@@ -1,0 +1,49 @@
+<Window x:Class="RunnerWidget.AddRunnerWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Add GitHub Runner" Width="560" Height="470"
+        ResizeMode="NoResize" WindowStartupLocation="CenterOwner"
+        Background="#0F1115" Foreground="#F4F6F8">
+    <Window.Resources>
+        <Style TargetType="TextBlock"><Setter Property="Foreground" Value="#F4F6F8" /></Style>
+        <Style TargetType="TextBox">
+            <Setter Property="Background" Value="#171B21"/><Setter Property="Foreground" Value="#F4F6F8"/>
+            <Setter Property="BorderBrush" Value="#343C48"/><Setter Property="Padding" Value="9,7"/>
+        </Style>
+        <Style TargetType="Button">
+            <Setter Property="Foreground" Value="#F4F6F8"/><Setter Property="Background" Value="#242A33"/>
+            <Setter Property="BorderBrush" Value="#343C48"/><Setter Property="Padding" Value="14,8"/>
+            <Setter Property="Margin" Value="8,0,0,0"/>
+        </Style>
+    </Window.Resources>
+    <Grid Margin="24">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <TextBlock Text="Create self-hosted runner" FontSize="24" FontWeight="SemiBold"/>
+        <StackPanel Grid.Row="1" Margin="0,22,0,0">
+            <TextBlock Text="GitHub repository URL" Foreground="#AAB2BD" Margin="0,0,0,6"/>
+            <TextBox x:Name="RepositoryUrlBox" TextChanged="RepositoryUrlBox_TextChanged"
+                     ToolTip="https://github.com/owner/repository"/>
+        </StackPanel>
+        <StackPanel Grid.Row="2" Margin="0,16,0,0">
+            <TextBlock Text="Runner name" Foreground="#AAB2BD" Margin="0,0,0,6"/>
+            <TextBox x:Name="RunnerNameBox"/>
+        </StackPanel>
+        <StackPanel Grid.Row="3" Margin="0,16,0,0">
+            <TextBlock Text="Install folder" Foreground="#AAB2BD" Margin="0,0,0,6"/>
+            <TextBox x:Name="InstallPathBox"/>
+        </StackPanel>
+        <StackPanel Grid.Row="4" Margin="0,16,0,0">
+            <TextBlock Text="Custom labels (optional, comma separated)" Foreground="#AAB2BD" Margin="0,0,0,6"/>
+            <TextBox x:Name="LabelsBox"/>
+        </StackPanel>
+        <TextBlock Grid.Row="5" Margin="0,18,0,0" Foreground="#7F8996" TextWrapping="Wrap"
+                   Text="The app downloads the latest official GitHub Actions runner, registers it to this repository, installs it as a Windows service, and starts it automatically."/>
+        <StackPanel Grid.Row="6" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,20,0,0">
+            <Button Content="Cancel" Click="Cancel_Click"/>
+            <Button Content="Create Runner" Click="Create_Click" Background="#285C45" BorderBrush="#39795C"/>
+        </StackPanel>
+    </Grid>
+</Window>

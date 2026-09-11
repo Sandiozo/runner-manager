@@ -1,8 +1,7 @@
+using System.IO;
 using System.Collections.ObjectModel;
 using System.Diagnostics;
-using System.IO;
 using System.Management;
-using System.ServiceProcess;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
@@ -19,81 +18,172 @@ public partial class MainWindow : Window
     private readonly DispatcherTimer _refreshTimer;
     private bool? _lastRemoteRunning;
     private bool _refreshing;
+    private bool _operationRunning;
+    private bool _githubAuthenticated;
+    private DateTime _lastAuthCheck = DateTime.MinValue;
 
     public MainWindow()
     {
         InitializeComponent();
         DataContext = this;
-        _refreshTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(3) };
+        _refreshTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(5) };
         _refreshTimer.Tick += async (_, _) => await RefreshAsync();
-        Loaded += async (_, _) => { await RefreshAsync(); _refreshTimer.Start(); };
+        Loaded += async (_, _) => { await RefreshAsync(forceAuthCheck: true); _refreshTimer.Start(); };
     }
 
-    private async Task RefreshAsync()
+    private async Task RefreshAsync(bool forceAuthCheck = false)
     {
-        if (_refreshing) return;
+        if (_refreshing || _operationRunning) return;
         _refreshing = true;
         try
         {
-            var runners = await Task.Run(ReadRunnerSnapshot);
-            var remote = await Task.Run(ReadRemoteSnapshot);
+            if (forceAuthCheck || DateTime.Now - _lastAuthCheck > TimeSpan.FromSeconds(30))
+            {
+                _githubAuthenticated = await GitHubCli.IsAuthenticatedAsync();
+                _lastAuthCheck = DateTime.Now;
+                ApplyGitHubStatus();
+            }
 
+            var runners = await RunnerManager.ReadSnapshotAsync(_githubAuthenticated);
+            var remote = await Task.Run(ReadRemoteSnapshot);
             Runners.Clear();
             foreach (var runner in runners)
             {
                 Runners.Add(runner);
-                var state = $"{runner.StatusText}/{runner.ActivityText}";
-                if (!_lastRunnerStates.TryGetValue(runner.Name, out var previous) || previous != state)
+                var state = $"{runner.StatusText}/{runner.ActivityText}/{runner.GitHubText}";
+                if (!_lastRunnerStates.TryGetValue(runner.InstallPath, out var previous) || previous != state)
                 {
                     AddActivity($"{runner.DisplayName}: {state}");
-                    _lastRunnerStates[runner.Name] = state;
+                    _lastRunnerStates[runner.InstallPath] = state;
                 }
             }
 
             ApplyRemoteSnapshot(remote);
             LastUpdatedText.Text = $"Updated {DateTime.Now:HH:mm:ss}";
         }
-        catch (Exception ex)
-        {
-            AddActivity($"Refresh failed: {ex.Message}");
-        }
-        finally
-        {
-            _refreshing = false;
-        }
+        catch (Exception ex) { AddActivity($"Refresh failed: {ex.Message}"); }
+        finally { _refreshing = false; }
     }
 
-    private static List<RunnerInfo> ReadRunnerSnapshot()
+    private void ApplyGitHubStatus()
     {
-        var processMap = ReadProcesses();
-        var result = new List<RunnerInfo>();
-        using var searcher = new ManagementObjectSearcher(
-            "SELECT Name, DisplayName, State, PathName, ProcessId FROM Win32_Service WHERE Name LIKE 'actions.runner.%'");
+        GitHubStatusText.Text = _githubAuthenticated ? "GitHub: Connected" : "GitHub: Not connected";
+        GitHubStatusText.Foreground = _githubAuthenticated ? Brushes.MediumSeaGreen : Brushes.Goldenrod;
+        GitHubConnectButton.Content = _githubAuthenticated ? "Reconnect" : "Connect GitHub";
+    }
 
-        foreach (ManagementObject service in searcher.Get())
+    private async void GitHubConnect_Click(object sender, RoutedEventArgs e)
+    {
+        GitHubCli.LaunchLogin();
+        AddActivity("Opened GitHub login. Complete authentication in the browser/terminal window.");
+        await Task.Delay(1500);
+        await RefreshAsync(forceAuthCheck: true);
+    }
+
+    private async void AddRunner_Click(object sender, RoutedEventArgs e)
+    {
+        if (!_githubAuthenticated)
         {
-            var name = service["Name"]?.ToString() ?? "Unknown runner";
-            var displayName = service["DisplayName"]?.ToString() ?? name;
-            var state = service["State"]?.ToString() ?? "Unknown";
-            var pathName = service["PathName"]?.ToString() ?? string.Empty;
-            var pid = ConvertToUInt(service["ProcessId"]);
-            var installPath = ResolveRunnerRoot(pathName);
-            var running = state.Equals("Running", StringComparison.OrdinalIgnoreCase);
-            var busy = running && HasDescendantWorker(pid, processMap);
-
-            result.Add(new RunnerInfo
-            {
-                Name = name,
-                DisplayName = displayName,
-                StatusText = state,
-                ActivityText = running ? (busy ? "Busy" : "Idle") : "Unavailable",
-                LastActivityText = GetLatestRunnerActivity(installPath),
-                InstallPath = installPath,
-                StatusBrush = running ? Brushes.MediumSeaGreen : Brushes.IndianRed
-            });
+            MessageBox.Show(this, "Connect GitHub first so the app can request temporary runner tokens.",
+                "GitHub connection required", MessageBoxButton.OK, MessageBoxImage.Information);
+            GitHubCli.LaunchLogin();
+            return;
         }
+        var dialog = new AddRunnerWindow { Owner = this };
+        if (dialog.ShowDialog() != true || dialog.Setup == null) return;
+        await RunOperationAsync("Create runner", log => RunnerManager.CreateRunnerAsync(dialog.Setup, log));
+    }
 
-        return result.OrderBy(r => r.DisplayName).ToList();
+    private async Task RunOperationAsync(string title, Func<Action<string>, Task> operation)
+    {
+        if (_operationRunning) return;
+        _operationRunning = true;
+        try
+        {
+            AddActivity($"{title} started.");
+            await operation(AddActivity);
+            AddActivity($"{title} completed.");
+        }
+        catch (Exception ex)
+        {
+            AddActivity($"{title} failed: {ex.Message}");
+            MessageBox.Show(this, ex.Message, title, MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+        finally { _operationRunning = false; await RefreshAsync(forceAuthCheck: true); }
+    }
+
+    private async Task ControlRunnerAsync(string serviceName, string action)
+    {
+        await RunOperationAsync($"{action} runner", async _ =>
+        {
+            await RunnerManager.ControlServiceAsync(serviceName, action);
+        });
+    }
+
+    private async void RunnerStart_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is Button { Tag: string name }) await ControlRunnerAsync(name, "Start");
+    }
+
+    private async void RunnerStop_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is Button { Tag: string name }) await ControlRunnerAsync(name, "Stop");
+    }
+
+    private async void RunnerRestart_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is Button { Tag: string name }) await ControlRunnerAsync(name, "Restart");
+    }
+
+    private async void RunnerRepair_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button { Tag: RunnerInfo runner }) return;
+        var confirm = MessageBox.Show(this,
+            $"Repair {runner.DisplayName} as a Windows service?\n\nThis unregisters it briefly and re-registers it using the same runner name.",
+            "Repair runner service", MessageBoxButton.YesNo, MessageBoxImage.Question);
+        if (confirm != MessageBoxResult.Yes) return;
+        await RunOperationAsync("Repair runner", log => RunnerManager.RepairRunnerAsync(runner, log));
+    }
+
+    private async void RunnerRemove_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button { Tag: RunnerInfo runner }) return;
+        var choice = MessageBox.Show(this,
+            $"Remove {runner.DisplayName} from GitHub?\n\nYes: unregister and delete {runner.InstallPath}\nNo: unregister but keep the local files\nCancel: do nothing",
+            "Remove runner", MessageBoxButton.YesNoCancel, MessageBoxImage.Warning);
+        if (choice == MessageBoxResult.Cancel) return;
+        var deleteFolder = choice == MessageBoxResult.Yes;
+        await RunOperationAsync("Remove runner",
+            log => RunnerManager.RemoveRunnerAsync(runner, deleteFolder, log));
+    }
+
+    private void RunnerLogs_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button { Tag: string root }) return;
+        var path = Path.Combine(root, "_diag");
+        if (!Directory.Exists(path))
+        {
+            AddActivity($"Runner log folder not found: {path}");
+            return;
+        }
+        Process.Start(new ProcessStartInfo("explorer.exe", $"\"{path}\"") { UseShellExecute = true });
+    }
+
+    private async void RefreshButton_Click(object sender, RoutedEventArgs e)
+        => await RefreshAsync(forceAuthCheck: true);
+
+    private static RemoteInfo ReadRemoteSnapshot()
+    {
+        var matches = ReadProcesses().Where(IsRemoteDesktopCommanderProcess).ToList();
+        if (matches.Count == 0) return new RemoteInfo { Running = false };
+        var started = matches.Select(p => TryParseWmiDate(p.CreationDate))
+            .Where(d => d.HasValue).Select(d => d!.Value).DefaultIfEmpty().Min();
+        return new RemoteInfo
+        {
+            Running = true,
+            Pids = matches.Select(p => p.ProcessId).Distinct().OrderBy(p => p).ToArray(),
+            Started = started == default ? null : started
+        };
     }
 
     private static List<ProcessInfo> ReadProcesses()
@@ -101,7 +191,6 @@ public partial class MainWindow : Window
         var result = new List<ProcessInfo>();
         using var searcher = new ManagementObjectSearcher(
             "SELECT ProcessId, ParentProcessId, Name, CommandLine, CreationDate FROM Win32_Process");
-
         foreach (ManagementObject process in searcher.Get())
         {
             result.Add(new ProcessInfo
@@ -113,81 +202,7 @@ public partial class MainWindow : Window
                 CreationDate = process["CreationDate"]?.ToString() ?? string.Empty
             });
         }
-
         return result;
-    }
-
-    private static bool HasDescendantWorker(uint rootPid, List<ProcessInfo> processes)
-    {
-        if (rootPid == 0) return false;
-        var queue = new Queue<uint>();
-        var visited = new HashSet<uint>();
-        queue.Enqueue(rootPid);
-
-        while (queue.Count > 0)
-        {
-            var parent = queue.Dequeue();
-            if (!visited.Add(parent)) continue;
-            foreach (var child in processes.Where(p => p.ParentProcessId == parent))
-            {
-                if (child.Name.Equals("Runner.Worker.exe", StringComparison.OrdinalIgnoreCase)) return true;
-                queue.Enqueue(child.ProcessId);
-            }
-        }
-        return false;
-    }
-
-    private static string ResolveRunnerRoot(string servicePath)
-    {
-        var executable = ExtractExecutablePath(servicePath);
-        if (string.IsNullOrWhiteSpace(executable)) return "Runner path unavailable";
-        var directory = Path.GetDirectoryName(executable);
-        if (string.IsNullOrWhiteSpace(directory)) return executable;
-        var current = new DirectoryInfo(directory);
-        return current.Name.Equals("bin", StringComparison.OrdinalIgnoreCase) && current.Parent != null
-            ? current.Parent.FullName
-            : current.FullName;
-    }
-
-    private static string ExtractExecutablePath(string commandLine)
-    {
-        if (string.IsNullOrWhiteSpace(commandLine)) return string.Empty;
-        commandLine = commandLine.Trim();
-        if (commandLine.StartsWith('"'))
-        {
-            var end = commandLine.IndexOf('"', 1);
-            return end > 1 ? commandLine[1..end] : commandLine.Trim('"');
-        }
-        var exe = commandLine.IndexOf(".exe", StringComparison.OrdinalIgnoreCase);
-        return exe >= 0 ? commandLine[..(exe + 4)] : commandLine.Split(' ')[0];
-    }
-
-    private static string GetLatestRunnerActivity(string root)
-    {
-        try
-        {
-            var diag = Path.Combine(root, "_diag");
-            if (!Directory.Exists(diag)) return "No local logs";
-            var latest = new DirectoryInfo(diag).GetFiles("*.log")
-                .OrderByDescending(f => f.LastWriteTime).FirstOrDefault();
-            return latest == null ? "No local logs" : FormatAge(latest.LastWriteTime);
-        }
-        catch { return "Log access unavailable"; }
-    }
-
-    private static RemoteInfo ReadRemoteSnapshot()
-    {
-        var matches = ReadProcesses().Where(IsRemoteDesktopCommanderProcess).ToList();
-        if (matches.Count == 0) return new RemoteInfo { Running = false };
-
-        var started = matches.Select(p => TryParseWmiDate(p.CreationDate))
-            .Where(d => d.HasValue).Select(d => d!.Value).DefaultIfEmpty().Min();
-        return new RemoteInfo
-        {
-            Running = true,
-            Pids = matches.Select(p => p.ProcessId).Distinct().OrderBy(p => p).ToArray(),
-            Started = started == default ? null : started
-        };
     }
 
     private static bool IsRemoteDesktopCommanderProcess(ProcessInfo process)
@@ -206,84 +221,12 @@ public partial class MainWindow : Window
             ? $"{remote.Pids.Length} process(es) · PID {string.Join(", ", remote.Pids)}" +
               (remote.Started.HasValue ? $" · started {remote.Started:HH:mm:ss}" : string.Empty)
             : "No Remote Desktop Commander process detected";
-
         if (_lastRemoteRunning != remote.Running)
         {
             AddActivity($"Remote Desktop Commander: {(remote.Running ? "Running" : "Stopped")}");
             _lastRemoteRunning = remote.Running;
         }
     }
-
-    private async Task ControlRunnerAsync(string serviceName, string action)
-    {
-        try
-        {
-            AddActivity($"{action} runner: {serviceName}");
-            await Task.Run(() =>
-            {
-                using var service = new ServiceController(serviceName);
-                service.Refresh();
-
-                if (action == "Start")
-                {
-                    if (service.Status == ServiceControllerStatus.Stopped)
-                    {
-                        service.Start();
-                        service.WaitForStatus(ServiceControllerStatus.Running, TimeSpan.FromSeconds(20));
-                    }
-                }
-                else if (action == "Stop")
-                {
-                    if (service.Status != ServiceControllerStatus.Stopped && service.CanStop)
-                    {
-                        service.Stop();
-                        service.WaitForStatus(ServiceControllerStatus.Stopped, TimeSpan.FromSeconds(20));
-                    }
-                }
-                else if (action == "Restart")
-                {
-                    if (service.Status != ServiceControllerStatus.Stopped && service.CanStop)
-                    {
-                        service.Stop();
-                        service.WaitForStatus(ServiceControllerStatus.Stopped, TimeSpan.FromSeconds(20));
-                    }
-                    service.Start();
-                    service.WaitForStatus(ServiceControllerStatus.Running, TimeSpan.FromSeconds(20));
-                }
-            });
-        }
-        catch (Exception ex) { AddActivity($"{action} failed: {ex.Message}"); }
-        await RefreshAsync();
-    }
-
-    private async void RunnerStart_Click(object sender, RoutedEventArgs e)
-    {
-        if (sender is Button { Tag: string name }) await ControlRunnerAsync(name, "Start");
-    }
-
-    private async void RunnerStop_Click(object sender, RoutedEventArgs e)
-    {
-        if (sender is Button { Tag: string name }) await ControlRunnerAsync(name, "Stop");
-    }
-
-    private async void RunnerRestart_Click(object sender, RoutedEventArgs e)
-    {
-        if (sender is Button { Tag: string name }) await ControlRunnerAsync(name, "Restart");
-    }
-
-    private void RunnerLogs_Click(object sender, RoutedEventArgs e)
-    {
-        if (sender is not Button { Tag: string root }) return;
-        var path = Path.Combine(root, "_diag");
-        if (!Directory.Exists(path))
-        {
-            AddActivity($"Runner log folder not found: {path}");
-            return;
-        }
-        Process.Start(new ProcessStartInfo("explorer.exe", $"\"{path}\"") { UseShellExecute = true });
-    }
-
-    private async void RefreshButton_Click(object sender, RoutedEventArgs e) => await RefreshAsync();
 
     private async void RemoteStart_Click(object sender, RoutedEventArgs e)
     {
@@ -315,7 +258,6 @@ public partial class MainWindow : Window
             if (ReadRemoteSnapshot().Running) return;
             var npx = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "nodejs", "npx.cmd");
             if (!File.Exists(npx)) npx = "npx.cmd";
-
             Process.Start(new ProcessStartInfo
             {
                 FileName = "cmd.exe",
@@ -334,7 +276,6 @@ public partial class MainWindow : Window
             var matches = ReadProcesses().Where(IsRemoteDesktopCommanderProcess).ToList();
             var ids = matches.Select(p => p.ProcessId).ToHashSet();
             var roots = matches.Where(p => !ids.Contains(p.ParentProcessId)).ToList();
-
             foreach (var processInfo in roots)
             {
                 try
@@ -361,16 +302,6 @@ public partial class MainWindow : Window
         catch { return null; }
     }
 
-    private static string FormatAge(DateTime timestamp)
-    {
-        var age = DateTime.Now - timestamp;
-        if (age.TotalSeconds < 10) return "Activity just now";
-        if (age.TotalMinutes < 1) return $"Activity {(int)age.TotalSeconds}s ago";
-        if (age.TotalHours < 1) return $"Activity {(int)age.TotalMinutes}m ago";
-        if (age.TotalDays < 1) return $"Activity {(int)age.TotalHours}h ago";
-        return $"Activity {timestamp:g}";
-    }
-
     private static uint ConvertToUInt(object? value)
     {
         try { return value == null ? 0 : Convert.ToUInt32(value); }
@@ -379,29 +310,14 @@ public partial class MainWindow : Window
 
     private void AddActivity(string message)
     {
+        if (!Dispatcher.CheckAccess())
+        {
+            Dispatcher.Invoke(() => AddActivity(message));
+            return;
+        }
         ActivityLog.Insert(0, $"{DateTime.Now:HH:mm:ss}  {message}");
-        while (ActivityLog.Count > 100) ActivityLog.RemoveAt(ActivityLog.Count - 1);
+        while (ActivityLog.Count > 150) ActivityLog.RemoveAt(ActivityLog.Count - 1);
     }
-}
-
-public sealed class RunnerInfo
-{
-    public string Name { get; init; } = string.Empty;
-    public string DisplayName { get; init; } = string.Empty;
-    public string StatusText { get; init; } = string.Empty;
-    public string ActivityText { get; init; } = string.Empty;
-    public string LastActivityText { get; init; } = string.Empty;
-    public string InstallPath { get; init; } = string.Empty;
-    public Brush StatusBrush { get; init; } = Brushes.Gray;
-}
-
-public sealed class ProcessInfo
-{
-    public uint ProcessId { get; init; }
-    public uint ParentProcessId { get; init; }
-    public string Name { get; init; } = string.Empty;
-    public string CommandLine { get; init; } = string.Empty;
-    public string CreationDate { get; init; } = string.Empty;
 }
 
 public sealed class RemoteInfo

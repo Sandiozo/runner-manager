@@ -1,25 +1,30 @@
-# Runner Widget
+# Runner Manager
 
 Small Windows control panel for local GitHub Actions self-hosted runners and Remote Desktop Commander.
 
-## Current features
+## Features
 
-- Automatically discovers local `actions.runner.*` Windows services.
-- Shows runner Running/Stopped and Busy/Idle state.
-- Shows recent runner diagnostic activity from each runner's `_diag` folder.
-- Start, stop, or restart individual runners.
-- Open a runner's diagnostic log folder.
-- Detect Remote Desktop Commander processes.
-- Start, stop, or restart Remote Desktop Commander.
-- Records status changes and user actions in a local activity feed.
-- Refreshes automatically every 3 seconds.
+- Discovers installed `actions.runner.*` Windows services automatically.
+- Also discovers configured runners under `C:\GitHub-Runners`, even when their service is missing.
+- Shows Running/Stopped, Busy/Idle, recent `_diag` activity, and GitHub online/offline/busy state.
+- Start, stop, restart, repair, or remove runners.
+- Add a runner from a GitHub repository URL; the app downloads the latest official Windows x64 runner and installs it as a service.
+- Preserves custom runner labels when repairing a runner.
+- Uses GitHub CLI authentication and temporary GitHub registration/removal tokens; the app does not store GitHub credentials.
+- Open runner diagnostic logs.
+- Detect, start, stop, and restart Remote Desktop Commander.
+- Activity feed and automatic refresh every 5 seconds.
+
+## GitHub connection
+
+GitHub CLI is required for Add/Repair/Remove and GitHub-side status. Use **Connect GitHub** in the app and complete GitHub's normal browser authentication flow.
 
 ## Build
 
-Requires the .NET 8 SDK on Windows.
+Requires the .NET 8 SDK on Windows:
 
 ```powershell
 & 'C:\Program Files\dotnet\dotnet.exe' build -c Release
 ```
 
-The app requests administrator privileges because Windows service control requires elevation.
+The app requests administrator privileges because Windows service installation and control require elevation.
