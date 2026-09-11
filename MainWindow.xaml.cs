@@ -50,7 +50,7 @@ public partial class MainWindow : Window
             foreach (var runner in runners)
             {
                 Runners.Add(runner);
-                var state = $"{runner.StatusText}/{runner.ActivityText}/{runner.GitHubText}";
+                var state = $"{runner.StatusText}/{runner.ActivityText}/{runner.GitHubText}/{runner.CurrentWorkText}/{runner.QueueText}";
                 if (!_lastRunnerStates.TryGetValue(runner.InstallPath, out var previous) || previous != state)
                 {
                     AddActivity($"{runner.DisplayName}: {state}");
@@ -145,6 +145,12 @@ public partial class MainWindow : Window
         await RunOperationAsync("Repair runner", log => RunnerManager.RepairRunnerAsync(runner, log));
     }
 
+    private async void RunnerWorkflow_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button { Tag: RunnerInfo runner }) return;
+        await RunOperationAsync("Check workflows", log => RunnerManager.CheckWorkflowsAsync(runner, log));
+    }
+
     private async void RunnerRemove_Click(object sender, RoutedEventArgs e)
     {
         if (sender is not Button { Tag: RunnerInfo runner }) return;
@@ -218,8 +224,8 @@ public partial class MainWindow : Window
         RemoteStatusText.Text = remote.Running ? "Running" : "Stopped";
         RemoteStatusText.Foreground = remote.Running ? Brushes.MediumSeaGreen : Brushes.IndianRed;
         RemoteDetailsText.Text = remote.Running
-            ? $"{remote.Pids.Length} process(es) · PID {string.Join(", ", remote.Pids)}" +
-              (remote.Started.HasValue ? $" · started {remote.Started:HH:mm:ss}" : string.Empty)
+            ? $"{remote.Pids.Length} process(es)  |  PID {string.Join(", ", remote.Pids)}" +
+              (remote.Started.HasValue ? $"  |  started {remote.Started:HH:mm:ss}" : string.Empty)
             : "No Remote Desktop Commander process detected";
         if (_lastRemoteRunning != remote.Running)
         {

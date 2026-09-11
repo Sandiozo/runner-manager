@@ -41,17 +41,21 @@ public static class RunnerManager
         var busy = running && service != null && HasDescendantWorker(service.ProcessId, processes);
         var repoPath = RepositoryPath(config.GitHubUrl);
         RemoteRunnerState? remote = null;
+        RunnerWorkState? work = null;
         if (queryGitHub && !string.IsNullOrWhiteSpace(repoPath) && config.AgentId > 0)
+        {
             remote = await GitHubCli.GetRunnerStateAsync(repoPath, config.AgentId);
+            work = await GitHubApi.GetRunnerWorkAsync(repoPath, config.AgentId, remote?.Labels ?? Array.Empty<string>());
+        }
 
         var label = !string.IsNullOrWhiteSpace(config.GitHubUrl)
-            ? $"{RepositoryName(config.GitHubUrl)} · {config.AgentName}"
+            ? $"{RepositoryName(config.GitHubUrl)}  |  {config.AgentName}"
             : service?.DisplayName ?? Path.GetFileName(root);
         return new RunnerInfo
         {
             Name = service?.Name ?? string.Empty,
             DisplayName = label,
-            StatusText = serviceInstalled ? service!.State : "Configured · No service",
+            StatusText = serviceInstalled ? service!.State : "Configured  |  No service",
             ActivityText = serviceInstalled ? (running ? (busy ? "Busy" : "Idle") : "Offline") : "Offline",
             LastActivityText = GetLatestRunnerActivity(root),
             InstallPath = root,
@@ -65,7 +69,11 @@ public static class RunnerManager
             StatusBrush = running ? Brushes.MediumSeaGreen : serviceInstalled ? Brushes.IndianRed : Brushes.Goldenrod,
             GitHubText = remote == null
                 ? (queryGitHub ? "GitHub: unavailable" : "GitHub: not connected")
-                : $"GitHub: {remote.Status}{(remote.Busy ? " · Busy" : " · Idle")}",
+                : $"GitHub: {remote.Status}{(remote.Busy ? "  |  Busy" : "  |  Idle")}",
+            CurrentWorkText = work?.CurrentWorkText ?? (queryGitHub ? "Current job: unavailable" : "Current job: connect GitHub"),
+            QueueText = work?.QueueText ?? (queryGitHub ? "Queue: unavailable" : "Queue: connect GitHub"),
+            CurrentJobUrl = work?.CurrentJobUrl ?? string.Empty,
+            QueueCount = work?.QueueCount ?? 0,
             CustomLabels = remote?.Labels ?? Array.Empty<string>()
         };
     }
@@ -200,6 +208,8 @@ public static class RunnerManager
         await ConfigureAsync(setup.InstallPath, setup.RepositoryUrl, token, setup.RunnerName,
             "_work", setup.Labels, runAsService: true);
         TryDelete(zipPath);
+        log("Checking repository workflows...");
+        await WorkflowManager.CheckAndUpdateAsync(repoPath, setup.Labels, log);
         log("Runner created and registered.");
     }
 
@@ -221,7 +231,16 @@ public static class RunnerManager
         log("Reconfiguring runner as a Windows service...");
         await ConfigureAsync(runner.InstallPath, runner.GitHubUrl, registerToken,
             runner.AgentName, runner.WorkFolder, labels, runAsService: true);
+        log("Checking repository workflows...");
+        await WorkflowManager.CheckAndUpdateAsync(runner.RepositoryPath, labels, log);
         log("Runner service repaired.");
+    }
+
+    public static async Task CheckWorkflowsAsync(RunnerInfo runner, Action<string> log)
+    {
+        if (!await GitHubCli.IsAuthenticatedAsync())
+            throw new InvalidOperationException("Connect GitHub first.");
+        await WorkflowManager.CheckAndUpdateAsync(runner.RepositoryPath, runner.CustomLabels, log);
     }
 
     public static async Task RemoveRunnerAsync(RunnerInfo runner, bool deleteFolder, Action<string> log)
@@ -458,6 +477,10 @@ public sealed class RunnerInfo
     public bool IsRunning { get; init; }
     public Brush StatusBrush { get; init; } = Brushes.Gray;
     public string GitHubText { get; init; } = string.Empty;
+    public string CurrentWorkText { get; init; } = "Current job: unavailable";
+    public string QueueText { get; init; } = "Queue: unavailable";
+    public string CurrentJobUrl { get; init; } = string.Empty;
+    public int QueueCount { get; init; }
     public string[] CustomLabels { get; init; } = Array.Empty<string>();
     public Visibility ServiceButtonsVisibility => ServiceInstalled ? Visibility.Visible : Visibility.Collapsed;
     public Visibility RepairButtonVisibility => ServiceInstalled ? Visibility.Collapsed : Visibility.Visible;

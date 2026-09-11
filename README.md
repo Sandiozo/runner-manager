@@ -28,3 +28,5 @@ Requires the .NET 8 SDK on Windows:
 ```
 
 The app requests administrator privileges because Windows service installation and control require elevation.
+
+- Shows current runner work, eligible queue state, and can repair workflow runner selectors.
