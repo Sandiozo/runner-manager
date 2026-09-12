@@ -31,6 +31,17 @@ public static class GitHubCli
         });
     }
 
+    public static async Task DisconnectAsync()
+    {
+        var user = await RunAsync("api user --jq .login");
+        if (user.ExitCode != 0 || string.IsNullOrWhiteSpace(user.Output))
+            throw new InvalidOperationException("Could not determine the active GitHub account.");
+        var logout = await RunAsync($"auth logout --hostname github.com --user {user.Output.Trim()}");
+        if (logout.ExitCode != 0)
+            throw new InvalidOperationException(string.IsNullOrWhiteSpace(logout.Error)
+                ? "GitHub logout failed." : logout.Error.Trim());
+    }
+
     public static async Task<string> GetRunnerTokenAsync(string repositoryPath, bool removal)
     {
         var endpoint = removal

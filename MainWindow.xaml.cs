@@ -4,6 +4,8 @@ using System.Diagnostics;
 using System.Management;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
+using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Threading;
 
@@ -15,6 +17,7 @@ public partial class MainWindow : Window
     public ObservableCollection<string> ActivityLog { get; } = new();
 
     private readonly Dictionary<string, string> _lastRunnerStates = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, bool> _runnerExpansionStates = new(StringComparer.OrdinalIgnoreCase);
     private readonly DispatcherTimer _refreshTimer;
     private bool? _lastRemoteRunning;
     private bool _refreshing;
@@ -46,9 +49,13 @@ public partial class MainWindow : Window
 
             var runners = await RunnerManager.ReadSnapshotAsync(_githubAuthenticated);
             var remote = await Task.Run(ReadRemoteSnapshot);
+            foreach (var existing in Runners)
+                _runnerExpansionStates[existing.InstallPath] = existing.IsExpanded;
             Runners.Clear();
             foreach (var runner in runners)
             {
+                if (_runnerExpansionStates.TryGetValue(runner.InstallPath, out var expanded))
+                    runner.IsExpanded = expanded;
                 Runners.Add(runner);
                 var state = $"{runner.StatusText}/{runner.ActivityText}/{runner.GitHubText}/{runner.CurrentWorkText}/{runner.QueueText}";
                 if (!_lastRunnerStates.TryGetValue(runner.InstallPath, out var previous) || previous != state)
@@ -69,15 +76,45 @@ public partial class MainWindow : Window
     {
         GitHubStatusText.Text = _githubAuthenticated ? "GitHub: Connected" : "GitHub: Not connected";
         GitHubStatusText.Foreground = _githubAuthenticated ? Brushes.MediumSeaGreen : Brushes.Goldenrod;
-        GitHubConnectButton.Content = _githubAuthenticated ? "Reconnect" : "Connect GitHub";
+        GitHubConnectButton.Content = _githubAuthenticated ? "Disconnect" : "Connect GitHub";
+        GitHubReconnectButton.Visibility = _githubAuthenticated ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private async void GitHubConnect_Click(object sender, RoutedEventArgs e)
     {
+        if (_githubAuthenticated)
+        {
+            await RunOperationAsync("Disconnect GitHub", async log =>
+            {
+                await GitHubCli.DisconnectAsync();
+                log("GitHub disconnected.");
+            });
+            return;
+        }
         GitHubCli.LaunchLogin();
         AddActivity("Opened GitHub login. Complete authentication in the browser/terminal window.");
         await Task.Delay(1500);
         await RefreshAsync(forceAuthCheck: true);
+    }
+
+    private async void GitHubReconnect_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            if (_githubAuthenticated)
+                await GitHubCli.DisconnectAsync();
+            GitHubCli.LaunchLogin();
+            AddActivity("Reconnecting GitHub. Complete authentication in the browser/terminal window.");
+            _githubAuthenticated = false;
+            ApplyGitHubStatus();
+            await Task.Delay(1500);
+            await RefreshAsync(forceAuthCheck: true);
+        }
+        catch (Exception ex)
+        {
+            AddActivity($"GitHub reconnect failed: {ex.Message}");
+            MessageBox.Show(this, ex.Message, "Reconnect GitHub", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
     }
 
     private async void AddRunner_Click(object sender, RoutedEventArgs e)
@@ -120,14 +157,25 @@ public partial class MainWindow : Window
         });
     }
 
-    private async void RunnerStart_Click(object sender, RoutedEventArgs e)
+    private async void RunnerPower_Click(object sender, RoutedEventArgs e)
     {
-        if (sender is Button { Tag: string name }) await ControlRunnerAsync(name, "Start");
+        if (sender is Button { Tag: RunnerInfo runner })
+            await ControlRunnerAsync(runner.Name, runner.IsRunning ? "Stop" : "Start");
     }
 
-    private async void RunnerStop_Click(object sender, RoutedEventArgs e)
+    private void RunnerCard_Click(object sender, MouseButtonEventArgs e)
     {
-        if (sender is Button { Tag: string name }) await ControlRunnerAsync(name, "Stop");
+        var current = e.OriginalSource as DependencyObject;
+        while (current != null)
+        {
+            if (current is ButtonBase) return;
+            current = VisualTreeHelper.GetParent(current);
+        }
+        if (sender is Border { Tag: RunnerInfo runner })
+        {
+            runner.IsExpanded = !runner.IsExpanded;
+            _runnerExpansionStates[runner.InstallPath] = runner.IsExpanded;
+        }
     }
 
     private async void RunnerRestart_Click(object sender, RoutedEventArgs e)
@@ -223,6 +271,7 @@ public partial class MainWindow : Window
         RemoteStatusDot.Fill = remote.Running ? Brushes.MediumSeaGreen : Brushes.IndianRed;
         RemoteStatusText.Text = remote.Running ? "Running" : "Stopped";
         RemoteStatusText.Foreground = remote.Running ? Brushes.MediumSeaGreen : Brushes.IndianRed;
+        RemotePowerButton.Content = remote.Running ? "Stop" : "Start";
         RemoteDetailsText.Text = remote.Running
             ? $"{remote.Pids.Length} process(es)  |  PID {string.Join(", ", remote.Pids)}" +
               (remote.Started.HasValue ? $"  |  started {remote.Started:HH:mm:ss}" : string.Empty)
@@ -234,17 +283,18 @@ public partial class MainWindow : Window
         }
     }
 
-    private async void RemoteStart_Click(object sender, RoutedEventArgs e)
+    private async void RemotePower_Click(object sender, RoutedEventArgs e)
     {
-        await StartRemoteAsync();
-        await Task.Delay(1000);
-        await RefreshAsync();
-    }
-
-    private async void RemoteStop_Click(object sender, RoutedEventArgs e)
-    {
-        await StopRemoteAsync();
-        await Task.Delay(700);
+        if (_lastRemoteRunning == true)
+        {
+            await StopRemoteAsync();
+            await Task.Delay(700);
+        }
+        else
+        {
+            await StartRemoteAsync();
+            await Task.Delay(1000);
+        }
         await RefreshAsync();
     }
 

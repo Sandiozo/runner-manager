@@ -1,4 +1,5 @@
 using System.IO;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.IO.Compression;
 using System.Management;
@@ -460,8 +461,11 @@ public sealed class RunnerServiceRecord
     public uint ProcessId { get; init; }
 }
 
-public sealed class RunnerInfo
+public sealed class RunnerInfo : INotifyPropertyChanged
 {
+    private bool _isExpanded;
+    public event PropertyChangedEventHandler? PropertyChanged;
+
     public string Name { get; init; } = string.Empty;
     public string DisplayName { get; init; } = string.Empty;
     public string StatusText { get; init; } = string.Empty;
@@ -482,6 +486,19 @@ public sealed class RunnerInfo
     public string CurrentJobUrl { get; init; } = string.Empty;
     public int QueueCount { get; init; }
     public string[] CustomLabels { get; init; } = Array.Empty<string>();
+    public string PowerButtonText => IsRunning ? "Stop" : "Start";
+    public bool IsExpanded
+    {
+        get => _isExpanded;
+        set
+        {
+            if (_isExpanded == value) return;
+            _isExpanded = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsExpanded)));
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(DetailsVisibility)));
+        }
+    }
+    public Visibility DetailsVisibility => IsExpanded ? Visibility.Visible : Visibility.Collapsed;
     public Visibility ServiceButtonsVisibility => ServiceInstalled ? Visibility.Visible : Visibility.Collapsed;
     public Visibility RepairButtonVisibility => ServiceInstalled ? Visibility.Collapsed : Visibility.Visible;
 }
