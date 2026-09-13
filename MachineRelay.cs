@@ -65,6 +65,18 @@ public static class MachineRelay
         var lastCommandId = LoadAgentState();
         string lastResult = "Agent started";
 
+        if (RemoteDesktopManager.IsConfigured() && !RemoteDesktopManager.ReadSnapshot().Running)
+        {
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(3), cancellationToken);
+                await RemoteDesktopManager.StartAsync();
+                lastResult = "Agent started; RDC auto-start requested";
+            }
+            catch (TaskCanceledException) { return; }
+            catch (Exception ex) { AppendAgentLog($"RDC auto-start failed: {ex.Message}"); }
+        }
+
         while (!cancellationToken.IsCancellationRequested)
         {
             try
@@ -387,7 +399,7 @@ public sealed class MachineInfo : INotifyPropertyChanged
     public Brush RdcStatusBrush => !string.IsNullOrEmpty(_rdcPendingAction)
         ? Brushes.Goldenrod : !RdcConfigured ? Brushes.Gray : RdcRunning ? Brushes.MediumSeaGreen : Brushes.IndianRed;
     public bool CanControl => IsOnline && RdcConfigured && string.IsNullOrEmpty(_rdcPendingAction);
-    public bool CanSetupRdc => IsOnline && !RdcConfigured && string.IsNullOrEmpty(_rdcPendingAction);
+    public bool CanSetupRdc => !RdcConfigured && string.IsNullOrEmpty(_rdcPendingAction);
     public string RunnerSummary
     {
         get

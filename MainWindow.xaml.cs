@@ -43,17 +43,21 @@ public partial class MainWindow : Window
         _refreshing = true;
         try
         {
+            var enrollmentTask = MachineRelay.IsAgentInstalledAsync();
             if (forceAuthCheck || DateTime.Now - _lastAuthCheck > TimeSpan.FromSeconds(30))
             {
                 _githubAuthenticated = await GitHubCli.IsAuthenticatedAsync();
                 _lastAuthCheck = DateTime.Now;
                 ApplyGitHubStatus();
             }
-            _isEnrolled = await MachineRelay.IsAgentInstalledAsync();
+            _isEnrolled = await enrollmentTask;
             ApplyEnrollmentStatus();
 
-            var runners = await RunnerManager.ReadSnapshotAsync(_githubAuthenticated);
-            var machines = _githubAuthenticated ? await MachineRelay.ReadMachinesAsync() : new List<MachineInfo>();
+            var runnersTask = RunnerManager.ReadSnapshotAsync(_githubAuthenticated);
+            var machinesTask = _githubAuthenticated ? MachineRelay.ReadMachinesAsync() : Task.FromResult(new List<MachineInfo>());
+            await Task.WhenAll(runnersTask, machinesTask);
+            var runners = await runnersTask;
+            var machines = await machinesTask;
             foreach (var existingMachine in Machines)
                 foreach (var existingRunner in existingMachine.Runners)
                     _machineRunnerExpansionStates[$"{existingMachine.MachineKey}|{existingRunner.ServiceName}"] = existingRunner.IsExpanded;
@@ -292,7 +296,7 @@ public partial class MainWindow : Window
         try
         {
             machine.SetRdcPending("Setup");
-            var commandId = await MachineRelay.SendCommandAsync(machine.MachineKey, "rdc", string.Empty, "Setup");
+            var commandId = await MachineRelay.SendCommandAsync(machine.MachineKey, "rdc", string.Empty, "Start");
             _pendingRdcCommands[machine.MachineKey] = new PendingRdcCommand(commandId, "Setup", DateTime.UtcNow);
             AddActivity($"{machine.MachineName}: started RDC setup. Complete authentication on that PC if prompted.");
         }

@@ -6,9 +6,14 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>assets\RunnerManager.ico</ApplicationIcon>
     <AssemblyName>RunnerWidget</AssemblyName>
     <RootNamespace>RunnerWidget</RootNamespace>
   </PropertyGroup>
+
+  <ItemGroup>
+    <Resource Include="assets\RunnerManager.ico" />
+  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="System.Management" Version="8.0.0" />
