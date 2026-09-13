@@ -6,6 +6,13 @@ namespace RunnerWidget;
 
 public static class RemoteDesktopManager
 {
+    public static bool IsConfigured()
+    {
+        var config = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".desktop-commander-device", "device.json");
+        try { return File.Exists(config) && new FileInfo(config).Length > 0; }
+        catch { return false; }
+    }
+
     public static RemoteInfo ReadSnapshot()
     {
         var matches = ReadProcesses().Where(IsRemoteDesktopCommanderProcess).ToList();

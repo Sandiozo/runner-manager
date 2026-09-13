@@ -91,6 +91,20 @@ public static class MachineRelay
         }
     }
 
+    public static async Task<bool> IsAgentInstalledAsync()
+    {
+        var result = await TryRunProcessAsync("schtasks.exe", "/Query /TN \"RunnerWidget Fleet Agent\"");
+        return result == 0;
+    }
+
+    public static async Task RemoveAgentTaskAsync()
+    {
+        await TryRunProcessAsync("schtasks.exe", "/End /TN \"RunnerWidget Fleet Agent\"");
+        await TryRunProcessAsync("schtasks.exe", "/Delete /F /TN \"RunnerWidget Fleet Agent\"");
+        await GitHubCli.RunAsync($"api --method DELETE repos/{RelayRepository}/actions/variables/{StatusPrefix}{LocalMachineKey}");
+        await GitHubCli.RunAsync($"api --method DELETE repos/{RelayRepository}/actions/variables/{CommandPrefix}{LocalMachineKey}");
+    }
+
     public static async Task InstallAndStartAgentTaskAsync()
     {
         var exe = Environment.ProcessPath;
@@ -113,6 +127,7 @@ public static class MachineRelay
             MachineName = Environment.MachineName,
             UpdatedUtc = DateTime.UtcNow,
             RdcRunning = remote.Running,
+            RdcConfigured = RemoteDesktopManager.IsConfigured(),
             RdcProcessCount = remote.Pids.Length,
             RdcPids = remote.Pids,
             RdcStartedUtc = remote.Started?.ToUniversalTime(),
@@ -155,6 +170,8 @@ public static class MachineRelay
                 await RemoteDesktopManager.StopAsync();
             else if (command.Action.Equals("Restart", StringComparison.OrdinalIgnoreCase))
                 await RemoteDesktopManager.RestartAsync();
+            else if (command.Action.Equals("Setup", StringComparison.OrdinalIgnoreCase))
+                await RemoteDesktopManager.StartAsync();
             else throw new InvalidOperationException($"Unsupported RDC action: {command.Action}");
             return $"RDC {command.Action} completed";
         }
@@ -229,6 +246,18 @@ public static class MachineRelay
         catch { }
     }
 
+    private static async Task<int> TryRunProcessAsync(string fileName, string arguments)
+    {
+        using var process = Process.Start(new ProcessStartInfo
+        {
+            FileName = fileName, Arguments = arguments, UseShellExecute = false,
+            CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true
+        });
+        if (process == null) return -1;
+        await process.WaitForExitAsync();
+        return process.ExitCode;
+    }
+
     private static async Task RunProcessAsync(string fileName, string arguments)
     {
         using var process = Process.Start(new ProcessStartInfo
@@ -257,6 +286,7 @@ public sealed class MachineStatusPayload
     public string MachineName { get; init; } = string.Empty;
     public DateTime UpdatedUtc { get; init; }
     public bool RdcRunning { get; init; }
+    public bool RdcConfigured { get; init; }
     public int RdcProcessCount { get; init; }
     public uint[] RdcPids { get; init; } = Array.Empty<uint>();
     public DateTime? RdcStartedUtc { get; init; }
@@ -321,6 +351,7 @@ public sealed class MachineInfo : INotifyPropertyChanged
     public string MachineName { get; init; } = string.Empty;
     public DateTime UpdatedUtc { get; init; }
     public bool RdcRunning { get; init; }
+    public bool RdcConfigured { get; init; }
     public int RdcProcessCount { get; init; }
     public uint[] RdcPids { get; init; } = Array.Empty<uint>();
     public DateTime? RdcStartedUtc { get; init; }
@@ -337,7 +368,8 @@ public sealed class MachineInfo : INotifyPropertyChanged
         "Start" => "RDC: Starting...",
         "Stop" => "RDC: Stopping...",
         "Restart" => "RDC: Restarting...",
-        _ => RdcRunning ? "RDC: Running" : "RDC: Stopped"
+        "Setup" => "RDC: Starting setup...",
+        _ => !RdcConfigured ? "RDC: Not set up" : RdcRunning ? "RDC: Running" : "RDC: Stopped"
     };
     public string RdcPowerButtonText => _rdcPendingAction switch
     {
@@ -346,12 +378,16 @@ public sealed class MachineInfo : INotifyPropertyChanged
         _ => RdcRunning ? "Stop RDC" : "Start RDC"
     };
     public string RdcRestartButtonText => _rdcPendingAction == "Restart" ? "Restarting..." : "Restart RDC";
+    public string RdcSetupButtonText => _rdcPendingAction == "Setup" ? "Starting setup..." : "Set up RDC";
+    public Visibility RdcSetupVisibility => !RdcConfigured ? Visibility.Visible : Visibility.Collapsed;
+    public Visibility RdcControlsVisibility => RdcConfigured ? Visibility.Visible : Visibility.Collapsed;
     public string RdcProcessText => RdcRunning ? $"Processes: {RdcProcessCount}" : "Processes: 0";
     public string RdcPidText => RdcRunning && RdcPids.Length > 0 ? $"PID: {string.Join(", ", RdcPids)}" : "No active RDC processes";
     public string RdcUptimeText => !RdcRunning || !RdcStartedUtc.HasValue ? "Uptime: --" : (DateTime.UtcNow - RdcStartedUtc.Value).TotalHours >= 1 ? $"Uptime: {(int)(DateTime.UtcNow - RdcStartedUtc.Value).TotalHours}h {(DateTime.UtcNow - RdcStartedUtc.Value).Minutes}m" : $"Uptime: {Math.Max(0,(int)(DateTime.UtcNow - RdcStartedUtc.Value).TotalMinutes)}m";
     public Brush RdcStatusBrush => !string.IsNullOrEmpty(_rdcPendingAction)
-        ? Brushes.Goldenrod : RdcRunning ? Brushes.MediumSeaGreen : Brushes.IndianRed;
-    public bool CanControl => IsOnline && string.IsNullOrEmpty(_rdcPendingAction);
+        ? Brushes.Goldenrod : !RdcConfigured ? Brushes.Gray : RdcRunning ? Brushes.MediumSeaGreen : Brushes.IndianRed;
+    public bool CanControl => IsOnline && RdcConfigured && string.IsNullOrEmpty(_rdcPendingAction);
+    public bool CanSetupRdc => IsOnline && !RdcConfigured && string.IsNullOrEmpty(_rdcPendingAction);
     public string RunnerSummary
     {
         get
@@ -380,8 +416,10 @@ public sealed class MachineInfo : INotifyPropertyChanged
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(RdcText)));
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(RdcPowerButtonText)));
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(RdcRestartButtonText)));
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(RdcSetupButtonText)));
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(RdcStatusBrush)));
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(CanControl)));
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(CanSetupRdc)));
     }
 
     public static MachineInfo FromPayload(string key, MachineStatusPayload payload)
@@ -393,6 +431,7 @@ public sealed class MachineInfo : INotifyPropertyChanged
             MachineName = payload.MachineName,
             UpdatedUtc = payload.UpdatedUtc,
             RdcRunning = payload.RdcRunning,
+            RdcConfigured = payload.RdcConfigured,
             RdcProcessCount = payload.RdcProcessCount,
             RdcPids = payload.RdcPids,
             RdcStartedUtc = payload.RdcStartedUtc,

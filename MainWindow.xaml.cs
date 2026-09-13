@@ -25,6 +25,7 @@ public partial class MainWindow : Window
     private bool _refreshing;
     private bool _operationRunning;
     private bool _githubAuthenticated;
+    private bool _isEnrolled;
     private DateTime _lastAuthCheck = DateTime.MinValue;
 
     public MainWindow()
@@ -48,6 +49,8 @@ public partial class MainWindow : Window
                 _lastAuthCheck = DateTime.Now;
                 ApplyGitHubStatus();
             }
+            _isEnrolled = await MachineRelay.IsAgentInstalledAsync();
+            ApplyEnrollmentStatus();
 
             var runners = await RunnerManager.ReadSnapshotAsync(_githubAuthenticated);
             var machines = _githubAuthenticated ? await MachineRelay.ReadMachinesAsync() : new List<MachineInfo>();
@@ -98,6 +101,14 @@ public partial class MainWindow : Window
         GitHubStatusText.Foreground = _githubAuthenticated ? Brushes.MediumSeaGreen : Brushes.Goldenrod;
         GitHubConnectButton.Content = _githubAuthenticated ? "Disconnect" : "Connect GitHub";
         GitHubReconnectButton.Visibility = _githubAuthenticated ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void ApplyEnrollmentStatus()
+    {
+        EnrollmentButton.Content = _isEnrolled ? "Remove this PC" : "Add this PC";
+        EnrollmentButton.ToolTip = _isEnrolled
+            ? "Remove this computer from Machines and stop its fleet agent"
+            : "Add this computer to Machines and enable remote runner/RDC status and controls";
     }
 
     private async void GitHubConnect_Click(object sender, RoutedEventArgs e)
@@ -245,17 +256,52 @@ public partial class MainWindow : Window
 
     private async void InstallAgent_Click(object sender, RoutedEventArgs e)
     {
+        if (_isEnrolled)
+        {
+            var confirm = MessageBox.Show(this,
+                $"Remove {Environment.MachineName} from Runner Manager?\n\nThis stops and removes its fleet agent. GitHub runners and RDC themselves are not removed.",
+                "Remove this PC", MessageBoxButton.YesNo, MessageBoxImage.Question);
+            if (confirm != MessageBoxResult.Yes) return;
+            await RunOperationAsync("Remove this PC", async log =>
+            {
+                await MachineRelay.RemoveAgentTaskAsync();
+                _isEnrolled = false;
+                ApplyEnrollmentStatus();
+                log($"{Environment.MachineName} removed from Machines.");
+            });
+            return;
+        }
         if (!_githubAuthenticated)
         {
             MessageBox.Show(this, "Connect GitHub first.", "GitHub connection required",
                 MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
-        await RunOperationAsync("Enable fleet agent", async log =>
+        await RunOperationAsync("Add this PC", async log =>
         {
             await MachineRelay.InstallAndStartAgentTaskAsync();
+            _isEnrolled = true;
+            ApplyEnrollmentStatus();
             log($"Fleet agent enabled on {Environment.MachineName}.");
         });
+    }
+
+    private async void MachineRdcSetup_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button { Tag: MachineInfo machine } || !machine.CanSetupRdc) return;
+        try
+        {
+            machine.SetRdcPending("Setup");
+            var commandId = await MachineRelay.SendCommandAsync(machine.MachineKey, "rdc", string.Empty, "Setup");
+            _pendingRdcCommands[machine.MachineKey] = new PendingRdcCommand(commandId, "Setup", DateTime.UtcNow);
+            AddActivity($"{machine.MachineName}: started RDC setup. Complete authentication on that PC if prompted.");
+        }
+        catch (Exception ex)
+        {
+            _pendingRdcCommands.Remove(machine.MachineKey);
+            AddActivity($"{machine.MachineName}: RDC setup failed: {ex.Message}");
+            await RefreshAsync();
+        }
     }
 
     private async void MachineRdcPower_Click(object sender, RoutedEventArgs e)
