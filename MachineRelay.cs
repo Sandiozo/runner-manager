@@ -416,6 +416,18 @@ public sealed class MachineInfo : INotifyPropertyChanged
     public bool IsOnline => DateTime.UtcNow - UpdatedUtc < TimeSpan.FromSeconds(45);
     public Brush StatusBrush => IsOnline ? Brushes.MediumSeaGreen : Brushes.IndianRed;
     public string AgentText => IsOnline ? "Agent online" : "Agent offline";
+    public string RunnerSyncText
+    {
+        get
+        {
+            var age = DateTime.UtcNow - UpdatedUtc;
+            if (age.TotalSeconds < 10) return "Runners synced just now";
+            if (age.TotalMinutes < 1) return $"Runners synced {(int)age.TotalSeconds}s ago";
+            if (age.TotalHours < 1) return $"Runner sync stale: {(int)age.TotalMinutes}m";
+            return $"Runner sync stale: {UpdatedUtc.ToLocalTime():g}";
+        }
+    }
+    public Brush RunnerSyncBrush => IsOnline ? Brushes.MediumSeaGreen : Brushes.Goldenrod;
     public string RdcText => _rdcPendingAction switch
     {
         "Start" => "RDC: Starting...",

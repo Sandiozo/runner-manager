@@ -63,14 +63,13 @@
                 </Button>
                 <Button x:Name="EnrollmentButton" Content="Add this PC" Click="InstallAgent_Click" ToolTip="Add this computer to Machines and enable remote runner/RDC status and controls"/>
                 <Button Content="Add Runner" Click="AddRunner_Click" Background="#285C45" BorderBrush="#39795C"/>
+                <TextBlock x:Name="LastUpdatedText" Text="Updated --" Foreground="#68727F" VerticalAlignment="Center" Margin="8,0,2,0" FontSize="11"/>
                 <Button Content="Refresh" Click="RefreshButton_Click"/>
             </StackPanel>
         </Grid>
 
         <Grid Grid.Row="1" Margin="0,0,0,8">
-            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
             <TextBlock Text="Machines" FontSize="16" FontWeight="SemiBold"/>
-            <TextBlock Grid.Column="1" x:Name="LastUpdatedText" Foreground="#68727F"/>
         </Grid>
 
         <ScrollViewer Grid.Row="2" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" Margin="0,0,0,14">
@@ -94,7 +93,7 @@
                                             <StackPanel Orientation="Horizontal" Margin="17,3,0,7">
                                                 <TextBlock Text="{Binding AgentText}" Foreground="#929BA8" FontSize="10"/>
                                                 <TextBlock Text="   |   " Foreground="#5D6673" FontSize="10"/>
-                                                <TextBlock Text="{Binding LastSeenText}" Foreground="#68727F" FontSize="10"/>
+                                                <TextBlock Text="{Binding RunnerSyncText}" Foreground="{Binding RunnerSyncBrush}" FontSize="10"/>
                                             </StackPanel>
                                             <ItemsControl ItemsSource="{Binding Runners}">
                                                 <ItemsControl.ItemTemplate>
