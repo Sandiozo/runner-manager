@@ -14,10 +14,12 @@ namespace RunnerWidget;
 public partial class MainWindow : Window
 {
     public ObservableCollection<RunnerInfo> Runners { get; } = new();
+    public ObservableCollection<MachineInfo> Machines { get; } = new();
     public ObservableCollection<string> ActivityLog { get; } = new();
 
     private readonly Dictionary<string, string> _lastRunnerStates = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, bool> _runnerExpansionStates = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, bool> _machineRunnerExpansionStates = new(StringComparer.OrdinalIgnoreCase);
     private readonly DispatcherTimer _refreshTimer;
     private bool? _lastRemoteRunning;
     private bool _refreshing;
@@ -48,7 +50,19 @@ public partial class MainWindow : Window
             }
 
             var runners = await RunnerManager.ReadSnapshotAsync(_githubAuthenticated);
-            var remote = await Task.Run(ReadRemoteSnapshot);
+            var remote = await Task.Run(RemoteDesktopManager.ReadSnapshot);
+            var machines = _githubAuthenticated ? await MachineRelay.ReadMachinesAsync() : new List<MachineInfo>();
+            foreach (var existingMachine in Machines)
+                foreach (var existingRunner in existingMachine.Runners)
+                    _machineRunnerExpansionStates[$"{existingMachine.MachineKey}|{existingRunner.ServiceName}"] = existingRunner.IsExpanded;
+            Machines.Clear();
+            foreach (var machine in machines)
+            {
+                foreach (var machineRunner in machine.Runners)
+                    if (_machineRunnerExpansionStates.TryGetValue($"{machine.MachineKey}|{machineRunner.ServiceName}", out var expanded))
+                        machineRunner.IsExpanded = expanded;
+                Machines.Add(machine);
+            }
             foreach (var existing in Runners)
                 _runnerExpansionStates[existing.InstallPath] = existing.IsExpanded;
             Runners.Clear();
@@ -223,48 +237,61 @@ public partial class MainWindow : Window
         Process.Start(new ProcessStartInfo("explorer.exe", $"\"{path}\"") { UseShellExecute = true });
     }
 
+    private async void InstallAgent_Click(object sender, RoutedEventArgs e)
+    {
+        if (!_githubAuthenticated)
+        {
+            MessageBox.Show(this, "Connect GitHub first.", "GitHub connection required",
+                MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+        await RunOperationAsync("Enable fleet agent", async log =>
+        {
+            await MachineRelay.InstallAndStartAgentTaskAsync();
+            log($"Fleet agent enabled on {Environment.MachineName}.");
+        });
+    }
+
+    private async void MachineRdcPower_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button { Tag: MachineInfo machine }) return;
+        var action = machine.RdcRunning ? "Stop" : "Start";
+        await MachineRelay.SendCommandAsync(machine.MachineKey, "rdc", string.Empty, action);
+        AddActivity($"{machine.MachineName}: queued RDC {action}.");
+    }
+
+    private async void MachineRdcRestart_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button { Tag: MachineInfo machine }) return;
+        await MachineRelay.SendCommandAsync(machine.MachineKey, "rdc", string.Empty, "Restart");
+        AddActivity($"{machine.MachineName}: queued RDC Restart.");
+    }
+
+    private void MachineRunnerCard_Click(object sender, MouseButtonEventArgs e)
+    {
+        var current = e.OriginalSource as DependencyObject;
+        while (current != null)
+        {
+            if (current is ButtonBase) return;
+            current = VisualTreeHelper.GetParent(current);
+        }
+        if (sender is Border { Tag: MachineRunnerStatus runner })
+        {
+            runner.IsExpanded = !runner.IsExpanded;
+            _machineRunnerExpansionStates[$"{runner.MachineKey}|{runner.ServiceName}"] = runner.IsExpanded;
+        }
+    }
+
+    private async void MachineRunnerPower_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button { Tag: MachineRunnerStatus runner }) return;
+        var action = runner.IsRunning ? "Stop" : "Start";
+        await MachineRelay.SendCommandAsync(runner.MachineKey, "runner", runner.ServiceName, action);
+        AddActivity($"{runner.AgentName}: queued {action} on {runner.MachineKey}.");
+    }
+
     private async void RefreshButton_Click(object sender, RoutedEventArgs e)
         => await RefreshAsync(forceAuthCheck: true);
-
-    private static RemoteInfo ReadRemoteSnapshot()
-    {
-        var matches = ReadProcesses().Where(IsRemoteDesktopCommanderProcess).ToList();
-        if (matches.Count == 0) return new RemoteInfo { Running = false };
-        var started = matches.Select(p => TryParseWmiDate(p.CreationDate))
-            .Where(d => d.HasValue).Select(d => d!.Value).DefaultIfEmpty().Min();
-        return new RemoteInfo
-        {
-            Running = true,
-            Pids = matches.Select(p => p.ProcessId).Distinct().OrderBy(p => p).ToArray(),
-            Started = started == default ? null : started
-        };
-    }
-
-    private static List<ProcessInfo> ReadProcesses()
-    {
-        var result = new List<ProcessInfo>();
-        using var searcher = new ManagementObjectSearcher(
-            "SELECT ProcessId, ParentProcessId, Name, CommandLine, CreationDate FROM Win32_Process");
-        foreach (ManagementObject process in searcher.Get())
-        {
-            result.Add(new ProcessInfo
-            {
-                ProcessId = ConvertToUInt(process["ProcessId"]),
-                ParentProcessId = ConvertToUInt(process["ParentProcessId"]),
-                Name = process["Name"]?.ToString() ?? string.Empty,
-                CommandLine = process["CommandLine"]?.ToString() ?? string.Empty,
-                CreationDate = process["CreationDate"]?.ToString() ?? string.Empty
-            });
-        }
-        return result;
-    }
-
-    private static bool IsRemoteDesktopCommanderProcess(ProcessInfo process)
-    {
-        var command = process.CommandLine;
-        return command.Contains("desktop-commander", StringComparison.OrdinalIgnoreCase)
-               && command.Contains("remote", StringComparison.OrdinalIgnoreCase);
-    }
 
     private void ApplyRemoteSnapshot(RemoteInfo remote)
     {
@@ -287,12 +314,14 @@ public partial class MainWindow : Window
     {
         if (_lastRemoteRunning == true)
         {
-            await StopRemoteAsync();
+            await RemoteDesktopManager.StopAsync();
+            AddActivity("Stopped Remote Desktop Commander");
             await Task.Delay(700);
         }
         else
         {
-            await StartRemoteAsync();
+            await RemoteDesktopManager.StartAsync();
+            AddActivity("Started Remote Desktop Commander");
             await Task.Delay(1000);
         }
         await RefreshAsync();
@@ -300,68 +329,10 @@ public partial class MainWindow : Window
 
     private async void RemoteRestart_Click(object sender, RoutedEventArgs e)
     {
-        await StopRemoteAsync();
-        await Task.Delay(900);
-        await StartRemoteAsync();
+        await RemoteDesktopManager.RestartAsync();
+        AddActivity("Restarted Remote Desktop Commander");
         await Task.Delay(1000);
         await RefreshAsync();
-    }
-
-    private Task StartRemoteAsync()
-    {
-        return Task.Run(() =>
-        {
-            if (ReadRemoteSnapshot().Running) return;
-            var npx = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "nodejs", "npx.cmd");
-            if (!File.Exists(npx)) npx = "npx.cmd";
-            Process.Start(new ProcessStartInfo
-            {
-                FileName = "cmd.exe",
-                Arguments = $"/c start \"Remote Desktop Commander\" /min \"{npx}\" @wonderwhy-er/desktop-commander@latest remote",
-                UseShellExecute = false,
-                CreateNoWindow = true
-            });
-            Dispatcher.Invoke(() => AddActivity("Started Remote Desktop Commander"));
-        });
-    }
-
-    private Task StopRemoteAsync()
-    {
-        return Task.Run(() =>
-        {
-            var matches = ReadProcesses().Where(IsRemoteDesktopCommanderProcess).ToList();
-            var ids = matches.Select(p => p.ProcessId).ToHashSet();
-            var roots = matches.Where(p => !ids.Contains(p.ParentProcessId)).ToList();
-            foreach (var processInfo in roots)
-            {
-                try
-                {
-                    using var process = Process.GetProcessById((int)processInfo.ProcessId);
-                    process.Kill(entireProcessTree: true);
-                    process.WaitForExit(5000);
-                }
-                catch (ArgumentException) { }
-                catch (InvalidOperationException) { }
-                catch (Exception ex)
-                {
-                    Dispatcher.Invoke(() => AddActivity($"Could not stop PID {processInfo.ProcessId}: {ex.Message}"));
-                }
-            }
-            Dispatcher.Invoke(() => AddActivity("Stopped Remote Desktop Commander"));
-        });
-    }
-
-    private static DateTime? TryParseWmiDate(string value)
-    {
-        if (string.IsNullOrWhiteSpace(value)) return null;
-        try { return ManagementDateTimeConverter.ToDateTime(value); }
-        catch { return null; }
-    }
-
-    private static uint ConvertToUInt(object? value)
-    {
-        try { return value == null ? 0 : Convert.ToUInt32(value); }
-        catch { return 0; }
     }
 
     private void AddActivity(string message)
@@ -374,11 +345,4 @@ public partial class MainWindow : Window
         ActivityLog.Insert(0, $"{DateTime.Now:HH:mm:ss}  {message}");
         while (ActivityLog.Count > 150) ActivityLog.RemoveAt(ActivityLog.Count - 1);
     }
-}
-
-public sealed class RemoteInfo
-{
-    public bool Running { get; init; }
-    public uint[] Pids { get; init; } = Array.Empty<uint>();
-    public DateTime? Started { get; init; }
 }
