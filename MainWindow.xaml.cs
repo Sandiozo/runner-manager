@@ -293,10 +293,17 @@ public partial class MainWindow : Window
     private async void MachineRdcSetup_Click(object sender, RoutedEventArgs e)
     {
         if (sender is not Button { Tag: MachineInfo machine } || !machine.CanSetupRdc) return;
+        if (machine.AgentProtocolVersion < 2)
+        {
+            MessageBox.Show(this,
+                $"{machine.MachineName} is running an older RunnerWidget fleet agent. Pull/build the latest Runner Manager on that PC and restart its fleet agent once; after that this button will open the RDC setup console remotely.",
+                "Fleet agent update required", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
         try
         {
             machine.SetRdcPending("Setup");
-            var commandId = await MachineRelay.SendCommandAsync(machine.MachineKey, "rdc", string.Empty, "Start");
+            var commandId = await MachineRelay.SendCommandAsync(machine.MachineKey, "rdc", string.Empty, "Setup");
             _pendingRdcCommands[machine.MachineKey] = new PendingRdcCommand(commandId, "Setup", DateTime.UtcNow);
             AddActivity($"{machine.MachineName}: started RDC setup. Complete authentication on that PC if prompted.");
         }
@@ -357,6 +364,36 @@ public partial class MainWindow : Window
         {
             runner.IsExpanded = !runner.IsExpanded;
             _machineRunnerExpansionStates[$"{runner.MachineKey}|{runner.ServiceName}"] = runner.IsExpanded;
+        }
+    }
+
+    private async void MachineRunnerEdit_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button { Tag: MachineRunnerStatus runner }) return;
+        if (!runner.CanEdit)
+        {
+            MessageBox.Show(this, "Stop or wait for the current runner job before editing it.",
+                "Runner is busy", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        var dialog = new EditRunnerWindow(runner) { Owner = this };
+        if (dialog.ShowDialog() != true || dialog.Edit == null) return;
+        var edit = dialog.Edit;
+        var confirm = MessageBox.Show(this,
+            $"Apply changes to {runner.AgentName}?\n\nThe runner will be briefly re-registered on its machine.",
+            "Edit runner", MessageBoxButton.YesNo, MessageBoxImage.Question);
+        if (confirm != MessageBoxResult.Yes) return;
+
+        try
+        {
+            await MachineRelay.SendCommandAsync(runner.MachineKey, "runner", runner.ServiceName, "Edit",
+                edit.RunnerName, edit.Labels);
+            AddActivity($"{runner.AgentName}: queued runner edit on {runner.MachineKey}.");
+        }
+        catch (Exception ex)
+        {
+            AddActivity($"{runner.AgentName}: edit failed: {ex.Message}");
         }
     }
 

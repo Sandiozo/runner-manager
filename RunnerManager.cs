@@ -237,6 +237,47 @@ public static class RunnerManager
         log("Runner service repaired.");
     }
 
+    public static async Task EditRunnerAsync(string serviceName, string newName, string[] requestedLabels, Action<string> log)
+    {
+        if (!await GitHubCli.IsAuthenticatedAsync())
+            throw new InvalidOperationException("Connect GitHub on the target PC first.");
+        if (string.IsNullOrWhiteSpace(newName))
+            throw new InvalidOperationException("Runner name is required.");
+
+        var local = (await ReadSnapshotAsync(queryGitHub: false))
+            .FirstOrDefault(r => r.Name.Equals(serviceName, StringComparison.OrdinalIgnoreCase));
+        if (local == null) throw new InvalidOperationException("Runner was not found on the target PC.");
+        if (local.ActivityText.Equals("Busy", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("Runner is busy. Wait for the current job to finish first.");
+        if (string.IsNullOrWhiteSpace(local.RepositoryPath) || string.IsNullOrWhiteSpace(local.GitHubUrl))
+            throw new InvalidOperationException("Runner repository information is missing.");
+
+        var remote = await GitHubCli.GetRunnerStateAsync(local.RepositoryPath, local.AgentId);
+        var labels = requestedLabels.Where(x => !string.IsNullOrWhiteSpace(x))
+            .Select(x => x.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        if (labels.Length == 0) labels = remote?.Labels ?? Array.Empty<string>();
+        var wasRunning = local.IsRunning;
+        if (wasRunning) await ControlServiceAsync(local.Name, "Stop");
+
+        log("Requesting temporary removal token...");
+        var removeToken = await GitHubCli.GetRunnerTokenAsync(local.RepositoryPath, removal: true);
+        await RunConfigRemoveAsync(local.InstallPath, removeToken);
+        log("Requesting fresh registration token...");
+        var registerToken = await GitHubCli.GetRunnerTokenAsync(local.RepositoryPath, removal: false);
+        await ConfigureAsync(local.InstallPath, local.GitHubUrl, registerToken, newName.Trim(),
+            local.WorkFolder, labels, runAsService: true);
+
+        if (wasRunning)
+        {
+            var updated = (await ReadSnapshotAsync(queryGitHub: false))
+                .FirstOrDefault(r => r.InstallPath.Equals(local.InstallPath, StringComparison.OrdinalIgnoreCase));
+            if (updated != null && updated.ServiceInstalled && !updated.IsRunning)
+                await ControlServiceAsync(updated.Name, "Start");
+        }
+        await WorkflowManager.CheckAndUpdateAsync(local.RepositoryPath, labels, log);
+        log("Runner settings updated.");
+    }
+
     public static async Task CheckWorkflowsAsync(RunnerInfo runner, Action<string> log)
     {
         if (!await GitHubCli.IsAuthenticatedAsync())

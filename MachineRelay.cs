@@ -45,7 +45,8 @@ public static class MachineRelay
         return machines.OrderByDescending(m => m.IsLocal).ThenBy(m => m.MachineName).ToList();
     }
 
-    public static async Task<string> SendCommandAsync(string machineKey, string target, string targetKey, string action)
+    public static async Task<string> SendCommandAsync(string machineKey, string target, string targetKey, string action,
+        string runnerName = "", string[]? runnerLabels = null)
     {
         var command = new MachineCommand
         {
@@ -53,7 +54,9 @@ public static class MachineRelay
             CreatedUtc = DateTime.UtcNow,
             Target = target,
             TargetKey = targetKey,
-            Action = action
+            Action = action,
+            RunnerName = runnerName,
+            RunnerLabels = runnerLabels ?? Array.Empty<string>()
         };
         await UpsertVariableAsync(CommandPrefix + Sanitize(machineKey), Encode(command));
         return command.Id;
@@ -137,6 +140,7 @@ public static class MachineRelay
         var payload = new MachineStatusPayload
         {
             MachineName = Environment.MachineName,
+            AgentProtocolVersion = 2,
             UpdatedUtc = DateTime.UtcNow,
             RdcRunning = remote.Running,
             RdcConfigured = RemoteDesktopManager.IsConfigured(),
@@ -183,13 +187,19 @@ public static class MachineRelay
             else if (command.Action.Equals("Restart", StringComparison.OrdinalIgnoreCase))
                 await RemoteDesktopManager.RestartAsync();
             else if (command.Action.Equals("Setup", StringComparison.OrdinalIgnoreCase))
-                await RemoteDesktopManager.StartAsync();
+                await RemoteDesktopManager.SetupAsync();
             else throw new InvalidOperationException($"Unsupported RDC action: {command.Action}");
             return $"RDC {command.Action} completed";
         }
 
         if (command.Target.Equals("runner", StringComparison.OrdinalIgnoreCase))
         {
+            if (command.Action.Equals("Edit", StringComparison.OrdinalIgnoreCase))
+            {
+                await RunnerManager.EditRunnerAsync(command.TargetKey, command.RunnerName, command.RunnerLabels,
+                    message => AppendAgentLog($"Runner edit: {message}"));
+                return $"Runner edit completed: {command.RunnerName}";
+            }
             await RunnerManager.ControlServiceAsync(command.TargetKey, command.Action);
             return $"Runner {command.Action} completed";
         }
@@ -296,6 +306,7 @@ public static class MachineRelay
 public sealed class MachineStatusPayload
 {
     public string MachineName { get; init; } = string.Empty;
+    public int AgentProtocolVersion { get; init; }
     public DateTime UpdatedUtc { get; init; }
     public bool RdcRunning { get; init; }
     public bool RdcConfigured { get; init; }
@@ -314,6 +325,8 @@ public sealed class MachineCommand
     public string Target { get; init; } = string.Empty;
     public string TargetKey { get; init; } = string.Empty;
     public string Action { get; init; } = string.Empty;
+    public string RunnerName { get; init; } = string.Empty;
+    public string[] RunnerLabels { get; init; } = Array.Empty<string>();
 }
 
 public sealed class MachineRunnerStatus : INotifyPropertyChanged
@@ -322,6 +335,8 @@ public sealed class MachineRunnerStatus : INotifyPropertyChanged
     public event PropertyChangedEventHandler? PropertyChanged;
     [JsonIgnore]
     public string MachineKey { get; set; } = string.Empty;
+    [JsonIgnore]
+    public int AgentProtocolVersion { get; set; }
     public string ServiceName { get; init; } = string.Empty;
     public string DisplayName { get; init; } = string.Empty;
     public string RepositoryPath { get; init; } = string.Empty;
@@ -335,6 +350,8 @@ public sealed class MachineRunnerStatus : INotifyPropertyChanged
     public Brush StatusBrush => IsRunning ? Brushes.MediumSeaGreen : Brushes.IndianRed;
     [JsonIgnore]
     public bool CanControl => ServiceInstalled && !string.IsNullOrWhiteSpace(ServiceName);
+    [JsonIgnore]
+    public bool CanEdit => AgentProtocolVersion >= 2 && CanControl && !ActivityText.Equals("Busy", StringComparison.OrdinalIgnoreCase);
     [JsonIgnore]
     public string StatusText => IsRunning ? "Running" : "Stopped";
     [JsonIgnore]
@@ -361,6 +378,7 @@ public sealed class MachineInfo : INotifyPropertyChanged
     public event PropertyChangedEventHandler? PropertyChanged;
     public string MachineKey { get; init; } = string.Empty;
     public string MachineName { get; init; } = string.Empty;
+    public int AgentProtocolVersion { get; init; }
     public DateTime UpdatedUtc { get; init; }
     public bool RdcRunning { get; init; }
     public bool RdcConfigured { get; init; }
@@ -390,7 +408,8 @@ public sealed class MachineInfo : INotifyPropertyChanged
         _ => RdcRunning ? "Stop RDC" : "Start RDC"
     };
     public string RdcRestartButtonText => _rdcPendingAction == "Restart" ? "Restarting..." : "Restart RDC";
-    public string RdcSetupButtonText => _rdcPendingAction == "Setup" ? "Starting setup..." : "Set up RDC";
+    public string RdcSetupButtonText => _rdcPendingAction == "Setup" ? "Starting setup..."
+        : AgentProtocolVersion < 2 ? "Update agent first" : "Set up RDC";
     public Visibility RdcSetupVisibility => !RdcConfigured ? Visibility.Visible : Visibility.Collapsed;
     public Visibility RdcControlsVisibility => RdcConfigured ? Visibility.Visible : Visibility.Collapsed;
     public string RdcProcessText => RdcRunning ? $"Processes: {RdcProcessCount}" : "Processes: 0";
@@ -436,11 +455,16 @@ public sealed class MachineInfo : INotifyPropertyChanged
 
     public static MachineInfo FromPayload(string key, MachineStatusPayload payload)
     {
-        foreach (var runner in payload.Runners) runner.MachineKey = key;
+        foreach (var runner in payload.Runners)
+        {
+            runner.MachineKey = key;
+            runner.AgentProtocolVersion = payload.AgentProtocolVersion;
+        }
         return new MachineInfo
         {
             MachineKey = key,
             MachineName = payload.MachineName,
+            AgentProtocolVersion = payload.AgentProtocolVersion,
             UpdatedUtc = payload.UpdatedUtc,
             RdcRunning = payload.RdcRunning,
             RdcConfigured = payload.RdcConfigured,

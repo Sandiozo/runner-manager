@@ -75,7 +75,7 @@
 
         <ScrollViewer Grid.Row="2" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto" Margin="0,0,0,14">
             <StackPanel Orientation="Horizontal">
-                <Border Width="430" Background="#171B21" BorderBrush="#252C35" BorderThickness="1" CornerRadius="8" Padding="14" Margin="0,0,10,0">
+                <Border Width="380" Background="#171B21" BorderBrush="#252C35" BorderThickness="1" CornerRadius="8" Padding="14" Margin="0,0,10,0">
                     <StackPanel>
                         <TextBlock Text="GitHub Actions Runners" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,8"/>
                         <ItemsControl ItemsSource="{Binding Machines}">
@@ -110,7 +110,17 @@
                                                                         <TextBlock Text="   |   " Foreground="#5D6673"/>
                                                                         <TextBlock Text="{Binding StatusText}" Foreground="{Binding StatusBrush}" FontSize="11"/>
                                                                     </StackPanel>
-                                                                    <Button Grid.Column="1" Content="{Binding PowerButtonText}" Tag="{Binding}" Click="MachineRunnerPower_Click" IsEnabled="{Binding CanControl}" Padding="8,4"/>
+                                                                    <StackPanel Grid.Column="1" Orientation="Horizontal">
+                                                                        <Button Style="{StaticResource StableActionButton}" Tag="{Binding}" Click="MachineRunnerEdit_Click"
+                                                                                IsEnabled="{Binding CanEdit}" Width="30" Height="28" Padding="7,6" ToolTip="Edit runner">
+                                                                            <Viewbox Width="13" Height="13">
+                                                                                <Path Stroke="#C3CAD3" StrokeThickness="1.7" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                                                                                      Data="M 2,11 L 3,7.5 L 9.5,1 L 12,3.5 L 5.5,10 Z M 8.5,2 L 11,4.5"/>
+                                                                            </Viewbox>
+                                                                        </Button>
+                                                                        <Button Content="{Binding PowerButtonText}" Tag="{Binding}" Click="MachineRunnerPower_Click"
+                                                                                IsEnabled="{Binding CanControl}" Padding="8,4"/>
+                                                                    </StackPanel>
                                                                 </Grid>
                                                                 <TextBlock Grid.Row="1" Visibility="{Binding DetailsVisibility}" Text="{Binding DisplayName}" Foreground="#C3CAD3" Margin="16,7,0,0" FontSize="11"/>
                                                                 <TextBlock Grid.Row="2" Visibility="{Binding DetailsVisibility}" Text="{Binding RepositoryPath, StringFormat=Repository: {0}}" Foreground="#7FA5D6" Margin="16,4,0,0" FontSize="11" TextTrimming="CharacterEllipsis"/>

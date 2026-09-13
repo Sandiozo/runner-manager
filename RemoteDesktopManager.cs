@@ -44,6 +44,29 @@ public static class RemoteDesktopManager
         });
     }
 
+    public static Task SetupAsync()
+    {
+        return Task.Run(() =>
+        {
+            if (IsConfigured())
+            {
+                StartAsync().GetAwaiter().GetResult();
+                return;
+            }
+
+            var npx = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "nodejs", "npx.cmd");
+            if (!File.Exists(npx)) npx = "npx.cmd";
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = "cmd.exe",
+                Arguments = $"/k \"\"{npx}\" @wonderwhy-er/desktop-commander@latest remote\"",
+                WorkingDirectory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                UseShellExecute = true,
+                WindowStyle = ProcessWindowStyle.Normal
+            });
+        });
+    }
+
     public static Task StopAsync()
     {
         return Task.Run(() =>
