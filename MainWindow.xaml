@@ -20,8 +20,6 @@
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="150"/>
@@ -43,7 +41,7 @@
                         <Path Stroke="#F4F6F8" StrokeThickness="1.8" StrokeStartLineCap="Round" StrokeEndLineCap="Round" Data="M 15,5 L 15,10 L 10,10 M 15,10 C 13.6,6.2 9.3,4.2 5.8,6 C 2.3,7.8 1.2,12.2 3.4,15.4 C 5.6,18.6 10.1,19.2 13,16.7 C 13.9,15.9 14.6,15 15,14"/>
                     </Viewbox>
                 </Button>
-                <Button Content="Enable this PC" Click="InstallAgent_Click"/>
+                <Button Content="Add this PC" Click="InstallAgent_Click" ToolTip="Add this computer to Machines and enable remote runner/RDC status and controls"/>
                 <Button Content="Add Runner" Click="AddRunner_Click" Background="#285C45" BorderBrush="#39795C"/>
                 <Button Content="Refresh" Click="RefreshButton_Click"/>
             </StackPanel>
@@ -121,49 +119,7 @@
             </ItemsControl>
         </ScrollViewer>
 
-        <TextBlock Grid.Row="3" Text="Local GitHub Actions runners" FontSize="16" FontWeight="SemiBold" Margin="0,0,0,8"/>
-
-        <ScrollViewer Grid.Row="4" VerticalScrollBarVisibility="Auto">
-            <ItemsControl ItemsSource="{Binding Runners}">
-                <ItemsControl.ItemTemplate>
-                    <DataTemplate>
-                        <Border Background="#171B21" BorderBrush="#252C35" BorderThickness="1" CornerRadius="8" Padding="16" Margin="0,0,0,10" Cursor="Hand" Tag="{Binding}" MouseLeftButtonUp="RunnerCard_Click">
-                            <Grid>
-                                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-                                <Grid>
-                                    <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                                        <Ellipse Width="10" Height="10" Fill="{Binding StatusBrush}" Margin="0,0,10,0"/>
-                                        <TextBlock Text="{Binding DisplayName}" FontSize="15" FontWeight="SemiBold"/>
-                                    </StackPanel>
-                                    <WrapPanel Grid.Column="1" Orientation="Horizontal">
-                                        <Button Content="{Binding PowerButtonText}" Tag="{Binding}" Click="RunnerPower_Click" Visibility="{Binding ServiceButtonsVisibility}"/>
-                                        <Button Content="Restart" Tag="{Binding Name}" Click="RunnerRestart_Click" Visibility="{Binding ServiceButtonsVisibility}"/>
-                                        <Button Content="Repair Service" Tag="{Binding}" Click="RunnerRepair_Click" Visibility="{Binding RepairButtonVisibility}" Background="#6B5328" BorderBrush="#8A6B34"/>
-                                        <Button Content="Workflows" Tag="{Binding}" Click="RunnerWorkflow_Click"/>
-                                        <Button Content="Logs" Tag="{Binding InstallPath}" Click="RunnerLogs_Click"/>
-                                        <Button Content="Remove" Tag="{Binding}" Click="RunnerRemove_Click" Background="#572D32" BorderBrush="#7B3D45"/>
-                                    </WrapPanel>
-                                </Grid>
-                                <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="20,10,0,0">
-                                    <TextBlock Text="{Binding StatusText}" Foreground="{Binding StatusBrush}" FontWeight="SemiBold"/>
-                                    <TextBlock Text="   |   " Foreground="#5D6673"/>
-                                    <TextBlock Text="{Binding ActivityText}" Foreground="#C3CAD3"/>
-                                    <TextBlock Text="   |   " Foreground="#5D6673"/>
-                                    <TextBlock Text="{Binding LastActivityText}" Foreground="#929BA8"/>
-                                </StackPanel>
-                                <TextBlock Grid.Row="2" Visibility="{Binding DetailsVisibility}" Text="{Binding GitHubText}" Foreground="#7FA5D6" Margin="20,7,0,0" FontSize="12"/>
-                                <TextBlock Grid.Row="3" Visibility="{Binding DetailsVisibility}" Text="{Binding CurrentWorkText}" Foreground="#D7DCE3" Margin="20,5,0,0" FontSize="12"/>
-                                <TextBlock Grid.Row="4" Visibility="{Binding DetailsVisibility}" Text="{Binding QueueText}" Foreground="#D5A85C" Margin="20,4,0,0" FontSize="12"/>
-                                <TextBlock Grid.Row="5" Visibility="{Binding DetailsVisibility}" Text="{Binding InstallPath}" Foreground="#68727F" Margin="20,5,0,0" FontSize="11" TextTrimming="CharacterEllipsis"/>
-                            </Grid>
-                        </Border>
-                    </DataTemplate>
-                </ItemsControl.ItemTemplate>
-            </ItemsControl>
-        </ScrollViewer>
-
-        <Border Grid.Row="5" Background="#171B21" BorderBrush="#252C35" BorderThickness="1" CornerRadius="8" Padding="14" Margin="0,12,0,12">
+        <Border Grid.Row="3" Background="#171B21" BorderBrush="#252C35" BorderThickness="1" CornerRadius="8" Padding="14" Margin="0,12,0,12">
             <Grid>
                 <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                 <StackPanel>
@@ -183,7 +139,7 @@
                 </StackPanel>
             </Grid>
         </Border>
-        <Grid Grid.Row="6">
+        <Grid Grid.Row="4">
             <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
             <TextBlock Text="Activity" FontSize="16" FontWeight="SemiBold" Margin="0,0,0,8"/>
             <ListBox Grid.Row="1" ItemsSource="{Binding ActivityLog}" Background="#11151A" BorderBrush="#252C35" Foreground="#B9C1CB" Padding="8" FontFamily="Consolas" FontSize="12"/>
