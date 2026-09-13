@@ -45,7 +45,7 @@ public static class MachineRelay
         return machines.OrderByDescending(m => m.IsLocal).ThenBy(m => m.MachineName).ToList();
     }
 
-    public static async Task SendCommandAsync(string machineKey, string target, string targetKey, string action)
+    public static async Task<string> SendCommandAsync(string machineKey, string target, string targetKey, string action)
     {
         var command = new MachineCommand
         {
@@ -56,6 +56,7 @@ public static class MachineRelay
             Action = action
         };
         await UpsertVariableAsync(CommandPrefix + Sanitize(machineKey), Encode(command));
+        return command.Id;
     }
 
     public static async Task RunAgentAsync(CancellationToken cancellationToken)
@@ -306,12 +307,15 @@ public sealed class MachineRunnerStatus : INotifyPropertyChanged
     public Visibility DetailsVisibility => IsExpanded ? Visibility.Visible : Visibility.Collapsed;
 }
 
-public sealed class MachineInfo
+public sealed class MachineInfo : INotifyPropertyChanged
 {
+    private string _rdcPendingAction = string.Empty;
+    public event PropertyChangedEventHandler? PropertyChanged;
     public string MachineKey { get; init; } = string.Empty;
     public string MachineName { get; init; } = string.Empty;
     public DateTime UpdatedUtc { get; init; }
     public bool RdcRunning { get; init; }
+    public string LastCommandId { get; init; } = string.Empty;
     public string LastCommandResult { get; init; } = string.Empty;
     public MachineRunnerStatus[] Runners { get; init; } = Array.Empty<MachineRunnerStatus>();
 
@@ -319,16 +323,30 @@ public sealed class MachineInfo
     public bool IsOnline => DateTime.UtcNow - UpdatedUtc < TimeSpan.FromSeconds(45);
     public Brush StatusBrush => IsOnline ? Brushes.MediumSeaGreen : Brushes.IndianRed;
     public string AgentText => IsOnline ? "Agent online" : "Agent offline";
-    public string RdcText => RdcRunning ? "RDC: Running" : "RDC: Stopped";
-    public string RdcPowerButtonText => RdcRunning ? "Stop RDC" : "Start RDC";
-    public bool CanControl => IsOnline;
+    public string RdcText => _rdcPendingAction switch
+    {
+        "Start" => "RDC: Starting...",
+        "Stop" => "RDC: Stopping...",
+        "Restart" => "RDC: Restarting...",
+        _ => RdcRunning ? "RDC: Running" : "RDC: Stopped"
+    };
+    public string RdcPowerButtonText => _rdcPendingAction switch
+    {
+        "Start" => "Starting...",
+        "Stop" => "Stopping...",
+        _ => RdcRunning ? "Stop RDC" : "Start RDC"
+    };
+    public string RdcRestartButtonText => _rdcPendingAction == "Restart" ? "Restarting..." : "Restart RDC";
+    public Brush RdcStatusBrush => !string.IsNullOrEmpty(_rdcPendingAction)
+        ? Brushes.Goldenrod : RdcRunning ? Brushes.MediumSeaGreen : Brushes.IndianRed;
+    public bool CanControl => IsOnline && string.IsNullOrEmpty(_rdcPendingAction);
     public string RunnerSummary
     {
         get
         {
             var running = Runners.Count(r => r.IsRunning);
             var busy = Runners.Count(r => r.ActivityText.Equals("Busy", StringComparison.OrdinalIgnoreCase));
-            return $"Runners: {running}/{Runners.Length} running  |  {busy} busy";
+            return $"{running}/{Runners.Length} running  |  {busy} busy";
         }
     }
 
@@ -343,6 +361,16 @@ public sealed class MachineInfo
             return $"Last seen {UpdatedUtc.ToLocalTime():g}";
         }
     }
+    public void SetRdcPending(string action)
+    {
+        if (_rdcPendingAction == action) return;
+        _rdcPendingAction = action;
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(RdcText)));
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(RdcPowerButtonText)));
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(RdcRestartButtonText)));
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(RdcStatusBrush)));
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(CanControl)));
+    }
 
     public static MachineInfo FromPayload(string key, MachineStatusPayload payload)
     {
@@ -353,6 +381,7 @@ public sealed class MachineInfo
             MachineName = payload.MachineName,
             UpdatedUtc = payload.UpdatedUtc,
             RdcRunning = payload.RdcRunning,
+            LastCommandId = payload.LastCommandId,
             LastCommandResult = payload.LastCommandResult,
             Runners = payload.Runners
         };

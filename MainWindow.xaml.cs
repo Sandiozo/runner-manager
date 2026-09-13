@@ -20,8 +20,8 @@ public partial class MainWindow : Window
     private readonly Dictionary<string, string> _lastRunnerStates = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, bool> _runnerExpansionStates = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, bool> _machineRunnerExpansionStates = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, PendingRdcCommand> _pendingRdcCommands = new(StringComparer.OrdinalIgnoreCase);
     private readonly DispatcherTimer _refreshTimer;
-    private bool? _lastRemoteRunning;
     private bool _refreshing;
     private bool _operationRunning;
     private bool _githubAuthenticated;
@@ -50,7 +50,6 @@ public partial class MainWindow : Window
             }
 
             var runners = await RunnerManager.ReadSnapshotAsync(_githubAuthenticated);
-            var remote = await Task.Run(RemoteDesktopManager.ReadSnapshot);
             var machines = _githubAuthenticated ? await MachineRelay.ReadMachinesAsync() : new List<MachineInfo>();
             foreach (var existingMachine in Machines)
                 foreach (var existingRunner in existingMachine.Runners)
@@ -58,6 +57,14 @@ public partial class MainWindow : Window
             Machines.Clear();
             foreach (var machine in machines)
             {
+                if (_pendingRdcCommands.TryGetValue(machine.MachineKey, out var pending))
+                {
+                    if (machine.LastCommandId.Equals(pending.CommandId, StringComparison.OrdinalIgnoreCase)
+                        || DateTime.UtcNow - pending.QueuedUtc > TimeSpan.FromSeconds(45))
+                        _pendingRdcCommands.Remove(machine.MachineKey);
+                    else
+                        machine.SetRdcPending(pending.Action);
+                }
                 foreach (var machineRunner in machine.Runners)
                     if (_machineRunnerExpansionStates.TryGetValue($"{machine.MachineKey}|{machineRunner.ServiceName}", out var expanded))
                         machineRunner.IsExpanded = expanded;
@@ -79,7 +86,6 @@ public partial class MainWindow : Window
                 }
             }
 
-            ApplyRemoteSnapshot(remote);
             LastUpdatedText.Text = $"Updated {DateTime.Now:HH:mm:ss}";
         }
         catch (Exception ex) { AddActivity($"Refresh failed: {ex.Message}"); }
@@ -254,17 +260,39 @@ public partial class MainWindow : Window
 
     private async void MachineRdcPower_Click(object sender, RoutedEventArgs e)
     {
-        if (sender is not Button { Tag: MachineInfo machine }) return;
+        if (sender is not Button { Tag: MachineInfo machine } || !machine.CanControl) return;
         var action = machine.RdcRunning ? "Stop" : "Start";
-        await MachineRelay.SendCommandAsync(machine.MachineKey, "rdc", string.Empty, action);
-        AddActivity($"{machine.MachineName}: queued RDC {action}.");
+        try
+        {
+            machine.SetRdcPending(action);
+            var commandId = await MachineRelay.SendCommandAsync(machine.MachineKey, "rdc", string.Empty, action);
+            _pendingRdcCommands[machine.MachineKey] = new PendingRdcCommand(commandId, action, DateTime.UtcNow);
+            AddActivity($"{machine.MachineName}: queued RDC {action}.");
+        }
+        catch (Exception ex)
+        {
+            _pendingRdcCommands.Remove(machine.MachineKey);
+            AddActivity($"{machine.MachineName}: RDC {action} failed: {ex.Message}");
+            await RefreshAsync();
+        }
     }
 
     private async void MachineRdcRestart_Click(object sender, RoutedEventArgs e)
     {
-        if (sender is not Button { Tag: MachineInfo machine }) return;
-        await MachineRelay.SendCommandAsync(machine.MachineKey, "rdc", string.Empty, "Restart");
-        AddActivity($"{machine.MachineName}: queued RDC Restart.");
+        if (sender is not Button { Tag: MachineInfo machine } || !machine.CanControl) return;
+        try
+        {
+            machine.SetRdcPending("Restart");
+            var commandId = await MachineRelay.SendCommandAsync(machine.MachineKey, "rdc", string.Empty, "Restart");
+            _pendingRdcCommands[machine.MachineKey] = new PendingRdcCommand(commandId, "Restart", DateTime.UtcNow);
+            AddActivity($"{machine.MachineName}: queued RDC Restart.");
+        }
+        catch (Exception ex)
+        {
+            _pendingRdcCommands.Remove(machine.MachineKey);
+            AddActivity($"{machine.MachineName}: RDC Restart failed: {ex.Message}");
+            await RefreshAsync();
+        }
     }
 
     private void MachineRunnerCard_Click(object sender, MouseButtonEventArgs e)
@@ -293,47 +321,7 @@ public partial class MainWindow : Window
     private async void RefreshButton_Click(object sender, RoutedEventArgs e)
         => await RefreshAsync(forceAuthCheck: true);
 
-    private void ApplyRemoteSnapshot(RemoteInfo remote)
-    {
-        RemoteStatusDot.Fill = remote.Running ? Brushes.MediumSeaGreen : Brushes.IndianRed;
-        RemoteStatusText.Text = remote.Running ? "Running" : "Stopped";
-        RemoteStatusText.Foreground = remote.Running ? Brushes.MediumSeaGreen : Brushes.IndianRed;
-        RemotePowerButton.Content = remote.Running ? "Stop" : "Start";
-        RemoteDetailsText.Text = remote.Running
-            ? $"{remote.Pids.Length} process(es)  |  PID {string.Join(", ", remote.Pids)}" +
-              (remote.Started.HasValue ? $"  |  started {remote.Started:HH:mm:ss}" : string.Empty)
-            : "No Remote Desktop Commander process detected";
-        if (_lastRemoteRunning != remote.Running)
-        {
-            AddActivity($"Remote Desktop Commander: {(remote.Running ? "Running" : "Stopped")}");
-            _lastRemoteRunning = remote.Running;
-        }
-    }
-
-    private async void RemotePower_Click(object sender, RoutedEventArgs e)
-    {
-        if (_lastRemoteRunning == true)
-        {
-            await RemoteDesktopManager.StopAsync();
-            AddActivity("Stopped Remote Desktop Commander");
-            await Task.Delay(700);
-        }
-        else
-        {
-            await RemoteDesktopManager.StartAsync();
-            AddActivity("Started Remote Desktop Commander");
-            await Task.Delay(1000);
-        }
-        await RefreshAsync();
-    }
-
-    private async void RemoteRestart_Click(object sender, RoutedEventArgs e)
-    {
-        await RemoteDesktopManager.RestartAsync();
-        AddActivity("Restarted Remote Desktop Commander");
-        await Task.Delay(1000);
-        await RefreshAsync();
-    }
+    private sealed record PendingRdcCommand(string CommandId, string Action, DateTime QueuedUtc);
 
     private void AddActivity(string message)
     {

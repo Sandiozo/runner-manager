@@ -13,8 +13,8 @@ Small Windows control panel for local GitHub Actions self-hosted runners and Rem
 - Uses GitHub CLI authentication and temporary GitHub registration/removal tokens; the app does not store GitHub credentials.
 - Open runner diagnostic logs.
 - Detect, start, stop, and restart Remote Desktop Commander.
-- Shows multiple managed PCs in a Machines view with per-PC RDC and runner status/control.
-- Machine runner rows expand independently to show repository, activity, and Windows service details.
+- Shows every enrolled PC in a Machines view, with separate side-by-side runner and Remote Desktop Commander containers per machine.
+- Machine runner rows expand independently to show repository, activity, and Windows service details; RDC controls show explicit starting/stopping/restarting states.
 - Activity feed and automatic refresh every 5 seconds.
 
 ## GitHub connection
