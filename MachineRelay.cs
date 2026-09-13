@@ -113,6 +113,9 @@ public static class MachineRelay
             MachineName = Environment.MachineName,
             UpdatedUtc = DateTime.UtcNow,
             RdcRunning = remote.Running,
+            RdcProcessCount = remote.Pids.Length,
+            RdcPids = remote.Pids,
+            RdcStartedUtc = remote.Started?.ToUniversalTime(),
             LastCommandId = lastCommandId,
             LastCommandResult = lastResult,
             Runners = runners.Select(r => new MachineRunnerStatus
@@ -254,6 +257,9 @@ public sealed class MachineStatusPayload
     public string MachineName { get; init; } = string.Empty;
     public DateTime UpdatedUtc { get; init; }
     public bool RdcRunning { get; init; }
+    public int RdcProcessCount { get; init; }
+    public uint[] RdcPids { get; init; } = Array.Empty<uint>();
+    public DateTime? RdcStartedUtc { get; init; }
     public string LastCommandId { get; init; } = string.Empty;
     public string LastCommandResult { get; init; } = string.Empty;
     public MachineRunnerStatus[] Runners { get; init; } = Array.Empty<MachineRunnerStatus>();
@@ -315,6 +321,9 @@ public sealed class MachineInfo : INotifyPropertyChanged
     public string MachineName { get; init; } = string.Empty;
     public DateTime UpdatedUtc { get; init; }
     public bool RdcRunning { get; init; }
+    public int RdcProcessCount { get; init; }
+    public uint[] RdcPids { get; init; } = Array.Empty<uint>();
+    public DateTime? RdcStartedUtc { get; init; }
     public string LastCommandId { get; init; } = string.Empty;
     public string LastCommandResult { get; init; } = string.Empty;
     public MachineRunnerStatus[] Runners { get; init; } = Array.Empty<MachineRunnerStatus>();
@@ -337,6 +346,9 @@ public sealed class MachineInfo : INotifyPropertyChanged
         _ => RdcRunning ? "Stop RDC" : "Start RDC"
     };
     public string RdcRestartButtonText => _rdcPendingAction == "Restart" ? "Restarting..." : "Restart RDC";
+    public string RdcProcessText => RdcRunning ? $"Processes: {RdcProcessCount}" : "Processes: 0";
+    public string RdcPidText => RdcRunning && RdcPids.Length > 0 ? $"PID: {string.Join(", ", RdcPids)}" : "No active RDC processes";
+    public string RdcUptimeText => !RdcRunning || !RdcStartedUtc.HasValue ? "Uptime: --" : (DateTime.UtcNow - RdcStartedUtc.Value).TotalHours >= 1 ? $"Uptime: {(int)(DateTime.UtcNow - RdcStartedUtc.Value).TotalHours}h {(DateTime.UtcNow - RdcStartedUtc.Value).Minutes}m" : $"Uptime: {Math.Max(0,(int)(DateTime.UtcNow - RdcStartedUtc.Value).TotalMinutes)}m";
     public Brush RdcStatusBrush => !string.IsNullOrEmpty(_rdcPendingAction)
         ? Brushes.Goldenrod : RdcRunning ? Brushes.MediumSeaGreen : Brushes.IndianRed;
     public bool CanControl => IsOnline && string.IsNullOrEmpty(_rdcPendingAction);
@@ -381,6 +393,9 @@ public sealed class MachineInfo : INotifyPropertyChanged
             MachineName = payload.MachineName,
             UpdatedUtc = payload.UpdatedUtc,
             RdcRunning = payload.RdcRunning,
+            RdcProcessCount = payload.RdcProcessCount,
+            RdcPids = payload.RdcPids,
+            RdcStartedUtc = payload.RdcStartedUtc,
             LastCommandId = payload.LastCommandId,
             LastCommandResult = payload.LastCommandResult,
             Runners = payload.Runners
