@@ -181,7 +181,15 @@ public partial class MainWindow : Window
             AddActivity($"{title} failed: {ex.Message}");
             MessageBox.Show(this, ex.Message, title, MessageBoxButton.OK, MessageBoxImage.Error);
         }
-        finally { _operationRunning = false; await RefreshAsync(forceAuthCheck: true); }
+        finally
+        {
+            _operationRunning = false;
+            if (_isEnrolled && _githubAuthenticated)
+            {
+                try { await MachineRelay.PublishLocalStatusNowAsync(); } catch { }
+            }
+            await RefreshAsync(forceAuthCheck: true);
+        }
     }
 
     private async Task ControlRunnerAsync(string serviceName, string action)
@@ -406,7 +414,22 @@ public partial class MainWindow : Window
     }
 
     private async void RefreshButton_Click(object sender, RoutedEventArgs e)
-        => await RefreshAsync(forceAuthCheck: true);
+    {
+        if (_operationRunning) return;
+        var button = sender as Button;
+        if (button != null) { button.IsEnabled = false; button.Content = "Refreshing..."; }
+        try
+        {
+            if (_githubAuthenticated && _isEnrolled)
+                await MachineRelay.PublishLocalStatusNowAsync();
+            await RefreshAsync(forceAuthCheck: true);
+        }
+        catch (Exception ex) { AddActivity($"Manual refresh failed: {ex.Message}"); }
+        finally
+        {
+            if (button != null) { button.Content = "Refresh"; button.IsEnabled = true; }
+        }
+    }
 
     private sealed record PendingRdcCommand(string CommandId, string Action, DateTime QueuedUtc);
 

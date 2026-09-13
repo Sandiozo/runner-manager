@@ -67,6 +67,7 @@ public static class MachineRelay
         Directory.CreateDirectory(StateDir);
         var lastCommandId = LoadAgentState();
         string lastResult = "Agent started";
+        var lastPublishedUtc = DateTime.MinValue;
 
         if (RemoteDesktopManager.IsConfigured() && !RemoteDesktopManager.ReadSnapshot().Running)
         {
@@ -85,6 +86,7 @@ public static class MachineRelay
             try
             {
                 var command = await ReadCommandAsync(LocalMachineKey);
+                var handledCommand = false;
                 if (command != null
                     && command.Id != lastCommandId
                     && DateTime.UtcNow - command.CreatedUtc < TimeSpan.FromMinutes(2))
@@ -92,16 +94,21 @@ public static class MachineRelay
                     lastResult = await ExecuteCommandAsync(command);
                     lastCommandId = command.Id;
                     SaveAgentState(lastCommandId);
+                    handledCommand = true;
                 }
 
-                await PublishLocalStatusAsync(lastCommandId, lastResult);
+                if (handledCommand || DateTime.UtcNow - lastPublishedUtc >= TimeSpan.FromSeconds(15))
+                {
+                    await PublishLocalStatusAsync(lastCommandId, lastResult);
+                    lastPublishedUtc = DateTime.UtcNow;
+                }
             }
             catch (Exception ex)
             {
                 AppendAgentLog(ex.Message);
             }
 
-            try { await Task.Delay(TimeSpan.FromSeconds(15), cancellationToken); }
+            try { await Task.Delay(TimeSpan.FromSeconds(5), cancellationToken); }
             catch (TaskCanceledException) { }
         }
     }
@@ -133,6 +140,10 @@ public static class MachineRelay
         await RunProcessAsync("schtasks.exe", $"/Run /TN \"{taskName}\"");
     }
 
+
+    public static Task PublishLocalStatusNowAsync()
+        => PublishLocalStatusAsync(LoadAgentState(), "Manual refresh completed");
+
     private static async Task PublishLocalStatusAsync(string lastCommandId, string lastResult)
     {
         var runners = await RunnerManager.ReadSnapshotAsync(queryGitHub: false);
@@ -140,13 +151,17 @@ public static class MachineRelay
         var payload = new MachineStatusPayload
         {
             MachineName = Environment.MachineName,
-            AgentProtocolVersion = 2,
+            AgentProtocolVersion = 3,
             UpdatedUtc = DateTime.UtcNow,
             RdcRunning = remote.Running,
             RdcConfigured = RemoteDesktopManager.IsConfigured(),
             RdcProcessCount = remote.Pids.Length,
             RdcPids = remote.Pids,
             RdcStartedUtc = remote.Started?.ToUniversalTime(),
+            RdcActiveCalls = remote.ActiveCalls,
+            RdcLastUsedUtc = remote.LastUsedUtc,
+            RdcLastTool = remote.LastTool,
+            RdcSecurityText = remote.SecurityText,
             LastCommandId = lastCommandId,
             LastCommandResult = lastResult,
             Runners = runners.Select(r => new MachineRunnerStatus
@@ -313,6 +328,10 @@ public sealed class MachineStatusPayload
     public int RdcProcessCount { get; init; }
     public uint[] RdcPids { get; init; } = Array.Empty<uint>();
     public DateTime? RdcStartedUtc { get; init; }
+    public int RdcActiveCalls { get; init; }
+    public DateTime? RdcLastUsedUtc { get; init; }
+    public string RdcLastTool { get; init; } = string.Empty;
+    public string RdcSecurityText { get; init; } = string.Empty;
     public string LastCommandId { get; init; } = string.Empty;
     public string LastCommandResult { get; init; } = string.Empty;
     public MachineRunnerStatus[] Runners { get; init; } = Array.Empty<MachineRunnerStatus>();
@@ -385,6 +404,10 @@ public sealed class MachineInfo : INotifyPropertyChanged
     public int RdcProcessCount { get; init; }
     public uint[] RdcPids { get; init; } = Array.Empty<uint>();
     public DateTime? RdcStartedUtc { get; init; }
+    public int RdcActiveCalls { get; init; }
+    public DateTime? RdcLastUsedUtc { get; init; }
+    public string RdcLastTool { get; init; } = string.Empty;
+    public string RdcSecurityText { get; init; } = string.Empty;
     public string LastCommandId { get; init; } = string.Empty;
     public string LastCommandResult { get; init; } = string.Empty;
     public MachineRunnerStatus[] Runners { get; init; } = Array.Empty<MachineRunnerStatus>();
@@ -415,6 +438,26 @@ public sealed class MachineInfo : INotifyPropertyChanged
     public string RdcProcessText => RdcRunning ? $"Processes: {RdcProcessCount}" : "Processes: 0";
     public string RdcPidText => RdcRunning && RdcPids.Length > 0 ? $"PID: {string.Join(", ", RdcPids)}" : "No active RDC processes";
     public string RdcUptimeText => !RdcRunning || !RdcStartedUtc.HasValue ? "Uptime: --" : (DateTime.UtcNow - RdcStartedUtc.Value).TotalHours >= 1 ? $"Uptime: {(int)(DateTime.UtcNow - RdcStartedUtc.Value).TotalHours}h {(DateTime.UtcNow - RdcStartedUtc.Value).Minutes}m" : $"Uptime: {Math.Max(0,(int)(DateTime.UtcNow - RdcStartedUtc.Value).TotalMinutes)}m";
+    public string RdcUsageText
+    {
+        get
+        {
+            if (AgentProtocolVersion < 3) return "Usage: update agent for activity status";
+            if (RdcActiveCalls > 0) return string.IsNullOrWhiteSpace(RdcLastTool) ? "Usage: In use" : $"Usage: In use • {RdcLastTool}";
+            if (RdcLastUsedUtc.HasValue)
+            {
+                var age = DateTime.UtcNow - RdcLastUsedUtc.Value;
+                if (age.TotalSeconds < 15) return "Usage: Just used";
+                if (age.TotalMinutes < 1) return $"Usage: Last used {(int)age.TotalSeconds}s ago";
+                if (age.TotalHours < 1) return $"Usage: Last used {(int)age.TotalMinutes}m ago";
+                return $"Usage: Last used {RdcLastUsedUtc.Value.ToLocalTime():g}";
+            }
+            return RdcRunning ? "Usage: Idle" : "Usage: --";
+        }
+    }
+    public Brush RdcUsageBrush => RdcActiveCalls > 0 ? Brushes.MediumSeaGreen : Brushes.Gray;
+    public string RdcSecurityStatusText => AgentProtocolVersion < 3 ? "Security: update agent for ACL check"
+        : string.IsNullOrWhiteSpace(RdcSecurityText) ? "Security: unavailable" : RdcSecurityText;
     public Brush RdcStatusBrush => !string.IsNullOrEmpty(_rdcPendingAction)
         ? Brushes.Goldenrod : !RdcConfigured ? Brushes.Gray : RdcRunning ? Brushes.MediumSeaGreen : Brushes.IndianRed;
     public bool CanControl => IsOnline && RdcConfigured && string.IsNullOrEmpty(_rdcPendingAction);
@@ -471,6 +514,10 @@ public sealed class MachineInfo : INotifyPropertyChanged
             RdcProcessCount = payload.RdcProcessCount,
             RdcPids = payload.RdcPids,
             RdcStartedUtc = payload.RdcStartedUtc,
+            RdcActiveCalls = payload.RdcActiveCalls,
+            RdcLastUsedUtc = payload.RdcLastUsedUtc,
+            RdcLastTool = payload.RdcLastTool,
+            RdcSecurityText = payload.RdcSecurityText,
             LastCommandId = payload.LastCommandId,
             LastCommandResult = payload.LastCommandResult,
             Runners = payload.Runners
