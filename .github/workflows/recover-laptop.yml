@@ -3,47 +3,25 @@ on:
   workflow_dispatch:
 
 jobs:
-  recover:
+  diagnose:
     runs-on: [self-hosted, Windows, X64]
-    timeout-minutes: 10
+    timeout-minutes: 5
     steps:
-      - name: Deploy canonical RunnerWidget
+      - name: Diagnose laptop RunnerWidget
         shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
         run: |
-          $ErrorActionPreference = 'Stop'
           $repo = 'C:\Users\skedn\Documents\GitHub\runner-widget'
-          $ErrorActionPreference = 'Continue'
-          schtasks.exe /End /TN 'RunnerWidget Fleet Agent' 2>$null | Out-Null
-          $ErrorActionPreference = 'Stop'
-          Get-Process RunnerWidget -ErrorAction SilentlyContinue | ForEach-Object {
-            try {
-              Stop-Process -Id $_.Id -Force -ErrorAction Stop
-              Write-Output ("Stopped RunnerWidget PID " + $_.Id)
-            } catch {
-              Write-Output ("Could not stop RunnerWidget PID " + $_.Id + ": " + $_.Exception.Message)
-            }
-          }
-          Start-Sleep -Seconds 1
-          $remaining = @(Get-Process RunnerWidget -ErrorAction SilentlyContinue)
-          if ($remaining.Count -gt 0) {
-            Write-Output ("RunnerWidget still locked by PID(s): " + (($remaining | Select-Object -ExpandProperty Id) -join ','))
-            exit 2
-          }
-          git -C $repo fetch origin main
-          git -C $repo checkout main
-          git -C $repo reset --hard origin/main
-          if (Test-Path (Join-Path $repo 'bin')) { Remove-Item (Join-Path $repo 'bin') -Recurse -Force }
-          & 'C:\Program Files\dotnet\dotnet.exe' build (Join-Path $repo 'RunnerWidget.csproj') -c Release
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          schtasks.exe /Run /TN 'RunnerWidget Fleet Agent'
-          Start-Sleep -Seconds 5
-          Write-Output '--- HEAD ---'
+          Write-Output '--- SOURCE HEAD ---'
           git -C $repo rev-parse HEAD
-          Write-Output '--- COPIES ---'
-          Get-ChildItem (Join-Path $repo 'bin') -Filter RunnerWidget.exe -Recurse | Select-Object -ExpandProperty FullName
-          Write-Output '--- TASK ---'
-          schtasks.exe /Query /TN 'RunnerWidget Fleet Agent' /FO CSV /NH
+          Write-Output '--- CANONICAL COPIES ---'
+          Get-ChildItem (Join-Path $repo 'bin') -Filter RunnerWidget.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName
+          Write-Output '--- RUNNERWIDGET PROCESS ---'
+          Get-CimInstance Win32_Process -Filter "Name='RunnerWidget.exe'" | Select-Object ProcessId,ParentProcessId,CommandLine,ExecutablePath | Format-List
+          Write-Output '--- RDC PROCESSES ---'
+          Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'desktop-commander|rdc-launch' } | Select-Object ProcessId,ParentProcessId,Name,CommandLine | Format-List
+          Write-Output '--- RDC LAUNCHER ---'
+          Get-Content 'C:\Users\skedn\AppData\Local\RunnerWidget\rdc-launch.ps1' -ErrorAction SilentlyContinue
+          Write-Output '--- RDC RUNTIME LOG ---'
+          Get-Content 'C:\Users\skedn\AppData\Local\RunnerWidget\rdc-runtime.log' -Tail 80 -ErrorAction SilentlyContinue
           Write-Output '--- AGENT LOG ---'
-          Get-Content 'C:\Users\skedn\AppData\Local\RunnerWidget\agent.log' -Tail 40 -ErrorAction SilentlyContinue
-          Write-Output '--- RDC LOG ---'
-          Get-Content 'C:\Users\skedn\AppData\Local\RunnerWidget\rdc-runtime.log' -Tail 40 -ErrorAction SilentlyContinue
+          Get-Content 'C:\Users\skedn\AppData\Local\RunnerWidget\agent.log' -Tail 80 -ErrorAction SilentlyContinue
