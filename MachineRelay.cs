@@ -70,16 +70,26 @@ public static class MachineRelay
         var lastPublishedUtc = DateTime.MinValue;
 
         var initialRdc = RemoteDesktopManager.ReadSnapshot();
-        if (RemoteDesktopManager.IsConfigured() && !initialRdc.Connected)
+        if (RemoteDesktopManager.IsConfigured())
         {
             try
             {
-                await Task.Delay(TimeSpan.FromSeconds(3), cancellationToken);
-                if (initialRdc.Running)
-                    await RemoteDesktopManager.RestartAsync();
-                else
+                if (!initialRdc.Running)
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(3), cancellationToken);
                     await RemoteDesktopManager.StartAsync();
-                lastResult = "Agent started; RDC relay connection verified";
+                    lastResult = "Agent started; RDC relay connection verified";
+                }
+                else if (initialRdc.ConnectionKnown && !initialRdc.Connected)
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(3), cancellationToken);
+                    await RemoteDesktopManager.RestartAsync();
+                    lastResult = "Agent started; disconnected RDC relay recovered";
+                }
+                else if (!initialRdc.ConnectionKnown)
+                {
+                    lastResult = "Agent started; existing RDC process preserved (relay status unknown)";
+                }
             }
             catch (TaskCanceledException) { return; }
             catch (Exception ex) { AppendAgentLog($"RDC auto-start failed: {ex.Message}"); }
