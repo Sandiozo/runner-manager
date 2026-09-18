@@ -137,7 +137,7 @@ public static class RemoteDesktopManager
     {
         const string script = """
 param([string]$Npx, [string]$ActivityLog, [string]$RuntimeLog)
-& $Npx '@wonderwhy-er/desktop-commander@latest' 'remote' 2>&1 | ForEach-Object {
+& $Npx '--yes' '@wonderwhy-er/desktop-commander@latest' 'remote' 2>&1 | ForEach-Object {
     $line = $_.ToString()
     Write-Host $line
     $ts = [DateTime]::UtcNow.ToString('O')

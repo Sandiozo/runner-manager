@@ -105,10 +105,21 @@ public static class MachineRelay
                     && command.Id != lastCommandId
                     && DateTime.UtcNow - command.CreatedUtc < TimeSpan.FromMinutes(2))
                 {
-                    lastResult = await ExecuteCommandAsync(command);
-                    lastCommandId = command.Id;
-                    SaveAgentState(lastCommandId);
-                    handledCommand = true;
+                    try
+                    {
+                        lastResult = await ExecuteCommandAsync(command);
+                    }
+                    catch (Exception ex)
+                    {
+                        lastResult = $"Command failed: {ex.Message}";
+                        AppendAgentLog(lastResult);
+                    }
+                    finally
+                    {
+                        lastCommandId = command.Id;
+                        SaveAgentState(lastCommandId);
+                        handledCommand = true;
+                    }
                 }
 
                 if (handledCommand || DateTime.UtcNow - lastPublishedUtc >= TimeSpan.FromSeconds(15))
