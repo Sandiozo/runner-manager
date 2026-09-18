@@ -12,9 +12,23 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $repo = 'C:\Users\skedn\Documents\GitHub\runner-widget'
+          $ErrorActionPreference = 'Continue'
           schtasks.exe /End /TN 'RunnerWidget Fleet Agent' 2>$null | Out-Null
+          $ErrorActionPreference = 'Stop'
+          Get-Process RunnerWidget -ErrorAction SilentlyContinue | ForEach-Object {
+            try {
+              Stop-Process -Id $_.Id -Force -ErrorAction Stop
+              Write-Output ("Stopped RunnerWidget PID " + $_.Id)
+            } catch {
+              Write-Output ("Could not stop RunnerWidget PID " + $_.Id + ": " + $_.Exception.Message)
+            }
+          }
           Start-Sleep -Seconds 1
-          Get-Process RunnerWidget -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+          $remaining = @(Get-Process RunnerWidget -ErrorAction SilentlyContinue)
+          if ($remaining.Count -gt 0) {
+            Write-Output ("RunnerWidget still locked by PID(s): " + (($remaining | Select-Object -ExpandProperty Id) -join ','))
+            exit 2
+          }
           git -C $repo fetch origin main
           git -C $repo checkout main
           git -C $repo reset --hard origin/main
