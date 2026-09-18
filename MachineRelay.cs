@@ -69,13 +69,17 @@ public static class MachineRelay
         string lastResult = "Agent started";
         var lastPublishedUtc = DateTime.MinValue;
 
-        if (RemoteDesktopManager.IsConfigured() && !RemoteDesktopManager.ReadSnapshot().Running)
+        var initialRdc = RemoteDesktopManager.ReadSnapshot();
+        if (RemoteDesktopManager.IsConfigured() && !initialRdc.Connected)
         {
             try
             {
                 await Task.Delay(TimeSpan.FromSeconds(3), cancellationToken);
-                await RemoteDesktopManager.StartAsync();
-                lastResult = "Agent started; RDC auto-start requested";
+                if (initialRdc.Running)
+                    await RemoteDesktopManager.RestartAsync();
+                else
+                    await RemoteDesktopManager.StartAsync();
+                lastResult = "Agent started; RDC relay connection verified";
             }
             catch (TaskCanceledException) { return; }
             catch (Exception ex) { AppendAgentLog($"RDC auto-start failed: {ex.Message}"); }
@@ -119,6 +123,23 @@ public static class MachineRelay
         return result == 0;
     }
 
+    public static async Task<bool> IsAgentRunningAsync()
+    {
+        using var process = Process.Start(new ProcessStartInfo
+        {
+            FileName = "schtasks.exe",
+            Arguments = "/Query /TN \"RunnerWidget Fleet Agent\" /FO CSV /NH",
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        });
+        if (process == null) return false;
+        var output = await process.StandardOutput.ReadToEndAsync();
+        await process.WaitForExitAsync();
+        return process.ExitCode == 0 && output.Contains("\"Running\"", StringComparison.OrdinalIgnoreCase);
+    }
+
     public static async Task RemoveAgentTaskAsync()
     {
         await TryRunProcessAsync("schtasks.exe", "/End /TN \"RunnerWidget Fleet Agent\"");
@@ -151,9 +172,13 @@ public static class MachineRelay
         var payload = new MachineStatusPayload
         {
             MachineName = Environment.MachineName,
-            AgentProtocolVersion = 3,
+            AgentProtocolVersion = 5,
             UpdatedUtc = DateTime.UtcNow,
+            FleetAgentRunning = await IsAgentRunningAsync(),
             RdcRunning = remote.Running,
+            RdcConnected = remote.Connected,
+            RdcConnectionChangedUtc = remote.ConnectionChangedUtc,
+            RdcConnectionText = remote.ConnectionText,
             RdcConfigured = RemoteDesktopManager.IsConfigured(),
             RdcProcessCount = remote.Pids.Length,
             RdcPids = remote.Pids,
@@ -204,7 +229,12 @@ public static class MachineRelay
             else if (command.Action.Equals("Setup", StringComparison.OrdinalIgnoreCase))
                 await RemoteDesktopManager.SetupAsync();
             else throw new InvalidOperationException($"Unsupported RDC action: {command.Action}");
-            return $"RDC {command.Action} completed";
+            var state = RemoteDesktopManager.ReadSnapshot();
+            return command.Action.Equals("Stop", StringComparison.OrdinalIgnoreCase)
+                ? "RDC Stop completed"
+                : state.Connected
+                    ? $"RDC {command.Action} completed; relay connected"
+                    : $"RDC {command.Action} completed; relay not connected";
         }
 
         if (command.Target.Equals("runner", StringComparison.OrdinalIgnoreCase))
@@ -323,7 +353,11 @@ public sealed class MachineStatusPayload
     public string MachineName { get; init; } = string.Empty;
     public int AgentProtocolVersion { get; init; }
     public DateTime UpdatedUtc { get; init; }
+    public bool FleetAgentRunning { get; init; }
     public bool RdcRunning { get; init; }
+    public bool RdcConnected { get; init; }
+    public DateTime? RdcConnectionChangedUtc { get; init; }
+    public string RdcConnectionText { get; init; } = string.Empty;
     public bool RdcConfigured { get; init; }
     public int RdcProcessCount { get; init; }
     public uint[] RdcPids { get; init; } = Array.Empty<uint>();
@@ -399,7 +433,11 @@ public sealed class MachineInfo : INotifyPropertyChanged
     public string MachineName { get; init; } = string.Empty;
     public int AgentProtocolVersion { get; init; }
     public DateTime UpdatedUtc { get; init; }
+    public bool FleetAgentRunning { get; init; }
     public bool RdcRunning { get; init; }
+    public bool RdcConnected { get; init; }
+    public DateTime? RdcConnectionChangedUtc { get; init; }
+    public string RdcConnectionText { get; init; } = string.Empty;
     public bool RdcConfigured { get; init; }
     public int RdcProcessCount { get; init; }
     public uint[] RdcPids { get; init; } = Array.Empty<uint>();
@@ -413,9 +451,14 @@ public sealed class MachineInfo : INotifyPropertyChanged
     public MachineRunnerStatus[] Runners { get; init; } = Array.Empty<MachineRunnerStatus>();
 
     public bool IsLocal => MachineName.Equals(Environment.MachineName, StringComparison.OrdinalIgnoreCase);
-    public bool IsOnline => DateTime.UtcNow - UpdatedUtc < TimeSpan.FromSeconds(45);
+    public bool IsOnline => DateTime.UtcNow - UpdatedUtc < TimeSpan.FromSeconds(45)
+        && (AgentProtocolVersion < 5 || FleetAgentRunning);
     public Brush StatusBrush => IsOnline ? Brushes.MediumSeaGreen : Brushes.IndianRed;
-    public string AgentText => IsOnline ? "Agent online" : "Agent offline";
+    public string AgentText => AgentProtocolVersion < 5
+        ? (IsOnline ? "Fleet agent online" : "Fleet agent offline")
+        : !FleetAgentRunning ? "Fleet agent stopped"
+        : IsOnline ? "Fleet agent online"
+        : "Fleet agent stale";
     public string RunnerSyncText
     {
         get
@@ -434,7 +477,11 @@ public sealed class MachineInfo : INotifyPropertyChanged
         "Stop" => "RDC: Stopping...",
         "Restart" => "RDC: Restarting...",
         "Setup" => "RDC: Starting setup...",
-        _ => !RdcConfigured ? "RDC: Not set up" : RdcRunning ? "RDC: Running" : "RDC: Stopped"
+        _ => !RdcConfigured ? "RDC: Not set up"
+            : AgentProtocolVersion < 4 ? (RdcRunning ? "RDC: Process running" : "RDC: Stopped")
+            : RdcConnected ? "RDC: Connected"
+            : RdcRunning ? "RDC: Process running, relay offline"
+            : "RDC: Stopped"
     };
     public string RdcPowerButtonText => _rdcPendingAction switch
     {
@@ -455,6 +502,8 @@ public sealed class MachineInfo : INotifyPropertyChanged
         get
         {
             if (AgentProtocolVersion < 3) return "Usage: update agent for activity status";
+            if (AgentProtocolVersion >= 4 && !RdcConnected)
+                return RdcRunning ? "Connection: Relay offline" : "Connection: Offline";
             if (RdcActiveCalls > 0) return string.IsNullOrWhiteSpace(RdcLastTool) ? "Usage: In use" : $"Usage: In use • {RdcLastTool}";
             if (RdcLastUsedUtc.HasValue)
             {
@@ -467,12 +516,19 @@ public sealed class MachineInfo : INotifyPropertyChanged
             return RdcRunning ? "Usage: Idle" : "Usage: --";
         }
     }
-    public Brush RdcUsageBrush => RdcActiveCalls > 0 ? Brushes.MediumSeaGreen : Brushes.Gray;
+    public Brush RdcUsageBrush => AgentProtocolVersion >= 4 && !RdcConnected
+        ? (RdcRunning ? Brushes.Goldenrod : Brushes.IndianRed)
+        : RdcActiveCalls > 0 ? Brushes.MediumSeaGreen : Brushes.Gray;
     public string RdcSecurityStatusText => AgentProtocolVersion < 3 ? "Security: update agent for ACL check"
         : string.IsNullOrWhiteSpace(RdcSecurityText) ? "Security: unavailable" : RdcSecurityText;
     public Brush RdcStatusBrush => !string.IsNullOrEmpty(_rdcPendingAction)
-        ? Brushes.Goldenrod : !RdcConfigured ? Brushes.Gray : RdcRunning ? Brushes.MediumSeaGreen : Brushes.IndianRed;
-    public bool CanControl => IsOnline && RdcConfigured && string.IsNullOrEmpty(_rdcPendingAction);
+        ? Brushes.Goldenrod
+        : !RdcConfigured ? Brushes.Gray
+        : AgentProtocolVersion < 4 ? (RdcRunning ? Brushes.MediumSeaGreen : Brushes.IndianRed)
+        : RdcConnected ? Brushes.MediumSeaGreen
+        : RdcRunning ? Brushes.Goldenrod
+        : Brushes.IndianRed;
+    public bool CanControl => RdcConfigured && string.IsNullOrEmpty(_rdcPendingAction) && (IsLocal || IsOnline);
     public bool CanSetupRdc => !RdcConfigured && string.IsNullOrEmpty(_rdcPendingAction);
     public string RunnerSummary
     {
@@ -521,7 +577,11 @@ public sealed class MachineInfo : INotifyPropertyChanged
             MachineName = payload.MachineName,
             AgentProtocolVersion = payload.AgentProtocolVersion,
             UpdatedUtc = payload.UpdatedUtc,
+            FleetAgentRunning = payload.FleetAgentRunning,
             RdcRunning = payload.RdcRunning,
+            RdcConnected = payload.RdcConnected,
+            RdcConnectionChangedUtc = payload.RdcConnectionChangedUtc,
+            RdcConnectionText = payload.RdcConnectionText,
             RdcConfigured = payload.RdcConfigured,
             RdcProcessCount = payload.RdcProcessCount,
             RdcPids = payload.RdcPids,

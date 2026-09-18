@@ -301,6 +301,15 @@ public partial class MainWindow : Window
     private async void MachineRdcSetup_Click(object sender, RoutedEventArgs e)
     {
         if (sender is not Button { Tag: MachineInfo machine } || !machine.CanSetupRdc) return;
+        if (machine.IsLocal)
+        {
+            await RunOperationAsync("Set up RDC", async log =>
+            {
+                await RemoteDesktopManager.SetupAsync();
+                log("Local RDC setup started.");
+            });
+            return;
+        }
         if (machine.AgentProtocolVersion < 2)
         {
             MessageBox.Show(this,
@@ -327,6 +336,16 @@ public partial class MainWindow : Window
     {
         if (sender is not Button { Tag: MachineInfo machine } || !machine.CanControl) return;
         var action = machine.RdcRunning ? "Stop" : "Start";
+        if (machine.IsLocal)
+        {
+            await RunOperationAsync($"{action} RDC", async log =>
+            {
+                if (action == "Stop") await RemoteDesktopManager.StopAsync();
+                else await RemoteDesktopManager.StartAsync();
+                log(action == "Stop" ? "Local RDC stopped." : "Local RDC relay connected.");
+            });
+            return;
+        }
         try
         {
             machine.SetRdcPending(action);
@@ -345,6 +364,15 @@ public partial class MainWindow : Window
     private async void MachineRdcRestart_Click(object sender, RoutedEventArgs e)
     {
         if (sender is not Button { Tag: MachineInfo machine } || !machine.CanControl) return;
+        if (machine.IsLocal)
+        {
+            await RunOperationAsync("Restart RDC", async log =>
+            {
+                await RemoteDesktopManager.RestartAsync();
+                log("Local RDC restarted and relay connection verified.");
+            });
+            return;
+        }
         try
         {
             machine.SetRdcPending("Restart");
