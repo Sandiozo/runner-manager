@@ -190,17 +190,22 @@ public static class MachineRelay
     {
         var runners = await RunnerManager.ReadSnapshotAsync(queryGitHub: false);
         var remote = RemoteDesktopManager.ReadSnapshot();
+        var relay = await RemoteDesktopManager.ProbeRelayAsync();
+        var connectionKnown = relay.Known || remote.ConnectionKnown;
+        var connected = relay.Known ? relay.Connected : remote.Connected;
+        var connectionChangedUtc = relay.Known ? relay.ChangedUtc : remote.ConnectionChangedUtc;
+        var connectionText = relay.Known ? relay.Detail : remote.ConnectionText;
         var payload = new MachineStatusPayload
         {
             MachineName = Environment.MachineName,
-            AgentProtocolVersion = 6,
+            AgentProtocolVersion = 7,
             UpdatedUtc = DateTime.UtcNow,
             FleetAgentRunning = await IsAgentRunningAsync(),
             RdcRunning = remote.Running,
-            RdcConnected = remote.Connected,
-            RdcConnectionKnown = remote.ConnectionKnown,
-            RdcConnectionChangedUtc = remote.ConnectionChangedUtc,
-            RdcConnectionText = remote.ConnectionText,
+            RdcConnected = connected,
+            RdcConnectionKnown = connectionKnown,
+            RdcConnectionChangedUtc = connectionChangedUtc,
+            RdcConnectionText = connectionText,
             RdcConfigured = RemoteDesktopManager.IsConfigured(),
             RdcProcessCount = remote.Pids.Length,
             RdcPids = remote.Pids,

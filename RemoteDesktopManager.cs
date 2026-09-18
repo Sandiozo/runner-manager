@@ -1,6 +1,7 @@
 using System.IO;
 using System.Diagnostics;
 using System.Management;
+using System.Net.Http;
 using System.Security.AccessControl;
 using System.Security.Principal;
 
@@ -17,6 +18,78 @@ public static class RemoteDesktopManager
         var config = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".desktop-commander-device", "device.json");
         try { return File.Exists(config) && new FileInfo(config).Length > 0; }
         catch { return false; }
+    }
+
+    public static async Task<RemoteRelayProbe> ProbeRelayAsync()
+    {
+        try
+        {
+            var configPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                ".desktop-commander-device", "device.json");
+            if (!File.Exists(configPath))
+                return new RemoteRelayProbe { Known = true, Connected = false, Detail = "Relay not configured" };
+
+            using var configJson = System.Text.Json.JsonDocument.Parse(await File.ReadAllTextAsync(configPath));
+            var root = configJson.RootElement;
+            var deviceId = root.TryGetProperty("deviceId", out var deviceIdElement)
+                ? deviceIdElement.GetString()
+                : null;
+            var accessToken = root.TryGetProperty("session", out var session)
+                && session.ValueKind == System.Text.Json.JsonValueKind.Object
+                && session.TryGetProperty("access_token", out var tokenElement)
+                    ? tokenElement.GetString()
+                    : null;
+
+            if (string.IsNullOrWhiteSpace(deviceId) || string.IsNullOrWhiteSpace(accessToken))
+                return new RemoteRelayProbe { Known = false, Detail = "Relay authentication unavailable" };
+
+            using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+            using var infoResponse = await client.GetAsync("https://mcp.desktopcommander.app/api/mcp-info");
+            if (!infoResponse.IsSuccessStatusCode)
+                return new RemoteRelayProbe { Known = false, Detail = $"Relay status lookup failed ({(int)infoResponse.StatusCode})" };
+
+            using var infoJson = System.Text.Json.JsonDocument.Parse(await infoResponse.Content.ReadAsStringAsync());
+            var infoRoot = infoJson.RootElement;
+            var supabaseUrl = infoRoot.TryGetProperty("supabaseUrl", out var urlElement) ? urlElement.GetString() : null;
+            var anonKey = infoRoot.TryGetProperty("supabasePublishableKey", out var keyElement) ? keyElement.GetString() : null;
+            if (string.IsNullOrWhiteSpace(supabaseUrl) || string.IsNullOrWhiteSpace(anonKey))
+                return new RemoteRelayProbe { Known = false, Detail = "Relay backend configuration unavailable" };
+
+            using var request = new HttpRequestMessage(HttpMethod.Get,
+                $"{supabaseUrl.TrimEnd('/')}/rest/v1/mcp_devices?id=eq.{Uri.EscapeDataString(deviceId)}&select=status,last_seen");
+            request.Headers.TryAddWithoutValidation("apikey", anonKey);
+            request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
+
+            using var response = await client.SendAsync(request);
+            if (!response.IsSuccessStatusCode)
+                return new RemoteRelayProbe { Known = false, Detail = $"Relay status lookup failed ({(int)response.StatusCode})" };
+
+            using var deviceJson = System.Text.Json.JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            if (deviceJson.RootElement.ValueKind != System.Text.Json.JsonValueKind.Array
+                || deviceJson.RootElement.GetArrayLength() == 0)
+                return new RemoteRelayProbe { Known = true, Connected = false, Detail = "Relay device not registered" };
+
+            var row = deviceJson.RootElement[0];
+            var status = row.TryGetProperty("status", out var statusElement) ? statusElement.GetString() : null;
+            DateTime? lastSeen = null;
+            if (row.TryGetProperty("last_seen", out var seenElement)
+                && DateTime.TryParse(seenElement.GetString(), null,
+                    System.Globalization.DateTimeStyles.RoundtripKind, out var parsed))
+                lastSeen = parsed.ToUniversalTime();
+
+            var connected = string.Equals(status, "online", StringComparison.OrdinalIgnoreCase);
+            return new RemoteRelayProbe
+            {
+                Known = true,
+                Connected = connected,
+                ChangedUtc = lastSeen,
+                Detail = connected ? "Relay connected" : "Relay offline"
+            };
+        }
+        catch
+        {
+            return new RemoteRelayProbe { Known = false, Detail = "Relay status unavailable" };
+        }
     }
 
     public static RemoteInfo ReadSnapshot()
@@ -161,16 +234,20 @@ param([string]$Npx, [string]$ActivityLog, [string]$RuntimeLog)
         while (DateTime.UtcNow < deadline)
         {
             var snapshot = ReadSnapshot();
-            if (snapshot.Running && snapshot.Connected) return;
+            var relay = await ProbeRelayAsync();
+            if (relay.Known && relay.Connected) return;
             if (!snapshot.Running && snapshot.ConnectionKnown)
                 throw new InvalidOperationException("RDC process exited before the relay connected.");
             await Task.Delay(500);
         }
 
         var final = ReadSnapshot();
-        var detail = string.IsNullOrWhiteSpace(final.ConnectionText)
-            ? "No relay-ready handshake was observed."
-            : final.ConnectionText;
+        var finalRelay = await ProbeRelayAsync();
+        var detail = finalRelay.Known
+            ? finalRelay.Detail
+            : string.IsNullOrWhiteSpace(final.ConnectionText)
+                ? "No relay-ready handshake was observed."
+                : final.ConnectionText;
         throw new InvalidOperationException($"RDC process did not connect to the relay within {(int)timeout.TotalSeconds}s. {detail}");
     }
 
@@ -315,6 +392,14 @@ public sealed class RemoteInfo
 }
 
 public sealed class RemoteConnectionInfo
+{
+    public bool Known { get; init; }
+    public bool Connected { get; init; }
+    public DateTime? ChangedUtc { get; init; }
+    public string Detail { get; init; } = string.Empty;
+}
+
+public sealed class RemoteRelayProbe
 {
     public bool Known { get; init; }
     public bool Connected { get; init; }
