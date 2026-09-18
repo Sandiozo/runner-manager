@@ -1,0 +1,35 @@
+name: Recover RunnerWidget Laptop
+on:
+  workflow_dispatch:
+
+jobs:
+  recover:
+    runs-on: [self-hosted, Windows, X64]
+    timeout-minutes: 10
+    steps:
+      - name: Deploy canonical RunnerWidget
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $repo = 'C:\Users\skedn\Documents\GitHub\runner-widget'
+          schtasks.exe /End /TN 'RunnerWidget Fleet Agent' 2>$null | Out-Null
+          Start-Sleep -Seconds 1
+          Get-Process RunnerWidget -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+          git -C $repo fetch origin main
+          git -C $repo checkout main
+          git -C $repo reset --hard origin/main
+          if (Test-Path (Join-Path $repo 'bin')) { Remove-Item (Join-Path $repo 'bin') -Recurse -Force }
+          & 'C:\Program Files\dotnet\dotnet.exe' build (Join-Path $repo 'RunnerWidget.csproj') -c Release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          schtasks.exe /Run /TN 'RunnerWidget Fleet Agent'
+          Start-Sleep -Seconds 5
+          Write-Output '--- HEAD ---'
+          git -C $repo rev-parse HEAD
+          Write-Output '--- COPIES ---'
+          Get-ChildItem (Join-Path $repo 'bin') -Filter RunnerWidget.exe -Recurse | Select-Object -ExpandProperty FullName
+          Write-Output '--- TASK ---'
+          schtasks.exe /Query /TN 'RunnerWidget Fleet Agent' /FO CSV /NH
+          Write-Output '--- AGENT LOG ---'
+          Get-Content 'C:\Users\skedn\AppData\Local\RunnerWidget\agent.log' -Tail 40 -ErrorAction SilentlyContinue
+          Write-Output '--- RDC LOG ---'
+          Get-Content 'C:\Users\skedn\AppData\Local\RunnerWidget\rdc-runtime.log' -Tail 40 -ErrorAction SilentlyContinue
