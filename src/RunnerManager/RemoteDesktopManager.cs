@@ -17,6 +17,11 @@ public static class RemoteDesktopManager
     // One shared client: creating an HttpClient per probe (every few seconds) leaks sockets over time.
     private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(5) };
     private static (DateTime FetchedUtc, string Url, string Key)? _relayBackend;
+    /// <summary>Status snapshots run every few seconds; the relay is asked at most this often.</summary>
+    private static readonly TimeSpan RelayProbeCacheTime = TimeSpan.FromSeconds(30);
+    private static (DateTime ProbedUtc, RemoteRelayProbe Result)? _relayProbe;
+    /// <summary>Only the end of the runtime log is read; the launcher keeps the log under about 1 MB.</summary>
+    private const int RuntimeLogTailBytes = 256 * 1024;
     public static bool IsConfigured()
     {
         var config = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".desktop-commander-device", "device.json");
@@ -24,7 +29,30 @@ public static class RemoteDesktopManager
         catch { return false; }
     }
 
+    /// <summary>
+    /// The relay's view of this PC. Skipped when Remote Desktop Commander is not running, and cached for
+    /// <see cref="RelayProbeCacheTime"/>, so a status snapshot does not make an HTTPS call every time.
+    /// </summary>
     public static async Task<RemoteRelayProbe> ProbeRelayAsync()
+    {
+        var cached = _relayProbe;
+        if (cached != null && DateTime.UtcNow - cached.Value.ProbedUtc < RelayProbeCacheTime) return cached.Value.Result;
+        var running = await Task.Run(() =>
+        {
+            try { return ReadProcesses().Any(IsRemoteDesktopCommanderProcess); }
+            catch { return true; }
+        });
+        var result = running
+            ? await QueryRelayAsync()
+            : new RemoteRelayProbe { Known = true, Connected = false, Detail = "Relay offline. Remote Desktop Commander is not running." };
+        _relayProbe = (DateTime.UtcNow, result);
+        return result;
+    }
+
+    /// <summary>Forgets the cached relay status, after Remote Desktop Commander was started or stopped.</summary>
+    private static void ForgetRelayProbe() => _relayProbe = null;
+
+    private static async Task<RemoteRelayProbe> QueryRelayAsync()
     {
         try
         {
@@ -189,6 +217,7 @@ public static class RemoteDesktopManager
             }
             Thread.Sleep(400);
         }
+        ForgetRelayProbe();
     });
 
     public static async Task RestartAsync()
@@ -200,6 +229,7 @@ public static class RemoteDesktopManager
 
     private static void LaunchRemote(bool visible)
     {
+        ForgetRelayProbe();
         Directory.CreateDirectory(StateDir);
         File.WriteAllText(ActivityLogPath, string.Empty);
         File.WriteAllText(RuntimeLogPath, string.Empty);
@@ -218,19 +248,37 @@ public static class RemoteDesktopManager
             "-Npx", npx, "-ActivityLog", ActivityLogPath, "-RuntimeLog", RuntimeLogPath
         })
             psi.ArgumentList.Add(arg);
-        Process.Start(psi);
+        using var process = Process.Start(psi);
     }
 
     private static void EnsureLauncherScript()
     {
         const string script = """
 param([string]$Npx, [string]$ActivityLog, [string]$RuntimeLog)
+$lineCount = 0
 & $Npx '--yes' '@wonderwhy-er/desktop-commander@latest' 'remote' 2>&1 | ForEach-Object {
     $line = $_.ToString()
     Write-Host $line
     $ts = [DateTime]::UtcNow.ToString('O')
     $safeLine = $line.Replace("`r", ' ').Replace("`n", ' ')
     Add-Content -LiteralPath $RuntimeLog -Value ($ts + '|' + $safeLine)
+    # Keep the log small: when it is over 1 MB, keep only its last 256 KB (from the start of a line).
+    $lineCount++
+    if ($lineCount % 200 -eq 0) {
+        try {
+            $stream = [System.IO.File]::Open($RuntimeLog, 'Open', 'ReadWrite', 'ReadWrite')
+            try {
+                if ($stream.Length -gt 1MB) {
+                    $keep = New-Object byte[] 256KB
+                    [void]$stream.Seek(-$keep.Length, 'End')
+                    $read = $stream.Read($keep, 0, $keep.Length)
+                    $start = [Array]::IndexOf($keep, [byte]10) + 1
+                    $stream.SetLength(0)
+                    $stream.Write($keep, $start, $read - $start)
+                }
+            } finally { $stream.Dispose() }
+        } catch { }
+    }
     if ($line -match 'Received tool call ([^:]+): ([^ ]+)') {
         Add-Content -LiteralPath $ActivityLog -Value ($ts + '|START|' + $Matches[1] + '|' + $Matches[2])
     } elseif ($line -match 'Tool call ([^ ]+) completed') {
@@ -249,15 +297,20 @@ param([string]$Npx, [string]$ActivityLog, [string]$RuntimeLog)
         while (DateTime.UtcNow < deadline)
         {
             var snapshot = ReadSnapshot();
-            var relay = await ProbeRelayAsync();
-            if (relay.Known && relay.Connected) return;
+            // Ask the relay directly: the cached status is from before the start.
+            var relay = await QueryRelayAsync();
+            if (relay.Known && relay.Connected)
+            {
+                _relayProbe = (DateTime.UtcNow, relay);
+                return;
+            }
             if (!snapshot.Running && snapshot.ConnectionKnown)
                 throw new InvalidOperationException("Remote Desktop Commander stopped before the relay connected. Check the Remote Desktop Commander log.");
             await Task.Delay(500);
         }
 
         var final = ReadSnapshot();
-        var finalRelay = await ProbeRelayAsync();
+        var finalRelay = await QueryRelayAsync();
         var detail = finalRelay.Known
             ? finalRelay.Detail
             : string.IsNullOrWhiteSpace(final.ConnectionText)
@@ -272,7 +325,7 @@ param([string]$Npx, [string]$ActivityLog, [string]$RuntimeLog)
         try
         {
             if (!File.Exists(RuntimeLogPath)) return info;
-            foreach (var line in File.ReadLines(RuntimeLogPath))
+            foreach (var line in ReadTailLines(RuntimeLogPath, RuntimeLogTailBytes))
             {
                 var parts = line.Split('|', 2);
                 if (parts.Length != 2) continue;
@@ -306,6 +359,20 @@ param([string]$Npx, [string]$ActivityLog, [string]$RuntimeLog)
         }
         catch { }
         return info;
+    }
+
+    /// <summary>The complete lines in the last <paramref name="maxBytes"/> of a file that another process is writing.</summary>
+    private static IEnumerable<string> ReadTailLines(string path, int maxBytes)
+    {
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        var skipPartialLine = stream.Length > maxBytes;
+        if (skipPartialLine) stream.Seek(-maxBytes, SeekOrigin.End);
+        using var reader = new StreamReader(stream);
+        // Starting in the middle of the file lands inside a line; skip that partial line.
+        if (skipPartialLine) reader.ReadLine();
+        var lines = new List<string>();
+        while (reader.ReadLine() is { } line) lines.Add(line);
+        return lines;
     }
 
     private static RemoteActivityInfo ReadActivitySnapshot()

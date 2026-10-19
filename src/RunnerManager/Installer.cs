@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.IO;
+using System.Management;
 using Microsoft.Win32;
 
 namespace RunnerManager;
@@ -17,7 +18,7 @@ public static class Installer
 {
     public const string SetupExeName = "RunnerManagerSetup.exe";
     private const string UninstallKey = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\RunnerManager";
-    private static string StartMenuShortcut => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Programs), "Runner Manager.lnk");
+    internal static string StartMenuShortcut => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Programs), "Runner Manager.lnk");
     private static string DesktopShortcut => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "Runner Manager.lnk");
 
     /// <summary>Run the setup wizard when started as RunnerManagerSetup.exe or with --setup.</summary>
@@ -25,12 +26,20 @@ public static class Installer
         => args.Any(a => a.Equals("--setup", StringComparison.OrdinalIgnoreCase))
            || Path.GetFileName(Environment.ProcessPath ?? string.Empty).StartsWith("RunnerManagerSetup", StringComparison.OrdinalIgnoreCase);
 
-    public static bool IsInstalled => File.Exists(AppUpdater.InstalledExe) && Registry.CurrentUser.OpenSubKey(UninstallKey) != null;
+    public static bool IsInstalled
+    {
+        get
+        {
+            if (!File.Exists(AppUpdater.InstalledExe)) return false;
+            using var key = Registry.CurrentUser.OpenSubKey(UninstallKey);
+            return key != null;
+        }
+    }
 
     public static async Task<string> InstallAsync(SetupChoices choices, Action<string> log)
     {
         CloseRunningDashboards(log);
-        var exe = await AppUpdater.InstallCurrentBuildAsync(log);
+        var exe = await AppUpdater.InstallCurrentBuildAsync(log, createShortcut: false);
 
         log("Adding shortcuts...");
         await CreateShortcutAsync(StartMenuShortcut, exe);
@@ -43,7 +52,7 @@ public static class Installer
         if (choices.StartWithWindows) await RegisterStartupTaskAsync(exe);
         else await ScheduledTasks.DeleteTaskAsync(ScheduledTasks.DashboardTaskName);
         await ScheduledTasks.RegisterLaunchTaskAsync(exe);
-        await LegacyInstall.MigrateAsync(log);
+        await LegacyInstall.MigrateAsync(log, fromSetup: true);
 
         // An agent from an earlier install keeps running from the old place; point it at the new copy.
         if (await MachineRelay.IsAgentInstalledAsync())
@@ -56,6 +65,7 @@ public static class Installer
         settings.SetupCompleted = true;
         settings.StartMinimizedHint = choices.StartWithWindows;
         settings.Save();
+        InstallChecks.MarkDone(LaunchTaskCheck);
         log("Installed.");
         return exe;
     }
@@ -64,13 +74,38 @@ public static class Installer
         ScheduledTasks.DashboardTaskName, exe, "--minimized",
         "Opens the Runner Manager dashboard in the notification area at sign-in.", restartOnFailure: false);
 
-    /// <summary>The installed dashboard opens through the launch task, so make sure it exists (older installs lack it).</summary>
+    private const string LaunchTaskCheck = "launch-task";
+
+    /// <summary>
+    /// The installed dashboard opens through the launch task, so make sure it exists (older installs lack it), and keep
+    /// the version in Settings → Apps current after updates. The task is checked once per version.
+    /// </summary>
     public static async Task EnsureLaunchTaskAsync()
     {
         if (!AppUpdater.IsRunningInstalledCopy) return;
+        RefreshUninstallEntryVersion();
+        if (InstallChecks.IsDone(LaunchTaskCheck)) return;
         var command = ScheduledTasks.CommandOf(await ScheduledTasks.QueryXmlAsync(ScheduledTasks.LaunchTaskName));
         if (!string.Equals(command, AppUpdater.InstalledExe, StringComparison.OrdinalIgnoreCase))
             await ScheduledTasks.RegisterLaunchTaskAsync(AppUpdater.InstalledExe);
+        InstallChecks.MarkDone(LaunchTaskCheck);
+    }
+
+    /// <summary>Setup writes DisplayVersion, and updates replace the exe without setup, so refresh it when it is outdated.</summary>
+    private static void RefreshUninstallEntryVersion()
+    {
+        try
+        {
+            string? stored;
+            using (var key = Registry.CurrentUser.OpenSubKey(UninstallKey))
+            {
+                if (key == null) return;
+                stored = key.GetValue("DisplayVersion") as string;
+            }
+            if (!string.Equals(stored, AppUpdater.CurrentVersion, StringComparison.Ordinal))
+                RegisterUninstallEntry(AppUpdater.InstalledExe);
+        }
+        catch { }
     }
 
     /// <summary>Points the shortcuts that exist and the Settings → Apps entry at <paramref name="exe"/>.</summary>
@@ -82,26 +117,52 @@ public static class Installer
         if (key != null) RegisterUninstallEntry(exe);
     }
 
-    /// <summary>Closes an already installed dashboard so it can be replaced (the agent is updated separately).</summary>
+    /// <summary>
+    /// Closes every dashboard that runs from the install folder, including one hidden in the notification area, so it
+    /// can be replaced or removed and its single-instance lock is freed. The fleet agent (--agent) is handled separately.
+    /// </summary>
     private static void CloseRunningDashboards(Action<string> log)
     {
-        var processes = Process.GetProcessesByName(Path.GetFileNameWithoutExtension(AppPaths.ExeName))
-            .Concat(Process.GetProcessesByName(Path.GetFileNameWithoutExtension(AppPaths.LegacyExeName)));
-        foreach (var process in processes)
+        var installDir = Path.TrimEndingDirectorySeparator(Path.GetFullPath(AppUpdater.InstallDir)) + Path.DirectorySeparatorChar;
+        var dashboards = new List<Process>();
+        try
         {
-            try
+            using var searcher = new ManagementObjectSearcher(
+                $"SELECT ProcessId, ExecutablePath, CommandLine FROM Win32_Process WHERE Name = '{AppPaths.ExeName}' OR Name = '{AppPaths.LegacyExeName}'");
+            foreach (ManagementObject item in searcher.Get())
             {
-                if (process.Id == Environment.ProcessId) continue;
-                var path = process.MainModule?.FileName ?? string.Empty;
-                if (!path.StartsWith(AppUpdater.InstallDir, StringComparison.OrdinalIgnoreCase) || process.MainWindowHandle == IntPtr.Zero) continue;
-                log("Closing Runner Manager...");
-                process.Kill();
-                process.WaitForExit(5000);
+                using (item)
+                {
+                    var id = Convert.ToInt32(item["ProcessId"]);
+                    var path = item["ExecutablePath"]?.ToString() ?? string.Empty;
+                    var commandLine = item["CommandLine"]?.ToString() ?? string.Empty;
+                    if (id == Environment.ProcessId || IsAgentCommandLine(commandLine)) continue;
+                    if (!path.StartsWith(installDir, StringComparison.OrdinalIgnoreCase)) continue;
+                    try { dashboards.Add(Process.GetProcessById(id)); } catch (ArgumentException) { }
+                }
             }
-            catch { }
-            finally { process.Dispose(); }
+        }
+        catch (Exception ex)
+        {
+            log($"Could not list running copies of Runner Manager: {ex.Message}");
+        }
+        if (dashboards.Count == 0) return;
+
+        log("Closing Runner Manager...");
+        foreach (var process in dashboards)
+        {
+            try { process.Kill(); } catch { }
+        }
+        foreach (var process in dashboards)
+        {
+            try { process.WaitForExit(5000); } catch { }
+            process.Dispose();
         }
     }
+
+    private static bool IsAgentCommandLine(string commandLine)
+        => commandLine.Split(' ', StringSplitOptions.RemoveEmptyEntries)
+            .Any(part => part.Trim('"').Equals("--agent", StringComparison.OrdinalIgnoreCase));
 
     private static void RegisterUninstallEntry(string exe)
     {
@@ -131,6 +192,7 @@ public static class Installer
     /// </summary>
     public static async Task UninstallAsync(bool removeData, Action<string> log)
     {
+        CloseRunningDashboards(log);
         if (FleetConfig.Current.FleetKey != null || await MachineRelay.IsAgentInstalledAsync())
             await MachineRelay.LeaveFleetAsync(log);
         log("Removing the scheduled tasks and shortcuts...");
@@ -143,18 +205,14 @@ public static class Installer
         // The running exe can't delete its own folder; a helper does it once this process has exited.
         var folders = new List<string> { AppUpdater.InstallDir };
         if (removeData) folders.Add(FleetConfig.StateDir);
-        var script = $"Wait-Process -Id {Environment.ProcessId} -Timeout 60 -ErrorAction SilentlyContinue; Start-Sleep -Seconds 1; " +
-                     string.Join("; ", folders.Select(f => $"Remove-Item -LiteralPath '{f.Replace("'", "''")}' -Recurse -Force -ErrorAction SilentlyContinue"));
-        Process.Start(new ProcessStartInfo("powershell.exe")
-        {
-            ArgumentList = { "-NoLogo", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script },
-            UseShellExecute = false,
-            CreateNoWindow = true
-        });
+        AppUpdater.RunAfterExit(
+            string.Join("; ", folders.Select(f => $"Remove-Item -LiteralPath '{f.Replace("'", "''")}' -Recurse -Force -ErrorAction SilentlyContinue")),
+            TimeSpan.FromSeconds(60), TimeSpan.FromSeconds(1));
         log("Runner Manager was removed.");
     }
 
-    private static async Task CreateShortcutAsync(string shortcut, string target)
+    /// <summary>Creates or updates a shortcut to <paramref name="target"/>.</summary>
+    internal static async Task CreateShortcutAsync(string shortcut, string target)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(shortcut)!);
         var script = $"$s=(New-Object -ComObject WScript.Shell).CreateShortcut('{shortcut.Replace("'", "''")}');" +
@@ -172,5 +230,51 @@ public static class Installer
     private static void TryDelete(string path)
     {
         try { if (File.Exists(path)) File.Delete(path); } catch { }
+    }
+}
+
+/// <summary>
+/// Remembers which install checks already ran for this version (in install-checked.txt), so the dashboard does not
+/// query scheduled tasks on every start. A new version runs each check once more.
+/// </summary>
+internal static class InstallChecks
+{
+    private static readonly string MarkerPath = Path.Combine(FleetConfig.StateDir, "install-checked.txt");
+    private static readonly object Gate = new();
+
+    public static bool IsDone(string check)
+    {
+        lock (Gate) return Read().TryGetValue(check, out var version) && version == AppUpdater.CurrentVersion;
+    }
+
+    public static void MarkDone(string check)
+    {
+        lock (Gate)
+        {
+            try
+            {
+                var entries = Read();
+                entries[check] = AppUpdater.CurrentVersion;
+                Directory.CreateDirectory(FleetConfig.StateDir);
+                File.WriteAllLines(MarkerPath, entries.Select(e => $"{e.Key}={e.Value}"));
+            }
+            catch { }
+        }
+    }
+
+    private static Dictionary<string, string> Read()
+    {
+        var entries = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            if (!File.Exists(MarkerPath)) return entries;
+            foreach (var line in File.ReadAllLines(MarkerPath))
+            {
+                var parts = line.Split('=', 2);
+                if (parts.Length == 2) entries[parts[0].Trim()] = parts[1].Trim();
+            }
+        }
+        catch { }
+        return entries;
     }
 }

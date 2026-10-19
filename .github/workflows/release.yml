@@ -14,6 +14,11 @@ on:
 permissions:
   contents: write
 
+# One release at a time; a second run waits instead of racing the first.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
   release:
     runs-on: windows-latest
@@ -46,6 +51,13 @@ jobs:
           dotnet publish src/RunnerManager/RunnerManager.csproj -c Release -r win-x64 -p:SelfContained=false
           -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
           -p:Version=$env:VERSION -o publish
+
+      - name: Smoke-test the exe
+        shell: pwsh
+        run: |
+          # --probe starts the app and exits right away; a non-zero exit code means the build cannot start.
+          $p = Start-Process publish/RunnerManager.exe -ArgumentList '--probe' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "RunnerManager.exe --probe exited with code $($p.ExitCode)." }
 
       - name: Create GitHub release
         shell: pwsh

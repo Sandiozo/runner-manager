@@ -20,12 +20,20 @@ public static class AppUpdater
     public static readonly string InstallDir = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "RunnerManager");
     public static string InstalledExe => Path.Combine(InstallDir, AssetName);
+    /// <summary>The installed copy when there is one, otherwise the running exe.</summary>
+    public static string PreferredExe => File.Exists(InstalledExe) ? InstalledExe : Environment.ProcessPath!;
     private static readonly TimeSpan CheckInterval = TimeSpan.FromMinutes(30);
     private static ReleaseInfo? _latest;
     private static DateTime _checkedUtc = DateTime.MinValue;
+    /// <summary>Held while files in the install folder are replaced, so the agent and the dashboard never swap at once.</summary>
+    private const string UpdateMutexName = @"Global\RunnerManagerUpdate";
+    private static readonly TimeSpan UpdateLockTimeout = TimeSpan.FromMinutes(2);
+    /// <summary>Set once this process has copied its build into the install folder, so setup copies it only once.</summary>
+    private static bool _installedThisBuild;
 
     /// <summary>Where Runner Manager's releases are published.</summary>
     public const string ReleaseRepository = "Sandiozo/runner-manager";
+    public static string ReleasesUrl => $"https://github.com/{ReleaseRepository}/releases";
 
     public static string CurrentVersion
     {
@@ -78,9 +86,7 @@ public static class AppUpdater
                     Tag = tag,
                     Version = Normalize(tag),
                     HtmlUrl = root.TryGetProperty("html_url", out var url) ? url.GetString() ?? string.Empty : string.Empty,
-                    Notes = root.TryGetProperty("body", out var body) ? body.GetString() ?? string.Empty : string.Empty,
-                    Sha256 = digest.StartsWith("sha256:", StringComparison.OrdinalIgnoreCase) ? digest[7..] : string.Empty,
-                    SizeBytes = asset.TryGetProperty("size", out var size) ? size.GetInt64() : 0
+                    Sha256 = digest.StartsWith("sha256:", StringComparison.OrdinalIgnoreCase) ? digest[7..] : string.Empty
                 };
                 return _latest;
             }
@@ -93,44 +99,129 @@ public static class AppUpdater
     /// <summary>Downloads the release, verifies its checksum and swaps it into the install folder.</summary>
     public static async Task<string> DownloadAndInstallAsync(ReleaseInfo release, Action<string> log)
     {
-        var staging = Path.Combine(FleetConfig.StateDir, "update");
+        if (string.IsNullOrEmpty(release.Sha256))
+            throw new InvalidOperationException("This release has no checksum, so it was not installed.");
+
+        // Each process downloads into its own folder, so the agent and the dashboard never share files.
+        var staging = Path.Combine(FleetConfig.StateDir, $"update-{Environment.ProcessId}");
+        RemoveStaleStagingFolders();
         if (Directory.Exists(staging)) Directory.Delete(staging, recursive: true);
         Directory.CreateDirectory(staging);
-
-        log($"Downloading Runner Manager {release.Tag}...");
-        var download = await GitHubCli.RunAsync(
-            $"release download {release.Tag} -R {ReleaseRepository} -p {AssetName} -D \"{staging}\" --clobber",
-            timeout: TimeSpan.FromMinutes(10));
-        var downloaded = Path.Combine(staging, AssetName);
-        if (download.ExitCode != 0 || !File.Exists(downloaded))
-            throw new InvalidOperationException(string.IsNullOrWhiteSpace(download.Error) ? "Could not download the update. Check the network connection and try again." : download.Error.Trim());
-
-        if (!string.IsNullOrEmpty(release.Sha256))
+        try
         {
+            log($"Downloading Runner Manager {release.Tag}...");
+            var download = await GitHubCli.RunAsync(
+                $"release download {release.Tag} -R {ReleaseRepository} -p {AssetName} -D \"{staging}\" --clobber",
+                timeout: TimeSpan.FromMinutes(10));
+            var downloaded = Path.Combine(staging, AssetName);
+            if (download.ExitCode != 0 || !File.Exists(downloaded))
+                throw new InvalidOperationException(string.IsNullOrWhiteSpace(download.Error) ? "Could not download the update. Check the network connection and try again." : download.Error.Trim());
+
+            string actual;
             await using (var stream = File.OpenRead(downloaded))
+                actual = Convert.ToHexString(await SHA256.HashDataAsync(stream));
+            if (!actual.Equals(release.Sha256, StringComparison.OrdinalIgnoreCase))
             {
-                var actual = Convert.ToHexString(await SHA256.HashDataAsync(stream));
-                if (!actual.Equals(release.Sha256, StringComparison.OrdinalIgnoreCase))
-                    throw new InvalidOperationException("The downloaded update did not pass the SHA-256 check and was deleted. Try again.");
+                File.Delete(downloaded);
+                throw new InvalidOperationException("The downloaded update did not pass the SHA-256 check and was deleted. Try again.");
             }
             log("Checksum verified.");
+
+            if (!IsNewer(ProbeSupportedSince, release.Version))
+                await EnsureRuntimeAsync(downloaded, staging, log);
+
+            await Task.Run(() => WithUpdateLock(() =>
+            {
+                Directory.CreateDirectory(InstallDir);
+                foreach (var old in Directory.EnumerateFiles(InstallDir, "*.old.exe"))
+                {
+                    try { File.Delete(old); } catch { }
+                }
+                ReplaceFile(downloaded, InstalledExe);
+            }));
+            log($"Installed {release.Tag} to {InstallDir}.");
+            return InstalledExe;
         }
-
-        if (!IsNewer(ProbeSupportedSince, release.Version))
-            await EnsureRuntimeAsync(downloaded, staging, log);
-
-        Directory.CreateDirectory(InstallDir);
-        foreach (var old in Directory.EnumerateFiles(InstallDir, "*.old.exe"))
+        finally
         {
-            try { File.Delete(old); } catch { }
+            try { Directory.Delete(staging, recursive: true); } catch { }
         }
-        // A running exe can't be overwritten but can be renamed, so the agent can update itself in place.
-        if (File.Exists(InstalledExe))
-            File.Move(InstalledExe, Path.Combine(InstallDir, $"RunnerManager.{DateTime.UtcNow.Ticks}.old.exe"));
-        File.Move(downloaded, InstalledExe);
-        try { Directory.Delete(staging, recursive: true); } catch { }
-        log($"Installed {release.Tag} to {InstallDir}.");
-        return InstalledExe;
+    }
+
+    /// <summary>Removes download folders left by processes that have exited.</summary>
+    private static void RemoveStaleStagingFolders()
+    {
+        try
+        {
+            foreach (var folder in Directory.EnumerateDirectories(FleetConfig.StateDir, "update-*"))
+            {
+                if (int.TryParse(Path.GetFileName(folder)["update-".Length..], out var id) && IsProcessRunning(id)) continue;
+                try { Directory.Delete(folder, recursive: true); } catch { }
+            }
+        }
+        catch { }
+    }
+
+    private static bool IsProcessRunning(int id)
+    {
+        try
+        {
+            using var process = Process.GetProcessById(id);
+            return !process.HasExited;
+        }
+        catch { return false; }
+    }
+
+    /// <summary>
+    /// Runs <paramref name="swap"/> while holding the update lock. The lock is taken and released on the same thread,
+    /// because a mutex belongs to the thread that acquired it.
+    /// </summary>
+    private static void WithUpdateLock(Action swap)
+    {
+        using var mutex = new Mutex(initiallyOwned: false, UpdateMutexName);
+        bool owned;
+        try { owned = mutex.WaitOne(UpdateLockTimeout); }
+        catch (AbandonedMutexException) { owned = true; }
+        if (!owned)
+            throw new InvalidOperationException("Another update of Runner Manager is being installed. Try again in a few minutes.");
+        try { swap(); }
+        finally { mutex.ReleaseMutex(); }
+    }
+
+    /// <summary>
+    /// Puts <paramref name="source"/> at <paramref name="destination"/> without a moment where neither exists. The new file
+    /// is copied next to the destination first; a running exe can't be overwritten but can be renamed, so the current file
+    /// is renamed away, the new one is moved into place, and the current file is renamed back if that fails.
+    /// </summary>
+    private static void ReplaceFile(string source, string destination)
+    {
+        var next = destination + ".new";
+        File.Copy(source, next, overwrite: true);
+        string? previous = null;
+        if (File.Exists(destination))
+        {
+            previous = Path.Combine(Path.GetDirectoryName(destination)!,
+                $"{Path.GetFileNameWithoutExtension(destination)}.{DateTime.UtcNow.Ticks}.old{Path.GetExtension(destination)}");
+            File.Move(destination, previous);
+        }
+        try
+        {
+            File.Move(next, destination);
+        }
+        catch
+        {
+            if (previous != null)
+            {
+                try { File.Move(previous, destination); } catch { }
+            }
+            try { File.Delete(next); } catch { }
+            throw;
+        }
+        // Succeeds when the old file is not in use; otherwise the next install removes it.
+        if (previous != null)
+        {
+            try { File.Delete(previous); } catch { }
+        }
     }
 
     /// <summary>
@@ -201,12 +292,19 @@ public static class AppUpdater
     /// the task is re-registered, so the agent comes back even if re-registering ends the running instance.
     /// </summary>
     public static void ScheduleAgentTaskRestart(string taskName)
+        => RunAfterExit($"schtasks.exe /Run /TN '{taskName.Replace("'", "''")}' | Out-Null", TimeSpan.FromSeconds(120), TimeSpan.FromSeconds(2));
+
+    /// <summary>
+    /// Starts a hidden, detached PowerShell helper that waits for this process to exit (at most <paramref name="timeout"/>),
+    /// waits <paramref name="delay"/> more, then runs <paramref name="script"/>.
+    /// </summary>
+    internal static void RunAfterExit(string script, TimeSpan timeout, TimeSpan delay)
     {
-        var script = $"Wait-Process -Id {Environment.ProcessId} -Timeout 120 -ErrorAction SilentlyContinue; " +
-                     $"Start-Sleep -Seconds 2; schtasks.exe /Run /TN '{taskName.Replace("'", "''")}' | Out-Null";
-        Process.Start(new ProcessStartInfo("powershell.exe")
+        var wrapped = $"Wait-Process -Id {Environment.ProcessId} -Timeout {(int)timeout.TotalSeconds} -ErrorAction SilentlyContinue; " +
+                      $"Start-Sleep -Seconds {(int)delay.TotalSeconds}; {script}";
+        using var process = Process.Start(new ProcessStartInfo("powershell.exe")
         {
-            ArgumentList = { "-NoLogo", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", script },
+            ArgumentList = { "-NoLogo", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", wrapped },
             UseShellExecute = false,
             CreateNoWindow = true
         });
@@ -216,9 +314,16 @@ public static class AppUpdater
     /// Copies the running build (a release exe or a build folder) into the install folder, so the fleet agent runs from a
     /// stable place that later rebuilds don't lock or overwrite. Returns the installed exe.
     /// </summary>
-    public static async Task<string> InstallCurrentBuildAsync(Action<string> log)
+    public static Task<string> InstallCurrentBuildAsync(Action<string> log) => InstallCurrentBuildAsync(log, createShortcut: true);
+
+    /// <summary>
+    /// Like <see cref="InstallCurrentBuildAsync(Action{string})"/>; setup passes false for <paramref name="createShortcut"/>
+    /// because it creates the shortcuts itself. Copies the build only once per process.
+    /// </summary>
+    internal static async Task<string> InstallCurrentBuildAsync(Action<string> log, bool createShortcut)
     {
         if (IsRunningInstalledCopy) return InstalledExe;
+        if (_installedThisBuild && File.Exists(InstalledExe)) return InstalledExe;
         Directory.CreateDirectory(InstallDir);
         foreach (var old in Directory.EnumerateFiles(InstallDir, "*.old.*"))
         {
@@ -226,7 +331,7 @@ public static class AppUpdater
         }
         log($"Installing Runner Manager v{CurrentVersion} to {InstallDir}...");
         var files = AppFiles();
-        await Task.Run(() =>
+        await Task.Run(() => WithUpdateLock(() =>
         {
             // Going from a multi-file build to a single-file exe: clear the old app files so only the exe remains.
             if (files.Count == 1)
@@ -247,15 +352,11 @@ public static class AppUpdater
                 var destination = Path.Combine(InstallDir, relative);
                 Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
                 // Files of a running agent can't be overwritten but can be renamed out of the way.
-                if (File.Exists(destination))
-                {
-                    try { File.Delete(destination); }
-                    catch { File.Move(destination, $"{destination}.{DateTime.UtcNow.Ticks}.old.{Path.GetExtension(destination).TrimStart('.')}"); }
-                }
-                File.Copy(source, destination);
+                ReplaceFile(source, destination);
             }
-        });
-        await CreateStartMenuShortcutAsync();
+        }));
+        _installedThisBuild = true;
+        if (createShortcut) await CreateStartMenuShortcutAsync();
         return InstalledExe;
     }
 
@@ -289,21 +390,7 @@ public static class AppUpdater
     }
 
     /// <summary>Adds a Start menu shortcut for the installed copy.</summary>
-    public static async Task CreateStartMenuShortcutAsync()
-    {
-        var programs = Environment.GetFolderPath(Environment.SpecialFolder.Programs);
-        var shortcut = Path.Combine(programs, "Runner Manager.lnk").Replace("'", "''");
-        var target = InstalledExe.Replace("'", "''");
-        var script = $"$s=(New-Object -ComObject WScript.Shell).CreateShortcut('{shortcut}');$s.TargetPath='{target}';" +
-                     $"$s.WorkingDirectory='{InstallDir.Replace("'", "''")}';$s.Description='Runner Manager';$s.Save()";
-        using var process = Process.Start(new ProcessStartInfo("powershell.exe")
-        {
-            ArgumentList = { "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script },
-            UseShellExecute = false,
-            CreateNoWindow = true
-        });
-        if (process != null) await process.WaitForExitAsync();
-    }
+    public static Task CreateStartMenuShortcutAsync() => Installer.CreateShortcutAsync(Installer.StartMenuShortcut, InstalledExe);
 }
 
 public sealed class ReleaseInfo
@@ -311,7 +398,5 @@ public sealed class ReleaseInfo
     public string Tag { get; init; } = string.Empty;
     public string Version { get; init; } = string.Empty;
     public string HtmlUrl { get; init; } = string.Empty;
-    public string Notes { get; init; } = string.Empty;
     public string Sha256 { get; init; } = string.Empty;
-    public long SizeBytes { get; init; }
 }

@@ -12,6 +12,7 @@ public partial class SetupWindow : Window
 {
     private int _page;
     private bool _installed;
+    private bool _installing;
     private string _installedExe = string.Empty;
 
     public SetupWindow()
@@ -36,6 +37,8 @@ public partial class SetupWindow : Window
             JoinFleetOption.IsChecked = true;
         }
         ShowPage(0);
+        // Closing during the install could leave a half-installed copy, so the window stays open until it finishes.
+        Closing += (_, e) => { if (_installing) e.Cancel = true; };
     }
 
     private void ShowPage(int page)
@@ -79,6 +82,7 @@ public partial class SetupWindow : Window
         var choices = Choices;
         ShowPage(3);
         NextButton.IsEnabled = false;
+        _installing = true;
         try
         {
             _installedExe = await Installer.InstallAsync(choices, message => Dispatcher.Invoke(() => InstallStatus.Text = message));
@@ -112,6 +116,7 @@ public partial class SetupWindow : Window
         }
         finally
         {
+            _installing = false;
             InstallProgress.Visibility = Visibility.Collapsed;
             NextButton.IsEnabled = _installed;
         }
@@ -122,7 +127,7 @@ public partial class SetupWindow : Window
         if (_installed && LaunchToggle.IsChecked == true)
         {
             var choices = Choices;
-            var args = new List<string> { "--after-setup" };
+            var args = new List<string>();
             if (choices.Fleet == FleetChoice.NewFleet) args.Add("--fleet=new");
             if (choices.Fleet == FleetChoice.JoinFleet) args.Add("--fleet=join");
             if (choices.Rdc == RdcChoice.SetUpNow) args.Add("--rdc=setup");

@@ -10,10 +10,15 @@ public partial class App : Application
     public const string ProbeArgument = "--probe";
     /// <summary>Passed by the launch task, so a copy that still is not elevated asks with UAC instead of looping.</summary>
     public const string FromTaskArgument = "--from-task";
+    /// <summary>Added when a copy asks for administrator rights, so a copy that still is not elevated stops instead of looping.</summary>
+    private const string ElevationAttemptedArgument = "--elevation-attempted";
     // Kept from the RunnerWidget versions, so an older and a newer dashboard never run side by side.
     private const string DashboardMutexName = @"Local\RunnerWidgetDashboard";
     private const string ActivatePipeName = "RunnerWidgetDashboard.Activate";
+    /// <summary>How long a new dashboard waits for one that is exiting (for example after "Restart now").</summary>
+    private static readonly TimeSpan PreviousDashboardExitTimeout = TimeSpan.FromSeconds(10);
     private Mutex? _dashboardMutex;
+    private bool _ownsDashboardMutex;
     private CancellationTokenSource? _pipeCts;
 
     protected override async void OnStartup(StartupEventArgs e)
@@ -87,12 +92,23 @@ public partial class App : Application
         }
 
         // One dashboard per user: a second launch brings the running one to the front instead.
-        _dashboardMutex = new Mutex(initiallyOwned: true, DashboardMutexName, out var createdNew);
-        if (!createdNew)
+        _dashboardMutex = new Mutex(initiallyOwned: false, DashboardMutexName);
+        _ownsDashboardMutex = TryOwnDashboardMutex();
+        if (!_ownsDashboardMutex)
         {
-            await SignalRunningDashboardAsync();
-            Shutdown();
-            return;
+            if (await SignalRunningDashboardAsync())
+            {
+                Shutdown();
+                return;
+            }
+            // Nobody answered: the other dashboard is exiting (for example after "Restart now"). Wait for it, then take over.
+            // This stays on the UI thread, because a mutex belongs to the thread that acquired it.
+            var deadline = DateTime.UtcNow + PreviousDashboardExitTimeout;
+            while (!_ownsDashboardMutex && DateTime.UtcNow < deadline)
+            {
+                await Task.Delay(250);
+                _ownsDashboardMutex = TryOwnDashboardMutex();
+            }
         }
 
         var settings = AppSettings.Load();
@@ -121,10 +137,20 @@ public partial class App : Application
     /// </summary>
     private static async Task HandOffToElevatedAsync(string[] args)
     {
+        // A standard user with UAC turned off gets another copy without administrator rights; stop instead of looping.
+        if (args.Contains(ElevationAttemptedArgument, StringComparer.OrdinalIgnoreCase))
+        {
+            MachineRelay.AppendAgentLog("Runner Manager could not get administrator rights.");
+            if (!args.Contains("--quiet", StringComparer.OrdinalIgnoreCase))
+                MessageBox.Show("Runner Manager needs administrator rights. Sign in with an administrator account and try again.",
+                    "Runner Manager", MessageBoxButton.OK, MessageBoxImage.Error);
+            return;
+        }
         var fromTask = args.Contains(FromTaskArgument, StringComparer.OrdinalIgnoreCase);
         if (args.Length == 0 && AppUpdater.IsRunningInstalledCopy && await Elevation.TryStartLaunchTaskAsync()) return;
-        Elevation.RelaunchElevated(args.Where(a => !a.Equals(FromTaskArgument, StringComparison.OrdinalIgnoreCase)));
-        if (fromTask) MachineRelay.AppendAgentLog("The launch task started Runner Manager without administrator rights. Asked with UAC instead.");
+        var relaunchArgs = args.Where(a => !a.Equals(FromTaskArgument, StringComparison.OrdinalIgnoreCase)).Append(ElevationAttemptedArgument);
+        if (Elevation.RelaunchElevated(relaunchArgs) && fromTask)
+            MachineRelay.AppendAgentLog("The launch task started Runner Manager without administrator rights. Asked with UAC instead.");
     }
 
     private static async Task UninstallAsync(bool quiet)
@@ -156,10 +182,24 @@ public partial class App : Application
     /// <summary>Exits the dashboard even when it is set to keep running in the tray.</summary>
     public void ExitApplication()
     {
-        if (MainWindow is MainWindow window) window.PrepareExit();
+        // Stop answering activation first, so a dashboard that starts now takes over instead of signalling this one.
         _pipeCts?.Cancel();
-        try { _dashboardMutex?.ReleaseMutex(); } catch { }
+        if (MainWindow is MainWindow window) window.PrepareExit();
+        if (_ownsDashboardMutex)
+        {
+            try { _dashboardMutex?.ReleaseMutex(); } catch { }
+            _ownsDashboardMutex = false;
+        }
+        _dashboardMutex?.Dispose();
+        _dashboardMutex = null;
         Shutdown();
+    }
+
+    private bool TryOwnDashboardMutex()
+    {
+        try { return _dashboardMutex!.WaitOne(0); }
+        // The previous dashboard ended without releasing it; the mutex now belongs to this process.
+        catch (AbandonedMutexException) { return true; }
     }
 
     private void ListenForActivation(MainWindow window)
@@ -183,14 +223,16 @@ public partial class App : Application
         });
     }
 
-    private static async Task SignalRunningDashboardAsync()
+    /// <summary>Asks the running dashboard to come to the front. Returns false when no dashboard is listening.</summary>
+    private static async Task<bool> SignalRunningDashboardAsync()
     {
         try
         {
             await using var client = new NamedPipeClientStream(".", ActivatePipeName, PipeDirection.Out, PipeOptions.CurrentUserOnly);
             await client.ConnectAsync(2000);
+            return true;
         }
-        catch { }
+        catch { return false; }
     }
 
     private void OnUiUnhandledException(object sender, DispatcherUnhandledExceptionEventArgs e)
