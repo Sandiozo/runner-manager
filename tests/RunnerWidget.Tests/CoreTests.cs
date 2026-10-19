@@ -1,3 +1,5 @@
+using System.Net;
+using System.Net.Sockets;
 using System.Text.Json;
 
 namespace RunnerWidget.Tests;
@@ -265,7 +267,7 @@ public class FleetNetworkTests
     {
         var key = CommandSigner.NewKey();
         var commands = new List<MachineCommand>();
-        var port = 48000 + Random.Shared.Next(1000);
+        var port = TestPorts.FreeRange(3);
         var server = new AgentServer(
             () => Task.FromResult(new MachineStatusPayload { MachineName = "TESTPC", AgentProtocolVersion = MachineRelay.ProtocolVersion, FleetAgentRunning = true }),
             command => { lock (commands) commands.Add(command); return command.Id; },
@@ -349,7 +351,7 @@ public class PairingTests
     public async Task Join_TransfersTheCodeWhenAllowed_AndBothSidesShowTheSameNumber()
     {
         var key = CommandSigner.NewKey();
-        var port = 49000 + Random.Shared.Next(500);
+        var port = TestPorts.FreeRange(3);
         using var host = new Pairing.PairingHost(key, "HOSTPC", port, port + 1);
         string? hostCode = null;
         host.JoinRequested += request => { hostCode = request.Code; request.Allow(); };
@@ -369,7 +371,7 @@ public class PairingTests
     [Fact]
     public async Task Join_FailsWhenDenied()
     {
-        var port = 49600 + Random.Shared.Next(300);
+        var port = TestPorts.FreeRange(3);
         using var host = new Pairing.PairingHost(CommandSigner.NewKey(), "HOSTPC", port, port + 1);
         host.JoinRequested += request => request.Deny();
         host.Start();
@@ -385,7 +387,7 @@ public class DiscoveryRobustnessTests
     {
         // Probes also go to loopback and unreachable addresses; Windows answers those with "connection reset",
         // which used to abort the whole search.
-        var port = 49900 + Random.Shared.Next(80);
+        var port = TestPorts.FreeRange(3);
         var silentPort = port + 1; // nobody listens here
         Assert.Empty(await Pairing.FindHostsAsync(TimeSpan.FromSeconds(0.5), silentPort));
 
@@ -410,7 +412,7 @@ public class LeaveTests
     public async Task LeaveRequest_IsAcceptedByTheAgent()
     {
         var key = CommandSigner.NewKey();
-        var port = 48500 + Random.Shared.Next(400);
+        var port = TestPorts.FreeRange(3);
         using var server = new AgentServer(
             () => Task.FromResult(new MachineStatusPayload { MachineName = "TESTPC" }), c => c.Id,
             _ => Task.FromResult(new LogPayload()), () => key, $"http://localhost:{port}/rw/", port + 1, "TESTPC");
@@ -419,5 +421,36 @@ public class LeaveTests
         var response = await FleetNetwork.CallAsync($"localhost:{port}", "TESTPC",
             new FleetRequest { Op = "leave", From = "NOT-A-REAL-PC-" + Guid.NewGuid().ToString("N") }, pairingKey: key);
         Assert.True(response.Ok);
+    }
+}
+
+/// <summary>
+/// Ports for network tests. Each one is checked, because Windows reserves some ranges (Hyper-V, WinNAT), as on CI
+/// machines. They come from below the dynamic range, so sockets bound to port 0 during a test cannot take them.
+/// </summary>
+internal static class TestPorts
+{
+    /// <summary>A start port where start..start+count-1 are free for both TCP and UDP.</summary>
+    public static int FreeRange(int count)
+    {
+        for (var attempt = 0; attempt < 100; attempt++)
+        {
+            var start = Random.Shared.Next(20000, 40000);
+            if (Enumerable.Range(start, count).All(IsFree)) return start;
+        }
+        throw new InvalidOperationException("No free port range found.");
+    }
+
+    private static bool IsFree(int port)
+    {
+        try
+        {
+            var tcp = new TcpListener(IPAddress.Any, port);
+            tcp.Start();
+            tcp.Stop();
+            using var udp = new UdpClient(new IPEndPoint(IPAddress.Any, port));
+            return true;
+        }
+        catch (SocketException) { return false; }
     }
 }
