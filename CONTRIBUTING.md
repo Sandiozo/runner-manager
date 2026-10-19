@@ -2,7 +2,9 @@
 
 Thank you for helping. Bug reports, ideas and pull requests are all welcome.
 
-## Reporting a bug or asking for a feature
+## Questions, bugs and ideas
+
+Questions and general ideas go to [Discussions](https://github.com/Sandiozo/runner-manager/discussions).
 
 Use the [issue forms](https://github.com/Sandiozo/runner-manager/issues/new/choose). For a bug, include the Runner
 Manager version (Settings → Updates), the Windows version, and the steps to reproduce it. The fleet agent log helps a

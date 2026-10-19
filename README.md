@@ -154,8 +154,9 @@ in `%LOCALAPPDATA%\RunnerManager`.
 
 ## Contributing
 
-Bug reports, ideas and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md), and report security problems
-as described in [SECURITY.md](SECURITY.md). Changes per version are in [CHANGELOG.md](CHANGELOG.md).
+Bug reports, ideas and pull requests are welcome. Ask questions in
+[Discussions](https://github.com/Sandiozo/runner-manager/discussions), see [CONTRIBUTING.md](CONTRIBUTING.md), and report
+security problems as described in [SECURITY.md](SECURITY.md). Changes per version are in [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 
