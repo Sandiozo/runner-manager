@@ -93,7 +93,7 @@ public static class ScheduledTasks
         try
         {
             await File.WriteAllTextAsync(xmlPath, xml, Encoding.Unicode);
-            var (code, output) = await RunAsync("schtasks.exe", $"/Create /F /TN \"{name}\" /XML \"{xmlPath}\"");
+            var (code, output) = await RunAsync("schtasks.exe", $"/Create /F /TN \"{name}\" /XML \"{xmlPath}\"", ShortTimeout);
             if (code != 0) throw new InvalidOperationException(string.IsNullOrWhiteSpace(output) ? $"Could not register the scheduled task \"{name}\"." : output.Trim());
         }
         finally
@@ -102,17 +102,17 @@ public static class ScheduledTasks
         }
     }
 
-    public static async Task<bool> ExistsAsync(string name) => (await RunAsync("schtasks.exe", $"/Query /TN \"{name}\"")).ExitCode == 0;
+    public static async Task<bool> ExistsAsync(string name) => (await RunAsync("schtasks.exe", $"/Query /TN \"{name}\"", ShortTimeout)).ExitCode == 0;
 
     public static async Task<string> QueryXmlAsync(string name)
     {
-        var (code, output) = await RunAsync("schtasks.exe", $"/Query /TN \"{name}\" /XML");
+        var (code, output) = await RunAsync("schtasks.exe", $"/Query /TN \"{name}\" /XML", ShortTimeout);
         return code == 0 ? output : string.Empty;
     }
 
-    public static Task<(int ExitCode, string Output)> RunTaskAsync(string name) => RunAsync("schtasks.exe", $"/Run /TN \"{name}\"");
-    public static Task<(int ExitCode, string Output)> EndTaskAsync(string name) => RunAsync("schtasks.exe", $"/End /TN \"{name}\"");
-    public static Task<(int ExitCode, string Output)> DeleteTaskAsync(string name) => RunAsync("schtasks.exe", $"/Delete /F /TN \"{name}\"");
+    public static Task<(int ExitCode, string Output)> RunTaskAsync(string name) => RunAsync("schtasks.exe", $"/Run /TN \"{name}\"", ShortTimeout);
+    public static Task<(int ExitCode, string Output)> EndTaskAsync(string name) => RunAsync("schtasks.exe", $"/End /TN \"{name}\"", ShortTimeout);
+    public static Task<(int ExitCode, string Output)> DeleteTaskAsync(string name) => RunAsync("schtasks.exe", $"/Delete /F /TN \"{name}\"", ShortTimeout);
 
     /// <summary>The executable a task runs, from its XML definition.</summary>
     public static string CommandOf(string xml)
@@ -126,22 +126,24 @@ public static class ScheduledTasks
             .Replace("&amp;", "&").Trim().Trim('"');
     }
 
-    public static async Task<(int ExitCode, string Output)> RunAsync(string fileName, string arguments)
+    /// <summary>Time limit for quick system tools such as schtasks.exe and sc.exe.</summary>
+    internal static readonly TimeSpan ShortTimeout = TimeSpan.FromSeconds(60);
+    /// <summary>Default time limit when the caller does not pass one; long enough for installers.</summary>
+    private static readonly TimeSpan DefaultTimeout = TimeSpan.FromMinutes(10);
+
+    /// <summary>
+    /// Runs a program hidden and returns its exit code with its output (or its error text when it failed).
+    /// When it does not finish within the timeout, its process tree is killed and the exit code is -1.
+    /// </summary>
+    public static async Task<(int ExitCode, string Output)> RunAsync(string fileName, string arguments, TimeSpan? timeout = null)
     {
+        var limit = timeout ?? DefaultTimeout;
         try
         {
-            using var process = Process.Start(new ProcessStartInfo
-            {
-                FileName = fileName, Arguments = arguments, UseShellExecute = false,
-                CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true
-            });
-            if (process == null) return (-1, string.Empty);
-            var stdout = process.StandardOutput.ReadToEndAsync();
-            var stderr = process.StandardError.ReadToEndAsync();
-            await process.WaitForExitAsync();
-            var error = await stderr;
-            var output = await stdout;
-            return (process.ExitCode, process.ExitCode == 0 ? output : string.IsNullOrWhiteSpace(error) ? output : error);
+            var result = await ProcessRunner.RunAsync(new ProcessStartInfo { FileName = fileName, Arguments = arguments }, limit);
+            if (result == null) return (-1, $"{Path.GetFileName(fileName)} did not finish within {ProcessRunner.Describe(limit)}.");
+            return (result.ExitCode, result.ExitCode == 0 ? result.Output
+                : string.IsNullOrWhiteSpace(result.Error) ? result.Output : result.Error);
         }
         catch (Exception ex) { return (-1, ex.Message); }
     }

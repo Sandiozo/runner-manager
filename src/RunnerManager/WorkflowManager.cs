@@ -5,7 +5,8 @@ namespace RunnerManager;
 public static class WorkflowManager
 {
     private static readonly Regex RunsOnRegex = new(
-        @"^(?<indent>\s*)runs-on\s*:\s*(?<value>[^#\r\n]+?)(?<comment>\s+#.*)?$",
+        // [ \t] instead of \s, and (?=\r?$) at the end: in files with CRLF line endings a \r comes before each line end.
+        @"^(?<indent>[ \t]*)runs-on[ \t]*:[ \t]*(?<value>[^#\r\n]+?)(?<comment>[ \t]+#[^\r\n]*)?(?=\r?$)",
         RegexOptions.Multiline | RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     public static async Task CheckAndUpdateAsync(
@@ -14,10 +15,13 @@ public static class WorkflowManager
         if (string.IsNullOrWhiteSpace(repositoryPath))
             throw new InvalidOperationException("The runner configuration does not include a GitHub repository or organization.");
 
-        var files = await GitHubApi.GetWorkflowFilesAsync(repositoryPath);
+        var list = await GitHubApi.GetWorkflowFilesAsync(repositoryPath);
+        foreach (var path in list.Skipped)
+            log($"{path}: the file could not be read and was skipped.");
+        var files = list.Files;
         if (files.Count == 0)
         {
-            log("No workflow YAML files were found.");
+            log(list.Skipped.Count == 0 ? "No workflow YAML files were found." : "No workflow YAML files could be read.");
             return;
         }
 
@@ -38,22 +42,18 @@ public static class WorkflowManager
             changed++;
         }
 
+        var skipped = list.Skipped.Count == 0 ? string.Empty : $" {list.Skipped.Count} file(s) were skipped.";
         if (changed == 0 && warnings == 0)
-            log("Workflow check complete. No changes are needed.");
+            log($"Workflow check complete. No changes are needed.{skipped}");
         else
-            log($"Workflow check complete. {changed} file(s) updated. {warnings} item(s) need review.");
+            log($"Workflow check complete. {changed} file(s) updated. {warnings} item(s) need review.{skipped}");
     }
 
     internal static WorkflowTransformResult Transform(
         string content, string selector, IEnumerable<string> customLabels)
     {
         var warnings = new List<string>();
-        var available = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-        {
-            "self-hosted", "Windows", "X64"
-        };
-        foreach (var label in customLabels.Where(x => !string.IsNullOrWhiteSpace(x)))
-            available.Add(label.Trim());
+        var available = RunnerLabels.Available(customLabels);
 
         var changed = false;
         var updated = RunsOnRegex.Replace(content, match =>
@@ -72,8 +72,7 @@ public static class WorkflowManager
             if (value.StartsWith('[') && value.EndsWith(']'))
             {
                 var required = ParseInlineLabels(value);
-                if (required.Any(x => x.Equals("self-hosted", StringComparison.OrdinalIgnoreCase))
-                    && required.All(available.Contains))
+                if (RunnerLabels.CanRun(required, available))
                     return match.Value;
 
                 if (required.Any(x => x.Equals("self-hosted", StringComparison.OrdinalIgnoreCase)))
@@ -106,7 +105,7 @@ public static class WorkflowManager
             .Select(Unquote).Where(x => !string.IsNullOrWhiteSpace(x)).ToArray();
     internal static string BuildSelector(IEnumerable<string> customLabels)
     {
-        var labels = new List<string> { "self-hosted", "Windows", "X64" };
+        var labels = new List<string>(RunnerLabels.Defaults);
         labels.AddRange(customLabels.Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => x.Trim()).Distinct());
         return "[" + string.Join(", ", labels.Select(FormatYamlLabel)) + "]";
     }
@@ -124,6 +123,29 @@ public static class WorkflowManager
             || (trimmed[0] == '\'' && trimmed[^1] == '\'')))
             return trimmed[1..^1];
         return trimmed;
+    }
+}
+
+/// <summary>The labels every runner registered by Runner Manager has, and how GitHub matches jobs to runners.</summary>
+internal static class RunnerLabels
+{
+    internal static readonly string[] Defaults = { "self-hosted", "Windows", "X64" };
+
+    /// <summary>The default labels plus the runner's custom labels.</summary>
+    internal static HashSet<string> Available(IEnumerable<string> customLabels)
+    {
+        var labels = new HashSet<string>(Defaults, StringComparer.OrdinalIgnoreCase);
+        foreach (var label in customLabels.Where(x => !string.IsNullOrWhiteSpace(x)))
+            labels.Add(label.Trim());
+        return labels;
+    }
+
+    /// <summary>A job can run on a runner when it asks for a self-hosted runner and the runner has every label it needs.</summary>
+    internal static bool CanRun(IEnumerable<string> required, ISet<string> available)
+    {
+        var labels = required.Where(x => !string.IsNullOrWhiteSpace(x)).ToArray();
+        return labels.Any(x => x.Equals("self-hosted", StringComparison.OrdinalIgnoreCase))
+               && labels.All(available.Contains);
     }
 }
 

@@ -8,6 +8,7 @@ using System.Security.Cryptography;
 using System.Windows;
 using System.ServiceProcess;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Windows.Media;
 
 namespace RunnerManager;
@@ -16,7 +17,11 @@ public static class RunnerService
 {
     public const string DefaultRoot = @"C:\GitHub-Runners";
 
-    public static async Task<List<RunnerInfo>> ReadSnapshotAsync(bool queryGitHub)
+    /// <summary>
+    /// All runners on this PC. WMI queries and file reads are slow, so the work runs on the thread pool, and the
+    /// GitHub queries for the runners run in parallel (GitHubCli limits how many gh processes run at a time).
+    /// </summary>
+    public static Task<List<RunnerInfo>> ReadSnapshotAsync(bool queryGitHub) => Task.Run(async () =>
     {
         var processes = ReadProcesses();
         var services = ReadRunnerServices();
@@ -40,11 +45,10 @@ public static class RunnerService
         foreach (var root in FleetConfig.Current.KnownRunnerRoots)
             if (File.Exists(Path.Combine(root, ".runner"))) roots.Add(root);
 
-        var runners = new List<RunnerInfo>();
-        foreach (var root in roots.OrderBy(x => x))
-            runners.Add(await BuildRunnerInfoAsync(root, services, processes, queryGitHub));
-        return runners;
-    }
+        var runners = await Task.WhenAll(roots.OrderBy(x => x)
+            .Select(root => BuildRunnerInfoAsync(root, services, processes, queryGitHub)));
+        return runners.ToList();
+    });
 
     private static async Task<RunnerInfo> BuildRunnerInfoAsync(
         string root, List<RunnerServiceRecord> services, List<ProcessInfo> processes, bool queryGitHub)
@@ -203,61 +207,103 @@ public static class RunnerService
         var serviceName = key;
         await Task.Run(() =>
         {
+            // A new ServiceController reads the current status on first use, so no Refresh is needed here.
             using var service = new ServiceController(serviceName);
-            service.Refresh();
             if (action == "Start") StartService(service);
             else if (action == "Stop") StopService(service);
             else if (action == "Restart") { StopService(service); StartService(service); }
         });
     }
 
+    private static readonly TimeSpan ServiceTimeout = TimeSpan.FromSeconds(25);
+
     private static void StartService(ServiceController service)
     {
         service.Refresh();
         if (service.Status == ServiceControllerStatus.Running) return;
+        // A pending service rejects new commands: wait for it to settle instead of sending the command again.
+        if (service.Status == ServiceControllerStatus.StartPending)
+        {
+            WaitForStatus(service, ServiceControllerStatus.Running, "start");
+            return;
+        }
+        if (service.Status == ServiceControllerStatus.StopPending)
+            WaitForStatus(service, ServiceControllerStatus.Stopped, "stop");
         service.Start();
-        service.WaitForStatus(ServiceControllerStatus.Running, TimeSpan.FromSeconds(25));
+        WaitForStatus(service, ServiceControllerStatus.Running, "start");
     }
 
     private static void StopService(ServiceController service)
     {
         service.Refresh();
         if (service.Status == ServiceControllerStatus.Stopped) return;
+        if (service.Status == ServiceControllerStatus.StopPending)
+        {
+            WaitForStatus(service, ServiceControllerStatus.Stopped, "stop");
+            return;
+        }
+        // CanStop is false while the service is still starting.
+        if (service.Status == ServiceControllerStatus.StartPending)
+        {
+            WaitForStatus(service, ServiceControllerStatus.Running, "start");
+            service.Refresh();
+        }
         if (!service.CanStop) throw new InvalidOperationException("The runner service cannot be stopped.");
         service.Stop();
-        service.WaitForStatus(ServiceControllerStatus.Stopped, TimeSpan.FromSeconds(25));
+        WaitForStatus(service, ServiceControllerStatus.Stopped, "stop");
+    }
+
+    private static void WaitForStatus(ServiceController service, ServiceControllerStatus status, string verb)
+    {
+        try { service.WaitForStatus(status, ServiceTimeout); }
+        catch (System.ServiceProcess.TimeoutException)
+        {
+            throw new InvalidOperationException($"The runner service did not {verb} within {(int)ServiceTimeout.TotalSeconds} seconds.");
+        }
     }
 
     public static async Task CreateRunnerAsync(RunnerSetup setup, Action<string> log)
     {
-        if (!await GitHubCli.IsAuthenticatedAsync())
-            throw new InvalidOperationException("GitHub is not connected. Connect GitHub and try again.");
+        await EnsureAuthenticatedAsync();
         var repoPath = RepositoryPath(setup.RepositoryUrl);
         var scope = ApiScope(setup.RepositoryUrl);
         if (string.IsNullOrWhiteSpace(scope)) throw new InvalidOperationException("Enter a valid GitHub repository or organization URL.");
+        EnsureValidConfigInput(setup.RepositoryUrl, setup.RunnerName, setup.Labels);
+        EnsureSafeFolder(setup.InstallPath);
         if (Directory.Exists(setup.InstallPath) && Directory.EnumerateFileSystemEntries(setup.InstallPath).Any())
             throw new InvalidOperationException("The runner folder already contains files. Choose an empty or new folder.");
 
+        var createdFolder = !Directory.Exists(setup.InstallPath);
         Directory.CreateDirectory(setup.InstallPath);
-        log("Finding the latest GitHub Actions runner…");
-        var package = await GetLatestWindowsRunnerAsync();
-        var zipPath = Path.Combine(setup.InstallPath, package.FileName);
-        log($"Downloading runner {package.Version}…");
-        await DownloadFileAsync(package.DownloadUrl, zipPath);
-        if (string.IsNullOrEmpty(package.Sha256))
-            log("GitHub did not publish a checksum for this package. Checksum check skipped.");
-        else
+        var zipPath = string.Empty;
+        try
         {
-            await VerifySha256Async(zipPath, package.Sha256);
-            log("Package checksum verified.");
-        }
-        ZipFile.ExtractToDirectory(zipPath, setup.InstallPath, overwriteFiles: true);
+            log("Finding the latest GitHub Actions runner…");
+            var package = await GetLatestWindowsRunnerAsync();
+            zipPath = Path.Combine(setup.InstallPath, package.FileName);
+            log($"Downloading runner {package.Version}…");
+            await DownloadFileAsync(package.DownloadUrl, zipPath);
+            if (string.IsNullOrEmpty(package.Sha256))
+                log("GitHub did not publish a checksum for this package. Checksum check skipped.");
+            else
+            {
+                await VerifySha256Async(zipPath, package.Sha256);
+                log("Package checksum verified.");
+            }
+            await Task.Run(() => ZipFile.ExtractToDirectory(zipPath, setup.InstallPath, overwriteFiles: true));
 
-        log("Requesting a registration token…");
-        var token = await GitHubCli.GetRunnerTokenAsync(scope, removal: false);
-        log("Configuring the runner as a Windows service…");
-        await ConfigureAsync(setup.InstallPath, setup.RepositoryUrl, token, setup.RunnerName,
-            "_work", setup.Labels, runAsService: true, replace: setup.ReplaceExisting);
+            log("Requesting a registration token…");
+            var token = await GitHubCli.GetRunnerTokenAsync(scope, removal: false);
+            log("Configuring the runner as a Windows service…");
+            await ConfigureAsync(setup.InstallPath, setup.RepositoryUrl, token, setup.RunnerName,
+                "_work", setup.Labels, runAsService: true, replace: setup.ReplaceExisting);
+        }
+        catch
+        {
+            // Leave the folder as it was, so trying again with the same folder works.
+            await Task.Run(() => RemoveFailedInstall(setup.InstallPath, createdFolder));
+            throw;
+        }
         TryDelete(zipPath);
         if (setup.CheckWorkflows && !string.IsNullOrWhiteSpace(repoPath))
         {
@@ -269,13 +315,13 @@ public static class RunnerService
 
     public static async Task RepairRunnerAsync(RunnerInfo runner, Action<string> log)
     {
-        if (!await GitHubCli.IsAuthenticatedAsync())
-            throw new InvalidOperationException("GitHub is not connected. Connect GitHub and try again.");
+        await EnsureAuthenticatedAsync();
         if (string.IsNullOrWhiteSpace(runner.ApiScope) || string.IsNullOrWhiteSpace(runner.GitHubUrl))
             throw new InvalidOperationException("The runner configuration does not include a GitHub repository or organization.");
 
-        var remote = await GitHubCli.GetRunnerStateAsync(runner.ApiScope, runner.AgentId);
-        var labels = remote?.Labels ?? runner.CustomLabels;
+        var labels = await ReadLabelsBeforeRemovalAsync(runner);
+        // Check the input before config remove, so an invalid value cannot leave the runner unregistered.
+        EnsureValidConfigInput(runner.GitHubUrl, runner.AgentName, labels);
         await DetachConsoleRunnerAsync(runner, log);
         log("Requesting a removal token…");
         var removeToken = await GitHubCli.GetRunnerTokenAsync(runner.ApiScope, removal: true);
@@ -291,22 +337,21 @@ public static class RunnerService
 
     public static async Task EditRunnerAsync(string key, string newName, string[] requestedLabels, Action<string> log)
     {
-        if (!await GitHubCli.IsAuthenticatedAsync())
-            throw new InvalidOperationException("GitHub is not connected on the target PC. Connect GitHub on that PC and try again.");
+        await EnsureAuthenticatedAsync("GitHub is not connected on the target PC. Connect GitHub on that PC and try again.");
         if (string.IsNullOrWhiteSpace(newName))
             throw new InvalidOperationException("Runner name is required.");
 
         var local = await FindRunnerAsync(key)
             ?? throw new InvalidOperationException("The runner was not found on the target PC.");
-        if (local.ActivityText.Equals("Busy", StringComparison.OrdinalIgnoreCase))
-            throw new InvalidOperationException("The runner is busy. Wait for the current job to finish and try again.");
+        EnsureNotBusy(local);
         if (string.IsNullOrWhiteSpace(local.ApiScope) || string.IsNullOrWhiteSpace(local.GitHubUrl))
             throw new InvalidOperationException("The runner configuration does not include a GitHub repository or organization.");
 
-        var remote = await GitHubCli.GetRunnerStateAsync(local.ApiScope, local.AgentId);
-        var labels = requestedLabels.Where(x => !string.IsNullOrWhiteSpace(x))
+        var labels = (requestedLabels ?? Array.Empty<string>()).Where(x => !string.IsNullOrWhiteSpace(x))
             .Select(x => x.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-        if (labels.Length == 0) labels = remote?.Labels ?? Array.Empty<string>();
+        // Blank labels mean "keep the current ones", which have to be read from GitHub before config remove.
+        if (labels.Length == 0) labels = await ReadLabelsBeforeRemovalAsync(local);
+        EnsureValidConfigInput(local.GitHubUrl, newName.Trim(), labels);
         var wasRunning = local.IsRunning;
         if (local.IsInteractive) await DetachConsoleRunnerAsync(local, log);
         else if (wasRunning) await ControlServiceAsync(local.Name, "Stop");
@@ -331,8 +376,7 @@ public static class RunnerService
 
     public static async Task CheckWorkflowsAsync(RunnerInfo runner, Action<string> log)
     {
-        if (!await GitHubCli.IsAuthenticatedAsync())
-            throw new InvalidOperationException("GitHub is not connected. Connect GitHub and try again.");
+        await EnsureAuthenticatedAsync();
         if (string.IsNullOrWhiteSpace(runner.RepositoryPath))
             throw new InvalidOperationException("Workflow checks are available only for repository runners.");
         await WorkflowManager.CheckAndUpdateAsync(runner.RepositoryPath, runner.CustomLabels, log);
@@ -346,8 +390,7 @@ public static class RunnerService
             await RemoveLocallyAsync(runner, deleteFolder, log);
             return;
         }
-        if (!await GitHubCli.IsAuthenticatedAsync())
-            throw new InvalidOperationException("GitHub is not connected. Connect GitHub and try again.");
+        await EnsureAuthenticatedAsync();
 
         if (runner.ServiceInstalled && runner.IsRunning)
             await ControlServiceAsync(runner.Name, "Stop");
@@ -369,10 +412,35 @@ public static class RunnerService
         if (deleteFolder && Directory.Exists(runner.InstallPath))
         {
             log("Deleting the runner folder…");
-            DeleteFolder(runner.InstallPath);
+            await Task.Run(() => DeleteFolder(runner.InstallPath));
         }
         ForgetRoot(runner.InstallPath);
         log("Runner removed.");
+    }
+
+    private static async Task EnsureAuthenticatedAsync(string message = "GitHub is not connected. Connect GitHub and try again.")
+    {
+        if (!await GitHubCli.IsAuthenticatedAsync()) throw new InvalidOperationException(message);
+    }
+
+    private static void EnsureNotBusy(RunnerInfo runner)
+    {
+        if (runner.ActivityText.Equals("Busy", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("The runner is busy. Wait for the current job to finish and try again.");
+    }
+
+    /// <summary>
+    /// The runner's custom labels from GitHub, read before config remove so that registering it again keeps them.
+    /// Stops when GitHub cannot be read (timeout, rate limit); continues only when GitHub confirms the runner is gone.
+    /// </summary>
+    private static async Task<string[]> ReadLabelsBeforeRemovalAsync(RunnerInfo runner)
+    {
+        // Without a runner ID there is no registration on GitHub to read labels from.
+        if (runner.AgentId <= 0) return runner.CustomLabels;
+        var lookup = await GitHubCli.LookUpRunnerAsync(runner.ApiScope, runner.AgentId);
+        if (lookup.State != null) return lookup.State.Labels;
+        if (lookup.NotFound) return runner.CustomLabels;
+        throw new InvalidOperationException("Could not read the runner's labels from GitHub. Try again.");
     }
 
     /// <summary>GitHub answers 404 when the repository, organization or runner registration no longer exists.</summary>
@@ -390,8 +458,7 @@ public static class RunnerService
     public static async Task RemoveRunnerAsync(string key, bool deleteFolder, Action<string> log)
     {
         var runner = await FindRunnerAsync(key) ?? throw new InvalidOperationException("The runner was not found on this PC.");
-        if (runner.ActivityText.Equals("Busy", StringComparison.OrdinalIgnoreCase))
-            throw new InvalidOperationException("The runner is busy. Wait for the current job to finish and try again.");
+        EnsureNotBusy(runner);
         await RemoveRunnerAsync(runner, deleteFolder, log);
     }
 
@@ -413,13 +480,13 @@ public static class RunnerService
         {
             if (runner.IsRunning) await ControlServiceAsync(runner.Name, "Stop");
             log("Removing the Windows service…");
-            var (code, output) = await ScheduledTasks.RunAsync("sc.exe", $"delete \"{runner.Name}\"");
+            var (code, output) = await ScheduledTasks.RunAsync("sc.exe", $"delete \"{runner.Name}\"", ScheduledTasks.ShortTimeout);
             if (code != 0) throw new InvalidOperationException($"Could not remove the Windows service {runner.Name}: {output.Trim()}");
         }
         if (deleteFolder)
         {
             log("Deleting the runner folder…");
-            DeleteFolder(runner.InstallPath);
+            await Task.Run(() => DeleteFolder(runner.InstallPath));
         }
         else
         {
@@ -436,8 +503,7 @@ public static class RunnerService
     {
         var runner = await FindRunnerAsync(key) ?? throw new InvalidOperationException("The runner was not found on this PC.");
         if (runner.ServiceInstalled) throw new InvalidOperationException("This runner already runs as a Windows service.");
-        if (runner.ActivityText.Equals("Busy", StringComparison.OrdinalIgnoreCase))
-            throw new InvalidOperationException("The runner is busy. Wait for the current job to finish and try again.");
+        EnsureNotBusy(runner);
         await RepairRunnerAsync(runner, log);
     }
 
@@ -506,9 +572,9 @@ public static class RunnerService
                 var extension = Path.GetExtension(file).ToLowerInvariant();
                 if (extension is not (".cmd" or ".bat" or ".ps1" or ".vbs" or ".lnk")) continue;
                 string content;
-                try { content = extension == ".lnk" ? System.Text.Encoding.Unicode.GetString(File.ReadAllBytes(file)) + System.Text.Encoding.Default.GetString(File.ReadAllBytes(file)) : File.ReadAllText(file); }
+                try { content = ReadStartupText(File.ReadAllBytes(file), extension == ".lnk"); }
                 catch { continue; }
-                if (!content.Contains(root, StringComparison.OrdinalIgnoreCase)) continue;
+                if (!ReferencesFolder(content, root)) continue;
                 try
                 {
                     Directory.CreateDirectory(target);
@@ -521,6 +587,31 @@ public static class RunnerService
             }
         }
         return moved;
+    }
+
+    private static readonly System.Text.Encoding StrictUtf8 = new System.Text.UTF8Encoding(false, throwOnInvalidBytes: true);
+
+    /// <summary>
+    /// Text to search for the runner folder. Shortcuts store paths as UTF-16 and as ANSI, so both decodings are
+    /// searched. Scripts are read as UTF-8 when they are valid UTF-8, and as Latin-1 otherwise (any byte decodes).
+    /// </summary>
+    internal static string ReadStartupText(byte[] bytes, bool shortcut)
+    {
+        if (shortcut) return System.Text.Encoding.Unicode.GetString(bytes) + System.Text.Encoding.Latin1.GetString(bytes);
+        try { return StrictUtf8.GetString(bytes); }
+        catch (System.Text.DecoderFallbackException) { return System.Text.Encoding.Latin1.GetString(bytes); }
+    }
+
+    /// <summary>
+    /// True when the text names this folder, and not only a sibling that starts with the same name
+    /// (C:\GitHub-Runners\foo must not match C:\GitHub-Runners\foo-2).
+    /// </summary>
+    internal static bool ReferencesFolder(string content, string root)
+    {
+        var folder = root.TrimEnd('\\', '/');
+        if (folder.Length == 0) return false;
+        return Regex.IsMatch(content, Regex.Escape(folder) + @"(?=[\\/""'\s\0]|$)",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
     }
 
     private static void ForgetRoot(string root)
@@ -537,6 +628,30 @@ public static class RunnerService
             try { File.SetAttributes(file, FileAttributes.Normal); } catch { }
         }
         Directory.Delete(path, recursive: true);
+    }
+
+    /// <summary>After a failed install: deletes the folder if this install created it, or empties it if it was empty before.</summary>
+    private static void RemoveFailedInstall(string path, bool createdFolder)
+    {
+        try
+        {
+            if (createdFolder)
+            {
+                DeleteFolder(path);
+                return;
+            }
+            if (!Directory.Exists(path)) return;
+            foreach (var entry in new DirectoryInfo(path).EnumerateFileSystemInfos())
+            {
+                if (entry is DirectoryInfo directory) DeleteFolder(directory.FullName);
+                else
+                {
+                    entry.Attributes = FileAttributes.Normal;
+                    entry.Delete();
+                }
+            }
+        }
+        catch { }
     }
 
     private static string RootFromExecutable(string executable)
@@ -564,20 +679,8 @@ public static class RunnerService
     private static async Task ConfigureAsync(string root, string repositoryUrl, string token,
         string name, string workFolder, IEnumerable<string> labels, bool runAsService, bool replace = false)
     {
-        var args = new List<string>
-        {
-            "--unattended", "--url", repositoryUrl, "--token", token,
-            "--name", name, "--work", string.IsNullOrWhiteSpace(workFolder) ? "_work" : workFolder
-        };
-        var labelList = labels.Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => x.Trim()).Distinct().ToArray();
-        if (labelList.Length > 0)
-        {
-            args.Add("--labels");
-            args.Add(string.Join(',', labelList));
-        }
-        if (runAsService) args.Add("--runasservice");
-        if (replace) args.Add("--replace");
-        var result = await RunBatchAsync(Path.Combine(root, "config.cmd"), root, args);
+        var arguments = BuildConfigureArguments(repositoryUrl, token, name, workFolder, labels, runAsService, replace);
+        var result = await RunConfigAsync(root, arguments);
         if (result.ExitCode != 0)
             throw new InvalidOperationException(CleanConfigError(result.Error, result.Output));
     }
@@ -586,7 +689,8 @@ public static class RunnerService
     {
         var config = Path.Combine(root, "config.cmd");
         if (!File.Exists(config)) throw new FileNotFoundException("config.cmd was not found in the runner folder.", config);
-        var result = await RunBatchAsync(config, root, new[] { "remove", "--token", token });
+        EnsureSafeValue(token, "runner token");
+        var result = await RunConfigAsync(root, $"remove --token {Quote(token)}");
         if (result.ExitCode != 0)
             throw new InvalidOperationException(CleanConfigError(result.Error, result.Output));
     }
@@ -597,31 +701,101 @@ public static class RunnerService
         return string.IsNullOrWhiteSpace(text) ? "Runner configuration failed." : text.Trim();
     }
 
-    private static async Task<CommandResult> RunBatchAsync(string batchPath, string workingDirectory, IEnumerable<string> arguments)
+    // config.cmd runs through cmd.exe as administrator, and the values come from users and from other PCs in the
+    // fleet. Every value is checked here and quoted, so none of them can add a command to the line.
+    private const string NameRule = "Runner names can only contain letters, digits, '-', '_' and '.'.";
+    private const string LabelRule = "Labels can only contain letters, digits, '-', '_', '.' and ','.";
+    private const string UrlRule = "The GitHub URL must start with https://github.com/ and can only contain letters, digits, '-', '_', '.' and '/'.";
+    private static readonly Regex RegistrationUrlPattern = new(@"^https://github\.com/[A-Za-z0-9._/-]+$",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+    /// <summary>Characters that cmd.exe treats specially even inside quotes, or that end a quoted value.</summary>
+    private static readonly char[] UnsafeInQuotes = { '"', '%', '!' };
+    private static readonly TimeSpan ConfigTimeout = TimeSpan.FromMinutes(10);
+
+    private static bool IsNameCharacter(char c) => char.IsAsciiLetterOrDigit(c) || c is '-' or '_' or '.';
+
+    /// <summary>Null when the runner name is valid, otherwise the message to show.</summary>
+    internal static string? RunnerNameProblem(string? name)
     {
-        var joined = string.Join(" ", arguments.Select(QuoteArgument));
+        if (string.IsNullOrWhiteSpace(name)) return "Runner name is required.";
+        return name.Trim().All(IsNameCharacter) ? null : NameRule;
+    }
+
+    /// <summary>Null when the labels are valid, otherwise the message to show. Blank labels are ignored.</summary>
+    internal static string? LabelsProblem(IEnumerable<string>? labels)
+        => CleanLabels(labels).All(label => label.All(c => IsNameCharacter(c) || c == ',')) ? null : LabelRule;
+
+    /// <summary>Null when the registration URL is a plain https://github.com/... URL, otherwise the message to show.</summary>
+    internal static string? RegistrationUrlProblem(string? url)
+        => !string.IsNullOrEmpty(url) && RegistrationUrlPattern.IsMatch(url) ? null : UrlRule;
+
+    internal static void EnsureValidConfigInput(string url, string name, IEnumerable<string>? labels)
+    {
+        var problem = RegistrationUrlProblem(url) ?? RunnerNameProblem(name) ?? LabelsProblem(labels);
+        if (problem != null) throw new InvalidOperationException(problem);
+    }
+
+    /// <summary>The config.cmd arguments for registering a runner. Throws when a value is not allowed.</summary>
+    internal static string BuildConfigureArguments(string url, string token, string name, string workFolder,
+        IEnumerable<string>? labels, bool runAsService, bool replace)
+    {
+        var labelList = CleanLabels(labels);
+        EnsureValidConfigInput(url, name, labelList);
+        EnsureSafeValue(token, "runner token");
+        var work = string.IsNullOrWhiteSpace(workFolder) ? "_work" : workFolder.Trim();
+        EnsureSafeValue(work, "work folder");
+
+        var args = new List<string>
+        {
+            "--unattended", "--url", Quote(url), "--token", Quote(token),
+            "--name", Quote(name.Trim()), "--work", Quote(work)
+        };
+        if (labelList.Length > 0)
+        {
+            args.Add("--labels");
+            args.Add(Quote(string.Join(',', labelList)));
+        }
+        if (runAsService) args.Add("--runasservice");
+        if (replace) args.Add("--replace");
+        return string.Join(' ', args);
+    }
+
+    private static string[] CleanLabels(IEnumerable<string>? labels)
+        => (labels ?? Array.Empty<string>()).Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => x.Trim()).Distinct().ToArray();
+
+    private static void EnsureSafeValue(string value, string what)
+    {
+        if (string.IsNullOrEmpty(value) || value.IndexOfAny(UnsafeInQuotes) >= 0 || value.Any(char.IsControl))
+            throw new InvalidOperationException($"The {what} contains characters that cannot be passed to config.cmd.");
+    }
+
+    private static void EnsureSafeFolder(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path) || path.IndexOfAny(UnsafeInQuotes) >= 0 || path.Any(char.IsControl))
+            throw new InvalidOperationException("The runner folder path cannot contain the characters \", % or !.");
+    }
+
+    /// <summary>Quotes a checked value. Trailing backslashes are doubled so they do not escape the closing quote.</summary>
+    private static string Quote(string value)
+    {
+        var trailing = value.Length - value.TrimEnd('\\').Length;
+        return $"\"{value}{new string('\\', trailing)}\"";
+    }
+
+    private static async Task<CommandResult> RunConfigAsync(string root, string arguments)
+    {
+        EnsureSafeFolder(root);
         var startInfo = new ProcessStartInfo
         {
             FileName = "cmd.exe",
-            Arguments = $"/d /s /c \"\"{batchPath}\" {joined}\"",
-            WorkingDirectory = workingDirectory,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true
+            Arguments = $"/d /s /c \"\"{Path.Combine(root, "config.cmd")}\" {arguments}\"",
+            WorkingDirectory = root
         };
-        using var process = Process.Start(startInfo) ?? throw new InvalidOperationException("Could not start the runner configuration (config.cmd).");
-        var stdout = process.StandardOutput.ReadToEndAsync();
-        var stderr = process.StandardError.ReadToEndAsync();
-        await process.WaitForExitAsync();
-        return new CommandResult(process.ExitCode, await stdout, await stderr);
-    }
-
-    private static string QuoteArgument(string value)
-    {
-        if (string.IsNullOrEmpty(value)) return "\"\"";
-        if (!value.Any(char.IsWhiteSpace) && !value.Contains('"')) return value;
-        return $"\"{value.Replace("\"", "\\\"")}\"";
+        CommandResult? result;
+        try { result = await ProcessRunner.RunAsync(startInfo, ConfigTimeout); }
+        catch (Win32Exception ex) { throw new InvalidOperationException($"Could not start the runner configuration (config.cmd): {ex.Message}"); }
+        return result ?? throw new InvalidOperationException(
+            $"config.cmd did not finish within {ProcessRunner.Describe(ConfigTimeout)}. It was stopped.");
     }
 
     private static async Task<RunnerPackage> GetLatestWindowsRunnerAsync()
@@ -749,8 +923,7 @@ public static class RunnerService
     {
         var runner = await FindRunnerAsync(serviceName)
             ?? throw new InvalidOperationException("The runner was not found on this PC.");
-        if (runner.ActivityText.Equals("Busy", StringComparison.OrdinalIgnoreCase))
-            throw new InvalidOperationException("The runner is busy. Wait for the current job to finish and try again.");
+        EnsureNotBusy(runner);
         if (runner.IsInteractive)
             throw new InvalidOperationException("This runner runs in a console window. Convert it to a Windows service first.");
         var folder = runner.WorkFolderPath;
@@ -814,11 +987,8 @@ public static class RunnerService
     private static string ResolveRunnerRoot(string servicePath)
     {
         var exe = ExtractExecutablePath(servicePath);
-        var directory = Path.GetDirectoryName(exe);
-        if (string.IsNullOrWhiteSpace(directory)) return exe;
-        var current = new DirectoryInfo(directory);
-        return current.Name.Equals("bin", StringComparison.OrdinalIgnoreCase) && current.Parent != null
-            ? current.Parent.FullName : current.FullName;
+        var root = RootFromExecutable(exe);
+        return string.IsNullOrEmpty(root) ? exe : root;
     }
 
     private static string ExtractExecutablePath(string commandLine)
@@ -840,9 +1010,9 @@ public static class RunnerService
         {
             var diag = Path.Combine(root, "_diag");
             if (!Directory.Exists(diag)) return "no logs";
-            var latest = new DirectoryInfo(diag).GetFiles("*.log")
-                .OrderByDescending(f => f.LastWriteTime).FirstOrDefault();
-            return latest == null ? "no logs" : FormatAge(latest.LastWriteTime);
+            var latest = new DirectoryInfo(diag).EnumerateFiles("*.log")
+                .Select(f => (DateTime?)f.LastWriteTimeUtc).Max();
+            return latest == null ? "no logs" : FormatAge(latest.Value.ToLocalTime());
         }
         catch { return "cannot read logs"; }
     }
@@ -912,7 +1082,6 @@ public sealed class RunnerInfo : INotifyPropertyChanged
     public string RunnerVersion { get; init; } = string.Empty;
     public string WorkFolderPath { get; init; } = string.Empty;
     public long? WorkFolderBytes { get; init; }
-    public string WorkFolderSizeText => SystemHealth.FormatBytes(WorkFolderBytes);
     public string AgentName { get; init; } = string.Empty;
     public long AgentId { get; init; }
     public string WorkFolder { get; init; } = "_work";
@@ -942,8 +1111,6 @@ public sealed class RunnerInfo : INotifyPropertyChanged
         }
     }
     public Visibility DetailsVisibility => IsExpanded ? Visibility.Visible : Visibility.Collapsed;
-    public Visibility ServiceButtonsVisibility => ServiceInstalled ? Visibility.Visible : Visibility.Collapsed;
-    public Visibility RepairButtonVisibility => ServiceInstalled ? Visibility.Collapsed : Visibility.Visible;
 }
 
 public sealed class ProcessInfo

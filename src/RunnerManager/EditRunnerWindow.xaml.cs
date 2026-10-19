@@ -31,9 +31,20 @@ public partial class EditRunnerWindow : Window
             DialogWindow.Info(this, "Missing information", "Runner name is required.");
             return;
         }
-        Edit = new RunnerEditRequest(
-            name,
-            LabelsBox.Text.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+        if (RunnerService.RunnerNameProblem(name) is { } nameProblem)
+        {
+            DialogWindow.Info(this, "Invalid runner name", nameProblem);
+            RunnerNameBox.Focus();
+            return;
+        }
+        var labels = LabelsBox.Text.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (RunnerService.LabelsProblem(labels) is { } labelProblem)
+        {
+            DialogWindow.Info(this, "Invalid labels", labelProblem);
+            LabelsBox.Focus();
+            return;
+        }
+        Edit = new RunnerEditRequest(name, labels);
         DialogResult = true;
     }
 

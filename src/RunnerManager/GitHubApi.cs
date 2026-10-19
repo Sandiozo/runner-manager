@@ -5,25 +5,28 @@ namespace RunnerManager;
 
 public static class GitHubApi
 {
+    private const int RecentRunCount = 6;
+    private static readonly TimeSpan WorkCacheLifetime = TimeSpan.FromSeconds(8);
     private static readonly object CacheLock = new();
-    private static readonly Dictionary<string, (DateTime Time, RepositoryWorkState State)> WorkCache
+    /// <summary>
+    /// One request per repository and refresh: runners of the same repository share the same task.
+    /// A task that failed (null) is not reused.
+    /// </summary>
+    private static readonly Dictionary<string, (DateTime Time, Task<RepositoryWorkState?> State)> WorkCache
         = new(StringComparer.OrdinalIgnoreCase);
 
-    public static async Task<RunnerWorkState> GetRunnerWorkAsync(
+    /// <returns>The runner's current job and queue, or null when GitHub could not be read.</returns>
+    public static async Task<RunnerWorkState?> GetRunnerWorkAsync(
         string repositoryPath, long runnerId, IEnumerable<string> customLabels)
     {
         var state = await GetRepositoryWorkAsync(repositoryPath);
-        var labels = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-        {
-            "self-hosted", "Windows", "X64"
-        };
-        foreach (var label in customLabels.Where(x => !string.IsNullOrWhiteSpace(x)))
-            labels.Add(label.Trim());
+        if (state == null) return null;
+        var labels = RunnerLabels.Available(customLabels);
 
         var current = state.Jobs.FirstOrDefault(j =>
             j.Status.Equals("in_progress", StringComparison.OrdinalIgnoreCase) && j.RunnerId == runnerId);
         var queued = state.Jobs.Where(j =>
-            j.Status.Equals("queued", StringComparison.OrdinalIgnoreCase) && IsEligible(j.Labels, labels)).ToList();
+            j.Status.Equals("queued", StringComparison.OrdinalIgnoreCase) && RunnerLabels.CanRun(j.Labels, labels)).ToList();
 
         return new RunnerWorkState
         {
@@ -37,44 +40,43 @@ public static class GitHubApi
                 : $"{queued.Count} waiting  ·  next: {queued[0].WorkflowName} → {queued[0].Name}"
         };
     }
-    private static bool IsEligible(IEnumerable<string> required, HashSet<string> available)
-    {
-        var labels = required.Where(x => !string.IsNullOrWhiteSpace(x)).ToArray();
-        return labels.Any(x => x.Equals("self-hosted", StringComparison.OrdinalIgnoreCase))
-               && labels.All(available.Contains);
-    }
 
-    private static async Task<RepositoryWorkState> GetRepositoryWorkAsync(string repositoryPath)
+    private static Task<RepositoryWorkState?> GetRepositoryWorkAsync(string repositoryPath)
     {
         lock (CacheLock)
         {
             if (WorkCache.TryGetValue(repositoryPath, out var cached)
-                && DateTime.UtcNow - cached.Time < TimeSpan.FromSeconds(8))
+                && DateTime.UtcNow - cached.Time < WorkCacheLifetime
+                && !HasFailed(cached.State))
                 return cached.State;
+            var task = Task.Run(() => ReadRepositoryWorkAsync(repositoryPath));
+            WorkCache[repositoryPath] = (DateTime.UtcNow, task);
+            return task;
         }
+    }
 
-        var runs = new List<WorkflowRunState>();
-        runs.AddRange(await GetRunsAsync(repositoryPath, "in_progress"));
-        runs.AddRange(await GetRunsAsync(repositoryPath, "queued"));
-        runs = runs.GroupBy(r => r.Id).Select(g => g.First()).ToList();
+    private static bool HasFailed(Task<RepositoryWorkState?> task)
+        => task.IsFaulted || task.IsCanceled || (task.IsCompletedSuccessfully && task.Result == null);
 
+    /// <returns>All jobs of the repository's active runs, or null when any request failed.</returns>
+    private static async Task<RepositoryWorkState?> ReadRepositoryWorkAsync(string repositoryPath)
+    {
+        var lists = await Task.WhenAll(GetRunsAsync(repositoryPath, "in_progress"), GetRunsAsync(repositoryPath, "queued"));
+        if (lists.Any(list => list == null)) return null;
+        var runs = lists.SelectMany(list => list!).GroupBy(r => r.Id).Select(g => g.First()).ToList();
+
+        var jobs = await Task.WhenAll(runs.Select(run => GetJobsAsync(repositoryPath, run)));
+        if (jobs.Any(list => list == null)) return null;
         var state = new RepositoryWorkState();
-        foreach (var run in runs)
-        {
-            var jobs = await GetJobsAsync(repositoryPath, run);
-            state.Jobs.AddRange(jobs);
-        }
-
-        lock (CacheLock)
-            WorkCache[repositoryPath] = (DateTime.UtcNow, state);
+        foreach (var list in jobs) state.Jobs.AddRange(list!);
         return state;
     }
 
-    private static async Task<List<WorkflowRunState>> GetRunsAsync(string repositoryPath, string status)
+    private static async Task<List<WorkflowRunState>?> GetRunsAsync(string repositoryPath, string status)
     {
-        var result = await GitHubCli.RunAsync(
+        var result = await GitHubCli.RunPollAsync(
             $"api repos/{repositoryPath}/actions/runs?status={status}&per_page=20");
-        if (result.ExitCode != 0) return new List<WorkflowRunState>();
+        if (result.ExitCode != 0) return null;
         try
         {
             using var json = JsonDocument.Parse(result.Output);
@@ -83,7 +85,7 @@ public static class GitHubApi
                 list.Add(ReadRun(run));
             return list;
         }
-        catch { return new List<WorkflowRunState>(); }
+        catch { return null; }
     }
     private static WorkflowRunState ReadRun(JsonElement run)
     {
@@ -92,17 +94,15 @@ public static class GitHubApi
             Id = run.GetProperty("id").GetInt64(),
             WorkflowName = run.TryGetProperty("name", out var name) ? name.GetString() ?? "Workflow" : "Workflow",
             RunNumber = run.TryGetProperty("run_number", out var number) ? number.GetInt32() : 0,
-            Branch = run.TryGetProperty("head_branch", out var branch) ? branch.GetString() ?? string.Empty : string.Empty,
-            DisplayTitle = run.TryGetProperty("display_title", out var title) ? title.GetString() ?? string.Empty : string.Empty,
             HtmlUrl = run.TryGetProperty("html_url", out var url) ? url.GetString() ?? string.Empty : string.Empty
         };
     }
 
-    private static async Task<List<GitHubJobState>> GetJobsAsync(string repositoryPath, WorkflowRunState run)
+    private static async Task<List<GitHubJobState>?> GetJobsAsync(string repositoryPath, WorkflowRunState run)
     {
-        var result = await GitHubCli.RunAsync(
+        var result = await GitHubCli.RunPollAsync(
             $"api repos/{repositoryPath}/actions/runs/{run.Id}/jobs?filter=latest&per_page=100");
-        if (result.ExitCode != 0) return new List<GitHubJobState>();
+        if (result.ExitCode != 0) return null;
         try
         {
             using var json = JsonDocument.Parse(result.Output);
@@ -111,7 +111,7 @@ public static class GitHubApi
                 list.Add(ReadJob(job, run));
             return list;
         }
-        catch { return new List<GitHubJobState>(); }
+        catch { return null; }
     }
     private static GitHubJobState ReadJob(JsonElement job, WorkflowRunState run)
     {
@@ -122,7 +122,6 @@ public static class GitHubApi
 
         return new GitHubJobState
         {
-            Id = job.TryGetProperty("id", out var id) ? id.GetInt64() : 0,
             RunnerId = job.TryGetProperty("runner_id", out var runnerId) && runnerId.ValueKind == JsonValueKind.Number
                 ? runnerId.GetInt64() : 0,
             Name = job.TryGetProperty("name", out var name) ? name.GetString() ?? "Job" : "Job",
@@ -141,14 +140,14 @@ public static class GitHubApi
     /// The latest workflow runs of a repository. Polled with an ETag, so unchanged polls are free
     /// against the API rate limit.
     /// </summary>
-    public static async Task<List<WorkflowRunSummary>?> GetRecentRunsAsync(string repositoryPath, int count = 6)
+    public static async Task<List<WorkflowRunSummary>?> GetRecentRunsAsync(string repositoryPath)
     {
         (string ETag, List<WorkflowRunSummary> Runs) cached;
         lock (CacheLock)
             cached = RecentRunsCache.TryGetValue(repositoryPath, out var entry) ? entry : (string.Empty, new List<WorkflowRunSummary>());
 
         var response = await GitHubCli.GetConditionalAsync(
-            $"repos/{repositoryPath}/actions/runs?per_page={count}&exclude_pull_requests=true", cached.ETag);
+            $"repos/{repositoryPath}/actions/runs?per_page={RecentRunCount}&exclude_pull_requests=true", cached.ETag);
         if (response.NotModified) return cached.Runs;
         if (!response.Ok) return null;
         try
@@ -164,11 +163,9 @@ public static class GitHubApi
                     WorkflowName = Str(run, "name", "Workflow"),
                     Title = Str(run, "display_title", string.Empty),
                     Branch = Str(run, "head_branch", string.Empty),
-                    Event = Str(run, "event", string.Empty),
                     Status = Str(run, "status", "unknown"),
                     Conclusion = Str(run, "conclusion", string.Empty),
                     RunNumber = run.TryGetProperty("run_number", out var number) ? number.GetInt32() : 0,
-                    RunAttempt = run.TryGetProperty("run_attempt", out var attempt) ? attempt.GetInt32() : 1,
                     HtmlUrl = Str(run, "html_url", string.Empty),
                     CreatedUtc = run.TryGetProperty("created_at", out var created) && created.TryGetDateTime(out var c) ? c.ToUniversalTime() : DateTime.MinValue,
                     UpdatedUtc = run.TryGetProperty("updated_at", out var updated) && updated.TryGetDateTime(out var u) ? u.ToUniversalTime() : DateTime.MinValue
@@ -190,26 +187,48 @@ public static class GitHubApi
     private static string Str(JsonElement element, string name, string fallback)
         => element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() ?? fallback : fallback;
 
-    public static async Task<List<RepositoryFile>> GetWorkflowFilesAsync(string repositoryPath)
+    /// <summary>
+    /// The workflow YAML files of a repository. A missing .github/workflows folder (404) gives an empty list; any other
+    /// failure throws. Files that cannot be read are listed in Skipped instead of failing the whole check.
+    /// </summary>
+    public static async Task<WorkflowFileList> GetWorkflowFilesAsync(string repositoryPath)
     {
         var result = await GitHubCli.RunAsync($"api repos/{repositoryPath}/contents/.github/workflows");
-        if (result.ExitCode != 0) return new List<RepositoryFile>();
+        if (result.ExitCode != 0)
+        {
+            if (GitHubCli.IsNotFound(result.Error)) return new WorkflowFileList();
+            throw new InvalidOperationException(string.IsNullOrWhiteSpace(result.Error)
+                ? "Could not read the workflow files from GitHub. Try again."
+                : $"Could not read the workflow files from GitHub: {result.Error.Trim()}");
+        }
+
+        var paths = new List<string>();
         try
         {
             using var json = JsonDocument.Parse(result.Output);
-            var files = new List<RepositoryFile>();
             foreach (var item in json.RootElement.EnumerateArray())
             {
                 var type = item.TryGetProperty("type", out var typeValue) ? typeValue.GetString() : null;
                 var path = item.TryGetProperty("path", out var pathValue) ? pathValue.GetString() ?? string.Empty : string.Empty;
-                if (type != "file" || !(path.EndsWith(".yml", StringComparison.OrdinalIgnoreCase)
-                    || path.EndsWith(".yaml", StringComparison.OrdinalIgnoreCase))) continue;
-                var file = await GetRepositoryFileAsync(repositoryPath, path);
-                if (file != null) files.Add(file);
+                if (type == "file" && (path.EndsWith(".yml", StringComparison.OrdinalIgnoreCase)
+                    || path.EndsWith(".yaml", StringComparison.OrdinalIgnoreCase))) paths.Add(path);
             }
-            return files;
         }
-        catch { return new List<RepositoryFile>(); }
+        catch
+        {
+            throw new InvalidOperationException("GitHub returned an unexpected answer for the workflow folder. Try again.");
+        }
+
+        var list = new WorkflowFileList();
+        foreach (var path in paths)
+        {
+            RepositoryFile? file;
+            try { file = await GetRepositoryFileAsync(repositoryPath, path); }
+            catch { file = null; }
+            if (file != null) list.Files.Add(file);
+            else list.Skipped.Add(path);
+        }
+        return list;
     }
 
     private static async Task<RepositoryFile?> GetRepositoryFileAsync(string repositoryPath, string path)
@@ -266,13 +285,10 @@ public sealed class WorkflowRunState
     public long Id { get; init; }
     public string WorkflowName { get; init; } = string.Empty;
     public int RunNumber { get; init; }
-    public string Branch { get; init; } = string.Empty;
-    public string DisplayTitle { get; init; } = string.Empty;
     public string HtmlUrl { get; init; } = string.Empty;
 }
 public sealed class GitHubJobState
 {
-    public long Id { get; init; }
     public long RunnerId { get; init; }
     public string Name { get; init; } = string.Empty;
     public string Status { get; init; } = string.Empty;
@@ -289,11 +305,9 @@ public sealed class WorkflowRunSummary
     public string WorkflowName { get; init; } = string.Empty;
     public string Title { get; init; } = string.Empty;
     public string Branch { get; init; } = string.Empty;
-    public string Event { get; init; } = string.Empty;
     public string Status { get; init; } = string.Empty;
     public string Conclusion { get; init; } = string.Empty;
     public int RunNumber { get; init; }
-    public int RunAttempt { get; init; }
     public string HtmlUrl { get; init; } = string.Empty;
     public DateTime CreatedUtc { get; init; }
     public DateTime UpdatedUtc { get; init; }
@@ -301,10 +315,10 @@ public sealed class WorkflowRunSummary
     public bool IsCompleted => Status.Equals("completed", StringComparison.OrdinalIgnoreCase);
     public bool IsFailure => IsCompleted && Conclusion is "failure" or "timed_out" or "startup_failure";
     public bool CanRerun => IsFailure || (IsCompleted && Conclusion == "cancelled");
-    public string Glyph => !IsCompleted ? "\uE916"
-        : Conclusion == "success" ? "\uE73E"
-        : IsFailure ? "\uE711"
-        : "\uE7BA";
+    public string Glyph => !IsCompleted ? ""
+        : Conclusion == "success" ? ""
+        : IsFailure ? ""
+        : "";
     public System.Windows.Media.Brush Brush => !IsCompleted ? Palette.Warning
         : Conclusion == "success" ? Palette.Success
         : IsFailure ? Palette.Danger
@@ -342,4 +356,11 @@ public sealed class RepositoryFile
     public string Path { get; init; } = string.Empty;
     public string Sha { get; init; } = string.Empty;
     public string Content { get; init; } = string.Empty;
+}
+
+/// <summary>The workflow files of a repository, and the paths of the files that could not be read.</summary>
+public sealed class WorkflowFileList
+{
+    public List<RepositoryFile> Files { get; } = new();
+    public List<string> Skipped { get; } = new();
 }

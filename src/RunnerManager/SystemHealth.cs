@@ -14,6 +14,10 @@ public static class SystemHealth
     private static ulong _lastIdle, _lastKernel, _lastUser;
     private static readonly ConcurrentDictionary<string, (DateTime MeasuredUtc, long Bytes)> FolderSizes = new(StringComparer.OrdinalIgnoreCase);
     private static readonly ConcurrentDictionary<string, bool> FolderSizeRunning = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>Bumped by ForgetFolderSize, so a scan that started before it cannot write the old size back.</summary>
+    private static readonly Dictionary<string, long> FolderSizeGenerations = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly object FolderSizeGate = new();
+    private static readonly ConcurrentDictionary<string, (DateTime WriteUtc, string Version)> RunnerVersions = new(StringComparer.OrdinalIgnoreCase);
     private static readonly TimeSpan FolderSizeLifetime = TimeSpan.FromMinutes(10);
 
     public static HealthSnapshot Read(IEnumerable<string> runnerRoots)
@@ -91,8 +95,10 @@ public static class SystemHealth
         try
         {
             using var hklm = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64);
-            if (hklm.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired") != null) return true;
-            if (hklm.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending") != null) return true;
+            using (var update = hklm.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired"))
+                if (update != null) return true;
+            using (var servicing = hklm.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending"))
+                if (servicing != null) return true;
             using var session = hklm.OpenSubKey(@"SYSTEM\CurrentControlSet\Control\Session Manager");
             return session?.GetValue("PendingFileRenameOperations") is string[] { Length: > 0 };
         }
@@ -109,16 +115,33 @@ public static class SystemHealth
         var cached = FolderSizes.TryGetValue(path, out var entry) ? entry : ((DateTime, long)?)null;
         if ((cached == null || DateTime.UtcNow - cached.Value.Item1 > FolderSizeLifetime) && FolderSizeRunning.TryAdd(path, true))
         {
+            long generation;
+            lock (FolderSizeGate) generation = FolderSizeGenerations.GetValueOrDefault(path);
             _ = Task.Run(() =>
             {
-                try { FolderSizes[path] = (DateTime.UtcNow, MeasureFolder(path)); }
+                try
+                {
+                    var bytes = MeasureFolder(path);
+                    lock (FolderSizeGate)
+                    {
+                        if (FolderSizeGenerations.GetValueOrDefault(path) == generation)
+                            FolderSizes[path] = (DateTime.UtcNow, bytes);
+                    }
+                }
                 finally { FolderSizeRunning.TryRemove(path, out _); }
             });
         }
         return cached?.Item2;
     }
 
-    public static void ForgetFolderSize(string path) => FolderSizes.TryRemove(path, out _);
+    public static void ForgetFolderSize(string path)
+    {
+        lock (FolderSizeGate)
+        {
+            FolderSizeGenerations[path] = FolderSizeGenerations.GetValueOrDefault(path) + 1;
+            FolderSizes.TryRemove(path, out _);
+        }
+    }
 
     private static long MeasureFolder(string path)
     {
@@ -145,11 +168,17 @@ public static class SystemHealth
             {
                 var file = Path.Combine(root, "bin", name);
                 if (!File.Exists(file)) continue;
-                var info = FileVersionInfo.GetVersionInfo(file);
-                var version = info.ProductVersion ?? info.FileVersion ?? string.Empty;
-                var plus = version.IndexOf('+');
-                if (plus > 0) version = version[..plus];
-                if (!string.IsNullOrWhiteSpace(version)) return version.Trim();
+                var written = File.GetLastWriteTimeUtc(file);
+                if (!RunnerVersions.TryGetValue(file, out var cached) || cached.WriteUtc != written)
+                {
+                    var info = FileVersionInfo.GetVersionInfo(file);
+                    var text = info.ProductVersion ?? info.FileVersion ?? string.Empty;
+                    var plus = text.IndexOf('+');
+                    if (plus > 0) text = text[..plus];
+                    cached = (written, text.Trim());
+                    RunnerVersions[file] = cached;
+                }
+                if (!string.IsNullOrWhiteSpace(cached.Version)) return cached.Version;
             }
         }
         catch { }

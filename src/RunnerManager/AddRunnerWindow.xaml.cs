@@ -112,6 +112,26 @@ public partial class AddRunnerWindow : Window
             DialogWindow.Info(this, "Missing information", "Runner name and install folder are required.");
             return;
         }
+        var registrationUrl = RunnerService.NormalizeRegistrationUrl(repo);
+        if (RunnerService.RegistrationUrlProblem(registrationUrl) is { } urlProblem)
+        {
+            DialogWindow.Info(this, "Invalid repository", urlProblem);
+            RepositoryUrlBox.Focus();
+            return;
+        }
+        if (RunnerService.RunnerNameProblem(runnerName) is { } nameProblem)
+        {
+            DialogWindow.Info(this, "Invalid runner name", nameProblem);
+            RunnerNameBox.Focus();
+            return;
+        }
+        var labels = LabelsBox.Text.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (RunnerService.LabelsProblem(labels) is { } labelProblem)
+        {
+            DialogWindow.Info(this, "Invalid labels", labelProblem);
+            LabelsBox.Focus();
+            return;
+        }
         if (Directory.Exists(install) && Directory.EnumerateFileSystemEntries(install).Any())
         {
             DialogWindow.Info(this, "Folder is not empty", "Choose an empty or new folder for the runner.");
@@ -119,11 +139,11 @@ public partial class AddRunnerWindow : Window
         }
         Setup = new RunnerSetup
         {
-            RepositoryUrl = RunnerService.NormalizeRegistrationUrl(repo),
+            RepositoryUrl = registrationUrl,
             CheckWorkflows = CheckWorkflowsToggle.IsChecked == true,
             RunnerName = runnerName,
             InstallPath = install,
-            Labels = LabelsBox.Text.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            Labels = labels
         };
         DialogResult = true;
     }
