@@ -233,12 +233,18 @@ public static class AppUpdater
         {
             // Going from a multi-file build to a single-file exe: clear the old app files so only the exe remains.
             if (files.Count == 1)
+            {
                 foreach (var stale in Directory.EnumerateFiles(InstallDir)
                              .Where(f => !Path.GetFileName(f).Equals(AssetName, StringComparison.OrdinalIgnoreCase) && !f.Contains(".old.")))
                 {
                     try { File.Delete(stale); }
                     catch { try { File.Move(stale, $"{stale}.{DateTime.UtcNow.Ticks}.old{Path.GetExtension(stale)}"); } catch { } }
                 }
+                foreach (var folder in Directory.EnumerateDirectories(InstallDir))
+                {
+                    try { Directory.Delete(folder, recursive: true); } catch { }
+                }
+            }
             foreach (var (source, relative) in files)
             {
                 var destination = Path.Combine(InstallDir, relative);
