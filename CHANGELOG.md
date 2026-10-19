@@ -3,6 +3,12 @@
 Runner Manager updates itself from [Releases](https://github.com/Sandiozo/runner-manager/releases): open
 **Settings → Updates**, or click **Update** on a PC's card.
 
+## 2.2.5
+
+- New download, **RunnerManagerSetup-standalone.exe**, that includes .NET, for PCs without the .NET 10 Desktop
+  Runtime.
+- Release notes list a checksum for each download.
+
 ## 2.2.4
 
 - Moving, repairing or converting a runner of a renamed repository works. Runner Manager now registers runners with

@@ -123,8 +123,8 @@ To publish a release, push a version tag; the version comes from the tag. The **
 builds the exe, checks that it starts, and attaches it to a GitHub release.
 
 ```powershell
-git tag v2.2.5
-git push origin v2.2.5
+git tag v2.2.6
+git push origin v2.2.6
 ```
 
 ## Project layout
