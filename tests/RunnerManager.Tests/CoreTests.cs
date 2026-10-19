@@ -454,8 +454,27 @@ public class FleetConfigTests
     private static void WriteRaw(string json)
     {
         Directory.CreateDirectory(FleetConfig.StateDir);
-        File.WriteAllText(ConfigPath, json);
-        File.SetLastWriteTimeUtc(ConfigPath, DateTime.UtcNow.AddDays(-1).AddTicks(Random.Shared.Next()));
+        WithRetry(() =>
+        {
+            File.WriteAllText(ConfigPath, json);
+            File.SetLastWriteTimeUtc(ConfigPath, DateTime.UtcNow.AddDays(-1).AddTicks(Random.Shared.Next()));
+        });
+    }
+
+    private static void DeleteConfig() => WithRetry(() => File.Delete(ConfigPath));
+
+    /// <summary>Antivirus scanners (Windows Defender on CI machines) briefly hold new files open, so the tests' own file steps retry.</summary>
+    private static void WithRetry(Action action)
+    {
+        for (var attempt = 0; ; attempt++)
+        {
+            try
+            {
+                action();
+                return;
+            }
+            catch (IOException) when (attempt < 20) { Thread.Sleep(100); }
+        }
     }
 
     /// <summary>Checks that fleet.json has no "FleetKey" property and no value holding the key in plain text.</summary>
@@ -479,7 +498,7 @@ public class FleetConfigTests
             AssertNoPlainKey(key);
             Assert.Equal(key, FleetConfig.Current.FleetKey);
         }
-        finally { File.Delete(ConfigPath); }
+        finally { DeleteConfig(); }
     }
 
     [Fact]
@@ -496,7 +515,7 @@ public class FleetConfigTests
             var root = AssertNoPlainKey(key);
             Assert.Equal(protectedKey, root.GetProperty("ProtectedFleetKey").GetString());
         }
-        finally { File.Delete(ConfigPath); }
+        finally { DeleteConfig(); }
     }
 
     [Fact]
@@ -510,7 +529,7 @@ public class FleetConfigTests
                 Assert.Throws<IOException>(() => FleetConfig.Update(c => c.ManualAddresses.Add("example-pc")));
             Assert.Equal(saved, File.ReadAllText(ConfigPath));
         }
-        finally { File.Delete(ConfigPath); }
+        finally { DeleteConfig(); }
     }
 
     [Fact]
@@ -527,8 +546,8 @@ public class FleetConfigTests
         }
         finally
         {
-            File.Delete(ConfigPath);
-            foreach (var file in Directory.GetFiles(FleetConfig.StateDir, "fleet.json.damaged-*")) File.Delete(file);
+            DeleteConfig();
+            foreach (var file in Directory.GetFiles(FleetConfig.StateDir, "fleet.json.damaged-*")) WithRetry(() => File.Delete(file));
         }
     }
 
@@ -537,14 +556,14 @@ public class FleetConfigTests
     {
         try
         {
-            if (File.Exists(ConfigPath)) File.Delete(ConfigPath);
+            DeleteConfig();
             Assert.True(FleetConfig.Current.Watchdog);
             FleetConfig.Update(c => c.ManualAddresses.Add("example-pc"));
             Assert.Contains("example-pc", File.ReadAllText(ConfigPath));
             Assert.Contains("example-pc", FleetConfig.Current.ManualAddresses);
             Assert.Empty(Directory.GetFiles(FleetConfig.StateDir, "fleet.json.*.tmp"));
         }
-        finally { File.Delete(ConfigPath); }
+        finally { DeleteConfig(); }
     }
 }
 
