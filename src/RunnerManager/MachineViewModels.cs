@@ -206,7 +206,7 @@ public sealed class MachineInfo : INotifyPropertyChanged
     private DateTime _updatedUtc;
     public event PropertyChangedEventHandler? PropertyChanged;
 
-    /// <summary>Newest Runner Manager release in the relay repository, set by the dashboard.</summary>
+    /// <summary>Newest Runner Manager release, set by the dashboard.</summary>
     public static string LatestAppVersion { get; set; } = string.Empty;
     /// <summary>Whether Remote Desktop Commander is set up on any PC (then its tile and texts are shown).</summary>
     public static bool ShowRdc { get; set; }

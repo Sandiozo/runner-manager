@@ -9,7 +9,7 @@ using System.Text.RegularExpressions;
 namespace RunnerManager;
 
 /// <summary>
-/// Installs Runner Manager from the relay repository's GitHub Releases into
+/// Installs Runner Manager from its GitHub Releases into
 /// %LOCALAPPDATA%\Programs\RunnerManager, so PCs don't need the .NET SDK or a git checkout.
 /// </summary>
 public static class AppUpdater
@@ -23,10 +23,9 @@ public static class AppUpdater
     private static readonly TimeSpan CheckInterval = TimeSpan.FromMinutes(30);
     private static ReleaseInfo? _latest;
     private static DateTime _checkedUtc = DateTime.MinValue;
-    private static string _checkedRepository = string.Empty;
 
-    /// <summary>Where releases are published (Settings → Updates).</summary>
-    public static string ReleaseRepository => FleetConfig.Current.RelayRepository;
+    /// <summary>Where Runner Manager's releases are published.</summary>
+    public const string ReleaseRepository = "Sandiozo/runner-manager";
 
     public static string CurrentVersion
     {
@@ -57,11 +56,9 @@ public static class AppUpdater
 
     public static async Task<ReleaseInfo?> GetLatestReleaseAsync(bool force = false)
     {
-        var repository = ReleaseRepository;
-        if (!force && _checkedRepository == repository && DateTime.UtcNow - _checkedUtc < CheckInterval) return _latest;
-        var result = await GitHubCli.RunAsync($"api repos/{repository}/releases/latest");
+        if (!force && DateTime.UtcNow - _checkedUtc < CheckInterval) return _latest;
+        var result = await GitHubCli.RunAsync($"api repos/{ReleaseRepository}/releases/latest");
         _checkedUtc = DateTime.UtcNow;
-        _checkedRepository = repository;
         if (result.ExitCode != 0)
         {
             _latest = null;

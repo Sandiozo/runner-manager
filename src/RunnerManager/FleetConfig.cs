@@ -11,17 +11,12 @@ namespace RunnerManager;
 /// </summary>
 public sealed class FleetConfig
 {
-    public const string DefaultRelayRepository = "Sandiozo/runner-manager";
-    /// <summary>The repository's name before it was renamed. GitHub redirects it, but saved settings are updated.</summary>
-    private const string LegacyRelayRepository = "Sandiozo/runner-widget";
     public static readonly string StateDir = AppPaths.StateDir;
     private static readonly string ConfigPath = Path.Combine(StateDir, "fleet.json");
     private static readonly object Gate = new();
     private static FleetConfig? _cached;
     private static DateTime _cachedStamp;
 
-    /// <summary>Repository whose GitHub Releases Runner Manager installs updates from (the property name predates releases).</summary>
-    public string RelayRepository { get; set; } = DefaultRelayRepository;
     /// <summary>The fleet pairing code, encrypted for this Windows user with DPAPI.</summary>
     public string ProtectedFleetKey { get; set; } = string.Empty;
     /// <summary>Other PCs in the fleet and where they were last reached.</summary>
@@ -56,11 +51,7 @@ public sealed class FleetConfig
         {
             if (File.Exists(ConfigPath))
             {
-                var config = JsonSerializer.Deserialize<FleetConfig>(File.ReadAllText(ConfigPath)) ?? new FleetConfig();
-                if (!IsValidRepository(config.RelayRepository)
-                    || config.RelayRepository.Equals(LegacyRelayRepository, StringComparison.OrdinalIgnoreCase))
-                    config.RelayRepository = DefaultRelayRepository;
-                return config;
+                return JsonSerializer.Deserialize<FleetConfig>(File.ReadAllText(ConfigPath)) ?? new FleetConfig();
             }
         }
         catch { }
@@ -99,13 +90,6 @@ public sealed class FleetConfig
             c.ManuallyStopped.RemoveAll(x => x.Equals(key, StringComparison.OrdinalIgnoreCase));
             if (stopped) c.ManuallyStopped.Add(key);
         });
-    }
-
-    public static bool IsValidRepository(string? value)
-    {
-        if (string.IsNullOrWhiteSpace(value)) return false;
-        var parts = value.Split('/');
-        return parts.Length == 2 && parts.All(p => p.Length > 0 && p.All(c => char.IsLetterOrDigit(c) || c is '-' or '_' or '.'));
     }
 
     // ----- Fleet key -----

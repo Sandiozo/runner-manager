@@ -35,7 +35,6 @@ public partial class SettingsWindow : Window
         FailedRunsToggle.IsChecked = settings.NotifyOnFailedRuns;
         CloseToTrayToggle.IsChecked = settings.CloseToTray;
         WatchdogToggle.IsChecked = FleetConfig.Current.Watchdog;
-        RelayBox.Text = FleetConfig.Current.RelayRepository;
         NavVersionText.Text = $"Runner Manager {AppUpdater.CurrentVersion}";
         VersionRow.Title = $"Runner Manager {AppUpdater.CurrentVersion}";
         DataRow.Description = FleetConfig.StateDir;
@@ -371,19 +370,6 @@ public partial class SettingsWindow : Window
     {
         var url = _release?.HtmlUrl is { Length: > 0 } html ? html : $"https://github.com/{AppUpdater.ReleaseRepository}/releases";
         Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
-    }
-
-    private async void RelaySave_Click(object sender, RoutedEventArgs e)
-    {
-        var repository = RelayBox.Text.Trim();
-        if (!FleetConfig.IsValidRepository(repository))
-        {
-            RelayRow.Description = "Enter the repository as owner/name.";
-            return;
-        }
-        FleetConfig.Update(c => c.RelayRepository = repository);
-        RelayRow.Description = "Saved. Updates now come from this repository.";
-        await CheckForUpdatesAsync(force: true);
     }
 
     private void OpenDataFolder_Click(object sender, RoutedEventArgs e)

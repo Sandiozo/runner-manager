@@ -231,15 +231,6 @@ public class MiscTests
     [InlineData(20, 1000, true)]
     public void Disk_IsLowBelowAbsoluteOrRelativeThreshold(double freeGb, double totalGb, bool expected)
         => Assert.Equal(expected, new DiskStatus { Name = "C:", FreeGb = freeGb, TotalGb = totalGb }.IsLow);
-
-    [Theory]
-    [InlineData("Sandiozo/runner-manager", true)]
-    [InlineData("owner/repo.name_1", true)]
-    [InlineData("owner", false)]
-    [InlineData("owner/repo/extra", false)]
-    [InlineData("owner/re po", false)]
-    public void RelayRepository_IsValidated(string value, bool expected)
-        => Assert.Equal(expected, FleetConfig.IsValidRepository(value));
 }
 
 public class RunnerRemovalTests

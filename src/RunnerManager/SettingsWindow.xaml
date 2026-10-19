@@ -279,13 +279,6 @@
                     <TextBlock Text="ADVANCED" Style="{StaticResource GroupLabel}"/>
                     <Border Style="{StaticResource Group}">
                         <StackPanel>
-                            <local:SettingRow x:Name="RelayRow" Glyph="&#xE943;" Title="Release repository" Description="Where updates come from.">
-                                <StackPanel Orientation="Horizontal">
-                                    <TextBox x:Name="RelayBox" Tag="owner/repository" Width="190"/>
-                                    <Button x:Name="RelaySaveButton" Content="Save" Margin="6,0,0,0" Click="RelaySave_Click"/>
-                                </StackPanel>
-                            </local:SettingRow>
-                            <Border Style="{StaticResource Divider}"/>
                             <local:SettingRow x:Name="DataRow" Glyph="&#xE838;" Title="Data and logs">
                                 <Button Content="Open folder" Style="{StaticResource GhostButton}" Click="OpenDataFolder_Click"/>
                             </local:SettingRow>
