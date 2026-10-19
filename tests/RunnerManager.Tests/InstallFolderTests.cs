@@ -42,6 +42,42 @@ public class InstallFolderTests
     }
 
     [Fact]
+    public void RemovalScript_KeepsOtherFiles_AndRemovesAFolderLeftEmpty()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"rm-remove-{Guid.NewGuid():N}");
+        var shared = Path.Combine(root, "shared", "RunnerManager");
+        var own = Path.Combine(root, "own", "RunnerManager");
+        Directory.CreateDirectory(shared);
+        Directory.CreateDirectory(own);
+        try
+        {
+            File.WriteAllText(Path.Combine(shared, "RunnerManager.exe"), string.Empty);
+            File.WriteAllText(Path.Combine(shared, "notes.txt"), "keep");
+            File.WriteAllText(Path.Combine(own, "RunnerManager.exe"), string.Empty);
+            File.WriteAllText(Path.Combine(own, "RunnerManager.123.old.exe"), string.Empty);
+
+            RunPowerShell(Installer.RemoveProgramFilesScript(shared));
+            RunPowerShell(Installer.RemoveProgramFilesScript(own));
+
+            Assert.False(File.Exists(Path.Combine(shared, "RunnerManager.exe")));
+            Assert.True(File.Exists(Path.Combine(shared, "notes.txt")));
+            Assert.False(Directory.Exists(own));
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    private static void RunPowerShell(string script)
+    {
+        using var process = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("powershell.exe")
+        {
+            ArgumentList = { "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script },
+            UseShellExecute = false,
+            CreateNoWindow = true
+        })!;
+        Assert.True(process.WaitForExit(30_000), "The removal script did not finish within 30 seconds.");
+    }
+
+    [Fact]
     public void Uninstall_RemovesTheDefaultFolder_ButOnlyOwnFilesElsewhere()
     {
         Assert.Contains("-Recurse", Installer.RemoveProgramFilesScript(AppUpdater.DefaultInstallDir));

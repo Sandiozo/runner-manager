@@ -266,12 +266,18 @@ public static class Installer
     internal static string RemoveProgramFilesScript(string folder)
     {
         var path = folder.Replace("'", "''");
-        if (AppUpdater.IsDefaultInstallDir(folder))
-            return $"Remove-Item -LiteralPath '{path}' -Recurse -Force -ErrorAction SilentlyContinue";
-        return $"$f = '{path}'; foreach ($p in 'RunnerManager.exe', 'RunnerManager.exe.new', 'RunnerManager.*.old.exe') " +
-               "{ Get-ChildItem -LiteralPath $f -Filter $p -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue }; " +
-               "if ((Test-Path -LiteralPath $f) -and -not (Get-ChildItem -LiteralPath $f -Force -ErrorAction SilentlyContinue)) " +
-               "{ Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue }";
+        // Retried for about 20 seconds: a process that just exited, or one using the folder as its working folder, can
+        // still hold it for a moment.
+        var remove = AppUpdater.IsDefaultInstallDir(folder)
+            ? "Remove-Item -LiteralPath $f -Recurse -Force -ErrorAction SilentlyContinue"
+            : "foreach ($p in 'RunnerManager.exe', 'RunnerManager.exe.new', 'RunnerManager.*.old.exe') " +
+              "{ Get-ChildItem -LiteralPath $f -Filter $p -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue }; " +
+              "$left = @(Get-ChildItem -LiteralPath $f -Force -ErrorAction SilentlyContinue); " +
+              "if ($left.Count -eq 0) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue } " +
+              // Only other files are left: the folder stays, and there is nothing more to wait for.
+              "elseif (-not ($left | Where-Object { $_.Name -like 'RunnerManager*' })) { break }";
+        return $"$f = '{path}'; for ($i = 0; $i -lt 10 -and (Test-Path -LiteralPath $f); $i++) " +
+               $"{{ {remove}; if (Test-Path -LiteralPath $f) {{ Start-Sleep -Seconds 2 }} }}";
     }
 
     /// <summary>Creates or updates a shortcut to <paramref name="target"/>.</summary>

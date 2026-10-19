@@ -238,6 +238,8 @@ public static class RemoteDesktopManager
         if (!File.Exists(npx)) npx = "npx.cmd";
         var psi = new ProcessStartInfo("powershell.exe")
         {
+            // Not the install folder: a long-running process there would keep setup from moving or removing it.
+            WorkingDirectory = StateDir,
             UseShellExecute = false,
             CreateNoWindow = !visible,
             WindowStyle = visible ? ProcessWindowStyle.Normal : ProcessWindowStyle.Hidden
