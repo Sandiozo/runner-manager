@@ -86,8 +86,10 @@ public static class FleetCrypto
 
     /// <summary>"RW1!" | HMAC(nonce | body) | body — proves the answer comes from a fleet member and fits this probe.</summary>
     public static byte[] Answer(byte[] discoveryKey, byte[] probeNonce, string body)
+        => Answer(discoveryKey, probeNonce, Encoding.UTF8.GetBytes(body));
+
+    public static byte[] Answer(byte[] discoveryKey, byte[] probeNonce, byte[] bodyBytes)
     {
-        var bodyBytes = Encoding.UTF8.GetBytes(body);
         var mac = HMACSHA256.HashData(discoveryKey, Concat(probeNonce, bodyBytes));
         return Concat(AnswerMagic, mac, bodyBytes);
     }
@@ -100,7 +102,7 @@ public static class FleetCrypto
         return CryptographicOperations.FixedTimeEquals(expected, packet.AsSpan(4, 32)) ? Encoding.UTF8.GetString(body) : null;
     }
 
-    private static byte[] Concat(params byte[][] parts)
+    internal static byte[] Concat(params byte[][] parts)
     {
         var result = new byte[parts.Sum(p => p.Length)];
         var offset = 0;

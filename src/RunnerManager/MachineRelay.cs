@@ -2,7 +2,6 @@ using System.IO;
 using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
-using System.Text.Json.Serialization;
 using System.Threading.Channels;
 
 namespace RunnerManager;
@@ -30,6 +29,8 @@ public static class MachineRelay
     private static readonly SemaphoreSlim StatusGate = new(1, 1);
     private static MachineStatusPayload? _cachedStatus;
     private static DateTime _cachedStatusUtc = DateTime.MinValue;
+    // Bumped whenever the cached status goes stale, so a status build already in progress does not store an old result.
+    private static int _statusVersion;
     private static int _rdcUnhealthyChecks;
     private static bool _restartAgentAfterUpdate;
 
@@ -66,7 +67,7 @@ public static class MachineRelay
         var fetches = peers.Select(p => FetchPeerAsync(p.Name, p.Address, p.LastSeenUtc))
             .Concat(unnamed.Select(a => FetchPeerAsync(null, a, DateTime.MinValue)));
         var results = await Task.WhenAll(fetches);
-        machines.AddRange(results.Where(m => m != null && !m.IsLocal).Cast<MachineInfo>()
+        machines.AddRange(results.Where(m => !m.IsLocal)
             .GroupBy(m => m.MachineKey).Select(g => g.First())
             .OrderBy(m => m.MachineName, StringComparer.OrdinalIgnoreCase));
         return machines;
@@ -76,8 +77,9 @@ public static class MachineRelay
     private static async Task<MachineInfo> ReadThisPcAsync()
     {
         var installed = await IsAgentInstalledAsync();
+        var running = await IsAgentRunningAsync();
         var outdated = false;
-        if (installed && FleetConfig.Current.FleetKey != null && await IsAgentRunningAsync())
+        if (installed && running && FleetConfig.Current.FleetKey != null)
         {
             try
             {
@@ -90,24 +92,28 @@ public static class MachineRelay
             }
             catch
             {
-                // Agents from before the direct connection don't listen at all.
-                outdated = true;
+                // A failed call alone (an agent still starting, a busy PC) is no reason to reinstall it; only an older
+                // build is. Agents from before the direct connection do not listen at all, and their build is older.
+                outdated = !await LocalAgentIsCurrentAsync();
             }
         }
-        else if (installed && await IsAgentRunningAsync())
+        else if (installed && running)
         {
             outdated = !await LocalAgentIsCurrentAsync();
         }
-        return await ReadLocalMachineAsync(string.Empty, outdated);
+        return await ReadLocalMachineAsync(outdated, running);
     }
 
     /// <summary>Whether the agent task runs this exact build (used before a pairing code exists).</summary>
     private static async Task<bool> LocalAgentIsCurrentAsync()
     {
         var exe = await AgentTaskExecutableAsync();
-        if (string.IsNullOrEmpty(exe) || !File.Exists(exe)) return false;
-        var version = System.Diagnostics.FileVersionInfo.GetVersionInfo(exe).ProductVersion ?? string.Empty;
-        return !AppUpdater.IsNewer(AppUpdater.CurrentVersion, version);
+        return await Task.Run(() =>
+        {
+            if (string.IsNullOrEmpty(exe) || !File.Exists(exe)) return false;
+            var version = FileVersionInfo.GetVersionInfo(exe).ProductVersion ?? string.Empty;
+            return !AppUpdater.IsNewer(AppUpdater.CurrentVersion, version);
+        });
     }
 
     /// <summary>
@@ -117,16 +123,11 @@ public static class MachineRelay
     {
         var exe = await AppUpdater.InstallCurrentBuildAsync(log);
         log("Restarting the fleet agent...");
-        await ScheduledTasks.EndTaskAsync(ScheduledTasks.AgentTaskName);
-        await RegisterAgentTaskAsync(exe);
-        await FleetNetwork.EnsureFirewallRulesAsync();
-        await Task.Delay(1500);
-        var (code, output) = await ScheduledTasks.RunTaskAsync(ScheduledTasks.AgentTaskName);
-        if (code != 0) throw new InvalidOperationException(output.Trim());
+        await ReplaceAndStartAgentTaskAsync(exe);
         log($"Fleet agent now runs v{AppUpdater.CurrentVersion} from {exe}.");
     }
 
-    private static async Task<MachineInfo?> FetchPeerAsync(string? name, string address, DateTime lastSeenUtc)
+    private static async Task<MachineInfo> FetchPeerAsync(string? name, string address, DateTime lastSeenUtc)
     {
         var key = name == null ? "*" : Sanitize(name);
         string problem;
@@ -237,12 +238,22 @@ public static class MachineRelay
             try { status = (await FleetNetwork.CallAsync(AddressOf(machineKey), Sanitize(machineKey), new FleetRequest { Op = "status" })).Status; }
             catch { continue; }
             if (status == null || !status.LastCommandId.Equals(commandId, StringComparison.OrdinalIgnoreCase)) continue;
-            if (status.LastCommandResult.Contains("failed", StringComparison.OrdinalIgnoreCase))
+            if (IsFailedResult(status.LastCommandResult))
                 throw new InvalidOperationException(status.LastCommandResult);
             return status.LastCommandResult;
         }
         throw new TimeoutException($"{machineKey} did not report a result within {(int)timeout.TotalMinutes} minutes. Check its fleet agent log.");
     }
+
+    /// <summary>
+    /// Whether a command result reports a failure. Agents (2.1 and later) write failures as
+    /// "{target} {action} failed: {reason}"; successful results may mention "failed" elsewhere.
+    /// </summary>
+    internal static bool IsFailedResult(string result)
+        => FailedResultPattern.IsMatch(result);
+
+    private static readonly System.Text.RegularExpressions.Regex FailedResultPattern =
+        new(@"^(rdc|runner|agent|machine) \S+ failed: ", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
 
     // ================= Agent =================
 
@@ -260,13 +271,12 @@ public static class MachineRelay
         var lastResult = $"Fleet agent v{AppUpdater.CurrentVersion} started";
         AppendAgentLog($"Fleet agent v{AppUpdater.CurrentVersion} started (protocol {ProtocolVersion}) from {Environment.ProcessPath}.");
 
-        try { await FleetNetwork.EnsureFirewallRulesAsync(); }
-        catch (Exception ex) { AppendAgentLog($"Could not add firewall rules: {ex.Message}"); }
-
         var queue = Channel.CreateUnbounded<MachineCommand>();
+        // Runs on HTTP threads. The command loop skips IDs it already processed, so the processed set
+        // is only ever touched by the loop.
         string Enqueue(MachineCommand command)
         {
-            if (!state.Processed.Contains(command.Id)) queue.Writer.TryWrite(command);
+            queue.Writer.TryWrite(command);
             return command.Id;
         }
         async Task<MachineStatusPayload> StatusAsync()
@@ -275,12 +285,19 @@ public static class MachineRelay
             try
             {
                 // Several dashboards may poll at once; build the (WMI-heavy) status at most every two seconds.
-                if (_cachedStatus == null || DateTime.UtcNow - _cachedStatusUtc > TimeSpan.FromSeconds(2))
+                var cached = _cachedStatus;
+                if (cached == null || DateTime.UtcNow - _cachedStatusUtc > TimeSpan.FromSeconds(2))
                 {
-                    _cachedStatus = BuildPayload(await GatherLocalStateAsync(), state.LastCommandId, lastResult);
-                    _cachedStatusUtc = DateTime.UtcNow;
+                    var version = Volatile.Read(ref _statusVersion);
+                    cached = BuildPayload(await GatherLocalStateAsync(), state.LastCommandId, lastResult);
+                    // Only keep it when nothing changed while it was built.
+                    if (version == Volatile.Read(ref _statusVersion))
+                    {
+                        _cachedStatus = cached;
+                        _cachedStatusUtc = DateTime.UtcNow;
+                    }
                 }
-                return _cachedStatus with { UpdatedUtc = DateTime.UtcNow };
+                return cached with { UpdatedUtc = DateTime.UtcNow };
             }
             finally { StatusGate.Release(); }
         }
@@ -288,6 +305,10 @@ public static class MachineRelay
         using var server = new AgentServer(StatusAsync, Enqueue, LogReader.ReadAsync);
         try { server.Start(); }
         catch (Exception ex) { AppendAgentLog($"Could not listen on port {FleetNetwork.AgentPort}: {ex.Message}"); }
+
+        // After the listener is up, so a freshly started agent answers right away.
+        try { await FleetNetwork.EnsureFirewallRulesAsync(); }
+        catch (Exception ex) { AppendAgentLog($"Could not add firewall rules: {ex.Message}"); }
 
         var initialRdc = RemoteDesktopManager.ReadSnapshot();
         if (RemoteDesktopManager.IsConfigured() && !IsManuallyStopped("rdc"))
@@ -336,7 +357,7 @@ public static class MachineRelay
                     {
                         state.MarkProcessed(command.Id);
                         SaveAgentState(state);
-                        _cachedStatus = null;
+                        InvalidateStatus();
                     }
                     if (_restartAgentAfterUpdate)
                     {
@@ -349,7 +370,7 @@ public static class MachineRelay
                 if (DateTime.UtcNow - lastWatchdogUtc >= WatchdogInterval)
                 {
                     lastWatchdogUtc = DateTime.UtcNow;
-                    if (await RunWatchdogAsync(await GatherLocalStateAsync())) _cachedStatus = null;
+                    if (await RunWatchdogAsync(await GatherLocalStateAsync())) InvalidateStatus();
                 }
             }
             catch (Exception ex)
@@ -358,6 +379,12 @@ public static class MachineRelay
                 await Task.Delay(1000, CancellationToken.None);
             }
         }
+    }
+
+    private static void InvalidateStatus()
+    {
+        Interlocked.Increment(ref _statusVersion);
+        _cachedStatus = null;
     }
 
     private static async Task<string> ExecuteCommandAsync(MachineCommand command)
@@ -568,7 +595,26 @@ public static class MachineRelay
 
     // ================= Agent task =================
 
-    public static Task<bool> IsAgentInstalledAsync() => ScheduledTasks.ExistsAsync(ScheduledTasks.AgentTaskName);
+    private sealed record InstalledCheck(bool Installed, DateTime CheckedUtc);
+    private static InstalledCheck? _agentInstalled;
+    private static int _agentInstalledVersion;
+    private static readonly TimeSpan AgentInstalledCacheTime = TimeSpan.FromSeconds(60);
+
+    /// <summary>Whether the agent task exists. Cached for a minute (it runs schtasks.exe); changes here clear it.</summary>
+    public static async Task<bool> IsAgentInstalledAsync()
+    {
+        if (_agentInstalled is { } cached && DateTime.UtcNow - cached.CheckedUtc < AgentInstalledCacheTime) return cached.Installed;
+        var version = Volatile.Read(ref _agentInstalledVersion);
+        var installed = await ScheduledTasks.ExistsAsync(ScheduledTasks.AgentTaskName);
+        if (version == Volatile.Read(ref _agentInstalledVersion)) _agentInstalled = new InstalledCheck(installed, DateTime.UtcNow);
+        return installed;
+    }
+
+    private static void ForgetAgentInstalled()
+    {
+        Interlocked.Increment(ref _agentInstalledVersion);
+        _agentInstalled = null;
+    }
 
     public static Task<bool> IsAgentRunningAsync() => Task.Run(() =>
     {
@@ -601,11 +647,15 @@ public static class MachineRelay
 
     public static async Task RemoveAgentTaskAsync()
     {
-        foreach (var task in new[] { ScheduledTasks.AgentTaskName, ScheduledTasks.LegacyAgentTaskName })
+        try
         {
-            await ScheduledTasks.EndTaskAsync(task);
-            await ScheduledTasks.DeleteTaskAsync(task);
+            foreach (var task in new[] { ScheduledTasks.AgentTaskName, ScheduledTasks.LegacyAgentTaskName })
+            {
+                await ScheduledTasks.EndTaskAsync(task);
+                await ScheduledTasks.DeleteTaskAsync(task);
+            }
         }
+        finally { ForgetAgentInstalled(); }
         await FleetNetwork.RemoveFirewallRulesAsync();
     }
 
@@ -649,11 +699,17 @@ public static class MachineRelay
         var exe = File.Exists(AppUpdater.InstalledExe) ? AppUpdater.InstalledExe : Environment.ProcessPath;
         if (string.IsNullOrWhiteSpace(exe) || !exe.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("Run RunnerManager.exe from a build output before installing the fleet agent.");
-        // Replace a running (possibly older) agent: stop it, re-register, start the new one.
+        await ReplaceAndStartAgentTaskAsync(exe);
+    }
+
+    /// <summary>Replaces a running (possibly older) agent: stops it, re-registers the task for exe, and starts it.</summary>
+    private static async Task ReplaceAndStartAgentTaskAsync(string exe)
+    {
+        ForgetAgentInstalled();
         await ScheduledTasks.EndTaskAsync(ScheduledTasks.AgentTaskName);
         await RegisterAgentTaskAsync(exe);
         await FleetNetwork.EnsureFirewallRulesAsync();
-        await Task.Delay(1000);
+        await Task.Delay(1500);
         var (code, output) = await ScheduledTasks.RunTaskAsync(ScheduledTasks.AgentTaskName);
         if (code != 0) throw new InvalidOperationException(output.Trim());
     }
@@ -695,26 +751,35 @@ public static class MachineRelay
         return true;
     }
 
-    internal static Task RegisterAgentTaskAsync(string exe) => ScheduledTasks.RegisterLogonTaskAsync(
-        ScheduledTasks.AgentTaskName, exe, "--agent",
-        "Runner Manager fleet agent. Reports runner and Remote Desktop Commander status and runs commands from other PCs.", restartOnFailure: true);
+    internal static async Task RegisterAgentTaskAsync(string exe)
+    {
+        try
+        {
+            await ScheduledTasks.RegisterLogonTaskAsync(ScheduledTasks.AgentTaskName, exe, "--agent",
+                "Runner Manager fleet agent. Reports runner and Remote Desktop Commander status and runs commands from other PCs.", restartOnFailure: true);
+        }
+        finally { ForgetAgentInstalled(); }
+    }
 
     // ================= Local status =================
 
-    /// <summary>Local status as a MachineInfo, for showing this PC before it is enrolled or has published.</summary>
-    public static async Task<MachineInfo> ReadLocalMachineAsync(string lastResult, bool agentOutdated = false)
+    /// <summary>Local status as a MachineInfo, for showing this PC when its agent is not installed, not running or outdated.</summary>
+    private static async Task<MachineInfo> ReadLocalMachineAsync(bool agentOutdated, bool agentRunning)
     {
-        var payload = BuildPayload(await GatherLocalStateAsync(), LoadAgentState().LastCommandId, lastResult);
+        var local = await GatherLocalStateAsync(agentRunning);
+        var payload = await Task.Run(() => BuildPayload(local, LoadAgentState().LastCommandId, string.Empty));
         return MachineInfo.FromPayload(LocalMachineKey, payload, localOnly: true, localAgentOutdated: agentOutdated);
     }
 
     private sealed record LocalState(List<RunnerInfo> Runners, RemoteInfo Rdc, RemoteRelayProbe Relay, bool AgentRunning, HealthSnapshot Health);
 
-    private static async Task<LocalState> GatherLocalStateAsync()
+    /// <param name="agentRunning">Whether the agent runs, when the caller already checked.</param>
+    private static async Task<LocalState> GatherLocalStateAsync(bool? agentRunning = null)
     {
-        var runnersTask = RunnerService.ReadSnapshotAsync(queryGitHub: false);
-        var relayTask = RemoteDesktopManager.ProbeRelayAsync();
-        var agentTask = IsAgentRunningAsync();
+        // The snapshots start with synchronous WMI and file work, so keep them off the calling (UI) thread.
+        var runnersTask = Task.Run(() => RunnerService.ReadSnapshotAsync(queryGitHub: false));
+        var relayTask = Task.Run(RemoteDesktopManager.ProbeRelayAsync);
+        var agentTask = agentRunning is { } known ? Task.FromResult(known) : IsAgentRunningAsync();
         var remote = await Task.Run(RemoteDesktopManager.ReadSnapshot);
         var runners = await runnersTask;
         var health = await Task.Run(() => SystemHealth.Read(runners.Select(r => r.InstallPath)));
@@ -778,20 +843,7 @@ public static class MachineRelay
         };
     }
 
-    // ================= Old GitHub relay =================
-
-    public static string Encode<T>(T value)
-        => Convert.ToBase64String(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(value)));
-
-    public static T? Decode<T>(string encoded)
-    {
-        try
-        {
-            var json = Encoding.UTF8.GetString(Convert.FromBase64String(encoded));
-            return JsonSerializer.Deserialize<T>(json);
-        }
-        catch { return default; }
-    }
+    // ================= Helpers and agent state =================
 
     public static string Sanitize(string value)
     {
@@ -932,7 +984,6 @@ public static class LogReader
 
 public sealed record LogPayload
 {
-    public string RequestId { get; init; } = string.Empty;
     public string Title { get; init; } = string.Empty;
     public string Text { get; init; } = string.Empty;
     public DateTime CreatedUtc { get; init; }
@@ -967,14 +1018,14 @@ public sealed record MachineStatusPayload
     public bool RebootPending { get; init; }
     public DiskStatus[] Disks { get; init; } = Array.Empty<DiskStatus>();
     public bool WatchdogEnabled { get; init; }
-    /// <summary>Fingerprint of this PC's fleet key; non-empty means it only accepts signed commands.</summary>
+    /// <summary>Short fingerprint of this PC's pairing code, so dashboards can spot a PC with a different code.</summary>
     public string SigningKeyId { get; init; } = string.Empty;
     public AgentEvent[] RecentEvents { get; init; } = Array.Empty<AgentEvent>();
     public MachineRunnerStatus[] Runners { get; init; } = Array.Empty<MachineRunnerStatus>();
 
     /// <summary>
     /// Everything except values that tick on their own (our heartbeat, the relay's last_seen, CPU and memory load),
-    /// so unchanged status can skip a publish or a UI rebuild.
+    /// so unchanged status can skip a UI rebuild.
     /// </summary>
     public string Fingerprint() => JsonSerializer.Serialize(this with
     {
@@ -995,9 +1046,4 @@ public sealed record MachineCommand
     public string RunnerName { get; init; } = string.Empty;
     public string[] RunnerLabels { get; init; } = Array.Empty<string>();
     public string Value { get; init; } = string.Empty;
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public MachineCommand[]? Queue { get; init; }
-
-    public IReadOnlyList<MachineCommand> AllCommands()
-        => Queue is { Length: > 0 } ? Queue : string.IsNullOrEmpty(Id) ? Array.Empty<MachineCommand>() : new[] { this with { Queue = null } };
 }

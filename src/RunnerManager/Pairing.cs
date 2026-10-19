@@ -27,7 +27,7 @@ public static class Pairing
     /// <summary>The 6-digit number both PCs show; derived from the exchanged secret and both public keys.</summary>
     public static string ComparisonCode(byte[] sharedSecret, byte[] hostPublicKey, byte[] joinerPublicKey)
     {
-        var hash = SHA256.HashData(Concat(Encoding.ASCII.GetBytes("rw-pair-code"), sharedSecret, hostPublicKey, joinerPublicKey));
+        var hash = SHA256.HashData(FleetCrypto.Concat(Encoding.ASCII.GetBytes("rw-pair-code"), sharedSecret, hostPublicKey, joinerPublicKey));
         var value = BitConverter.ToUInt32(hash, 0) % 1_000_000;
         return $"{value / 1000:000} {value % 1000:000}";
     }
@@ -43,16 +43,8 @@ public static class Pairing
         var found = new Dictionary<string, Host>(StringComparer.OrdinalIgnoreCase);
         using var udp = FleetNetwork.CreateProbeSocket();
         var targets = new HashSet<IPAddress> { IPAddress.Broadcast, IPAddress.Loopback };
-        foreach (var address in FleetNetworkBroadcasts()) targets.Add(address);
-        foreach (var host in extraHosts ?? Array.Empty<string>())
-        {
-            try
-            {
-                foreach (var ip in await Dns.GetHostAddressesAsync(host.Split(':')[0]))
-                    if (ip.AddressFamily == AddressFamily.InterNetwork) targets.Add(ip);
-            }
-            catch { }
-        }
+        foreach (var address in FleetNetwork.DirectedBroadcastAddresses()) targets.Add(address);
+        foreach (var ip in await FleetNetwork.ResolveIPv4Async(extraHosts ?? Array.Empty<string>())) targets.Add(ip);
         foreach (var target in targets)
         {
             try { await udp.SendAsync(FindMagic, FindMagic.Length, new IPEndPoint(target, announcePort)); } catch { }
@@ -112,8 +104,18 @@ public static class Pairing
         var key = FleetCrypto.Open(TransferKey(shared), Convert.FromBase64String(decision.Payload), "rw-pair-transfer")
                   ?? throw new CryptographicException("Could not decrypt the pairing code.");
         if (key.Length != 32) throw new CryptographicException("Received an invalid pairing code.");
-        var remote = (IPEndPoint?)tcp.Client.RemoteEndPoint;
-        return new JoinResult(key, hello.Name, remote == null ? parts[0] : $"{remote.Address}:{FleetNetwork.AgentPort}");
+        return new JoinResult(key, hello.Name, $"{AgentHost(tcp, parts[0])}:{FleetNetwork.AgentPort}");
+    }
+
+    /// <summary>
+    /// The host's IPv4 address as connected, or the name the user typed when the connection went over IPv6
+    /// (addresses are stored as "host:port", which an IPv6 address would break).
+    /// </summary>
+    private static string AgentHost(TcpClient tcp, string typedHost)
+    {
+        if (tcp.Client.RemoteEndPoint is not IPEndPoint remote) return typedHost;
+        var address = remote.Address.IsIPv4MappedToIPv6 ? remote.Address.MapToIPv4() : remote.Address;
+        return address.AddressFamily == AddressFamily.InterNetwork ? address.ToString() : typedHost;
     }
 
     // ================= Host (PC already in the fleet) =================
@@ -164,7 +166,7 @@ public static class Pairing
 
         private async Task AnnounceLoopAsync()
         {
-            var answer = Concat(HereMagic, JsonSerializer.SerializeToUtf8Bytes(new { name = _name, port = _pairingPort }));
+            var answer = FleetCrypto.Concat(HereMagic, JsonSerializer.SerializeToUtf8Bytes(new { name = _name, port = _pairingPort }));
             while (!_cts.IsCancellationRequested && _udp != null)
             {
                 try
@@ -271,34 +273,5 @@ public static class Pairing
         var body = new byte[size];
         await stream.ReadExactlyAsync(body, cts.Token);
         return JsonSerializer.Deserialize<PairMessage>(body) ?? throw new InvalidDataException("Empty pairing message.");
-    }
-
-    private static IEnumerable<IPAddress> FleetNetworkBroadcasts()
-    {
-        foreach (var nic in System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces())
-        {
-            if (nic.OperationalStatus != System.Net.NetworkInformation.OperationalStatus.Up) continue;
-            foreach (var unicast in nic.GetIPProperties().UnicastAddresses)
-            {
-                if (unicast.Address.AddressFamily != AddressFamily.InterNetwork || unicast.IPv4Mask == null) continue;
-                var ip = unicast.Address.GetAddressBytes();
-                var mask = unicast.IPv4Mask.GetAddressBytes();
-                var broadcast = new byte[4];
-                for (var i = 0; i < 4; i++) broadcast[i] = (byte)(ip[i] | ~mask[i]);
-                yield return new IPAddress(broadcast);
-            }
-        }
-    }
-
-    private static byte[] Concat(params byte[][] parts)
-    {
-        var result = new byte[parts.Sum(p => p.Length)];
-        var offset = 0;
-        foreach (var part in parts)
-        {
-            part.CopyTo(result, offset);
-            offset += part.Length;
-        }
-        return result;
     }
 }

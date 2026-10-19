@@ -1,5 +1,8 @@
+using System.IO;
 using System.Net;
+using System.Net.Http;
 using System.Net.Sockets;
+using System.Security.Cryptography;
 using System.Text.Json;
 
 namespace RunnerManager.Tests;
@@ -35,31 +38,15 @@ public class RunnerUrlTests
 
 public class CommandRelayTests
 {
-    [Fact]
-    public void Queue_RoundTripsAndKeepsLatestOnTopForOldAgents()
-    {
-        var a = new MachineCommand { Id = "a", CreatedUtc = DateTime.UtcNow, Target = "runner", TargetKey = "svc1", Action = "Stop" };
-        var b = new MachineCommand { Id = "b", CreatedUtc = DateTime.UtcNow, Target = "runner", TargetKey = "svc2", Action = "Stop" };
-        var envelope = b with { Queue = new[] { a, b } };
-
-        var back = JsonSerializer.Deserialize<MachineCommand>(JsonSerializer.Serialize(envelope))!;
-
-        Assert.Equal(new[] { "a", "b" }, back.AllCommands().Select(c => c.Id));
-        Assert.Equal("svc2", back.TargetKey);
-    }
-
-    [Fact]
-    public void OldSingleCommandFormat_IsStillUnderstood()
-    {
-        const string json = "{\"Id\":\"df02\",\"CreatedUtc\":\"2026-09-30T10:21:48.6349221Z\",\"Target\":\"runner\",\"TargetKey\":\"x\",\"Action\":\"Stop\",\"RunnerName\":\"\",\"RunnerLabels\":[]}";
-        var command = JsonSerializer.Deserialize<MachineCommand>(json)!;
-        Assert.Single(command.AllCommands());
-        Assert.Equal("df02", command.AllCommands()[0].Id);
-    }
-
-    [Fact]
-    public void NullQueue_IsNotSerialized()
-        => Assert.DoesNotContain("Queue", JsonSerializer.Serialize(new MachineCommand { Id = "x" }));
+    [Theory]
+    [InlineData("runner Stop failed: Access is denied.", true)]
+    [InlineData("rdc Restart failed: timeout", true)]
+    [InlineData("agent Update failed: no release", true)]
+    [InlineData("Runner edit completed: build-failed-tests", false)]
+    [InlineData("Runner created: failed", false)]
+    [InlineData("Remote Desktop Commander start completed. Relay not connected.", false)]
+    public void FailedResults_AreRecognizedByTheAgentFormat(string result, bool expected)
+        => Assert.Equal(expected, MachineRelay.IsFailedResult(result));
 
     [Fact]
     public void Fingerprint_IgnoresHeartbeatAndLoadButSeesStateChanges()
@@ -299,14 +286,49 @@ public class FleetNetworkTests
         using (server)
         {
             var address = $"localhost:{port}";
-            await Assert.ThrowsAsync<PairingMismatchException>(() =>
+            var wrongCode = await Assert.ThrowsAsync<PairingMismatchException>(() =>
                 FleetNetwork.CallAsync(address, "TESTPC", new FleetRequest { Op = "status" }, pairingKey: CommandSigner.NewKey()));
-            await Assert.ThrowsAsync<PairingMismatchException>(() =>
+            Assert.Contains("pairing code does not match", wrongCode.Message);
+            var wrongPc = await Assert.ThrowsAsync<PairingMismatchException>(() =>
                 FleetNetwork.CallAsync(address, "OTHERPC", new FleetRequest { Op = "status" }, pairingKey: key));
+            Assert.Contains("wrong PC", wrongPc.Message);
             // "*" only identifies a PC; it can't be used to send commands.
             await Assert.ThrowsAsync<PairingMismatchException>(() =>
                 FleetNetwork.CallAsync(address, "*", new FleetRequest { Op = "command", Command = new MachineCommand { Id = "x" } }, pairingKey: key));
             Assert.Empty(commands);
+        }
+    }
+
+    [Fact]
+    public async Task OversizedOrChunkedBodies_AreRejected()
+    {
+        var (server, _, _, port) = await StartAgentAsync();
+        using (server)
+        using (var http = new HttpClient())
+        {
+            async Task<HttpStatusCode> PostAsync(HttpContent content)
+            {
+                using var message = new HttpRequestMessage(HttpMethod.Post, $"http://localhost:{port}/rw/") { Content = content };
+                message.Headers.Add("X-RW-Time", DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString());
+                message.Headers.Add("X-RW-To", "TESTPC");
+                using var response = await http.SendAsync(message);
+                return response.StatusCode;
+            }
+
+            Assert.Equal(HttpStatusCode.BadRequest, await PostAsync(new ByteArrayContent(new byte[1024 * 1024 + 1])));
+            Assert.Equal(HttpStatusCode.BadRequest, await PostAsync(new ChunkedContent(new byte[100])));
+        }
+    }
+
+    /// <summary>Content without a length, so it is sent chunked.</summary>
+    private sealed class ChunkedContent(byte[] bytes) : HttpContent
+    {
+        protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context) => stream.WriteAsync(bytes).AsTask();
+
+        protected override bool TryComputeLength(out long length)
+        {
+            length = -1;
+            return false;
         }
     }
 
@@ -397,6 +419,7 @@ public class DiscoveryRobustnessTests
     }
 }
 
+[Collection(FleetSettingsCollection.Name)]
 public class LeaveTests
 {
     [Fact]
@@ -412,6 +435,96 @@ public class LeaveTests
         var response = await FleetNetwork.CallAsync($"localhost:{port}", "TESTPC",
             new FleetRequest { Op = "leave", From = "NOT-A-REAL-PC-" + Guid.NewGuid().ToString("N") }, pairingKey: key);
         Assert.True(response.Ok);
+    }
+}
+
+/// <summary>Tests that read or write fleet.json (in the test state folder) run one at a time.</summary>
+[CollectionDefinition(Name)]
+public class FleetSettingsCollection
+{
+    public const string Name = "Fleet settings";
+}
+
+[Collection(FleetSettingsCollection.Name)]
+public class FleetConfigTests
+{
+    private static readonly string ConfigPath = Path.Combine(FleetConfig.StateDir, "fleet.json");
+
+    /// <summary>Writes fleet.json directly, with a distinct time stamp so the cached config is always re-read.</summary>
+    private static void WriteRaw(string json)
+    {
+        Directory.CreateDirectory(FleetConfig.StateDir);
+        File.WriteAllText(ConfigPath, json);
+        File.SetLastWriteTimeUtc(ConfigPath, DateTime.UtcNow.AddDays(-1).AddTicks(Random.Shared.Next()));
+    }
+
+    /// <summary>Checks that fleet.json has no "FleetKey" property and no value holding the key in plain text.</summary>
+    private static JsonElement AssertNoPlainKey(byte[] key)
+    {
+        using var document = JsonDocument.Parse(File.ReadAllText(ConfigPath));
+        var root = document.RootElement.Clone();
+        Assert.False(root.TryGetProperty("FleetKey", out _));
+        Assert.DoesNotContain(root.EnumerateObject(), p =>
+            p.Value.ValueKind == JsonValueKind.String && p.Value.GetString() == Convert.ToBase64String(key));
+        return root;
+    }
+
+    [Fact]
+    public void FleetKey_IsNotWrittenToFleetJson()
+    {
+        var key = CommandSigner.NewKey();
+        try
+        {
+            FleetConfig.SetFleetKey(key);
+            AssertNoPlainKey(key);
+            Assert.Equal(key, FleetConfig.Current.FleetKey);
+        }
+        finally { File.Delete(ConfigPath); }
+    }
+
+    [Fact]
+    public void PlainFleetKeyFromOlderBuilds_IsRemovedWhenLoaded()
+    {
+        var key = CommandSigner.NewKey();
+        var protectedKey = Convert.ToBase64String(ProtectedData.Protect(key, null, DataProtectionScope.CurrentUser));
+        try
+        {
+            WriteRaw($"{{\"ProtectedFleetKey\":\"{protectedKey}\",\"Watchdog\":false,\"FleetKey\":\"{Convert.ToBase64String(key)}\"}}");
+            var config = FleetConfig.Current;
+            Assert.Equal(key, config.FleetKey);
+            Assert.False(config.Watchdog);
+            var root = AssertNoPlainKey(key);
+            Assert.Equal(protectedKey, root.GetProperty("ProtectedFleetKey").GetString());
+        }
+        finally { File.Delete(ConfigPath); }
+    }
+
+    [Fact]
+    public void UnreadableSettings_AreNotReplacedWithDefaults()
+    {
+        const string broken = "{\"Watchdog\":false,\"ManualAddresses\":[";
+        try
+        {
+            WriteRaw(broken);
+            Assert.Throws<IOException>(() => FleetConfig.Update(c => c.Watchdog = true));
+            Assert.Equal(broken, File.ReadAllText(ConfigPath));
+        }
+        finally { File.Delete(ConfigPath); }
+    }
+
+    [Fact]
+    public void MissingSettings_GiveDefaults_AndUpdatesAreSaved()
+    {
+        try
+        {
+            if (File.Exists(ConfigPath)) File.Delete(ConfigPath);
+            Assert.True(FleetConfig.Current.Watchdog);
+            FleetConfig.Update(c => c.ManualAddresses.Add("example-pc"));
+            Assert.Contains("example-pc", File.ReadAllText(ConfigPath));
+            Assert.Contains("example-pc", FleetConfig.Current.ManualAddresses);
+            Assert.Empty(Directory.GetFiles(FleetConfig.StateDir, "fleet.json.*.tmp"));
+        }
+        finally { File.Delete(ConfigPath); }
     }
 }
 

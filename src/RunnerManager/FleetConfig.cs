@@ -2,6 +2,7 @@ using System.IO;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace RunnerManager;
 
@@ -16,6 +17,10 @@ public sealed class FleetConfig
     private static readonly object Gate = new();
     private static FleetConfig? _cached;
     private static DateTime _cachedStamp;
+    private static DateTime? _readFailedUtc;
+    private const int ReadAttempts = 5;
+    private static readonly TimeSpan FailedReadRetryInterval = TimeSpan.FromSeconds(5);
+    private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
 
     /// <summary>The fleet pairing code, encrypted for this Windows user with DPAPI.</summary>
     public string ProtectedFleetKey { get; set; } = string.Empty;
@@ -37,46 +42,104 @@ public sealed class FleetConfig
             lock (Gate)
             {
                 var stamp = File.Exists(ConfigPath) ? File.GetLastWriteTimeUtc(ConfigPath) : DateTime.MinValue;
-                if (_cached != null && stamp == _cachedStamp) return _cached;
-                _cached = Load();
+                var retryFailedRead = _readFailedUtc is { } failed && DateTime.UtcNow - failed > FailedReadRetryInterval;
+                if (_cached != null && stamp == _cachedStamp && !retryFailedRead) return _cached;
+                try
+                {
+                    _cached = Read(out var hasPlainKey);
+                    _readFailedUtc = null;
+                    if (hasPlainKey)
+                    {
+                        // Earlier builds also wrote the decrypted pairing code; save once without it.
+                        // Write never reads the config back, so this cannot recurse.
+                        try
+                        {
+                            Write(_cached);
+                            stamp = File.GetLastWriteTimeUtc(ConfigPath);
+                        }
+                        catch { }
+                    }
+                }
+                catch
+                {
+                    // Keep the last good settings (or defaults) and try again a little later.
+                    _cached ??= new FleetConfig();
+                    _readFailedUtc = DateTime.UtcNow;
+                }
                 _cachedStamp = stamp;
                 return _cached;
             }
         }
     }
 
-    private static FleetConfig Load()
+    /// <summary>
+    /// Reads fleet.json. Only a missing file gives defaults; a file that cannot be read or parsed (for example while
+    /// another process writes it) is retried briefly and then reported, so callers never mistake it for empty settings.
+    /// </summary>
+    private static FleetConfig Read(out bool hasPlainKey)
     {
-        try
+        for (var attempt = 0; ; attempt++)
         {
-            if (File.Exists(ConfigPath))
+            try
             {
-                return JsonSerializer.Deserialize<FleetConfig>(File.ReadAllText(ConfigPath)) ?? new FleetConfig();
+                hasPlainKey = false;
+                if (!File.Exists(ConfigPath)) return new FleetConfig();
+                var json = File.ReadAllText(ConfigPath);
+                using (var document = JsonDocument.Parse(json))
+                {
+                    if (document.RootElement.ValueKind == JsonValueKind.Null) return new FleetConfig();
+                    hasPlainKey = document.RootElement.ValueKind == JsonValueKind.Object
+                                  && document.RootElement.TryGetProperty(nameof(FleetKey), out _);
+                }
+                return JsonSerializer.Deserialize<FleetConfig>(json, JsonOptions) ?? new FleetConfig();
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+            {
+                if (attempt >= ReadAttempts - 1)
+                    throw new IOException($"Could not read the fleet settings in {ConfigPath}: {ex.Message}", ex);
+                Thread.Sleep(100);
             }
         }
-        catch { }
-        return new FleetConfig();
     }
 
-    /// <summary>Applies a change to the on-disk config and saves it (retrying briefly if the other process is writing).</summary>
+    /// <summary>Saves the config atomically: a reader sees either the old file or the new one, never a partial one.</summary>
+    private static void Write(FleetConfig config)
+    {
+        Directory.CreateDirectory(StateDir);
+        var json = JsonSerializer.Serialize(config, JsonOptions);
+        // One temporary file per process, so the dashboard and the agent never write the same one.
+        var temp = $"{ConfigPath}.{Environment.ProcessId}.tmp";
+        for (var attempt = 0; ; attempt++)
+        {
+            try
+            {
+                File.WriteAllText(temp, json);
+                File.Move(temp, ConfigPath, overwrite: true);
+                return;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException && attempt < 5) { Thread.Sleep(100); }
+            catch
+            {
+                try { File.Delete(temp); } catch { }
+                throw;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Applies a change to the on-disk config and saves it (retrying briefly if the other process is writing).
+    /// Throws when the existing file cannot be read, instead of replacing it with defaults.
+    /// </summary>
     public static void Update(Action<FleetConfig> change)
     {
         lock (Gate)
         {
-            var config = Load();
+            var config = Read(out _);
             change(config);
-            Directory.CreateDirectory(StateDir);
-            for (var attempt = 0; ; attempt++)
-            {
-                try
-                {
-                    File.WriteAllText(ConfigPath, JsonSerializer.Serialize(config, new JsonSerializerOptions { WriteIndented = true }));
-                    break;
-                }
-                catch (IOException) when (attempt < 5) { Thread.Sleep(100); }
-            }
+            Write(config);
             _cached = config;
             _cachedStamp = File.GetLastWriteTimeUtc(ConfigPath);
+            _readFailedUtc = null;
         }
     }
 
@@ -94,14 +157,31 @@ public sealed class FleetConfig
 
     // ----- Fleet key -----
 
+    private sealed record DecryptedKey(string Source, byte[]? Key);
+    private DecryptedKey? _decryptedKey;
+
+    /// <summary>
+    /// The decrypted pairing code, or null. Never written to fleet.json. Decrypted once per instance (a new
+    /// instance is loaded when the file changes); each caller gets its own copy.
+    /// </summary>
+    [JsonIgnore]
     public byte[]? FleetKey
     {
         get
         {
-            if (string.IsNullOrEmpty(ProtectedFleetKey)) return null;
-            try { return ProtectedData.Unprotect(Convert.FromBase64String(ProtectedFleetKey), null, DataProtectionScope.CurrentUser); }
-            catch { return null; }
+            var source = ProtectedFleetKey;
+            var cached = _decryptedKey;
+            if (cached == null || !ReferenceEquals(cached.Source, source))
+                _decryptedKey = cached = new DecryptedKey(source, Unprotect(source));
+            return (byte[]?)cached.Key?.Clone();
         }
+    }
+
+    private static byte[]? Unprotect(string protectedKey)
+    {
+        if (string.IsNullOrEmpty(protectedKey)) return null;
+        try { return ProtectedData.Unprotect(Convert.FromBase64String(protectedKey), null, DataProtectionScope.CurrentUser); }
+        catch { return null; }
     }
 
     public static void SetFleetKey(byte[]? key) => Update(c =>
@@ -134,7 +214,7 @@ public static class CommandSigner
         catch { return null; }
     }
 
-    /// <summary>Short public fingerprint of a key, published so dashboards can spot mismatched keys.</summary>
+    /// <summary>Short public fingerprint of a key, sent in status answers so dashboards can spot mismatched keys.</summary>
     public static string KeyId(byte[]? key)
         => key == null ? string.Empty : Convert.ToHexString(SHA256.HashData(key))[..8].ToLowerInvariant();
 }
