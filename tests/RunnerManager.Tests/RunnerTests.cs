@@ -166,3 +166,29 @@ public class StartupScriptTests
         Assert.Contains(@"C:\Läufer\foo", RunnerService.ReadStartupText(utf8, shortcut: false));
     }
 }
+
+[Collection(FleetSettingsCollection.Name)]
+public class RunnerFolderTests
+{
+    [Theory]
+    [InlineData(@"D:\Runners", true)]
+    [InlineData(@"C:\GitHub Runners\Build", true)]
+    [InlineData(@"Runners", false)]
+    [InlineData(@"C:\Runners%TEMP%", false)]
+    [InlineData("", false)]
+    public void RunnerFolder_IsChecked(string path, bool valid)
+        => Assert.Equal(valid, RunnerService.RunnerFolderProblem(path) == null);
+
+    [Fact]
+    public void NewRunners_GoToTheConfiguredFolder()
+    {
+        var folder = Path.Combine(Path.GetTempPath(), $"runner-folder-test-{Guid.NewGuid():N}");
+        try
+        {
+            Assert.Equal(Path.Combine(RunnerService.DefaultRoot, "web-app"), RunnerService.SuggestInstallPath("https://github.com/acme/web-app"));
+            FleetConfig.Update(c => c.RunnerFolder = folder);
+            Assert.Equal(Path.Combine(folder, "web-app"), RunnerService.SuggestInstallPath("https://github.com/acme/web-app"));
+        }
+        finally { FleetConfig.Update(c => c.RunnerFolder = string.Empty); }
+    }
+}

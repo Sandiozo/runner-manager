@@ -128,6 +128,16 @@
                         </StackPanel>
                     </Border>
 
+                    <TextBlock Text="RUNNERS" Style="{StaticResource GroupLabel}"/>
+                    <Border Style="{StaticResource Group}">
+                        <local:SettingRow x:Name="RunnerFolderRow" Glyph="&#xE8B7;" Title="Folder for new runners">
+                            <StackPanel Orientation="Horizontal">
+                                <Button x:Name="RunnerFolderResetButton" Content="Use default" Style="{StaticResource GhostButton}" Margin="0,0,6,0" Click="RunnerFolderReset_Click"/>
+                                <Button Content="Change…" Click="RunnerFolderChange_Click"/>
+                            </StackPanel>
+                        </local:SettingRow>
+                    </Border>
+
                     <TextBlock Text="STARTUP" Style="{StaticResource GroupLabel}"/>
                     <Border Style="{StaticResource Group}">
                         <StackPanel>

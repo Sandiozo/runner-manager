@@ -38,6 +38,7 @@ public partial class SettingsWindow : Window
         VersionRow.Title = $"Runner Manager {AppUpdater.CurrentVersion}";
         DataRow.Description = FleetConfig.StateDir;
         UpdateRdcStatus();
+        UpdateRunnerFolder();
         UpdateKeyStatus();
         RefreshPeers();
         ShowPage(_lastPage);
@@ -122,6 +123,38 @@ public partial class SettingsWindow : Window
             StartupToggle.IsChecked = !StartupToggle.IsChecked;
             DialogWindow.Error(this, "Could not change the Start with Windows setting", ex.Message);
         }
+    }
+
+    private void UpdateRunnerFolder()
+    {
+        var custom = FleetConfig.Current.RunnerFolder.Length > 0;
+        RunnerFolderRow.Description = custom
+            ? $"{RunnerService.RunnersRoot}. Runners moved to this PC are installed here too."
+            : $"{RunnerService.RunnersRoot} (default). Runners moved to this PC are installed here too.";
+        RunnerFolderResetButton.Visibility = custom ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void RunnerFolderChange_Click(object sender, RoutedEventArgs e)
+    {
+        var dialog = new Microsoft.Win32.OpenFolderDialog
+        {
+            Title = "Choose the folder for new runners",
+            InitialDirectory = Directory.Exists(RunnerService.RunnersRoot) ? RunnerService.RunnersRoot : null
+        };
+        if (dialog.ShowDialog(this) != true) return;
+        if (RunnerService.RunnerFolderProblem(dialog.FolderName) is { } problem)
+        {
+            DialogWindow.Info(this, "Choose another folder", problem);
+            return;
+        }
+        FleetConfig.Update(c => c.RunnerFolder = dialog.FolderName);
+        UpdateRunnerFolder();
+    }
+
+    private void RunnerFolderReset_Click(object sender, RoutedEventArgs e)
+    {
+        FleetConfig.Update(c => c.RunnerFolder = string.Empty);
+        UpdateRunnerFolder();
     }
 
     private void Save()

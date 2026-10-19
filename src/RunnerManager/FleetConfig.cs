@@ -34,6 +34,8 @@ public sealed class FleetConfig
     public List<string> ManuallyStopped { get; set; } = new();
     /// <summary>Runner folders found outside C:\GitHub-Runners (console runners), so they stay listed while stopped.</summary>
     public List<string> KnownRunnerRoots { get; set; } = new();
+    /// <summary>Where new and moved runners are installed on this PC; empty means C:\GitHub-Runners.</summary>
+    public string RunnerFolder { get; set; } = string.Empty;
 
     public static FleetConfig Current
     {

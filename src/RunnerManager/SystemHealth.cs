@@ -90,6 +90,10 @@ public static class SystemHealth
         return disks.ToArray();
     }
 
+    /// <summary>
+    /// Whether Windows Update or a Windows component waits for a restart. PendingFileRenameOperations is not checked:
+    /// apps leave temporary files there for deletion at the next boot all the time, so it is almost never empty.
+    /// </summary>
     private static bool IsRebootPending()
     {
         try
@@ -97,10 +101,8 @@ public static class SystemHealth
             using var hklm = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64);
             using (var update = hklm.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired"))
                 if (update != null) return true;
-            using (var servicing = hklm.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending"))
-                if (servicing != null) return true;
-            using var session = hklm.OpenSubKey(@"SYSTEM\CurrentControlSet\Control\Session Manager");
-            return session?.GetValue("PendingFileRenameOperations") is string[] { Length: > 0 };
+            using var servicing = hklm.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending");
+            return servicing != null;
         }
         catch { return false; }
     }

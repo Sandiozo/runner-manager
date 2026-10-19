@@ -17,6 +17,9 @@ public static class RunnerService
 {
     public const string DefaultRoot = @"C:\GitHub-Runners";
 
+    /// <summary>Where new and moved runners are installed on this PC (Settings → General).</summary>
+    public static string RunnersRoot => FleetConfig.Current.RunnerFolder is { Length: > 0 } folder ? folder : DefaultRoot;
+
     /// <summary>
     /// All runners on this PC. WMI queries and file reads are slow, so the work runs on the thread pool, and the
     /// GitHub queries for the runners run in parallel (GitHubCli limits how many gh processes run at a time).
@@ -26,9 +29,10 @@ public static class RunnerService
         var processes = ReadProcesses();
         var services = ReadRunnerServices();
         var roots = new HashSet<string>(services.Select(s => s.Root), StringComparer.OrdinalIgnoreCase);
-        if (Directory.Exists(DefaultRoot))
+        // The default folder is scanned too, for runners installed before the folder setting was changed.
+        foreach (var folder in new[] { RunnersRoot, DefaultRoot }.Distinct(StringComparer.OrdinalIgnoreCase).Where(Directory.Exists))
         {
-            foreach (var dir in Directory.GetDirectories(DefaultRoot))
+            foreach (var dir in Directory.GetDirectories(folder))
                 if (File.Exists(Path.Combine(dir, ".runner"))) roots.Add(dir);
         }
         // Runners started from a console (run.cmd) instead of a service live anywhere; find them by their
@@ -663,16 +667,17 @@ public static class RunnerService
         return info.Name.Equals("bin", StringComparison.OrdinalIgnoreCase) && info.Parent != null ? info.Parent.FullName : info.FullName;
     }
 
-    /// <summary>A free folder under C:\GitHub-Runners for a runner of this repository or organization.</summary>
+    /// <summary>A free folder in the runner folder for a runner of this repository or organization.</summary>
     public static string SuggestInstallPath(string registrationUrl)
     {
         var name = RepositoryPath(registrationUrl).Split('/').LastOrDefault(s => s.Length > 0)
                    ?? OrganizationName(registrationUrl);
         if (string.IsNullOrWhiteSpace(name)) name = "runner";
         var safe = new string(name.Select(c => Path.GetInvalidFileNameChars().Contains(c) ? '-' : c).ToArray());
-        var path = Path.Combine(DefaultRoot, safe);
+        var root = RunnersRoot;
+        var path = Path.Combine(root, safe);
         for (var i = 2; Directory.Exists(path) && Directory.EnumerateFileSystemEntries(path).Any(); i++)
-            path = Path.Combine(DefaultRoot, $"{safe}-{i}");
+            path = Path.Combine(root, $"{safe}-{i}");
         return path;
     }
 
@@ -767,6 +772,15 @@ public static class RunnerService
     {
         if (string.IsNullOrEmpty(value) || value.IndexOfAny(UnsafeInQuotes) >= 0 || value.Any(char.IsControl))
             throw new InvalidOperationException($"The {what} contains characters that cannot be passed to config.cmd.");
+    }
+
+    /// <summary>Null when the folder can be used for runners, otherwise the message to show.</summary>
+    internal static string? RunnerFolderProblem(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path) || !Path.IsPathFullyQualified(path)) return @"Choose a full folder path, such as D:\Runners.";
+        return path.IndexOfAny(UnsafeInQuotes) >= 0 || path.Any(char.IsControl)
+            ? "The runner folder path cannot contain the characters \", % or !."
+            : null;
     }
 
     private static void EnsureSafeFolder(string path)

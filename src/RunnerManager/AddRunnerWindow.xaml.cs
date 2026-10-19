@@ -15,7 +15,7 @@ public partial class AddRunnerWindow : Window
         InitializeComponent();
         WindowTheme.Apply(this);
         RunnerNameBox.Text = Environment.MachineName;
-        InstallPathBox.Text = Path.Combine(RunnerService.DefaultRoot, "NewRunner");
+        InstallPathBox.Text = Path.Combine(RunnerService.RunnersRoot, "NewRunner");
         InstallPathBox.TextChanged += (_, _) =>
         {
             if (InstallPathBox.IsKeyboardFocused) _pathEdited = true;
@@ -67,7 +67,7 @@ public partial class AddRunnerWindow : Window
         if (_pathEdited) return;
         var name = (string.IsNullOrEmpty(repoPath) ? org : repoPath).Split('/', StringSplitOptions.RemoveEmptyEntries).LastOrDefault();
         if (!string.IsNullOrWhiteSpace(name))
-            InstallPathBox.Text = Path.Combine(RunnerService.DefaultRoot, Sanitize(name));
+            InstallPathBox.Text = Path.Combine(RunnerService.RunnersRoot, Sanitize(name));
     }
 
     private void ValidateInstallPath()
@@ -89,7 +89,7 @@ public partial class AddRunnerWindow : Window
         var dialog = new OpenFolderDialog
         {
             Title = "Choose the runner install folder",
-            InitialDirectory = Directory.Exists(RunnerService.DefaultRoot) ? RunnerService.DefaultRoot : null
+            InitialDirectory = Directory.Exists(RunnerService.RunnersRoot) ? RunnerService.RunnersRoot : null
         };
         if (dialog.ShowDialog(this) != true) return;
         _pathEdited = true;
