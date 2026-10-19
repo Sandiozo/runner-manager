@@ -780,24 +780,6 @@ public static class MachineRelay
 
     // ================= Old GitHub relay =================
 
-    /// <summary>
-    /// Deletes the RW_STATUS_/RW_COMMAND_/RW_LOG_ Actions variables older versions used as a relay.
-    /// Returns how many were deleted.
-    /// </summary>
-    public static async Task<int> DeleteLegacyRelayDataAsync(string repository)
-    {
-        var list = await GitHubCli.RunAsync($"api repos/{repository}/actions/variables?per_page=100 --jq \".variables[].name\"");
-        if (list.ExitCode != 0) throw new InvalidOperationException(string.IsNullOrWhiteSpace(list.Error) ? "Could not list variables." : list.Error.Trim());
-        var deleted = 0;
-        foreach (var name in list.Output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
-        {
-            if (!name.StartsWith("RW_STATUS_") && !name.StartsWith("RW_COMMAND_") && !name.StartsWith("RW_LOG_")) continue;
-            var result = await GitHubCli.RunAsync($"api --method DELETE repos/{repository}/actions/variables/{name}");
-            if (result.ExitCode == 0) deleted++;
-        }
-        return deleted;
-    }
-
     public static string Encode<T>(T value)
         => Convert.ToBase64String(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(value)));
 

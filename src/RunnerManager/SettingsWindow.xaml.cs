@@ -2,11 +2,16 @@ using System.Diagnostics;
 using System.IO;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
+using System.Windows.Input;
 
 namespace RunnerManager;
 
 public partial class SettingsWindow : Window
 {
+    /// <summary>The page shown last, so Settings reopens where it was left during this session.</summary>
+    private static string _lastPage = "General";
+
     private readonly AppSettings _settings;
     private readonly Action _settingsChanged;
     private readonly Func<Task> _fleetChanged;
@@ -26,16 +31,18 @@ public partial class SettingsWindow : Window
 
         (settings.Theme switch { AppTheme.System => ThemeSystem, AppTheme.Light => ThemeLight, _ => ThemeDark }).IsChecked = true;
         (settings.RefreshSeconds switch { >= 30 => Refresh30, >= 10 => Refresh10, _ => Refresh5 }).IsChecked = true;
-        UpdateRdcStatus();
         NotificationsToggle.IsChecked = settings.Notifications;
         FailedRunsToggle.IsChecked = settings.NotifyOnFailedRuns;
         CloseToTrayToggle.IsChecked = settings.CloseToTray;
-        RelayBox.Text = FleetConfig.Current.RelayRepository;
         WatchdogToggle.IsChecked = FleetConfig.Current.Watchdog;
-        VersionText.Text = $"Runner Manager v{AppUpdater.CurrentVersion}" + (AppUpdater.IsRunningInstalledCopy ? "  ·  installed copy" : "  ·  running from a build folder");
-        FooterText.Text = $"Data and logs: {FleetConfig.StateDir}";
+        RelayBox.Text = FleetConfig.Current.RelayRepository;
+        NavVersionText.Text = $"Runner Manager {AppUpdater.CurrentVersion}";
+        VersionRow.Title = $"Runner Manager {AppUpdater.CurrentVersion}";
+        DataRow.Description = FleetConfig.StateDir;
+        UpdateRdcStatus();
         UpdateKeyStatus();
         RefreshPeers();
+        ShowPage(_lastPage);
         Loaded += async (_, _) =>
         {
             StartupToggle.IsChecked = await ScheduledTasks.ExistsAsync(ScheduledTasks.DashboardTaskName);
@@ -44,17 +51,50 @@ public partial class SettingsWindow : Window
         };
     }
 
-    // ----- Appearance & dashboard -----
+    // ----- Navigation -----
+
+    private void ShowPage(string page)
+    {
+        var item = Nav.Items.Cast<ListBoxItem>().FirstOrDefault(i => (string)i.Tag == page) ?? (ListBoxItem)Nav.Items[0];
+        Nav.SelectedItem = item;
+    }
+
+    private void Nav_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (Nav.SelectedItem is not ListBoxItem { Tag: string page }) return;
+        _lastPage = page;
+        GeneralPage.Visibility = page == "General" ? Visibility.Visible : Visibility.Collapsed;
+        FleetPage.Visibility = page == "Fleet" ? Visibility.Visible : Visibility.Collapsed;
+        RdcPage.Visibility = page == "Rdc" ? Visibility.Visible : Visibility.Collapsed;
+        UpdatesPage.Visibility = page == "Updates" ? Visibility.Visible : Visibility.Collapsed;
+        PageScroller.ScrollToTop();
+    }
+
+    private void Window_PreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.Escape || Keyboard.FocusedElement is TextBox { Text.Length: > 0 }) return;
+        e.Handled = true;
+        Close();
+    }
+
+    private void OpenMenu_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Button { ContextMenu: { } menu } button) return;
+        menu.PlacementTarget = button;
+        menu.Placement = PlacementMode.Bottom;
+        menu.VerticalOffset = 4;
+        menu.IsOpen = true;
+    }
+
+    // ----- General -----
 
     private void Theme_Checked(object sender, RoutedEventArgs e)
     {
         if (_loading) return;
-        _settings.Theme = ModeFor(sender);
+        _settings.Theme = sender == ThemeSystem ? AppTheme.System : sender == ThemeLight ? AppTheme.Light : AppTheme.Dark;
         ThemeManager.Apply(_settings.Theme);
         Save();
     }
-
-    private AppTheme ModeFor(object sender) => sender == ThemeSystem ? AppTheme.System : sender == ThemeLight ? AppTheme.Light : AppTheme.Dark;
 
     private void Refresh_Checked(object sender, RoutedEventArgs e)
     {
@@ -64,27 +104,6 @@ public partial class SettingsWindow : Window
             _settings.RefreshSeconds = seconds;
             Save();
         }
-    }
-
-    private void UpdateRdcStatus()
-    {
-        var configured = RemoteDesktopManager.IsConfigured();
-        RdcStatusText.Text = configured ? "Set up on this PC" : "Not set up on this PC";
-        RdcStatusText.Foreground = configured ? Palette.Success : Palette.TextMuted;
-        RdcSetupButton.Content = configured ? "Run setup again" : "Set up";
-        RdcSetupButton.Style = (Style)FindResource(configured ? typeof(Button) : "PrimaryButton");
-    }
-
-    private async void RdcSetup_Click(object sender, RoutedEventArgs e)
-    {
-        await _runOperation("Set up Remote Desktop Commander", async log =>
-        {
-            await RemoteDesktopManager.SetupAsync();
-            log(RemoteDesktopManager.IsConfigured()
-                ? "Remote Desktop Commander is set up and starting."
-                : "Setup window opened. Sign in there. Runner Manager detects the connection automatically.");
-        });
-        UpdateRdcStatus();
     }
 
     private void Toggle_Click(object sender, RoutedEventArgs e)
@@ -100,15 +119,9 @@ public partial class SettingsWindow : Window
         try
         {
             if (StartupToggle.IsChecked == true)
-            {
-                var exe = File.Exists(AppUpdater.InstalledExe) ? AppUpdater.InstalledExe : Environment.ProcessPath!;
-                await ScheduledTasks.RegisterLogonTaskAsync(ScheduledTasks.DashboardTaskName, exe, "--minimized",
-                    "Opens the Runner Manager dashboard in the notification area at sign-in.", restartOnFailure: false);
-            }
+                await Installer.RegisterStartupTaskAsync(File.Exists(AppUpdater.InstalledExe) ? AppUpdater.InstalledExe : Environment.ProcessPath!);
             else
-            {
                 await ScheduledTasks.DeleteTaskAsync(ScheduledTasks.DashboardTaskName);
-            }
         }
         catch (Exception ex)
         {
@@ -125,32 +138,17 @@ public partial class SettingsWindow : Window
 
     // ----- Fleet -----
 
-    private async void RelaySave_Click(object sender, RoutedEventArgs e)
-    {
-        var repository = RelayBox.Text.Trim();
-        RelayHint.Visibility = Visibility.Visible;
-        if (!FleetConfig.IsValidRepository(repository))
-        {
-            RelayHint.Text = "Enter the repository as owner/name.";
-            RelayHint.Foreground = Palette.Danger;
-            return;
-        }
-        FleetConfig.Update(c => c.RelayRepository = repository);
-        RelayHint.Text = "Saved. Updates now come from the releases in this repository.";
-        RelayHint.Foreground = Palette.Success;
-        await CheckForUpdatesAsync(force: true);
-    }
-
     private void UpdateKeyStatus()
     {
         var key = FleetConfig.Current.FleetKey;
-        KeyStatusText.Text = key == null
-            ? "Not set. Start a new fleet on your first PC, or enter the pairing code from a PC that is already in the fleet."
-            : $"Set (fingerprint {CommandSigner.KeyId(key)}). All PCs in the fleet must use this code and show the same fingerprint.";
-        KeyStatusText.Foreground = key == null ? Palette.TextMuted : Palette.Success;
+        KeyRow.Description = key == null
+            ? "Not set. Start a new fleet here, or enter the code from a PC that is already in one."
+            : $"Set. Fingerprint {CommandSigner.KeyId(key)}, the same on every PC in the fleet.";
+        GenerateKeyButton.Visibility = key == null ? Visibility.Visible : Visibility.Collapsed;
         CopyKeyButton.Visibility = key == null ? Visibility.Collapsed : Visibility.Visible;
-        RemoveKeyButton.Visibility = key == null ? Visibility.Collapsed : Visibility.Visible;
-        GenerateKeyButton.Content = key == null ? "Start a new fleet" : "Replace pairing code…";
+        ReplaceKeyItem.Visibility = key == null ? Visibility.Collapsed : Visibility.Visible;
+        RemoveKeyItem.Visibility = key == null ? Visibility.Collapsed : Visibility.Visible;
+        LeaveFleetButton.IsEnabled = key != null;
     }
 
     private async void GenerateKey_Click(object sender, RoutedEventArgs e)
@@ -158,10 +156,8 @@ public partial class SettingsWindow : Window
         if (FleetConfig.Current.FleetKey != null && !DialogWindow.Confirm(this, "Replace the pairing code?",
                 "Your other PCs cannot connect to this PC until you enter the new code on them.", "Replace code", danger: true))
             return;
-        var key = CommandSigner.NewKey();
-        FleetConfig.SetFleetKey(key);
+        FleetConfig.SetFleetKey(CommandSigner.NewKey());
         UpdateKeyStatus();
-        CopyKey_Click(sender, e);
         await _fleetChanged();
     }
 
@@ -173,7 +169,7 @@ public partial class SettingsWindow : Window
         {
             Clipboard.SetText(CommandSigner.FormatKey(key));
             DialogWindow.Info(this, "Pairing code copied",
-                "On each of your other PCs, go to Settings → Fleet → “Enter pairing code” and paste it. Keep the code private, like a password. Anyone on your network with this code can control your PCs.");
+                "On another PC, open Settings → Fleet → ⋯ → Enter pairing code, and paste it. Keep the code private, like a password: anyone on your network with it can control your PCs.");
         }
         catch (Exception ex) { DialogWindow.Error(this, "Could not copy the pairing code", ex.Message); }
     }
@@ -182,6 +178,12 @@ public partial class SettingsWindow : Window
     {
         PasteKeyPanel.Visibility = Visibility.Visible;
         PasteKeyBox.Focus();
+    }
+
+    private void CancelPasteKey_Click(object sender, RoutedEventArgs e)
+    {
+        PasteKeyBox.Clear();
+        PasteKeyPanel.Visibility = Visibility.Collapsed;
     }
 
     private async void SaveKey_Click(object sender, RoutedEventArgs e)
@@ -193,8 +195,7 @@ public partial class SettingsWindow : Window
             return;
         }
         FleetConfig.SetFleetKey(key);
-        PasteKeyBox.Clear();
-        PasteKeyPanel.Visibility = Visibility.Collapsed;
+        CancelPasteKey_Click(sender, e);
         UpdateKeyStatus();
         await _fleetChanged();
     }
@@ -214,94 +215,15 @@ public partial class SettingsWindow : Window
         await _fleetChanged();
     }
 
-    // ----- Updates -----
-
-    private async void CheckUpdates_Click(object sender, RoutedEventArgs e) => await CheckForUpdatesAsync(force: true);
-
-    private async Task CheckForUpdatesAsync(bool force)
-    {
-        CheckUpdatesButton.IsEnabled = false;
-        UpdateStatusText.Text = "Checking GitHub Releases…";
-        try
-        {
-            _release = await AppUpdater.GetLatestReleaseAsync(force);
-            var current = AppUpdater.CurrentVersion;
-            if (_release == null)
-            {
-                UpdateStatusText.Text = $"{AppUpdater.ReleaseRepository} has no release with {AppUpdater.AssetName}. To build one, push a tag such as v{current} (see README).";
-                InstallUpdateButton.Visibility = Visibility.Collapsed;
-            }
-            else if (AppUpdater.IsNewer(_release.Version, current))
-            {
-                UpdateStatusText.Text = $"Version {_release.Version} is available.";
-                InstallUpdateButton.Content = $"Install v{_release.Version}";
-                InstallUpdateButton.Visibility = Visibility.Visible;
-            }
-            else
-            {
-                UpdateStatusText.Text = AppUpdater.IsRunningInstalledCopy
-                    ? $"Runner Manager is up to date (latest release: v{_release.Version})."
-                    : $"The latest release is v{_release.Version}. Install it to run Runner Manager from a fixed location with a Start menu shortcut.";
-                InstallUpdateButton.Content = "Install release";
-                InstallUpdateButton.Visibility = AppUpdater.IsRunningInstalledCopy ? Visibility.Collapsed : Visibility.Visible;
-            }
-        }
-        finally { CheckUpdatesButton.IsEnabled = true; }
-    }
-
-    private async void InstallUpdate_Click(object sender, RoutedEventArgs e)
-    {
-        if (_release == null) return;
-        var release = _release;
-        var installed = false;
-        await _runOperation($"Install Runner Manager {release.Tag}", async log =>
-        {
-            var exe = await AppUpdater.DownloadAndInstallAsync(release, log);
-            await AppUpdater.CreateStartMenuShortcutAsync();
-            if (await MachineRelay.IsAgentInstalledAsync())
-            {
-                log("Switching the fleet agent to the installed copy...");
-                await MachineRelay.RegisterAgentTaskAsync(exe);
-                await MachineRelay.RestartLocalAgentAsync();
-            }
-            if (await ScheduledTasks.ExistsAsync(ScheduledTasks.DashboardTaskName))
-                await ScheduledTasks.RegisterLogonTaskAsync(ScheduledTasks.DashboardTaskName, exe, "--minimized",
-                    "Opens the Runner Manager dashboard in the notification area at sign-in.", restartOnFailure: false);
-            installed = true;
-        });
-        if (!installed) return;
-        if (DialogWindow.Show(this, DialogTone.Question, $"Runner Manager {release.Tag} is installed",
-                "Restart Runner Manager now to use the new version? It is also available in the Start menu.", "Restart now", cancel: "Later") == "Restart now")
-        {
-            Process.Start(new ProcessStartInfo(AppUpdater.InstalledExe) { UseShellExecute = true });
-            ((App)Application.Current).ExitApplication();
-        }
-    }
-
-    private void Uninstall_Click(object sender, RoutedEventArgs e)
-    {
-        var exe = File.Exists(AppUpdater.InstalledExe) ? AppUpdater.InstalledExe : Environment.ProcessPath!;
-        Process.Start(new ProcessStartInfo(exe) { UseShellExecute = true, ArgumentList = { "--uninstall" } });
-        ((App)Application.Current).ExitApplication();
-    }
-
-    private void Releases_Click(object sender, RoutedEventArgs e)
-    {
-        var url = _release?.HtmlUrl is { Length: > 0 } html ? html : $"https://github.com/{AppUpdater.ReleaseRepository}/releases";
-        Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
-    }
-
-    // ----- Peers -----
-
-    private sealed record PeerRow(string Name, string Address, string LastSeenText);
+    private sealed record PeerRow(string Name, string Detail);
 
     private void RefreshPeers()
     {
         var config = FleetConfig.Current;
-        var peers = config.KnownPeers.OrderBy(p => p.Name).Select(p => new PeerRow(p.Name, p.Address,
-            p.LastSeenUtc == DateTime.MinValue ? "never" : p.LastSeenUtc.ToLocalTime().ToString("g"))).ToList();
+        var peers = config.KnownPeers.OrderBy(p => p.Name).Select(p => new PeerRow(p.Name,
+            $"{p.Address}  ·  last seen {(p.LastSeenUtc == DateTime.MinValue ? "never" : p.LastSeenUtc.ToLocalTime().ToString("g"))}")).ToList();
         PeersList.ItemsSource = peers;
-        PeersEmptyText.Visibility = peers.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        PeersEmptyPanel.Visibility = peers.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         AddressList.ItemsSource = config.ManualAddresses.ToList();
         ThisPcAddressText.Text = $"This PC: {Environment.MachineName}  ·  {string.Join(", ", FleetNetwork.LocalAddresses())}  ·  port {FleetNetwork.AgentPort}";
     }
@@ -356,21 +278,6 @@ public partial class SettingsWindow : Window
         await _fleetChanged();
     }
 
-    private async void DeleteRelay_Click(object sender, RoutedEventArgs e)
-    {
-        if (!DialogWindow.Confirm(this, "Delete the old relay variables?",
-                $"This deletes all RW_STATUS_, RW_COMMAND_ and RW_LOG_ Actions variables in {AppUpdater.ReleaseRepository}. " +
-                "PCs that run an older version create them again until they are updated.", "Delete", danger: true)) return;
-        DeleteRelayButton.IsEnabled = false;
-        try
-        {
-            var count = await MachineRelay.DeleteLegacyRelayDataAsync(AppUpdater.ReleaseRepository);
-            DialogWindow.Info(this, "Old relay data deleted", count == 0 ? "There were no variables to delete." : $"Deleted {count} variable{(count == 1 ? "" : "s")}.");
-        }
-        catch (Exception ex) { DialogWindow.Error(this, "Could not delete the variables", ex.Message); }
-        finally { DeleteRelayButton.IsEnabled = true; }
-    }
-
     private async void LeaveFleet_Click(object sender, RoutedEventArgs e)
     {
         if (Owner is not MainWindow main) return;
@@ -379,5 +286,116 @@ public partial class SettingsWindow : Window
         RefreshPeers();
     }
 
-    private void Done_Click(object sender, RoutedEventArgs e) => Close();
+    // ----- Remote Desktop Commander -----
+
+    private void UpdateRdcStatus()
+    {
+        var configured = RemoteDesktopManager.IsConfigured();
+        RdcRow.Title = configured ? "Set up on this PC" : "Not set up on this PC";
+        RdcRow.Description = configured
+            ? "Runner Manager monitors it and restarts it when it stops."
+            : "Set it up to monitor and restart it from Runner Manager.";
+        RdcSetupButton.Content = configured ? "Run setup again" : "Set up";
+        RdcSetupButton.Style = (Style)FindResource(configured ? typeof(Button) : "PrimaryButton");
+    }
+
+    private async void RdcSetup_Click(object sender, RoutedEventArgs e)
+    {
+        await _runOperation("Set up Remote Desktop Commander", async log =>
+        {
+            await RemoteDesktopManager.SetupAsync();
+            log(RemoteDesktopManager.IsConfigured()
+                ? "Remote Desktop Commander is set up and starting."
+                : "Setup window opened. Sign in there. Runner Manager detects the connection automatically.");
+        });
+        UpdateRdcStatus();
+    }
+
+    // ----- Updates -----
+
+    private async void CheckUpdates_Click(object sender, RoutedEventArgs e) => await CheckForUpdatesAsync(force: true);
+
+    private async Task CheckForUpdatesAsync(bool force)
+    {
+        CheckUpdatesButton.IsEnabled = false;
+        VersionRow.Description = "Checking for updates…";
+        try
+        {
+            _release = await AppUpdater.GetLatestReleaseAsync(force);
+            var current = AppUpdater.CurrentVersion;
+            var available = _release != null && AppUpdater.IsNewer(_release.Version, current);
+            var installable = available || _release != null && !AppUpdater.IsRunningInstalledCopy;
+            VersionRow.Description = _release == null
+                ? $"No release found in {AppUpdater.ReleaseRepository}."
+                : available
+                    ? $"Version {_release.Version} is available."
+                    : AppUpdater.IsRunningInstalledCopy
+                        ? "Up to date."
+                        : $"Running from a build folder. Install v{_release.Version} to run from a fixed location.";
+            InstallUpdateButton.Content = available ? $"Install {_release!.Version}" : "Install";
+            InstallUpdateButton.Visibility = installable ? Visibility.Visible : Visibility.Collapsed;
+            UpdateDot.Visibility = available ? Visibility.Visible : Visibility.Collapsed;
+        }
+        finally { CheckUpdatesButton.IsEnabled = true; }
+    }
+
+    private async void InstallUpdate_Click(object sender, RoutedEventArgs e)
+    {
+        if (_release == null) return;
+        var release = _release;
+        var installed = false;
+        await _runOperation($"Install Runner Manager {release.Tag}", async log =>
+        {
+            var exe = await AppUpdater.DownloadAndInstallAsync(release, log);
+            await AppUpdater.CreateStartMenuShortcutAsync();
+            if (await MachineRelay.IsAgentInstalledAsync())
+            {
+                log("Switching the fleet agent to the installed copy...");
+                await MachineRelay.RegisterAgentTaskAsync(exe);
+                await MachineRelay.RestartLocalAgentAsync();
+            }
+            if (await ScheduledTasks.ExistsAsync(ScheduledTasks.DashboardTaskName))
+                await Installer.RegisterStartupTaskAsync(exe);
+            installed = true;
+        });
+        if (!installed) return;
+        if (DialogWindow.Show(this, DialogTone.Question, $"Runner Manager {release.Tag} is installed",
+                "Restart Runner Manager now to use the new version?", "Restart now", cancel: "Later") == "Restart now")
+        {
+            Process.Start(new ProcessStartInfo(AppUpdater.InstalledExe) { UseShellExecute = true });
+            ((App)Application.Current).ExitApplication();
+        }
+    }
+
+    private void Releases_Click(object sender, RoutedEventArgs e)
+    {
+        var url = _release?.HtmlUrl is { Length: > 0 } html ? html : $"https://github.com/{AppUpdater.ReleaseRepository}/releases";
+        Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+    }
+
+    private async void RelaySave_Click(object sender, RoutedEventArgs e)
+    {
+        var repository = RelayBox.Text.Trim();
+        if (!FleetConfig.IsValidRepository(repository))
+        {
+            RelayRow.Description = "Enter the repository as owner/name.";
+            return;
+        }
+        FleetConfig.Update(c => c.RelayRepository = repository);
+        RelayRow.Description = "Saved. Updates now come from this repository.";
+        await CheckForUpdatesAsync(force: true);
+    }
+
+    private void OpenDataFolder_Click(object sender, RoutedEventArgs e)
+    {
+        Directory.CreateDirectory(FleetConfig.StateDir);
+        Process.Start(new ProcessStartInfo(FleetConfig.StateDir) { UseShellExecute = true });
+    }
+
+    private void Uninstall_Click(object sender, RoutedEventArgs e)
+    {
+        var exe = File.Exists(AppUpdater.InstalledExe) ? AppUpdater.InstalledExe : Environment.ProcessPath!;
+        Process.Start(new ProcessStartInfo(exe) { UseShellExecute = true, ArgumentList = { "--uninstall" } });
+        ((App)Application.Current).ExitApplication();
+    }
 }
