@@ -3,6 +3,7 @@ using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Threading;
 
 namespace RunnerManager;
 
@@ -36,6 +37,7 @@ public partial class MainWindow
         catch (Exception ex) { AddActivity($"Could not update the install: {ex.Message}"); }
         await RefreshAsync(forceAuthCheck: true);
         _refreshTimer.Start();
+        StartLiveJobs();
         await RunPostSetupStepsAsync();
     }
 
@@ -123,6 +125,110 @@ public partial class MainWindow
             _recentRuns[repository] = runs;
         }
         foreach (var runner in Machines.SelectMany(m => m.Runners)) ApplyRecentRuns(runner);
+    }
+
+    // ================= Live job view =================
+
+    private sealed class LiveJobState
+    {
+        public GitHubJobState? Job;
+        public string JobNote = string.Empty;
+        public RunnerJobActivity? Activity;
+        public string ActivityNote = string.Empty;
+    }
+
+    private static readonly TimeSpan LiveJobInterval = TimeSpan.FromSeconds(3);
+    private readonly Dictionary<string, LiveJobState> _liveJobs = new(StringComparer.OrdinalIgnoreCase);
+    private bool _liveJobsRefreshing;
+
+    private void StartLiveJobs()
+    {
+        var timer = new DispatcherTimer { Interval = LiveJobInterval };
+        timer.Tick += async (_, _) => await RefreshLiveJobsAsync();
+        timer.Start();
+    }
+
+    /// <summary>
+    /// Updates busy runners: the job and its steps from GitHub (cached for a few seconds), and for expanded runners the
+    /// output and processes from the PC the runner is on. Skipped while the window is hidden in the notification area.
+    /// </summary>
+    private async Task RefreshLiveJobsAsync()
+    {
+        if (_liveJobsRefreshing || !IsVisible) return;
+        _liveJobsRefreshing = true;
+        try
+        {
+            var busy = Machines.SelectMany(m => m.Runners.Where(r => r.IsBusy).Select(r => (Machine: m, Runner: r))).ToList();
+            var keys = busy.Select(b => RunnerKey(b.Runner)).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            foreach (var finished in _liveJobs.Keys.Where(k => !keys.Contains(k)).ToList()) _liveJobs.Remove(finished);
+            await Task.WhenAll(busy.Select(b => RefreshLiveJobAsync(b.Machine, b.Runner)));
+            // Cards may have been rebuilt meanwhile; the state is kept by runner key.
+            foreach (var runner in Machines.SelectMany(m => m.Runners)) ApplyLiveJob(runner);
+        }
+        catch (Exception ex) { AddActivity($"Could not update the job view: {ex.Message}"); }
+        finally { _liveJobsRefreshing = false; }
+    }
+
+    private async Task RefreshLiveJobAsync(MachineInfo machine, MachineRunnerStatus runner)
+    {
+        var key = RunnerKey(runner);
+        if (!_liveJobs.TryGetValue(key, out var state)) _liveJobs[key] = state = new LiveJobState();
+
+        if (!_githubAuthenticated)
+        {
+            state.Job = null;
+            state.JobNote = "Connect GitHub to see the job and its steps.";
+        }
+        else if (string.IsNullOrWhiteSpace(runner.RepositoryPath) || runner.AgentId == 0)
+        {
+            state.Job = null;
+            state.JobNote = runner.IsOrgRunner ? "GitHub does not list jobs per organization runner, so the steps are not shown." : string.Empty;
+        }
+        else
+        {
+            var (read, job) = await GitHubApi.GetCurrentJobAsync(runner.RepositoryPath, runner.AgentId);
+            if (!read) state.JobNote = "Could not read the job from GitHub. Trying again.";
+            else
+            {
+                state.Job = job;
+                state.JobNote = job == null ? "Waiting for GitHub to report the job." : string.Empty;
+            }
+        }
+
+        if (!runner.IsExpanded) return;
+        try
+        {
+            if (machine.IsLocal) state.Activity = await RunnerActivity.ReadAsync(runner.CommandKey);
+            else if (!machine.IsReachable)
+            {
+                state.ActivityNote = $"{machine.MachineName} is offline.";
+                return;
+            }
+            else if (machine.AgentProtocolVersion < 11)
+            {
+                state.Activity = null;
+                state.ActivityNote = $"Update Runner Manager on {machine.MachineName} to see the output and processes.";
+                return;
+            }
+            else state.Activity = await MachineRelay.RequestJobActivityAsync(machine.MachineKey, runner.CommandKey);
+            state.ActivityNote = state.Activity is { Output.Length: 0, Processes.Length: 0 }
+                ? $"The job has not started on {machine.MachineName} yet." : string.Empty;
+        }
+        catch (Exception ex) { state.ActivityNote = $"Could not read the output from {machine.MachineName}: {ex.Message}"; }
+    }
+
+    private void ApplyLiveJob(MachineRunnerStatus runner)
+        => runner.LiveJob = runner.IsBusy && _liveJobs.TryGetValue(RunnerKey(runner), out var state)
+            ? LiveJobView.Build(state.Job, state.JobNote, runner.IsExpanded ? state.Activity : null,
+                runner.IsExpanded ? state.ActivityNote : string.Empty, DateTime.UtcNow)
+            : null;
+
+    private void RunnerLiveOutput_Click(object sender, RoutedEventArgs e)
+    {
+        if (ItemFrom<MachineRunnerStatus>(sender) is not { } runner) return;
+        var machine = Machines.FirstOrDefault(m => m.MachineKey == runner.MachineKey);
+        var folder = runner.LocalRunner == null ? null : Path.Combine(runner.LocalRunner.InstallPath, "_diag", "pages");
+        ShowLog(machine, $"job:{runner.CommandKey}", runner.TitleText, folder);
     }
 
     private void ApplyRecentRuns(MachineRunnerStatus runner)
@@ -286,7 +392,13 @@ public partial class MainWindow
     private void ShowLog(MachineInfo? machine, string logKey, string? label, string? localFolder)
     {
         if (machine == null) return;
-        var what = logKey switch { "agent" => "fleet agent log", "rdc" => "Remote Desktop Commander log", _ => $"{label} diagnostic log" };
+        var what = logKey switch
+        {
+            "agent" => "fleet agent log",
+            "rdc" => "Remote Desktop Commander log",
+            _ when logKey.StartsWith("job:", StringComparison.OrdinalIgnoreCase) => $"{label} live output",
+            _ => $"{label} diagnostic log"
+        };
         LogViewerWindow window;
         if (machine.IsLocal)
         {

@@ -333,6 +333,7 @@ public partial class MainWindow : Window
                 runner.IsExpanded = expanded;
             LinkLocalRunner(runner);
             ApplyRecentRuns(runner);
+            ApplyLiveJob(runner);
         }
     }
 
@@ -706,12 +707,15 @@ public partial class MainWindow : Window
         var current = e.OriginalSource as DependencyObject;
         while (current != null && current != sender)
         {
-            if (current is ButtonBase || current is TextBlock { Tag: string { Length: > 0 } }) return;
+            // Buttons, links and the live job panel (so its output can be read and selected) do not toggle the row.
+            if (current is ButtonBase || current is TextBlock { Tag: string { Length: > 0 } } || current is FrameworkElement { Name: "LiveJobPanel" }) return;
             current = VisualTreeHelper.GetParent(current);
         }
         if (ItemFrom<MachineRunnerStatus>(sender) is not { } runner) return;
         runner.IsExpanded = !runner.IsExpanded;
         _machineRunnerExpansionStates[RunnerKey(runner)] = runner.IsExpanded;
+        ApplyLiveJob(runner);
+        if (runner.IsExpanded && runner.IsBusy) _ = RefreshLiveJobsAsync();
     }
 
     private async void RunnerPower_Click(object sender, RoutedEventArgs e)

@@ -444,6 +444,11 @@
                                                                         <StackPanel Grid.Column="1" VerticalAlignment="Center">
                                                                             <TextBlock Text="{Binding TitleText}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
                                                                             <TextBlock Text="{Binding RepositoryText}" Style="{StaticResource Caption}" FontSize="11" Margin="0,1,0,0" TextTrimming="CharacterEllipsis"/>
+                                                                            <StackPanel Orientation="Horizontal" Margin="0,2,0,0" Visibility="{Binding JobLineVisibility}">
+                                                                                <TextBlock Text="&#xE768;" Style="{StaticResource Icon}" FontSize="9" Foreground="{DynamicResource AccentBrush}"
+                                                                                           VerticalAlignment="Center" Margin="0,0,5,0"/>
+                                                                                <TextBlock Text="{Binding LiveJob.Summary}" FontSize="11" Foreground="{DynamicResource AccentBrush}" TextTrimming="CharacterEllipsis"/>
+                                                                            </StackPanel>
                                                                         </StackPanel>
                                                                         <Border Grid.Column="2" Style="{StaticResource Pill}" Background="{Binding StatusTint}" Margin="10,0,10,0"
                                                                                 ToolTip="{Binding StatusTip}">
@@ -496,6 +501,109 @@
                                                                                     CornerRadius="6" Padding="10,7" Margin="0,0,0,8" Visibility="{Binding ConsoleNoteVisibility}">
                                                                                 <TextBlock TextWrapping="Wrap" FontSize="12" Foreground="{DynamicResource TextMutedBrush}"
                                                                                            Text="This runner runs in a console window that a script in your Startup folder opens when you sign in. Closing the window or signing out takes the runner offline. “Run as service” makes it a Windows service. It then has no window, starts with Windows before sign-in, and Runner Manager can start, stop and restart it."/>
+                                                                            </Border>
+                                                                            <!-- Live job: steps from GitHub, output and processes from the runner's PC -->
+                                                                            <Border x:Name="LiveJobPanel" Visibility="{Binding LiveJobVisibility}" Background="{DynamicResource Bg2Brush}"
+                                                                                    BorderBrush="{DynamicResource BorderSubtleBrush}" BorderThickness="1" CornerRadius="8" Padding="12,10" Margin="0,0,0,10">
+                                                                                <StackPanel>
+                                                                                    <DockPanel>
+                                                                                        <TextBlock DockPanel.Dock="Right" Text="{Binding LiveJob.ElapsedText}" Style="{StaticResource Caption}" FontSize="11" VerticalAlignment="Center"/>
+                                                                                        <TextBlock Text="CURRENT JOB" Style="{StaticResource SectionLabel}" VerticalAlignment="Center"/>
+                                                                                    </DockPanel>
+                                                                                    <TextBlock Text="{Binding LiveJob.Title}" Tag="{Binding LiveJob.Url}" MouseLeftButtonUp="Link_Click" FontWeight="SemiBold"
+                                                                                               Margin="0,4,0,0" TextTrimming="CharacterEllipsis" Cursor="Hand" ToolTip="Open the job on GitHub"/>
+                                                                                    <TextBlock Text="{Binding LiveJob.Note}" Visibility="{Binding LiveJob.NoteVisibility}" Style="{StaticResource Caption}"
+                                                                                               FontSize="12" TextWrapping="Wrap" Margin="0,4,0,0"/>
+
+                                                                                    <!-- Steps -->
+                                                                                    <ItemsControl ItemsSource="{Binding LiveJob.Steps}" Visibility="{Binding LiveJob.StepsVisibility}" Margin="0,8,0,0">
+                                                                                        <ItemsControl.ItemTemplate>
+                                                                                            <DataTemplate DataType="{x:Type local:LiveStepView}">
+                                                                                                <DockPanel Margin="0,2">
+                                                                                                    <TextBlock Text="{Binding Glyph}" FontSize="11" Width="20" VerticalAlignment="Center">
+                                                                                                        <TextBlock.Style>
+                                                                                                            <Style TargetType="TextBlock" BasedOn="{StaticResource Icon}">
+                                                                                                                <Setter Property="Foreground" Value="{DynamicResource TextFaintBrush}"/>
+                                                                                                                <Style.Triggers>
+                                                                                                                    <DataTrigger Binding="{Binding State}" Value="done">
+                                                                                                                        <Setter Property="Foreground" Value="{DynamicResource SuccessBrush}"/>
+                                                                                                                    </DataTrigger>
+                                                                                                                    <DataTrigger Binding="{Binding State}" Value="failed">
+                                                                                                                        <Setter Property="Foreground" Value="{DynamicResource DangerBrush}"/>
+                                                                                                                    </DataTrigger>
+                                                                                                                    <DataTrigger Binding="{Binding State}" Value="running">
+                                                                                                                        <Setter Property="Foreground" Value="{DynamicResource AccentBrush}"/>
+                                                                                                                    </DataTrigger>
+                                                                                                                </Style.Triggers>
+                                                                                                            </Style>
+                                                                                                        </TextBlock.Style>
+                                                                                                    </TextBlock>
+                                                                                                    <TextBlock DockPanel.Dock="Right" Text="{Binding DurationText}" Style="{StaticResource Caption}" FontSize="11"
+                                                                                                               Margin="12,0,0,0" VerticalAlignment="Center"/>
+                                                                                                    <TextBlock Text="{Binding Name}" FontSize="12" TextTrimming="CharacterEllipsis" VerticalAlignment="Center">
+                                                                                                        <TextBlock.Style>
+                                                                                                            <Style TargetType="TextBlock">
+                                                                                                                <Style.Triggers>
+                                                                                                                    <DataTrigger Binding="{Binding State}" Value="running">
+                                                                                                                        <Setter Property="FontWeight" Value="SemiBold"/>
+                                                                                                                    </DataTrigger>
+                                                                                                                    <DataTrigger Binding="{Binding State}" Value="waiting">
+                                                                                                                        <Setter Property="Foreground" Value="{DynamicResource TextMutedBrush}"/>
+                                                                                                                    </DataTrigger>
+                                                                                                                    <DataTrigger Binding="{Binding State}" Value="skipped">
+                                                                                                                        <Setter Property="Foreground" Value="{DynamicResource TextFaintBrush}"/>
+                                                                                                                    </DataTrigger>
+                                                                                                                </Style.Triggers>
+                                                                                                            </Style>
+                                                                                                        </TextBlock.Style>
+                                                                                                    </TextBlock>
+                                                                                                </DockPanel>
+                                                                                            </DataTemplate>
+                                                                                        </ItemsControl.ItemTemplate>
+                                                                                    </ItemsControl>
+
+                                                                                    <!-- Processes -->
+                                                                                    <StackPanel Visibility="{Binding LiveJob.ProcessesVisibility}" Margin="0,12,0,0">
+                                                                                        <DockPanel Margin="0,0,0,4">
+                                                                                            <TextBlock DockPanel.Dock="Right" Text="{Binding LiveJob.ProcessSummary}" Style="{StaticResource Caption}" FontSize="11"/>
+                                                                                            <TextBlock Text="PROCESSES" Style="{StaticResource SectionLabel}"/>
+                                                                                        </DockPanel>
+                                                                                        <ItemsControl ItemsSource="{Binding LiveJob.Processes}">
+                                                                                            <ItemsControl.ItemTemplate>
+                                                                                                <DataTemplate DataType="{x:Type local:LiveProcessView}">
+                                                                                                    <Grid Margin="0,1">
+                                                                                                        <Grid.ColumnDefinitions>
+                                                                                                            <ColumnDefinition Width="*"/>
+                                                                                                            <ColumnDefinition Width="52"/>
+                                                                                                            <ColumnDefinition Width="72"/>
+                                                                                                        </Grid.ColumnDefinitions>
+                                                                                                        <TextBlock FontSize="12" TextTrimming="CharacterEllipsis">
+                                                                                                            <Run Text="{Binding Name, Mode=OneWay}" FontWeight="SemiBold"/><Run Text="  "/><Run Text="{Binding Arguments, Mode=OneWay}" Foreground="{DynamicResource TextMutedBrush}"/>
+                                                                                                        </TextBlock>
+                                                                                                        <TextBlock Grid.Column="1" Text="{Binding CpuText}" FontSize="12" TextAlignment="Right"/>
+                                                                                                        <TextBlock Grid.Column="2" Text="{Binding MemoryText}" FontSize="12" TextAlignment="Right" Foreground="{DynamicResource TextMutedBrush}"/>
+                                                                                                    </Grid>
+                                                                                                </DataTemplate>
+                                                                                            </ItemsControl.ItemTemplate>
+                                                                                        </ItemsControl>
+                                                                                    </StackPanel>
+
+                                                                                    <TextBlock Text="{Binding LiveJob.ActivityNote}" Visibility="{Binding LiveJob.ActivityNoteVisibility}" Style="{StaticResource Caption}"
+                                                                                               FontSize="12" TextWrapping="Wrap" Margin="0,10,0,0"/>
+
+                                                                                    <!-- Output of the running step -->
+                                                                                    <StackPanel Visibility="{Binding LiveJob.OutputVisibility}" Margin="0,12,0,0">
+                                                                                        <DockPanel Margin="0,0,0,4">
+                                                                                            <Button DockPanel.Dock="Right" Content="Open full output" Style="{StaticResource GhostButton}" Padding="6,1" FontSize="11"
+                                                                                                    Click="RunnerLiveOutput_Click"/>
+                                                                                            <TextBlock Text="OUTPUT" Style="{StaticResource SectionLabel}" VerticalAlignment="Center"/>
+                                                                                        </DockPanel>
+                                                                                        <Border Background="{DynamicResource Bg0Brush}" CornerRadius="6" Padding="10,8" ClipToBounds="True">
+                                                                                            <TextBlock Text="{Binding LiveJob.Output}" FontFamily="{StaticResource MonoFont}" FontSize="11"
+                                                                                                       Foreground="{DynamicResource TextMutedBrush}" TextWrapping="NoWrap"/>
+                                                                                        </Border>
+                                                                                    </StackPanel>
+                                                                                </StackPanel>
                                                                             </Border>
                                                                             <DockPanel Style="{StaticResource KeyRow}">
                                                                                 <TextBlock Text="Repository" Style="{StaticResource KeyText}"/>

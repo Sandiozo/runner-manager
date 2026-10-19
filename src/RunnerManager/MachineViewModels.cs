@@ -12,6 +12,7 @@ public sealed class MachineRunnerStatus : INotifyPropertyChanged
     private string _pendingAction = string.Empty;
     private RunnerInfo? _localRunner;
     private IReadOnlyList<WorkflowRunSummary> _recentRuns = Array.Empty<WorkflowRunSummary>();
+    private LiveJobView? _liveJob;
     public event PropertyChangedEventHandler? PropertyChanged;
 
     /// <summary>Latest GitHub Actions runner release, set by the dashboard for "update available" hints.</summary>
@@ -140,6 +141,23 @@ public sealed class MachineRunnerStatus : INotifyPropertyChanged
         }
     }
     [JsonIgnore] public Visibility RecentRunsVisibility => IsExpanded && _recentRuns.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+
+    /// <summary>The running job, its steps, output and processes; set by the dashboard while the runner is busy.</summary>
+    [JsonIgnore]
+    public LiveJobView? LiveJob
+    {
+        get => _liveJob;
+        set
+        {
+            if (ReferenceEquals(_liveJob, value)) return;
+            _liveJob = value;
+            Notify(nameof(LiveJob));
+            Notify(nameof(LiveJobVisibility));
+            Notify(nameof(JobLineVisibility));
+        }
+    }
+    [JsonIgnore] public Visibility LiveJobVisibility => IsExpanded && IsBusy && _liveJob != null ? Visibility.Visible : Visibility.Collapsed;
+    [JsonIgnore] public Visibility JobLineVisibility => IsBusy && !string.IsNullOrEmpty(_liveJob?.Summary) ? Visibility.Visible : Visibility.Collapsed;
 
     [JsonIgnore]
     public bool IsExpanded
@@ -596,4 +614,105 @@ public sealed class MachineInfo : INotifyPropertyChanged
         }
         return machine;
     }
+}
+
+/// <summary>What a busy runner is doing: its job and steps from GitHub, and its output and processes from its PC.</summary>
+public sealed class LiveJobView
+{
+    public string Title { get; init; } = string.Empty;
+    public string Url { get; init; } = string.Empty;
+    /// <summary>One line for the collapsed runner row, for example "Build · step 4 of 9: Compile".</summary>
+    public string Summary { get; init; } = string.Empty;
+    public string ElapsedText { get; init; } = string.Empty;
+    public string Note { get; init; } = string.Empty;
+    public IReadOnlyList<LiveStepView> Steps { get; init; } = Array.Empty<LiveStepView>();
+    public IReadOnlyList<LiveProcessView> Processes { get; init; } = Array.Empty<LiveProcessView>();
+    public string ProcessSummary { get; init; } = string.Empty;
+    public string ActivityNote { get; init; } = string.Empty;
+    public string Output { get; init; } = string.Empty;
+
+    public Visibility NoteVisibility => Note.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+    public Visibility StepsVisibility => Steps.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+    public Visibility ProcessesVisibility => Processes.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+    public Visibility ActivityNoteVisibility => ActivityNote.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+    public Visibility OutputVisibility => Output.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+
+    private const int OutputLines = 14;
+
+    public static LiveJobView Build(GitHubJobState? job, string jobNote, RunnerJobActivity? activity, string activityNote, DateTime nowUtc)
+    {
+        var steps = job?.Steps.Select(s => LiveStepView.From(s, nowUtc)).ToList() ?? new List<LiveStepView>();
+        var current = job?.Steps.FirstOrDefault(s => s.Status.Equals("in_progress", StringComparison.OrdinalIgnoreCase))
+                      ?? job?.Steps.LastOrDefault(s => s.Status.Equals("completed", StringComparison.OrdinalIgnoreCase));
+        var stepText = current == null || job == null ? string.Empty
+            : $"step {job.Steps.ToList().IndexOf(current) + 1} of {job.Steps.Count}: {current.Name}";
+        var processes = activity?.Processes.Select(LiveProcessView.From).ToList() ?? new List<LiveProcessView>();
+        return new LiveJobView
+        {
+            Title = job == null ? "Running a job" : $"{job.WorkflowName} → {job.Name}  ·  run #{job.RunNumber}",
+            Url = job?.HtmlUrl ?? string.Empty,
+            Summary = job == null ? string.Empty
+                : stepText.Length == 0 ? job.WorkflowName : $"{job.WorkflowName}  ·  {stepText}",
+            ElapsedText = job?.StartedUtc is { } started ? $"Running for {LiveStepView.FormatDuration(nowUtc - started)}" : string.Empty,
+            Note = jobNote,
+            Steps = steps,
+            Processes = processes,
+            ProcessSummary = processes.Count == 0 ? string.Empty
+                : $"CPU {activity!.Processes.Sum(p => p.CpuPercent):0}%  ·  {SystemHealth.FormatBytes(activity.Processes.Sum(p => p.MemoryBytes))}",
+            ActivityNote = activityNote,
+            Output = activity == null ? string.Empty : string.Join('\n', activity.Output.TakeLast(OutputLines))
+        };
+    }
+}
+
+public sealed class LiveStepView
+{
+    public string Name { get; init; } = string.Empty;
+    public string DurationText { get; init; } = string.Empty;
+    /// <summary>"done", "failed", "running", "skipped" or "waiting"; the XAML picks icon colors from it.</summary>
+    public string State { get; init; } = "waiting";
+    public string Glyph => State switch
+    {
+        "done" => "",
+        "failed" => "",
+        "running" => "",
+        "skipped" => "",
+        _ => ""
+    };
+
+    public static LiveStepView From(GitHubJobStep step, DateTime nowUtc)
+    {
+        var state = step.Status.Equals("in_progress", StringComparison.OrdinalIgnoreCase) ? "running"
+            : !step.Status.Equals("completed", StringComparison.OrdinalIgnoreCase) ? "waiting"
+            : step.Conclusion switch { "success" => "done", "skipped" => "skipped", "failure" or "cancelled" => "failed", _ => "done" };
+        var duration = step.StartedUtc is not { } started ? string.Empty
+            : state == "running" ? FormatDuration(nowUtc - started)
+            : step.CompletedUtc is { } completed && state != "skipped" ? FormatDuration(completed - started)
+            : string.Empty;
+        return new LiveStepView { Name = step.Name, DurationText = duration, State = state };
+    }
+
+    public static string FormatDuration(TimeSpan span)
+    {
+        if (span < TimeSpan.Zero) span = TimeSpan.Zero;
+        return span.TotalHours >= 1 ? $"{(int)span.TotalHours}h {span.Minutes}m"
+            : span.TotalMinutes >= 1 ? $"{span.Minutes}m {span.Seconds}s"
+            : $"{span.Seconds}s";
+    }
+}
+
+public sealed class LiveProcessView
+{
+    public string Name { get; init; } = string.Empty;
+    public string Arguments { get; init; } = string.Empty;
+    public string CpuText { get; init; } = string.Empty;
+    public string MemoryText { get; init; } = string.Empty;
+
+    public static LiveProcessView From(RunnerProcess process) => new()
+    {
+        Name = process.Name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) ? process.Name[..^4] : process.Name,
+        Arguments = process.Arguments,
+        CpuText = $"{process.CpuPercent:0}%",
+        MemoryText = SystemHealth.FormatBytes(process.MemoryBytes)
+    };
 }

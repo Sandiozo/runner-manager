@@ -8,7 +8,8 @@ namespace RunnerManager;
 
 public static class MachineRelay
 {
-    public const int ProtocolVersion = 10;
+    /// <summary>11: answers "job" requests (live output and processes of a runner's job).</summary>
+    public const int ProtocolVersion = 11;
     private const string AgentMutexName = @"Global\RunnerWidgetFleetAgent";
     private static readonly TimeSpan WatchdogInterval = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan DiscoveryInterval = TimeSpan.FromSeconds(30);
@@ -217,6 +218,15 @@ public static class MachineRelay
     }
 
     /// <summary>Reads the tail of one of another PC's logs directly from its agent.</summary>
+    /// <summary>A busy runner's live output and processes from the PC it runs on (agents with protocol 11 or later).</summary>
+    public static async Task<RunnerJobActivity> RequestJobActivityAsync(string machineKey, string runnerKey, CancellationToken cancellationToken = default)
+    {
+        var response = await FleetNetwork.CallAsync(AddressOf(machineKey), Sanitize(machineKey),
+            new FleetRequest { Op = "job", LogKey = runnerKey }, TimeSpan.FromSeconds(10), cancellationToken);
+        if (!response.Ok) throw new InvalidOperationException(response.Error);
+        return response.Job ?? throw new InvalidOperationException("The PC returned no job details.");
+    }
+
     public static async Task<LogPayload> RequestRemoteLogAsync(string machineKey, string logKey, CancellationToken cancellationToken)
     {
         var response = await FleetNetwork.CallAsync(AddressOf(machineKey), Sanitize(machineKey),
@@ -302,7 +312,7 @@ public static class MachineRelay
             finally { StatusGate.Release(); }
         }
 
-        using var server = new AgentServer(StatusAsync, Enqueue, LogReader.ReadAsync);
+        using var server = new AgentServer(StatusAsync, Enqueue, LogReader.ReadAsync, job: RunnerActivity.ReadAsync);
         try { server.Start(); }
         catch (Exception ex) { AppendAgentLog($"Could not listen on port {FleetNetwork.AgentPort}: {ex.Message}"); }
 
@@ -941,6 +951,18 @@ public static class LogReader
             title = $"{runner?.AgentName ?? service} diagnostic log — {Environment.MachineName}";
             path = runner == null ? null : NewestLog(Path.Combine(runner.InstallPath, "_diag"));
             if (path != null) title += $"  ({Path.GetFileName(path)})";
+        }
+        else if (logKey.StartsWith("job:", StringComparison.OrdinalIgnoreCase))
+        {
+            var key = logKey[4..];
+            var root = await RunnerActivity.FindRootAsync(key);
+            var lines = RunnerActivity.ReadOutput(root, MaxLines);
+            return new LogPayload
+            {
+                Title = $"{Path.GetFileName(root)} live output — {Environment.MachineName}",
+                Text = lines.Length > 0 ? Truncate(lines) : "(No output yet. The runner writes the output of the running step here while a job runs.)",
+                CreatedUtc = DateTime.UtcNow
+            };
         }
         else throw new InvalidOperationException($"Unknown log: {logKey}");
 

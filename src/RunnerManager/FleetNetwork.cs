@@ -11,7 +11,7 @@ namespace RunnerManager;
 
 public sealed record FleetRequest
 {
-    /// <summary>"status", "command" or "log".</summary>
+    /// <summary>"status", "command", "log", "leave", or "job" (protocol 11: a runner's live output and processes).</summary>
     public string Op { get; init; } = "status";
     public MachineCommand? Command { get; init; }
     public string LogKey { get; init; } = string.Empty;
@@ -25,6 +25,7 @@ public sealed record FleetResponse
     public string Error { get; init; } = string.Empty;
     public MachineStatusPayload? Status { get; init; }
     public LogPayload? Log { get; init; }
+    public RunnerJobActivity? Job { get; init; }
     public string CommandId { get; init; } = string.Empty;
 }
 
@@ -266,6 +267,7 @@ public sealed class AgentServer : IDisposable
     private readonly Func<Task<MachineStatusPayload>> _status;
     private readonly Func<MachineCommand, string> _enqueue;
     private readonly Func<string, Task<LogPayload>> _log;
+    private readonly Func<string, Task<RunnerJobActivity>>? _job;
     private readonly Func<byte[]?> _pairingKey;
     private readonly string _prefix;
     private readonly int _discoveryPort;
@@ -279,11 +281,13 @@ public sealed class AgentServer : IDisposable
 
     /// <param name="prefix">HTTP prefix to listen on (tests use a localhost one; the agent listens on all interfaces).</param>
     public AgentServer(Func<Task<MachineStatusPayload>> status, Func<MachineCommand, string> enqueue, Func<string, Task<LogPayload>> log,
-        Func<byte[]?>? pairingKey = null, string? prefix = null, int discoveryPort = FleetNetwork.DiscoveryPort, string? machineKey = null)
+        Func<byte[]?>? pairingKey = null, string? prefix = null, int discoveryPort = FleetNetwork.DiscoveryPort, string? machineKey = null,
+        Func<string, Task<RunnerJobActivity>>? job = null)
     {
         _status = status;
         _enqueue = enqueue;
         _log = log;
+        _job = job;
         _pairingKey = pairingKey ?? (() => FleetConfig.Current.FleetKey);
         _prefix = prefix ?? $"http://+:{FleetNetwork.AgentPort}/rw/";
         _discoveryPort = discoveryPort;
@@ -360,6 +364,7 @@ public sealed class AgentServer : IDisposable
                     "status" => new FleetResponse { Ok = true, Status = await _status() },
                     "command" when request.Command != null => new FleetResponse { Ok = true, CommandId = _enqueue(request.Command) },
                     "log" => new FleetResponse { Ok = true, Log = await _log(request.LogKey) },
+                    "job" when _job != null => new FleetResponse { Ok = true, Job = await _job(request.LogKey) },
                     "leave" when request.From.Length > 0 => Leave(request.From),
                     _ => new FleetResponse { Ok = false, Error = $"Unknown request: {request.Op}" }
                 };

@@ -41,6 +41,18 @@ public static class GitHubApi
         };
     }
 
+    /// <summary>
+    /// The job a runner is running now, with its steps. Read is false when GitHub could not be read; Job is null when
+    /// GitHub does not (yet) report a running job for this runner. Shares the few-second cache of the queue view.
+    /// </summary>
+    public static async Task<(bool Read, GitHubJobState? Job)> GetCurrentJobAsync(string repositoryPath, long runnerId)
+    {
+        var state = await GetRepositoryWorkAsync(repositoryPath);
+        if (state == null) return (false, null);
+        return (true, state.Jobs.FirstOrDefault(j =>
+            j.Status.Equals("in_progress", StringComparison.OrdinalIgnoreCase) && j.RunnerId == runnerId));
+    }
+
     private static Task<RepositoryWorkState?> GetRepositoryWorkAsync(string repositoryPath)
     {
         lock (CacheLock)
@@ -113,6 +125,10 @@ public static class GitHubApi
         }
         catch { return null; }
     }
+    private static DateTime? ReadTime(JsonElement element, string property)
+        => element.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.String && value.TryGetDateTime(out var time)
+            ? time.ToUniversalTime() : null;
+
     private static GitHubJobState ReadJob(JsonElement job, WorkflowRunState run)
     {
         var labels = new List<string>();
@@ -120,8 +136,24 @@ public static class GitHubApi
             foreach (var label in labelValues.EnumerateArray())
                 if (!string.IsNullOrWhiteSpace(label.GetString())) labels.Add(label.GetString()!);
 
+        var steps = new List<GitHubJobStep>();
+        if (job.TryGetProperty("steps", out var stepValues) && stepValues.ValueKind == JsonValueKind.Array)
+            foreach (var step in stepValues.EnumerateArray())
+                steps.Add(new GitHubJobStep
+                {
+                    Number = step.TryGetProperty("number", out var number) && number.ValueKind == JsonValueKind.Number ? number.GetInt32() : steps.Count + 1,
+                    Name = step.TryGetProperty("name", out var stepName) ? stepName.GetString() ?? "Step" : "Step",
+                    Status = step.TryGetProperty("status", out var stepStatus) ? stepStatus.GetString() ?? string.Empty : string.Empty,
+                    Conclusion = step.TryGetProperty("conclusion", out var conclusion) ? conclusion.GetString() ?? string.Empty : string.Empty,
+                    StartedUtc = ReadTime(step, "started_at"),
+                    CompletedUtc = ReadTime(step, "completed_at")
+                });
+
         return new GitHubJobState
         {
+            Id = job.TryGetProperty("id", out var id) && id.ValueKind == JsonValueKind.Number ? id.GetInt64() : 0,
+            StartedUtc = ReadTime(job, "started_at"),
+            Steps = steps,
             RunnerId = job.TryGetProperty("runner_id", out var runnerId) && runnerId.ValueKind == JsonValueKind.Number
                 ? runnerId.GetInt64() : 0,
             Name = job.TryGetProperty("name", out var name) ? name.GetString() ?? "Job" : "Job",
@@ -287,8 +319,23 @@ public sealed class WorkflowRunState
     public int RunNumber { get; init; }
     public string HtmlUrl { get; init; } = string.Empty;
 }
+public sealed class GitHubJobStep
+{
+    public int Number { get; init; }
+    public string Name { get; init; } = string.Empty;
+    /// <summary>"queued", "in_progress" or "completed".</summary>
+    public string Status { get; init; } = string.Empty;
+    /// <summary>"success", "failure", "skipped" or "cancelled" once completed.</summary>
+    public string Conclusion { get; init; } = string.Empty;
+    public DateTime? StartedUtc { get; init; }
+    public DateTime? CompletedUtc { get; init; }
+}
+
 public sealed class GitHubJobState
 {
+    public long Id { get; init; }
+    public DateTime? StartedUtc { get; init; }
+    public IReadOnlyList<GitHubJobStep> Steps { get; init; } = Array.Empty<GitHubJobStep>();
     public long RunnerId { get; init; }
     public string Name { get; init; } = string.Empty;
     public string Status { get; init; } = string.Empty;
