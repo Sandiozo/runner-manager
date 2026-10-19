@@ -91,7 +91,7 @@ public partial class JoinFleetWindow : Window
         ConfirmText.Text = $"Connecting to {label}…";
         CodeText.Text = "··· ···";
         WaitText.Text = string.Empty;
-        _joinCts = new CancellationTokenSource();
+        var cts = _joinCts = new CancellationTokenSource();
         try
         {
             var result = await Pairing.JoinAsync(address, Environment.MachineName, code => Dispatcher.Invoke(() =>
@@ -99,13 +99,15 @@ public partial class JoinFleetWindow : Window
                 CodeText.Text = code;
                 ConfirmText.Text = $"Check that {label} shows the same 6-digit code. Then click Allow on {label}.";
                 WaitText.Text = $"Waiting for {label}…";
-            }), _joinCts.Token);
+            }), cts.Token);
             PairingKey = result.PairingKey;
             HostName = result.HostName;
             HostAddress = result.HostAddress;
             DialogResult = true;
         }
         catch (OperationCanceledException) when (!IsLoaded) { }
+        // Back was clicked: the page has already changed, so there is nothing to report.
+        catch (OperationCanceledException) when (cts.IsCancellationRequested) { return; }
         catch (Exception ex)
         {
             if (!IsLoaded) return;
@@ -133,6 +135,4 @@ public partial class JoinFleetWindow : Window
         OtherWaysPanel.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
         OtherWaysButton.Content = show ? "Other ways to join ▴" : "Other ways to join ▾";
     }
-
-    private void Cancel_Click(object sender, RoutedEventArgs e) => DialogResult = false;
 }

@@ -2,6 +2,8 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Interop;
 using System.Windows.Media;
 using Microsoft.Win32;
@@ -19,8 +21,11 @@ public static class Palette
     public static Brush Text { get; private set; } = Brush("#E6EDF3");
     public static Brush TextMuted { get; private set; } = Brush("#9198A1");
 
+    private static readonly Dictionary<Color, Brush> Tints = new();
+
     public static void Use(bool light)
     {
+        Tints.Clear();
         Success = Brush(light ? "#1A7F37" : "#3FB950");
         Danger = Brush(light ? "#CF222E" : "#F85149");
         Warning = Brush(light ? "#9A6700" : "#D29922");
@@ -30,12 +35,17 @@ public static class Palette
         TextMuted = Brush(light ? "#59636E" : "#9198A1");
     }
 
-    /// <summary>A translucent version of a status color, for pill backgrounds.</summary>
+    /// <summary>
+    /// A translucent version of a status color, for pill backgrounds. Cached per color, so bindings
+    /// get the same frozen brush on every refresh.
+    /// </summary>
     public static Brush Tint(Brush brush)
     {
         if (brush is not SolidColorBrush solid) return Brushes.Transparent;
+        if (Tints.TryGetValue(solid.Color, out var cached)) return cached;
         var tint = new SolidColorBrush(Color.FromArgb(0x26, solid.Color.R, solid.Color.G, solid.Color.B));
         tint.Freeze();
+        Tints[solid.Color] = tint;
         return tint;
     }
 
@@ -45,6 +55,32 @@ public static class Palette
         brush.Freeze();
         return brush;
     }
+}
+
+public static class Menus
+{
+    /// <summary>Opens a button's context menu below it, optionally with the menu's right edge aligned to the button.</summary>
+    public static void OpenBelow(Button button, bool alignRight)
+    {
+        if (button.ContextMenu is not { } menu) return;
+        menu.PlacementTarget = button;
+        menu.Placement = PlacementMode.Bottom;
+        menu.VerticalOffset = 4;
+        // The menu's width is only known once it's open.
+        if (alignRight) menu.Opened += AlignRight;
+        menu.IsOpen = true;
+
+        void AlignRight(object? sender, RoutedEventArgs e)
+        {
+            menu.Opened -= AlignRight;
+            menu.HorizontalOffset = button.ActualWidth - menu.ActualWidth;
+        }
+    }
+}
+
+public static class AppLinks
+{
+    public static string ReleasesUrl => $"https://github.com/{AppUpdater.ReleaseRepository}/releases";
 }
 
 public enum AppTheme { System, Dark, Light }
@@ -172,13 +208,6 @@ public sealed class ActivityEntry
         ActivityKind.Warning => "",
         ActivityKind.Error => "",
         _ => ""
-    };
-    public Brush Brush => Kind switch
-    {
-        ActivityKind.Success => Palette.Success,
-        ActivityKind.Warning => Palette.Warning,
-        ActivityKind.Error => Palette.Danger,
-        _ => Palette.Muted
     };
 
     public static ActivityKind Classify(string message)

@@ -339,9 +339,6 @@ public sealed class MachineInfo : INotifyPropertyChanged
     // ----- Versions and updates -----
     public string VersionText => IsLocalOnly ? $"v{AppUpdater.CurrentVersion}"
         : string.IsNullOrWhiteSpace(AppVersion) ? $"agent protocol {AgentProtocolVersion}" : $"v{AppVersion}";
-    /// <summary>Agents before protocol 9 can't update themselves; they need one manual update.</summary>
-    /// <summary>Kept for older call sites: agents too old to update themselves.</summary>
-    public bool NeedsManualUpdate => false;
     public bool UpdateAvailable => !IsLocalOnly && AppVersion.Length > 0 && AppUpdater.IsNewer(LatestAppVersion, AppVersion);
     public Visibility UpdateBadgeVisibility => LocalAgentOutdated || UpdateAvailable ? Visibility.Visible : Visibility.Collapsed;
     public string UpdateBadgeText => LocalAgentOutdated ? "Update fleet agent" : $"Runner Manager v{LatestAppVersion} available";
@@ -460,9 +457,6 @@ public sealed class MachineInfo : INotifyPropertyChanged
         _ => RdcRunning ? "Stop" : "Start"
     };
     public string RdcPowerGlyph => RdcRunning ? "" : "";
-    public string RdcSetupButtonText => _rdcPendingAction == "Setup" ? "Starting setup…"
-        : !IsLocal && AgentProtocolVersion < 2 ? "Update the fleet agent first" : "Set up Remote Desktop Commander";
-    public Visibility RdcSetupVisibility => !RdcConfigured ? Visibility.Visible : Visibility.Collapsed;
     public Visibility RdcControlsVisibility => RdcConfigured ? Visibility.Visible : Visibility.Collapsed;
     public bool CanControl => RdcConfigured && string.IsNullOrEmpty(_rdcPendingAction) && (IsLocal || IsOnline);
     public bool CanSetupRdc => !RdcConfigured && string.IsNullOrEmpty(_rdcPendingAction) && (IsLocal || IsOnline);
@@ -478,8 +472,25 @@ public sealed class MachineInfo : INotifyPropertyChanged
     }
     public Visibility LastResultVisibility => string.IsNullOrWhiteSpace(LastResultText) ? Visibility.Collapsed : Visibility.Visible;
 
+    /// <summary>Properties that change with time, load readings or online state (which follows the heartbeat age).</summary>
+    private static readonly string[] TimeBasedProperties =
+    {
+        nameof(UpdatedUtc), nameof(SyncText), nameof(CpuPercent), nameof(CpuText), nameof(CpuBrush),
+        nameof(MemoryPercent), nameof(MemoryText), nameof(MemoryBrush), nameof(UptimeText),
+        nameof(RdcActivityValue), nameof(RdcUptimeValue), nameof(LastResultText), nameof(LastResultVisibility),
+        nameof(IsOnline), nameof(IsReachable), nameof(StatusText), nameof(StatusBrush), nameof(StatusTint),
+        nameof(SupportsFleetTools), nameof(CanUpdateAgent), nameof(CanControl), nameof(CanSetupRdc)
+    };
+
+    /// <summary>Properties that depend on the pending Remote Desktop Commander (or PC) action.</summary>
+    private static readonly string[] PendingProperties =
+    {
+        nameof(PendingAction), nameof(RdcPanelVisibility), nameof(RdcPillText), nameof(RdcStatusBrush), nameof(RdcStatusTint),
+        nameof(RdcPowerButtonText), nameof(CanUpdateAgent), nameof(CanControl), nameof(CanSetupRdc)
+    };
+
     /// <summary>
-    /// Takes the newer timestamp and load readings from an otherwise identical status and refreshes all
+    /// Takes the newer timestamp and load readings from an otherwise identical status and refreshes the
     /// time-based text, without rebuilding the card.
     /// </summary>
     public void Touch(MachineInfo newer)
@@ -487,12 +498,14 @@ public sealed class MachineInfo : INotifyPropertyChanged
         _updatedUtc = newer.UpdatedUtc;
         _cpuPercent = newer.CpuPercent;
         _memoryPercent = newer.MemoryPercent;
-        foreach (var runner in Runners)
-        {
-            if (runner.MachineOnline == IsReachable) continue;
-            runner.MachineOnline = IsReachable;
-            runner.Refresh();
-        }
+        RefreshRunnerReachability();
+        Notify(TimeBasedProperties);
+    }
+
+    /// <summary>Re-evaluates every binding (used when the theme, the latest version or the RDC visibility changes).</summary>
+    public void Refresh()
+    {
+        RefreshRunnerReachability();
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(string.Empty));
     }
 
@@ -500,7 +513,23 @@ public sealed class MachineInfo : INotifyPropertyChanged
     {
         if (_rdcPendingAction == action) return;
         _rdcPendingAction = action;
-        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(string.Empty));
+        Notify(PendingProperties);
+    }
+
+    private void RefreshRunnerReachability()
+    {
+        foreach (var runner in Runners)
+        {
+            if (runner.MachineOnline == IsReachable) continue;
+            runner.MachineOnline = IsReachable;
+            runner.Refresh();
+        }
+    }
+
+    private void Notify(string[] names)
+    {
+        if (PropertyChanged is not { } handler) return;
+        foreach (var name in names) handler(this, new PropertyChangedEventArgs(name));
     }
 
     /// <summary>A known PC that hasn't answered yet, shown as offline with the reason.</summary>

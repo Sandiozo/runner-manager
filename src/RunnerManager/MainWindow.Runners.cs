@@ -17,15 +17,8 @@ public partial class MainWindow
             deleteFiles, keepFiles, detail: string.IsNullOrEmpty(runner.InstallPath) ? runner.LocalRunner?.InstallPath : runner.InstallPath);
         if (choice == null) return;
         var deleteFolder = choice == deleteFiles;
-        MarkUserAction(RunnerKey(runner));
-
-        if (runner.IsLocalMachine)
-        {
-            runner.SetPending("Remove");
-            await RunOperationAsync($"Delete {runner.TitleText}", log => RunnerService.RemoveRunnerAsync(runner.CommandKey, deleteFolder, log));
-            return;
-        }
-        await QueueRunnerCommandAsync(runner, "Remove", value: deleteFolder ? "delete" : "keep");
+        await RunRunnerActionAsync(runner, "Remove", $"Delete {runner.TitleText}",
+            log => RunnerService.RemoveRunnerAsync(runner.CommandKey, deleteFolder, log), value: deleteFolder ? "delete" : "keep");
     }
 
     private async void RunnerConvert_Click(object sender, RoutedEventArgs e)
@@ -35,14 +28,8 @@ public partial class MainWindow
                 "The console window closes, and its startup entry is moved to %LOCALAPPDATA%\\RunnerManager\\disabled-startup so it does not start twice. " +
                 "The runner is registered again as a Windows service with the same name and labels. It then starts with Windows, before sign-in.",
                 "Run as service")) return;
-        MarkUserAction(RunnerKey(runner));
-        if (runner.IsLocalMachine)
-        {
-            runner.SetPending("Convert");
-            await RunOperationAsync($"Convert {runner.TitleText}", log => RunnerService.ConvertToServiceAsync(runner.CommandKey, log));
-            return;
-        }
-        await QueueRunnerCommandAsync(runner, "Convert");
+        await RunRunnerActionAsync(runner, "Convert", $"Convert {runner.TitleText}",
+            log => RunnerService.ConvertToServiceAsync(runner.CommandKey, log));
     }
 
     private async void RunnerMove_Click(object sender, RoutedEventArgs e)
@@ -72,11 +59,11 @@ public partial class MainWindow
         }
         var deleteOld = dialog.DeleteOldFiles;
         var key = RunnerKey(runner);
-        MarkUserAction(key);
-        runner.SetPending("Move");
 
         await RunOperationAsync($"Move {runner.TitleText} to {target.MachineName}", async log =>
         {
+            MarkUserAction(key);
+            runner.SetPending("Move");
             var labels = runner.LocalRunner?.CustomLabels;
             if (labels == null || labels.Length == 0)
                 labels = (await GitHubCli.GetRunnerStateAsync(runner.Scope, runner.AgentId))?.Labels ?? Array.Empty<string>();

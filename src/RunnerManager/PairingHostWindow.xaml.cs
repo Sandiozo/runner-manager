@@ -106,6 +106,4 @@ public partial class PairingHostWindow : Window
         }
         catch { }
     }
-
-    private void Close_Click(object sender, RoutedEventArgs e) => Close();
 }

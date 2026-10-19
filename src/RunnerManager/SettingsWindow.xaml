@@ -132,11 +132,11 @@
                     <Border Style="{StaticResource Group}">
                         <StackPanel>
                             <local:SettingRow Glyph="&#xE7E8;" Title="Start with Windows" Description="Opens in the notification area when you sign in.">
-                                <CheckBox x:Name="StartupToggle" Style="{StaticResource ToggleSwitch}" Click="StartupToggle_Click"/>
+                                <CheckBox x:Name="StartupToggle" Style="{StaticResource ToggleSwitch}" AutomationProperties.Name="Start with Windows" Click="StartupToggle_Click"/>
                             </local:SettingRow>
                             <Border Style="{StaticResource Divider}"/>
                             <local:SettingRow Glyph="&#xE8A7;" Title="Keep running when closed" Description="Monitoring continues in the notification area. Exit from its icon.">
-                                <CheckBox x:Name="CloseToTrayToggle" Style="{StaticResource ToggleSwitch}" Click="Toggle_Click"/>
+                                <CheckBox x:Name="CloseToTrayToggle" Style="{StaticResource ToggleSwitch}" AutomationProperties.Name="Keep running when closed" Click="Toggle_Click"/>
                             </local:SettingRow>
                         </StackPanel>
                     </Border>
@@ -145,11 +145,11 @@
                     <Border Style="{StaticResource Group}">
                         <StackPanel>
                             <local:SettingRow Glyph="&#xEA8F;" Title="Desktop notifications" Description="When a PC goes offline, a runner stops or auto-recovery takes action.">
-                                <CheckBox x:Name="NotificationsToggle" Style="{StaticResource ToggleSwitch}" Click="Toggle_Click"/>
+                                <CheckBox x:Name="NotificationsToggle" Style="{StaticResource ToggleSwitch}" AutomationProperties.Name="Desktop notifications" Click="Toggle_Click"/>
                             </local:SettingRow>
                             <Border Style="{StaticResource Divider}"/>
                             <local:SettingRow Glyph="&#xE7BA;" Title="Failed workflow runs" Description="For repositories that use your runners.">
-                                <CheckBox x:Name="FailedRunsToggle" Style="{StaticResource ToggleSwitch}" Click="Toggle_Click"/>
+                                <CheckBox x:Name="FailedRunsToggle" Style="{StaticResource ToggleSwitch}" AutomationProperties.Name="Failed workflow runs" Click="Toggle_Click"/>
                             </local:SettingRow>
                         </StackPanel>
                     </Border>
@@ -164,7 +164,7 @@
                                 <StackPanel Orientation="Horizontal">
                                     <Button x:Name="GenerateKeyButton" Content="Start a new fleet" Style="{StaticResource PrimaryButton}" Click="GenerateKey_Click" Margin="0,0,6,0"/>
                                     <Button x:Name="CopyKeyButton" Content="Copy" Click="CopyKey_Click" Margin="0,0,6,0"/>
-                                    <Button x:Name="KeyMenuButton" Style="{StaticResource IconButton}" Content="&#xE712;" ToolTip="More pairing code actions" Click="OpenMenu_Click">
+                                    <Button Style="{StaticResource IconButton}" Content="&#xE712;" ToolTip="More pairing code actions" Click="OpenMenu_Click">
                                         <Button.ContextMenu>
                                             <ContextMenu>
                                                 <MenuItem Header="Enter pairing code…" Tag="&#xE70F;" Click="PasteKey_Click"/>
@@ -188,7 +188,7 @@
                             <Border Style="{StaticResource Divider}"/>
                             <local:SettingRow Glyph="&#xE83D;" Title="Auto-recovery on this PC"
                                               Description="Restarts runners that stop unexpectedly, up to 3 times an hour.">
-                                <CheckBox x:Name="WatchdogToggle" Style="{StaticResource ToggleSwitch}" Click="WatchdogToggle_Click"/>
+                                <CheckBox x:Name="WatchdogToggle" Style="{StaticResource ToggleSwitch}" AutomationProperties.Name="Auto-recovery on this PC" Click="WatchdogToggle_Click"/>
                             </local:SettingRow>
                         </StackPanel>
                     </Border>

@@ -50,7 +50,7 @@
         </StackPanel>
         <Border Grid.Row="1" Background="{DynamicResource Bg0Brush}" BorderBrush="{DynamicResource BorderSubtleBrush}" BorderThickness="0,1,0,0" Padding="28,14">
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
-                <Button Content="Cancel" Style="{StaticResource GhostButton}" IsCancel="True" Click="Cancel_Click" MinWidth="88"/>
+                <Button Content="Cancel" Style="{StaticResource GhostButton}" IsCancel="True" MinWidth="88"/>
                 <Button x:Name="MoveButton" Content="Move runner" Style="{StaticResource PrimaryButton}" IsDefault="True" Click="Move_Click" Margin="8,0,0,0" MinWidth="120" IsEnabled="False"/>
             </StackPanel>
         </Border>

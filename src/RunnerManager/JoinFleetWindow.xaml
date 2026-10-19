@@ -129,7 +129,7 @@
         <Border Grid.Row="1" Background="{DynamicResource Bg0Brush}" BorderBrush="{DynamicResource BorderSubtleBrush}" BorderThickness="0,1,0,0" Padding="28,14">
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
                 <Button x:Name="BackButton" Content="Back" Style="{StaticResource GhostButton}" Click="Back_Click" MinWidth="80" Visibility="Collapsed"/>
-                <Button Content="Cancel" Style="{StaticResource GhostButton}" IsCancel="True" Click="Cancel_Click" MinWidth="88" Margin="8,0,0,0"/>
+                <Button Content="Cancel" Style="{StaticResource GhostButton}" IsCancel="True" MinWidth="88" Margin="8,0,0,0"/>
             </StackPanel>
         </Border>
     </Grid>

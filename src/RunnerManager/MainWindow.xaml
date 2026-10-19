@@ -162,7 +162,7 @@
                         </StackPanel>
                         <StackPanel Grid.Column="2" Orientation="Horizontal">
                             <Button Style="{StaticResource IconButton}" Content="&#xE713;" ToolTip="Settings (Ctrl+,)" Click="OpenSettings_Click"/>
-                            <Button x:Name="AccountMenuButton" Style="{StaticResource IconButton}" Content="&#xE712;"
+                            <Button Style="{StaticResource IconButton}" Content="&#xE712;"
                                     ToolTip="GitHub account" Click="OpenButtonMenu_Click">
                                 <Button.ContextMenu>
                                     <ContextMenu>
@@ -224,7 +224,8 @@
                 <DockPanel>
                     <TextBlock Text="&#xE896;" Style="{StaticResource Icon}" Foreground="{DynamicResource AccentBrush}" Margin="0,0,10,0"/>
                     <Button DockPanel.Dock="Right" Style="{StaticResource GhostButton}" Content="&#xE711;" FontFamily="{StaticResource IconFont}"
-                            FontSize="10" Padding="8,6" ToolTip="Hide until the next version" Click="DismissUpdateBanner_Click"/>
+                            FontSize="10" Padding="8,6" ToolTip="Hide until the next version" AutomationProperties.Name="Hide until the next version"
+                            Click="DismissUpdateBanner_Click"/>
                     <Button DockPanel.Dock="Right" Content="Install update" Style="{StaticResource PrimaryButton}" Padding="12,4" Click="OpenSettings_Click"/>
                     <TextBlock x:Name="UpdateBannerText" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
                 </DockPanel>
@@ -240,7 +241,8 @@
                 </StackPanel>
                 <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
                     <Grid Width="220" Margin="0,0,8,0">
-                        <TextBox x:Name="SearchBox" Tag="Search runners" ToolTip="Search runners by name, repository, label or status" Padding="30,5,28,5" TextChanged="SearchBox_TextChanged"/>
+                        <TextBox x:Name="SearchBox" Tag="Search runners" ToolTip="Search runners by name, repository, label or status" Padding="30,5,28,5"
+                                 AutomationProperties.Name="Search runners" TextChanged="SearchBox_TextChanged"/>
                         <TextBlock Text="&#xE721;" Style="{StaticResource Icon}" FontSize="12" HorizontalAlignment="Left" Margin="12,0,0,0"
                                    Foreground="{DynamicResource TextFaintBrush}" IsHitTestVisible="False"/>
                         <TextBlock Text="Ctrl+F" FontSize="10" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,10,0"
@@ -272,7 +274,7 @@
                         </StackPanel>
                     </DockPanel>
                 </Border>
-                <Border x:Name="TileRunnersCard" Style="{StaticResource Tile}">
+                <Border Style="{StaticResource Tile}">
                     <DockPanel>
                         <Border Width="28" Height="28" CornerRadius="7" Background="{DynamicResource Bg3Brush}" VerticalAlignment="Center">
                             <TextBlock Text="&#xE768;" Style="{StaticResource Icon}" FontSize="12" Foreground="{DynamicResource TextMutedBrush}"/>
@@ -284,7 +286,7 @@
                         </StackPanel>
                     </DockPanel>
                 </Border>
-                <Border x:Name="TileBusyCard" Style="{StaticResource Tile}">
+                <Border Style="{StaticResource Tile}">
                     <DockPanel>
                         <Border Width="28" Height="28" CornerRadius="7" Background="{DynamicResource Bg3Brush}" VerticalAlignment="Center">
                             <TextBlock Text="&#xE9F5;" Style="{StaticResource Icon}" FontSize="12" Foreground="{DynamicResource TextMutedBrush}"/>
@@ -313,7 +315,7 @@
             <!-- Machine cards -->
             <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Padding="20,0,20,6">
                 <StackPanel>
-                    <ItemsControl x:Name="MachineCards" ItemsSource="{Binding MachinesView}">
+                    <ItemsControl ItemsSource="{Binding MachinesView}">
                         <ItemsControl.ItemTemplate>
                             <DataTemplate DataType="{x:Type local:MachineInfo}">
                                 <Border Style="{StaticResource Card}" Margin="0,0,0,10">
@@ -564,7 +566,25 @@
                                                                                         <DataTemplate DataType="{x:Type local:WorkflowRunSummary}">
                                                                                             <Border Style="{StaticResource RunRow}" Tag="{Binding HtmlUrl}" MouseLeftButtonUp="Link_Click" ToolTip="{Binding Title}">
                                                                                                 <DockPanel>
-                                                                                                    <TextBlock Text="{Binding Glyph}" Style="{StaticResource Icon}" FontSize="11" Foreground="{Binding Brush}" Margin="0,0,10,0"/>
+                                                                                                    <!-- Colors come from the theme resources, so they follow theme changes. -->
+                                                                                                    <TextBlock Text="{Binding Glyph}" FontSize="11" Margin="0,0,10,0">
+                                                                                                        <TextBlock.Style>
+                                                                                                            <Style TargetType="TextBlock" BasedOn="{StaticResource Icon}">
+                                                                                                                <Setter Property="Foreground" Value="{DynamicResource TextFaintBrush}"/>
+                                                                                                                <Style.Triggers>
+                                                                                                                    <DataTrigger Binding="{Binding Conclusion}" Value="success">
+                                                                                                                        <Setter Property="Foreground" Value="{DynamicResource SuccessBrush}"/>
+                                                                                                                    </DataTrigger>
+                                                                                                                    <DataTrigger Binding="{Binding IsFailure}" Value="True">
+                                                                                                                        <Setter Property="Foreground" Value="{DynamicResource DangerBrush}"/>
+                                                                                                                    </DataTrigger>
+                                                                                                                    <DataTrigger Binding="{Binding IsCompleted}" Value="False">
+                                                                                                                        <Setter Property="Foreground" Value="{DynamicResource WarningBrush}"/>
+                                                                                                                    </DataTrigger>
+                                                                                                                </Style.Triggers>
+                                                                                                            </Style>
+                                                                                                        </TextBlock.Style>
+                                                                                                    </TextBlock>
                                                                                                     <Button DockPanel.Dock="Right" Style="{StaticResource GhostButton}" Padding="6,2" FontSize="11"
                                                                                                             Visibility="{Binding RerunVisibility}" Click="RerunFailed_Click" ToolTip="Re-run failed jobs">
                                                                                                         <StackPanel Orientation="Horizontal">
@@ -640,7 +660,7 @@
                                                                 </Button>
                                                             </Grid>
                                                         </StackPanel>
-                                                        <StackPanel Visibility="{Binding RdcSetupVisibility}">
+                                                        <StackPanel Visibility="{Binding RdcSetupMenuVisibility}">
                                                             <TextBlock Style="{StaticResource Caption}" TextWrapping="Wrap"
                                                                        Text="Setting up Remote Desktop Commander. Sign in using the console window on that PC. This panel updates when it connects."/>
                                                         </StackPanel>
@@ -699,7 +719,24 @@
                     <ListBox.ItemTemplate>
                         <DataTemplate DataType="{x:Type local:ActivityEntry}">
                             <DockPanel>
-                                <TextBlock Text="{Binding Glyph}" Style="{StaticResource Icon}" FontSize="11" Foreground="{Binding Brush}" Margin="0,0,10,0"/>
+                                <TextBlock Text="{Binding Glyph}" FontSize="11" Margin="0,0,10,0">
+                                    <TextBlock.Style>
+                                        <Style TargetType="TextBlock" BasedOn="{StaticResource Icon}">
+                                            <Setter Property="Foreground" Value="{DynamicResource TextFaintBrush}"/>
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding Kind}" Value="{x:Static local:ActivityKind.Success}">
+                                                    <Setter Property="Foreground" Value="{DynamicResource SuccessBrush}"/>
+                                                </DataTrigger>
+                                                <DataTrigger Binding="{Binding Kind}" Value="{x:Static local:ActivityKind.Warning}">
+                                                    <Setter Property="Foreground" Value="{DynamicResource WarningBrush}"/>
+                                                </DataTrigger>
+                                                <DataTrigger Binding="{Binding Kind}" Value="{x:Static local:ActivityKind.Error}">
+                                                    <Setter Property="Foreground" Value="{DynamicResource DangerBrush}"/>
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </TextBlock.Style>
+                                </TextBlock>
                                 <TextBlock Text="{Binding TimeText}" FontFamily="{StaticResource MonoFont}" FontSize="12" Foreground="{DynamicResource TextFaintBrush}" Margin="0,0,12,0"/>
                                 <TextBlock Text="{Binding Message}" FontSize="12" Foreground="{DynamicResource TextMutedBrush}" TextTrimming="CharacterEllipsis" ToolTip="{Binding Message}"/>
                             </DockPanel>

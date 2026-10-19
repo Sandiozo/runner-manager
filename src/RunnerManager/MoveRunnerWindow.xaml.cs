@@ -31,6 +31,4 @@ public partial class MoveRunnerWindow : Window
         DeleteOldFiles = DeleteOldToggle.IsChecked == true;
         DialogResult = true;
     }
-
-    private void Cancel_Click(object sender, RoutedEventArgs e) => DialogResult = false;
 }

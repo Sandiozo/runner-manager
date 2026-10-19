@@ -20,7 +20,8 @@ public partial class MainWindow : Window
     private static readonly TimeSpan LocalGitHubRefreshInterval = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan PendingCommandTimeout = TimeSpan.FromSeconds(75);
 
-    public ObservableCollection<RunnerInfo> Runners { get; } = new();
+    /// <summary>Runners on this PC with their GitHub state (the cards show <see cref="Machines"/>).</summary>
+    public List<RunnerInfo> Runners { get; } = new();
     public ObservableCollection<MachineInfo> Machines { get; } = new();
     public ObservableCollection<object> NavItems { get; } = new();
     public ObservableCollection<ActivityEntry> ActivityLog { get; } = new();
@@ -37,6 +38,8 @@ public partial class MainWindow : Window
     private readonly DispatcherTimer _refreshTimer;
     private TrayIcon? _tray;
     private bool _refreshing;
+    private bool _refreshQueued;
+    private bool _refreshQueuedForceAuth;
     private bool _operationRunning;
     private bool _githubAuthenticated;
     private string _githubLogin = string.Empty;
@@ -65,7 +68,11 @@ public partial class MainWindow : Window
         ApplyEnrollmentStatus();
 
         _refreshTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(_settings.RefreshSeconds) };
-        _refreshTimer.Tick += async (_, _) => await RefreshAsync();
+        // A tick during a slow refresh is simply skipped; the next tick comes soon enough.
+        _refreshTimer.Tick += async (_, _) =>
+        {
+            if (!_refreshing) await RefreshAsync();
+        };
         Loaded += async (_, _) => await StartAsync();
         ThemeManager.Changed += OnThemeChanged;
         Closing += OnClosing;
@@ -82,7 +89,15 @@ public partial class MainWindow : Window
 
     private async Task RefreshAsync(bool forceAuthCheck = false)
     {
-        if (_refreshing || _operationRunning) return;
+        if (_refreshing)
+        {
+            // Run it once more when the current refresh ends, so state changed meanwhile (an operation that
+            // just finished, a PC that was forgotten) is not missed.
+            _refreshQueued = true;
+            _refreshQueuedForceAuth |= forceAuthCheck;
+            return;
+        }
+        if (_operationRunning) return;
         _refreshing = true;
         try
         {
@@ -142,7 +157,16 @@ public partial class MainWindow : Window
             AddActivity($"Refresh failed: {ex.Message}");
             SetStatus($"Refresh failed: {ex.Message}", StatusKind.Error);
         }
-        finally { _refreshing = false; }
+        finally
+        {
+            _refreshing = false;
+            if (_refreshQueued)
+            {
+                var force = _refreshQueuedForceAuth;
+                _refreshQueued = _refreshQueuedForceAuth = false;
+                await RefreshAsync(force);
+            }
+        }
     }
 
     private async Task EnsureAgentTaskSettingsAsync()
@@ -158,16 +182,28 @@ public partial class MainWindow : Window
     }
 
     private bool _localAgentUpdateTried;
+    private bool _localAgentUpdateScheduled;
 
     /// <summary>When this PC's agent is older than this dashboard, update it once, automatically.</summary>
     private void ScheduleLocalAgentUpdate(MachineInfo? local)
     {
-        if (_localAgentUpdateTried || local is not { LocalAgentOutdated: true } || FleetConfig.Current.FleetKey == null) return;
-        _localAgentUpdateTried = true;
+        if (_localAgentUpdateTried || _localAgentUpdateScheduled
+            || local is not { LocalAgentOutdated: true } || FleetConfig.Current.FleetKey == null) return;
+        _localAgentUpdateScheduled = true;
         Dispatcher.BeginInvoke(async () =>
         {
-            AddActivity("The fleet agent on this PC is outdated. Updating it.");
-            await RunOperationAsync("Update fleet agent", MachineRelay.UpdateLocalAgentAsync);
+            try
+            {
+                // Another operation is running: try again on a later refresh.
+                if (_operationRunning) return;
+                AddActivity("The fleet agent on this PC is outdated. Updating it.");
+                await RunOperationAsync("Update fleet agent", log =>
+                {
+                    _localAgentUpdateTried = true;
+                    return MachineRelay.UpdateLocalAgentAsync(log);
+                });
+            }
+            finally { _localAgentUpdateScheduled = false; }
         }, DispatcherPriority.Background);
     }
 
@@ -213,11 +249,13 @@ public partial class MainWindow : Window
 
         var sameShape = Machines.Count == machines.Count
             && Machines.Zip(machines).All(pair => pair.First.MachineKey == pair.Second.MachineKey);
+        // "All PCs" is only in the sidebar when there are several PCs (see UpdateNavShape).
+        var offset = NavItems.Contains(_allMachines) ? 1 : 0;
         if (!sameShape)
         {
             _suppressNavSelection = true;
             Machines.Clear();
-            while (NavItems.Count > 1) NavItems.RemoveAt(NavItems.Count - 1);
+            while (NavItems.Count > offset) NavItems.RemoveAt(NavItems.Count - 1);
             foreach (var machine in machines)
             {
                 PrepareRunners(machine);
@@ -244,7 +282,7 @@ public partial class MainWindow : Window
             PrepareRunners(incoming);
             _suppressNavSelection = true;
             Machines[i] = incoming;
-            NavItems[i + 1] = incoming;
+            NavItems[i + offset] = incoming;
             RestoreNavSelection();
         }
     }
@@ -274,10 +312,17 @@ public partial class MainWindow : Window
     {
         _suppressNavSelection = true;
         object? fallback = NavItems.Contains(_allMachines) ? _allMachines : Machines.FirstOrDefault();
-        MachineNav.SelectedItem = _selectedMachineKey == null
-            ? fallback
-            : (object?)Machines.FirstOrDefault(m => m.MachineKey == _selectedMachineKey) ?? fallback;
+        var selected = _selectedMachineKey == null ? null : Machines.FirstOrDefault(m => m.MachineKey == _selectedMachineKey);
+        // The selected PC is gone: show all PCs again instead of filtering every card out.
+        var lostSelection = _selectedMachineKey != null && selected == null;
+        if (lostSelection) _selectedMachineKey = null;
+        MachineNav.SelectedItem = (object?)selected ?? fallback;
         _suppressNavSelection = false;
+        if (lostSelection)
+        {
+            ApplyFilter();
+            UpdatePageHeader();
+        }
     }
 
     private void PrepareRunners(MachineInfo machine)
@@ -553,15 +598,21 @@ public partial class MainWindow : Window
 
     // ================= Operations =================
 
-    private async Task RunOperationAsync(string title, Func<Action<string>, Task> operation)
+    /// <summary>
+    /// Runs one operation at a time on this PC, with progress in the status bar and activity.
+    /// Returns true when it ran and succeeded; false when it was skipped or failed. Set pending states inside
+    /// <paramref name="operation"/>, so nothing shows as pending when the operation is skipped.
+    /// </summary>
+    private async Task<bool> RunOperationAsync(string title, Func<Action<string>, Task> operation)
     {
         if (_operationRunning)
         {
             AddActivity($"{title} skipped: another operation is still running.");
-            return;
+            return false;
         }
         _operationRunning = true;
         SetStatus($"{title}…", StatusKind.Busy);
+        var succeeded = false;
         try
         {
             AddActivity($"{title} started.");
@@ -570,6 +621,7 @@ public partial class MainWindow : Window
                 AddActivity(message);
                 SetStatus($"{title}: {message}", StatusKind.Busy);
             });
+            succeeded = true;
             AddActivity($"{title} completed.");
             if (!IsActive && _settings.Notifications) _tray?.Notify("Runner Manager", $"{title} completed.");
         }
@@ -584,6 +636,7 @@ public partial class MainWindow : Window
             _operationRunning = false;
             await RefreshAsync(forceAuthCheck: true);
         }
+        return succeeded;
     }
 
     private enum StatusKind { Ok, Busy, Warning, Error }
@@ -623,6 +676,27 @@ public partial class MainWindow : Window
         }
     }
 
+    /// <summary>
+    /// Runs a runner action directly when the runner is on this PC, or queues it for the runner's PC otherwise.
+    /// The local runner shows <paramref name="action"/> as pending only while the operation runs.
+    /// </summary>
+    private async Task RunRunnerActionAsync(MachineRunnerStatus runner, string action, string title,
+        Func<Action<string>, Task> local, string runnerName = "", string[]? labels = null, string value = "",
+        bool showLocalPending = true)
+    {
+        if (!runner.IsLocalMachine)
+        {
+            await QueueRunnerCommandAsync(runner, action, runnerName, labels, value);
+            return;
+        }
+        await RunOperationAsync(title, log =>
+        {
+            MarkUserAction(RunnerKey(runner));
+            if (showLocalPending) runner.SetPending(action);
+            return local(log);
+        });
+    }
+
     // ================= Runner actions =================
 
     private static T? ItemFrom<T>(object sender) where T : class => (sender as FrameworkElement)?.DataContext as T;
@@ -647,28 +721,19 @@ public partial class MainWindow : Window
         if (action == "Stop" && runner.IsBusy && !DialogWindow.Confirm(this, $"Stop {runner.TitleText}?",
                 "This runner is running a job. Stopping it cancels the job.", "Stop runner", danger: true))
             return;
-        if (runner.IsLocalMachine)
+        await RunRunnerActionAsync(runner, action, $"{action} {runner.TitleText}", _ =>
         {
-            MarkUserAction(RunnerKey(runner));
-            runner.SetPending(action);
+            // Saved only when the stop or start really runs, so auto-recovery follows what happened.
             FleetConfig.SetManuallyStopped(runner.CommandKey, action == "Stop");
-            await RunOperationAsync($"{action} {runner.TitleText}", _ => RunnerService.ControlServiceAsync(runner.CommandKey, action));
-            return;
-        }
-        await QueueRunnerCommandAsync(runner, action);
+            return RunnerService.ControlServiceAsync(runner.CommandKey, action);
+        });
     }
 
     private async void RunnerRestart_Click(object sender, RoutedEventArgs e)
     {
         if (ItemFrom<MachineRunnerStatus>(sender) is not { } runner) return;
-        if (runner.IsLocalMachine)
-        {
-            MarkUserAction(RunnerKey(runner));
-            runner.SetPending("Restart");
-            await RunOperationAsync($"Restart {runner.TitleText}", _ => RunnerService.ControlServiceAsync(runner.CommandKey, "Restart"));
-            return;
-        }
-        await QueueRunnerCommandAsync(runner, "Restart");
+        await RunRunnerActionAsync(runner, "Restart", $"Restart {runner.TitleText}",
+            _ => RunnerService.ControlServiceAsync(runner.CommandKey, "Restart"));
     }
 
     private async void RunnerEdit_Click(object sender, RoutedEventArgs e)
@@ -682,15 +747,9 @@ public partial class MainWindow : Window
         var dialog = new EditRunnerWindow(runner) { Owner = this };
         if (dialog.ShowDialog() != true || dialog.Edit == null) return;
         var edit = dialog.Edit;
-
-        if (runner.IsLocalMachine)
-        {
-            MarkUserAction(RunnerKey(runner));
-            await RunOperationAsync($"Edit {runner.TitleText}",
-                log => RunnerService.EditRunnerAsync(runner.CommandKey, edit.RunnerName, edit.Labels, log));
-            return;
-        }
-        await QueueRunnerCommandAsync(runner, "Edit", edit.RunnerName, edit.Labels);
+        await RunRunnerActionAsync(runner, "Edit", $"Edit {runner.TitleText}",
+            log => RunnerService.EditRunnerAsync(runner.CommandKey, edit.RunnerName, edit.Labels, log),
+            edit.RunnerName, edit.Labels, showLocalPending: false);
     }
 
     private async void RunnerRepair_Click(object sender, RoutedEventArgs e)
@@ -734,18 +793,7 @@ public partial class MainWindow : Window
 
     private void OpenButtonMenu_Click(object sender, RoutedEventArgs e)
     {
-        if (sender is not Button { ContextMenu: { } menu } button) return;
-        menu.PlacementTarget = button;
-        menu.Placement = PlacementMode.Bottom;
-        menu.VerticalOffset = 4;
-        // Align the menu's right edge with the button once its size is known.
-        menu.Opened += AlignRight;
-        menu.IsOpen = true;
-        void AlignRight(object? s, RoutedEventArgs args)
-        {
-            menu.Opened -= AlignRight;
-            menu.HorizontalOffset = button.ActualWidth - menu.ActualWidth;
-        }
+        if (sender is Button button) Menus.OpenBelow(button, alignRight: true);
     }
 
     // ================= Fleet / RDC actions =================
@@ -865,9 +913,9 @@ public partial class MainWindow : Window
         MarkUserAction(machine.MachineKey);
         if (machine.IsLocal)
         {
-            machine.SetRdcPending(action);
             await RunOperationAsync($"{action} Remote Desktop Commander", async log =>
             {
+                machine.SetRdcPending(action);
                 FleetConfig.SetManuallyStopped("rdc", action == "Stop");
                 if (action == "Stop") await RemoteDesktopManager.StopAsync();
                 else await RemoteDesktopManager.StartAsync();
@@ -884,9 +932,9 @@ public partial class MainWindow : Window
         MarkUserAction(machine.MachineKey);
         if (machine.IsLocal)
         {
-            machine.SetRdcPending("Restart");
             await RunOperationAsync("Restart Remote Desktop Commander", async log =>
             {
+                machine.SetRdcPending("Restart");
                 FleetConfig.SetManuallyStopped("rdc", false);
                 await RemoteDesktopManager.RestartAsync();
                 log("Restarted and relay connection verified.");
@@ -896,24 +944,8 @@ public partial class MainWindow : Window
         await QueueRdcCommandAsync(machine, "Restart", $"{machine.MachineName}: Remote Desktop Commander restart queued.");
     }
 
-    private async Task QueueRdcCommandAsync(MachineInfo machine, string action, string queuedMessage)
-    {
-        if (!CanSendTo(machine.MachineKey)) return;
-        try
-        {
-            machine.SetRdcPending(action);
-            var commandId = await MachineRelay.SendCommandAsync(machine.MachineKey, "rdc", string.Empty, action);
-            _pendingRdcCommands[machine.MachineKey] = new PendingCommand(commandId, action, DateTime.UtcNow);
-            AddActivity(queuedMessage);
-        }
-        catch (Exception ex)
-        {
-            _pendingRdcCommands.Remove(machine.MachineKey);
-            machine.SetRdcPending(string.Empty);
-            AddActivity($"{machine.MachineName}: Remote Desktop Commander {action.ToLowerInvariant()} failed: {ex.Message}");
-            await RefreshAsync();
-        }
-    }
+    private Task QueueRdcCommandAsync(MachineInfo machine, string action, string queuedMessage)
+        => QueueMachineCommandAsync(machine, "rdc", action, string.Empty, action, queuedMessage);
 
     private async void RefreshButton_Click(object sender, RoutedEventArgs e) => await ManualRefreshAsync();
 
@@ -979,7 +1011,7 @@ public partial class MainWindow : Window
         => OpenFolder(FleetConfig.StateDir);
 
     private void OpenReleases_Click(object sender, RoutedEventArgs e)
-        => OpenUrl($"https://github.com/{AppUpdater.ReleaseRepository}/releases");
+        => OpenUrl(AppLinks.ReleasesUrl);
 
     private void ShowShortcuts_Click(object sender, RoutedEventArgs e)
         => DialogWindow.Info(this, "Keyboard shortcuts",

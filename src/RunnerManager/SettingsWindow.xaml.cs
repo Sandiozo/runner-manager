@@ -2,7 +2,6 @@ using System.Diagnostics;
 using System.IO;
 using System.Windows;
 using System.Windows.Controls;
-using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 
 namespace RunnerManager;
@@ -78,11 +77,7 @@ public partial class SettingsWindow : Window
 
     private void OpenMenu_Click(object sender, RoutedEventArgs e)
     {
-        if (sender is not Button { ContextMenu: { } menu } button) return;
-        menu.PlacementTarget = button;
-        menu.Placement = PlacementMode.Bottom;
-        menu.VerticalOffset = 4;
-        menu.IsOpen = true;
+        if (sender is Button button) Menus.OpenBelow(button, alignRight: false);
     }
 
     // ----- General -----
@@ -368,7 +363,7 @@ public partial class SettingsWindow : Window
 
     private void Releases_Click(object sender, RoutedEventArgs e)
     {
-        var url = _release?.HtmlUrl is { Length: > 0 } html ? html : $"https://github.com/{AppUpdater.ReleaseRepository}/releases";
+        var url = _release?.HtmlUrl is { Length: > 0 } html ? html : AppLinks.ReleasesUrl;
         Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
     }
 

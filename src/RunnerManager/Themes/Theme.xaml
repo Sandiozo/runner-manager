@@ -128,6 +128,7 @@
         <Setter Property="Padding" Value="0"/>
         <Setter Property="FontFamily" Value="{StaticResource IconFont}"/>
         <Setter Property="FontSize" Value="14"/>
+        <Setter Property="AutomationProperties.Name" Value="{Binding ToolTip, RelativeSource={RelativeSource Self}}"/>
     </Style>
 
     <!-- TextBox with placeholder taken from Tag -->
@@ -329,7 +330,7 @@
     <Style x:Key="NavItem" TargetType="ListBoxItem">
         <Setter Property="Foreground" Value="{DynamicResource TextBrush}"/>
         <Setter Property="Cursor" Value="Hand"/>
-        <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+        <Setter Property="FocusVisualStyle" Value="{StaticResource SubtleFocus}"/>
         <Setter Property="Margin" Value="0,1"/>
         <Setter Property="Template">
             <Setter.Value>
@@ -390,7 +391,7 @@
     <Style x:Key="OptionCard" TargetType="RadioButton">
         <Setter Property="Foreground" Value="{DynamicResource TextBrush}"/>
         <Setter Property="Cursor" Value="Hand"/>
-        <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+        <Setter Property="FocusVisualStyle" Value="{StaticResource SubtleFocus}"/>
         <Setter Property="Margin" Value="0,0,0,8"/>
         <Setter Property="Template">
             <Setter.Value>
@@ -476,7 +477,7 @@
     <Style x:Key="ToggleSwitch" TargetType="CheckBox">
         <Setter Property="Foreground" Value="{DynamicResource TextBrush}"/>
         <Setter Property="Cursor" Value="Hand"/>
-        <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+        <Setter Property="FocusVisualStyle" Value="{StaticResource SubtleFocus}"/>
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="CheckBox">
@@ -512,7 +513,7 @@
     <Style x:Key="Segment" TargetType="RadioButton">
         <Setter Property="Foreground" Value="{DynamicResource TextMutedBrush}"/>
         <Setter Property="Cursor" Value="Hand"/>
-        <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+        <Setter Property="FocusVisualStyle" Value="{StaticResource SubtleFocus}"/>
         <Setter Property="Padding" Value="14,6"/>
         <Setter Property="Template">
             <Setter.Value>

@@ -73,7 +73,7 @@ public partial class MainWindow
             if (latest != MachineInfo.LatestAppVersion)
             {
                 MachineInfo.LatestAppVersion = latest;
-                foreach (var machine in Machines) machine.Touch(machine);
+                foreach (var machine in Machines) machine.Refresh();
             }
             var showBanner = release != null && AppUpdater.IsNewer(release.Version, AppUpdater.CurrentVersion)
                 && release.Version != _settings.DismissedUpdateVersion;
@@ -185,7 +185,7 @@ public partial class MainWindow
         if (showRdc != MachineInfo.ShowRdc)
         {
             MachineInfo.ShowRdc = showRdc;
-            foreach (var machine in Machines) machine.Touch(machine);
+            foreach (var machine in Machines) machine.Refresh();
         }
         TileRdcCard.Visibility = showRdc ? Visibility.Visible : Visibility.Collapsed;
         TileMachinesCard.Visibility = machines.Count > 1 ? Visibility.Visible : Visibility.Collapsed;
@@ -215,16 +215,17 @@ public partial class MainWindow
         UpdateBanner.Visibility = Visibility.Collapsed;
     }
 
+    /// <summary>
+    /// Re-reads the view-model brushes. Activity entries and recent runs pick their colors with DynamicResource
+    /// triggers in XAML, so they follow the theme by themselves.
+    /// </summary>
     private void OnThemeChanged()
     {
         foreach (var machine in Machines)
         {
-            machine.Touch(machine);
+            machine.Refresh();
             foreach (var runner in machine.Runners) runner.Refresh();
         }
-        var entries = ActivityLog.ToList();
-        ActivityLog.Clear();
-        foreach (var entry in entries) ActivityLog.Add(entry);
         ApplyGitHubStatus();
         ApplyEnrollmentStatus();
         UpdateSummary();
@@ -234,15 +235,7 @@ public partial class MainWindow
 
     private async void MachineUpdate_Click(object sender, RoutedEventArgs e)
     {
-        if (ItemFrom<MachineInfo>(sender) is not { } machine) return;
-        if (machine.NeedsManualUpdate)
-        {
-            if (DialogWindow.Show(this, DialogTone.Info, $"Update {machine.MachineName} manually",
-                    machine.UpdateBadgeTip, "Open releases", cancel: "Close") == "Open releases")
-                OpenUrl($"https://github.com/{AppUpdater.ReleaseRepository}/releases");
-            return;
-        }
-        if (!machine.CanUpdateAgent) return;
+        if (ItemFrom<MachineInfo>(sender) is not { CanUpdateAgent: true } machine) return;
         if (machine.LocalAgentOutdated)
         {
             if (!DialogWindow.Confirm(this, "Update the fleet agent on this PC?",
@@ -355,6 +348,7 @@ public partial class MainWindow
             $"{machine.MachineName}: restart queued. The PC restarts 60 seconds after it receives the command.");
     }
 
+    /// <summary>Sends a PC-level command ("agent", "machine" or "rdc") to another PC and shows it as pending until it reports back.</summary>
     private async Task QueueMachineCommandAsync(MachineInfo machine, string target, string action, string value,
         string pendingLabel, string queuedMessage)
     {
@@ -372,7 +366,10 @@ public partial class MainWindow
         {
             machine.SetRdcPending(string.Empty);
             _pendingRdcCommands.Remove(machine.MachineKey);
-            AddActivity($"{machine.MachineName}: {action} failed: {ex.Message}");
+            AddActivity(target == "rdc"
+                ? $"{machine.MachineName}: Remote Desktop Commander {action.ToLowerInvariant()} failed: {ex.Message}"
+                : $"{machine.MachineName}: {action} failed: {ex.Message}");
+            await RefreshAsync();
         }
     }
 
@@ -385,14 +382,8 @@ public partial class MainWindow
         if (!DialogWindow.Confirm(this, $"Clean the work folder of {runner.TitleText}?",
                 $"This deletes {size} checkouts, tool caches and build output on {runner.MachineName}. The runner stops during cleanup and starts again afterwards. The next job starts with a fresh checkout.",
                 "Clean work folder", danger: true)) return;
-        MarkUserAction(RunnerKey(runner));
-        if (runner.IsLocalMachine)
-        {
-            runner.SetPending("CleanWork");
-            await RunOperationAsync($"Clean {runner.TitleText} work folder", log => RunnerService.CleanWorkFolderAsync(runner.CommandKey, log));
-            return;
-        }
-        await QueueRunnerCommandAsync(runner, "CleanWork");
+        await RunRunnerActionAsync(runner, "CleanWork", $"Clean {runner.TitleText} work folder",
+            log => RunnerService.CleanWorkFolderAsync(runner.CommandKey, log));
     }
 
     private async void RerunFailed_Click(object sender, RoutedEventArgs e)

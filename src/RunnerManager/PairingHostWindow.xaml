@@ -47,7 +47,7 @@
                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
                     <Button x:Name="DenyButton" Content="Deny" Style="{StaticResource GhostButton}" Click="Deny_Click" MinWidth="88" Visibility="Collapsed"/>
                     <Button x:Name="AllowButton" Content="Allow" Style="{StaticResource PrimaryButton}" Click="Allow_Click" Margin="8,0,0,0" MinWidth="110" Visibility="Collapsed"/>
-                    <Button x:Name="CloseButton" Content="Done" Click="Close_Click" Margin="8,0,0,0" MinWidth="96" IsCancel="True"/>
+                    <Button x:Name="CloseButton" Content="Done" Margin="8,0,0,0" MinWidth="96" IsCancel="True"/>
                 </StackPanel>
             </DockPanel>
         </Border>
