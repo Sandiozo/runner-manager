@@ -314,6 +314,28 @@ public partial class MainWindow
         await RefreshAsync(forceAuthCheck: true);
     }
 
+    private async void InstallUpdate_Click(object sender, RoutedEventArgs e) => await InstallUpdateAsync();
+
+    /// <summary>Installs the newest release on this PC, then offers to restart the dashboard with it.</summary>
+    private async Task InstallUpdateAsync()
+    {
+        var release = await AppUpdater.GetLatestReleaseAsync(force: true);
+        if (release == null || !AppUpdater.IsNewer(release.Version, AppUpdater.CurrentVersion))
+        {
+            DialogWindow.Info(this, "Runner Manager is up to date", $"This PC runs the newest version, v{AppUpdater.CurrentVersion}.");
+            return;
+        }
+        var installed = await RunOperationAsync($"Install Runner Manager {release.Tag}", log => AppUpdater.InstallReleaseAsync(release, log));
+        if (!installed) return;
+        UpdateBanner.Visibility = Visibility.Collapsed;
+        if (DialogWindow.Show(this, DialogTone.Question, $"Runner Manager {release.Tag} is installed",
+                "Restart Runner Manager now to use the new version?", "Restart now", cancel: "Later") == "Restart now")
+        {
+            Process.Start(new ProcessStartInfo(AppUpdater.InstalledExe) { UseShellExecute = true });
+            ((App)Application.Current).ExitApplication();
+        }
+    }
+
     private void DismissUpdateBanner_Click(object sender, RoutedEventArgs e)
     {
         _settings.DismissedUpdateVersion = MachineInfo.LatestAppVersion;
@@ -352,7 +374,7 @@ public partial class MainWindow
         }
         if (machine.IsLocal)
         {
-            OpenSettings_Click(sender, e);
+            await InstallUpdateAsync();
             return;
         }
         if (!DialogWindow.Confirm(this, $"Update {machine.MachineName}?",

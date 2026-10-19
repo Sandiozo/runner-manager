@@ -374,16 +374,7 @@ public partial class SettingsWindow : Window
         var installed = false;
         await _runOperation($"Install Runner Manager {release.Tag}", async log =>
         {
-            var exe = await AppUpdater.DownloadAndInstallAsync(release, log);
-            await AppUpdater.CreateStartMenuShortcutAsync();
-            if (await MachineRelay.IsAgentInstalledAsync())
-            {
-                log("Switching the fleet agent to the installed copy...");
-                await MachineRelay.RegisterAgentTaskAsync(exe);
-                await MachineRelay.RestartLocalAgentAsync();
-            }
-            if (await ScheduledTasks.ExistsAsync(ScheduledTasks.DashboardTaskName))
-                await Installer.RegisterStartupTaskAsync(exe);
+            await AppUpdater.InstallReleaseAsync(release, log);
             installed = true;
         });
         if (!installed) return;

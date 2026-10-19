@@ -226,7 +226,7 @@
                     <Button DockPanel.Dock="Right" Style="{StaticResource GhostButton}" Content="&#xE711;" FontFamily="{StaticResource IconFont}"
                             FontSize="10" Padding="8,6" ToolTip="Hide until the next version" AutomationProperties.Name="Hide until the next version"
                             Click="DismissUpdateBanner_Click"/>
-                    <Button DockPanel.Dock="Right" Content="Install update" Style="{StaticResource PrimaryButton}" Padding="12,4" Click="OpenSettings_Click"/>
+                    <Button DockPanel.Dock="Right" Content="Install update" Style="{StaticResource PrimaryButton}" Padding="12,4" Click="InstallUpdate_Click"/>
                     <TextBlock x:Name="UpdateBannerText" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
                 </DockPanel>
             </Border>
