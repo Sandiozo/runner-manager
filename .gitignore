@@ -4,3 +4,6 @@ obj/
 *.user
 *.suo
 dist/
+
+# Local git worktrees
+.claude/worktrees/

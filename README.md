@@ -19,14 +19,16 @@ A Windows dashboard for GitHub Actions self-hosted runners, on one PC or several
   Manager downloads the official runner, verifies its SHA-256 checksum and installs it as a Windows service, in a
   runner folder you choose for each PC.
 - **Live jobs.** A busy runner shows its job and every step with its state and duration, the latest output of the
-  running step, and the processes the job runs with their CPU and memory. This works for runners on every PC.
+  running step, and the processes the job runs with their CPU and memory. This works for runners on every PC; steps
+  are shown for repository runners.
 - **Status at a glance.** Each runner shows its state, recent workflow runs, version and work folder size. Each PC
   shows CPU, memory, disk space, uptime and pending restarts.
 - **Several PCs.** PCs connect directly over the local network, encrypted. Control the runners on every PC from any
   of them. A single PC works without any fleet setup.
 - **Auto-recovery.** The fleet agent restarts runners that stop unexpectedly.
 - **Notifications.** Alerts in the notification area when a PC goes offline, a runner stops or a workflow run fails.
-- **Remote Desktop Commander (optional).** Monitor and restart it on each PC. It is shown only where it is set up.
+- **Remote Desktop Commander (optional).** Monitor and restart it on each PC. It is shown only where it is set up, and
+  needs [Node.js](https://nodejs.org).
 - **Updates.** Installs new releases on every PC from the dashboard.
 
 <table>
@@ -89,18 +91,19 @@ dotnet test
 To build the installer:
 
 ```powershell
-dotnet publish src/RunnerManager -c Release -r win-x64 -p:SelfContained=false -p:PublishSingleFile=true -o publish
+dotnet publish src/RunnerManager -c Release -r win-x64 -p:SelfContained=false -p:PublishSingleFile=true `
+  -p:IncludeNativeLibrariesForSelfExtract=true -o publish
 Copy-Item publish/RunnerManager.exe publish/RunnerManagerSetup.exe
 ```
 
 Any copy named `RunnerManagerSetup.exe`, or started with `--setup`, opens the setup wizard.
 
-To publish a release, push a version tag. The **Release** workflow runs the tests, builds the exe and attaches it to
-a GitHub release.
+To publish a release, push a version tag; the version comes from the tag. The **Release** workflow runs the tests,
+builds the exe, checks that it starts, and attaches it to a GitHub release.
 
 ```powershell
-git tag v2.2.0
-git push origin v2.2.0
+git tag v2.2.5
+git push origin v2.2.5
 ```
 
 ## Project layout
@@ -124,7 +127,9 @@ in `%LOCALAPPDATA%\RunnerManager`.
 | `Ctrl+F` | Search runners |
 | `Ctrl+N` | Add a runner |
 | `Ctrl+,` | Settings |
-| `Ctrl+0…9` | All PCs or a specific PC |
+| `Esc` | Clear search |
+| `Ctrl+0` | All PCs |
+| `Ctrl+1…9` | Go to a PC |
 
 ## License
 
