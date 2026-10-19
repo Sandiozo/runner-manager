@@ -1,8 +1,6 @@
 <div align="center">
 
-<img src="src/RunnerManager/assets/RunnerManager.png" width="72" alt="">
-
-# Runner Manager
+<img src="docs/images/readme-header.png" width="800" alt="Runner Manager">
 
 A Windows dashboard for GitHub Actions self-hosted runners, on one PC or several.
 
@@ -18,9 +16,12 @@ A Windows dashboard for GitHub Actions self-hosted runners, on one PC or several
 ## Features
 
 - **Runners.** Add repository or organization runners, then start, stop, restart, edit, move and remove them. Runner
-  Manager downloads the official runner, verifies its SHA-256 checksum and installs it as a Windows service.
-- **Status at a glance.** Each runner shows its state, current job, recent workflow runs, version and work folder size.
-  Each PC shows CPU, memory, disk space, uptime and pending restarts.
+  Manager downloads the official runner, verifies its SHA-256 checksum and installs it as a Windows service, in a
+  runner folder you choose for each PC.
+- **Live jobs.** A busy runner shows its job and every step with its state and duration, the latest output of the
+  running step, and the processes the job runs with their CPU and memory. This works for runners on every PC.
+- **Status at a glance.** Each runner shows its state, recent workflow runs, version and work folder size. Each PC
+  shows CPU, memory, disk space, uptime and pending restarts.
 - **Several PCs.** PCs connect directly over the local network, encrypted. Control the runners on every PC from any
   of them. A single PC works without any fleet setup.
 - **Auto-recovery.** The fleet agent restarts runners that stop unexpectedly.
@@ -30,11 +31,11 @@ A Windows dashboard for GitHub Actions self-hosted runners, on one PC or several
 
 <table>
   <tr>
-    <td width="60%"><img src="docs/images/pc-light.png" alt="Single PC view, light theme"></td>
+    <td width="60%"><img src="docs/images/live-job.png" alt="Live job view: steps, processes and output of a running job"></td>
     <td width="40%"><img src="docs/images/setup.png" alt="Setup wizard"></td>
   </tr>
   <tr>
-    <td align="center">PC view, light theme</td>
+    <td align="center">Live job view, light theme</td>
     <td align="center">Setup wizard</td>
   </tr>
 </table>
@@ -105,7 +106,8 @@ git push origin v2.2.0
 ```text
 src/RunnerManager/          WPF app: dashboard, setup wizard and fleet agent
 tests/RunnerManager.Tests/  xUnit tests
-docs/images/                README screenshots
+docs/images/                README header and screenshots
+docs/brand/                 Logo and icon sources (SVG) and the GitHub social preview
 ```
 
 Runner Manager needs administrator rights to install and control Windows services. Setup registers a scheduled task
