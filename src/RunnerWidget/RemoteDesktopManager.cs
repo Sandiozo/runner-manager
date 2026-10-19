@@ -12,7 +12,11 @@ public static class RemoteDesktopManager
     private static readonly string StateDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RunnerWidget");
     private static readonly string ActivityLogPath = Path.Combine(StateDir, "rdc-activity.log");
     private static readonly string RuntimeLogPath = Path.Combine(StateDir, "rdc-runtime.log");
+    public static string RuntimeLogFile => RuntimeLogPath;
     private static readonly string LauncherScriptPath = Path.Combine(StateDir, "rdc-launch.ps1");
+    // One shared client: creating an HttpClient per probe (every few seconds) leaks sockets over time.
+    private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(5) };
+    private static (DateTime FetchedUtc, string Url, string Key)? _relayBackend;
     public static bool IsConfigured()
     {
         var config = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".desktop-commander-device", "device.json");
@@ -43,31 +47,38 @@ public static class RemoteDesktopManager
             if (string.IsNullOrWhiteSpace(deviceId) || string.IsNullOrWhiteSpace(accessToken))
                 return new RemoteRelayProbe { Known = false, Detail = "Relay authentication unavailable" };
 
-            using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
-            using var infoResponse = await client.GetAsync("https://mcp.desktopcommander.app/api/mcp-info");
-            if (!infoResponse.IsSuccessStatusCode)
-                return new RemoteRelayProbe { Known = false, Detail = $"Relay status lookup failed ({(int)infoResponse.StatusCode})" };
+            var backend = _relayBackend;
+            if (backend == null || DateTime.UtcNow - backend.Value.FetchedUtc > TimeSpan.FromMinutes(30))
+            {
+                using var infoResponse = await Http.GetAsync("https://mcp.desktopcommander.app/api/mcp-info");
+                if (!infoResponse.IsSuccessStatusCode)
+                    return new RemoteRelayProbe { Known = false, Detail = $"Could not read the relay status (HTTP {(int)infoResponse.StatusCode})" };
 
-            using var infoJson = System.Text.Json.JsonDocument.Parse(await infoResponse.Content.ReadAsStringAsync());
-            var infoRoot = infoJson.RootElement;
-            var supabaseUrl = infoRoot.TryGetProperty("supabaseUrl", out var urlElement) ? urlElement.GetString() : null;
-            var anonKey = infoRoot.TryGetProperty("supabasePublishableKey", out var keyElement) ? keyElement.GetString() : null;
-            if (string.IsNullOrWhiteSpace(supabaseUrl) || string.IsNullOrWhiteSpace(anonKey))
-                return new RemoteRelayProbe { Known = false, Detail = "Relay backend configuration unavailable" };
+                using var infoJson = System.Text.Json.JsonDocument.Parse(await infoResponse.Content.ReadAsStringAsync());
+                var infoRoot = infoJson.RootElement;
+                var url = infoRoot.TryGetProperty("supabaseUrl", out var urlElement) ? urlElement.GetString() : null;
+                var key = infoRoot.TryGetProperty("supabasePublishableKey", out var keyElement) ? keyElement.GetString() : null;
+                if (string.IsNullOrWhiteSpace(url) || string.IsNullOrWhiteSpace(key))
+                    return new RemoteRelayProbe { Known = false, Detail = "Relay backend configuration unavailable" };
+                backend = (DateTime.UtcNow, url, key);
+                _relayBackend = backend;
+            }
+            var supabaseUrl = backend.Value.Url;
+            var anonKey = backend.Value.Key;
 
             using var request = new HttpRequestMessage(HttpMethod.Get,
                 $"{supabaseUrl.TrimEnd('/')}/rest/v1/mcp_devices?id=eq.{Uri.EscapeDataString(deviceId)}&select=status,last_seen");
             request.Headers.TryAddWithoutValidation("apikey", anonKey);
             request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
 
-            using var response = await client.SendAsync(request);
+            using var response = await Http.SendAsync(request);
             if (!response.IsSuccessStatusCode)
-                return new RemoteRelayProbe { Known = false, Detail = $"Relay status lookup failed ({(int)response.StatusCode})" };
+                return new RemoteRelayProbe { Known = false, Detail = $"Could not read the relay status (HTTP {(int)response.StatusCode})" };
 
             using var deviceJson = System.Text.Json.JsonDocument.Parse(await response.Content.ReadAsStringAsync());
             if (deviceJson.RootElement.ValueKind != System.Text.Json.JsonValueKind.Array
                 || deviceJson.RootElement.GetArrayLength() == 0)
-                return new RemoteRelayProbe { Known = true, Connected = false, Detail = "Relay device not registered" };
+                return new RemoteRelayProbe { Known = true, Connected = false, Detail = "This PC is not registered with the relay" };
 
             var row = deviceJson.RootElement[0];
             var status = row.TryGetProperty("status", out var statusElement) ? statusElement.GetString() : null;
@@ -105,7 +116,7 @@ public static class RemoteDesktopManager
                 Connected = false,
                 ConnectionKnown = true,
                 ConnectionChangedUtc = connection.ChangedUtc,
-                ConnectionText = "Relay offline (process not running)",
+                ConnectionText = "Relay offline. Remote Desktop Commander is not running.",
                 ActiveCalls = 0,
                 LastUsedUtc = activity.LastUsedUtc,
                 LastTool = activity.LastTool,
@@ -121,7 +132,7 @@ public static class RemoteDesktopManager
             ConnectionChangedUtc = connection.ChangedUtc,
             ConnectionText = connection.Known
                 ? connection.Detail
-                : "Relay status unknown (process was not started by Runner Manager)",
+                : "Relay status unknown. Remote Desktop Commander was not started by Runner Manager.",
             Pids = matches.Select(p => p.ProcessId).Distinct().OrderBy(p => p).ToArray(),
             Started = started == default ? null : started,
             ActiveCalls = activity.ActiveCalls,
@@ -152,14 +163,18 @@ public static class RemoteDesktopManager
 
     public static Task StopAsync() => Task.Run(() =>
     {
-        for (var attempt = 0; attempt < 10; attempt++)
+        // npx can respawn its child briefly after the parent dies, so require a few clean checks in a row.
+        var cleanChecks = 0;
+        for (var attempt = 0; attempt < 10 && cleanChecks < 3; attempt++)
         {
             var matches = ReadProcesses().Where(IsRemoteDesktopCommanderProcess).ToList();
             if (matches.Count == 0)
             {
+                cleanChecks++;
                 Thread.Sleep(400);
                 continue;
             }
+            cleanChecks = 0;
             var ids = matches.Select(p => p.ProcessId).ToHashSet();
             foreach (var info in matches.Where(p => !ids.Contains(p.ParentProcessId)))
             {
@@ -237,7 +252,7 @@ param([string]$Npx, [string]$ActivityLog, [string]$RuntimeLog)
             var relay = await ProbeRelayAsync();
             if (relay.Known && relay.Connected) return;
             if (!snapshot.Running && snapshot.ConnectionKnown)
-                throw new InvalidOperationException("RDC process exited before the relay connected.");
+                throw new InvalidOperationException("Remote Desktop Commander stopped before the relay connected. Check the Remote Desktop Commander log.");
             await Task.Delay(500);
         }
 
@@ -246,9 +261,9 @@ param([string]$Npx, [string]$ActivityLog, [string]$RuntimeLog)
         var detail = finalRelay.Known
             ? finalRelay.Detail
             : string.IsNullOrWhiteSpace(final.ConnectionText)
-                ? "No relay-ready handshake was observed."
+                ? "The relay did not confirm the connection."
                 : final.ConnectionText;
-        throw new InvalidOperationException($"RDC process did not connect to the relay within {(int)timeout.TotalSeconds}s. {detail}");
+        throw new InvalidOperationException($"Remote Desktop Commander did not connect to the relay within {(int)timeout.TotalSeconds} seconds. {detail}");
     }
 
     private static RemoteConnectionInfo ReadConnectionSnapshot()
@@ -318,7 +333,7 @@ param([string]$Npx, [string]$ActivityLog, [string]$RuntimeLog)
     private static string ReadSecurityStatus()
     {
         var config = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".desktop-commander-device", "device.json");
-        if (!File.Exists(config)) return "Security: not configured";
+        if (!File.Exists(config)) return "Security: Not set up";
         try
         {
             var acl = FileSystemAclExtensions.GetAccessControl(new FileInfo(config));
@@ -328,18 +343,19 @@ param([string]$Npx, [string]$ActivityLog, [string]$RuntimeLog)
                 if (rule.AccessControlType != AccessControlType.Allow) continue;
                 var sid = (SecurityIdentifier)rule.IdentityReference;
                 if (sid.IsWellKnown(WellKnownSidType.WorldSid) || sid.IsWellKnown(WellKnownSidType.BuiltinUsersSid) || sid.IsWellKnown(WellKnownSidType.AuthenticatedUserSid))
-                    return "Security: review permissions";
+                    return "Security: Review file permissions";
             }
-            return "Security: Windows-user protected";
+            return "Security: Protected by Windows permissions";
         }
-        catch { return "Security: ACL check unavailable"; }
+        catch { return "Security: Could not check permissions"; }
     }
 
     private static List<ProcessInfo> ReadProcesses()
     {
         var result = new List<ProcessInfo>();
         using var searcher = new ManagementObjectSearcher(
-            "SELECT ProcessId, ParentProcessId, Name, CommandLine, CreationDate FROM Win32_Process");
+            "SELECT ProcessId, ParentProcessId, Name, CommandLine, CreationDate FROM Win32_Process " +
+            "WHERE CommandLine LIKE '%desktop-commander%' OR CommandLine LIKE '%rdc-launch.ps1%'");
         foreach (ManagementObject process in searcher.Get())
         {
             result.Add(new ProcessInfo

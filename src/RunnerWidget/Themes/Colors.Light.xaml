@@ -1,0 +1,35 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <!-- Keep the keys identical in Colors.Dark.xaml; Ui.cs Palette mirrors the status colors. -->
+    <SolidColorBrush x:Key="Bg0Brush" Color="#F6F8FA"/>
+    <SolidColorBrush x:Key="Bg1Brush" Color="#FFFFFF"/>
+    <SolidColorBrush x:Key="Bg2Brush" Color="#F3F5F8"/>
+    <SolidColorBrush x:Key="Bg3Brush" Color="#EEF1F4"/>
+    <SolidColorBrush x:Key="SidebarBrush" Color="#EEF1F5"/>
+    <SolidColorBrush x:Key="HoverBrush" Color="#E5E9EE"/>
+    <SolidColorBrush x:Key="PressedBrush" Color="#DCE1E7"/>
+    <SolidColorBrush x:Key="SelectedBrush" Color="#DDEBFF"/>
+    <SolidColorBrush x:Key="BorderBrush" Color="#D1D9E0"/>
+    <SolidColorBrush x:Key="BorderSubtleBrush" Color="#E1E6EB"/>
+    <SolidColorBrush x:Key="HoverBorderBrush" Color="#B7C0CA"/>
+    <SolidColorBrush x:Key="ScrollThumbBrush" Color="#C6CED6"/>
+    <SolidColorBrush x:Key="ScrollThumbHoverBrush" Color="#A6B0BB"/>
+    <SolidColorBrush x:Key="TextBrush" Color="#1F2328"/>
+    <SolidColorBrush x:Key="TextMutedBrush" Color="#59636E"/>
+    <SolidColorBrush x:Key="TextFaintBrush" Color="#818B98"/>
+    <SolidColorBrush x:Key="AccentBrush" Color="#0969DA"/>
+    <SolidColorBrush x:Key="SuccessBrush" Color="#1A7F37"/>
+    <SolidColorBrush x:Key="DangerBrush" Color="#CF222E"/>
+    <SolidColorBrush x:Key="WarningBrush" Color="#9A6700"/>
+    <SolidColorBrush x:Key="PrimaryBrush" Color="#1F883D"/>
+    <SolidColorBrush x:Key="PrimaryHoverBrush" Color="#1A7F37"/>
+    <SolidColorBrush x:Key="PrimaryBorderBrush" Color="#1A7F37"/>
+    <SolidColorBrush x:Key="SolidDangerBrush" Color="#CF222E"/>
+    <SolidColorBrush x:Key="OnAccentBrush" Color="#FFFFFF"/>
+    <SolidColorBrush x:Key="BadgeInfoBgBrush" Color="#DDF4FF"/>
+    <SolidColorBrush x:Key="BadgeInfoBorderBrush" Color="#B6E3FF"/>
+    <SolidColorBrush x:Key="BadgeWarnBgBrush" Color="#FFF8C5"/>
+    <SolidColorBrush x:Key="BadgeWarnBorderBrush" Color="#E9D58A"/>
+    <SolidColorBrush x:Key="BannerBgBrush" Color="#DDF4FF"/>
+    <SolidColorBrush x:Key="BannerBorderBrush" Color="#9CD3FF"/>
+</ResourceDictionary>

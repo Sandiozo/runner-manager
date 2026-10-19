@@ -28,13 +28,13 @@ public static class GitHubApi
         return new RunnerWorkState
         {
             CurrentWorkText = current == null
-                ? "Current job: none"
-                : $"Working: {current.WorkflowName}  ->  {current.Name}  |  run #{current.RunNumber}",
+                ? "none"
+                : $"{current.WorkflowName} → {current.Name}  ·  run #{current.RunNumber}",
             CurrentJobUrl = current?.HtmlUrl ?? string.Empty,
             QueueCount = queued.Count,
             QueueText = queued.Count == 0
-                ? "Queue: 0 eligible jobs"
-                : $"Queue: {queued.Count}  |  next: {queued[0].WorkflowName}  ->  {queued[0].Name}"
+                ? "empty"
+                : $"{queued.Count} waiting  ·  next: {queued[0].WorkflowName} → {queued[0].Name}"
         };
     }
     private static bool IsEligible(IEnumerable<string> required, HashSet<string> available)
@@ -134,6 +134,62 @@ public static class GitHubApi
         };
     }
 
+    private static readonly Dictionary<string, (string ETag, List<WorkflowRunSummary> Runs)> RecentRunsCache
+        = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// The latest workflow runs of a repository. Polled with an ETag, so unchanged polls are free
+    /// against the API rate limit.
+    /// </summary>
+    public static async Task<List<WorkflowRunSummary>?> GetRecentRunsAsync(string repositoryPath, int count = 6)
+    {
+        (string ETag, List<WorkflowRunSummary> Runs) cached;
+        lock (CacheLock)
+            cached = RecentRunsCache.TryGetValue(repositoryPath, out var entry) ? entry : (string.Empty, new List<WorkflowRunSummary>());
+
+        var response = await GitHubCli.GetConditionalAsync(
+            $"repos/{repositoryPath}/actions/runs?per_page={count}&exclude_pull_requests=true", cached.ETag);
+        if (response.NotModified) return cached.Runs;
+        if (!response.Ok) return null;
+        try
+        {
+            using var json = JsonDocument.Parse(response.Body);
+            var runs = new List<WorkflowRunSummary>();
+            foreach (var run in json.RootElement.GetProperty("workflow_runs").EnumerateArray())
+            {
+                runs.Add(new WorkflowRunSummary
+                {
+                    Id = run.GetProperty("id").GetInt64(),
+                    RepositoryPath = repositoryPath,
+                    WorkflowName = Str(run, "name", "Workflow"),
+                    Title = Str(run, "display_title", string.Empty),
+                    Branch = Str(run, "head_branch", string.Empty),
+                    Event = Str(run, "event", string.Empty),
+                    Status = Str(run, "status", "unknown"),
+                    Conclusion = Str(run, "conclusion", string.Empty),
+                    RunNumber = run.TryGetProperty("run_number", out var number) ? number.GetInt32() : 0,
+                    RunAttempt = run.TryGetProperty("run_attempt", out var attempt) ? attempt.GetInt32() : 1,
+                    HtmlUrl = Str(run, "html_url", string.Empty),
+                    CreatedUtc = run.TryGetProperty("created_at", out var created) && created.TryGetDateTime(out var c) ? c.ToUniversalTime() : DateTime.MinValue,
+                    UpdatedUtc = run.TryGetProperty("updated_at", out var updated) && updated.TryGetDateTime(out var u) ? u.ToUniversalTime() : DateTime.MinValue
+                });
+            }
+            lock (CacheLock) RecentRunsCache[repositoryPath] = (response.ETag, runs);
+            return runs;
+        }
+        catch { return null; }
+    }
+
+    public static async Task RerunFailedJobsAsync(string repositoryPath, long runId)
+    {
+        var result = await GitHubCli.RunAsync($"api --method POST repos/{repositoryPath}/actions/runs/{runId}/rerun-failed-jobs");
+        if (result.ExitCode != 0)
+            throw new InvalidOperationException(string.IsNullOrWhiteSpace(result.Error) ? "GitHub did not accept the re-run request." : result.Error.Trim());
+    }
+
+    private static string Str(JsonElement element, string name, string fallback)
+        => element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() ?? fallback : fallback;
+
     public static async Task<List<RepositoryFile>> GetWorkflowFilesAsync(string repositoryPath)
     {
         var result = await GitHubCli.RunAsync($"api repos/{repositoryPath}/contents/.github/workflows");
@@ -175,10 +231,14 @@ public static class GitHubApi
         string repositoryPath, RepositoryFile file, string newContent, string commitMessage)
     {
         var endpoint = $"repos/{repositoryPath}/contents/{EscapePath(file.Path)}";
-        var encoded = Convert.ToBase64String(Encoding.UTF8.GetBytes(newContent));
-        var safeMessage = commitMessage.Replace("\"", "'");
-        var result = await GitHubCli.RunAsync(
-            $"api --method PUT {endpoint} -f \"message={safeMessage}\" -f content={encoded} -f sha={file.Sha}");
+        // Sent on stdin: a base64 workflow file can easily exceed Windows' 32K command-line limit.
+        var body = JsonSerializer.Serialize(new
+        {
+            message = commitMessage,
+            content = Convert.ToBase64String(Encoding.UTF8.GetBytes(newContent)),
+            sha = file.Sha
+        });
+        var result = await GitHubCli.RunAsync($"api --method PUT {endpoint} --input -", body);
         if (result.ExitCode != 0)
             throw new InvalidOperationException(string.IsNullOrWhiteSpace(result.Error)
                 ? $"Could not update {file.Path}."
@@ -190,10 +250,10 @@ public static class GitHubApi
 }
 public sealed class RunnerWorkState
 {
-    public string CurrentWorkText { get; init; } = "Current job: unavailable";
+    public string CurrentWorkText { get; init; } = "unavailable";
     public string CurrentJobUrl { get; init; } = string.Empty;
     public int QueueCount { get; init; }
-    public string QueueText { get; init; } = "Queue: unavailable";
+    public string QueueText { get; init; } = "unavailable";
 }
 
 public sealed class RepositoryWorkState
@@ -220,6 +280,61 @@ public sealed class GitHubJobState
     public string[] Labels { get; init; } = Array.Empty<string>();
     public string WorkflowName { get; init; } = string.Empty;
     public int RunNumber { get; init; }
+}
+
+public sealed class WorkflowRunSummary
+{
+    public long Id { get; init; }
+    public string RepositoryPath { get; init; } = string.Empty;
+    public string WorkflowName { get; init; } = string.Empty;
+    public string Title { get; init; } = string.Empty;
+    public string Branch { get; init; } = string.Empty;
+    public string Event { get; init; } = string.Empty;
+    public string Status { get; init; } = string.Empty;
+    public string Conclusion { get; init; } = string.Empty;
+    public int RunNumber { get; init; }
+    public int RunAttempt { get; init; }
+    public string HtmlUrl { get; init; } = string.Empty;
+    public DateTime CreatedUtc { get; init; }
+    public DateTime UpdatedUtc { get; init; }
+
+    public bool IsCompleted => Status.Equals("completed", StringComparison.OrdinalIgnoreCase);
+    public bool IsFailure => IsCompleted && Conclusion is "failure" or "timed_out" or "startup_failure";
+    public bool CanRerun => IsFailure || (IsCompleted && Conclusion == "cancelled");
+    public string Glyph => !IsCompleted ? "\uE916"
+        : Conclusion == "success" ? "\uE73E"
+        : IsFailure ? "\uE711"
+        : "\uE7BA";
+    public System.Windows.Media.Brush Brush => !IsCompleted ? Palette.Warning
+        : Conclusion == "success" ? Palette.Success
+        : IsFailure ? Palette.Danger
+        : Palette.Muted;
+    public string StateText => !IsCompleted ? (Status == "queued" ? "Queued" : "Running")
+        : Conclusion switch
+        {
+            "success" => "Succeeded",
+            "failure" => "Failed",
+            "cancelled" => "Cancelled",
+            "timed_out" => "Timed out",
+            "skipped" => "Skipped",
+            "startup_failure" => "Startup failure",
+            _ => string.IsNullOrEmpty(Conclusion) ? "Completed" : Conclusion
+        };
+    public string TitleText => $"{WorkflowName}  #{RunNumber}";
+    public string DetailText
+    {
+        get
+        {
+            var age = DateTime.UtcNow - (IsCompleted ? UpdatedUtc : CreatedUtc);
+            var when = age.TotalMinutes < 1 ? "just now"
+                : age.TotalHours < 1 ? $"{(int)age.TotalMinutes}m ago"
+                : age.TotalDays < 1 ? $"{(int)age.TotalHours}h ago"
+                : $"{(int)age.TotalDays}d ago";
+            var branch = string.IsNullOrWhiteSpace(Branch) ? string.Empty : $"{Branch}  ·  ";
+            return $"{StateText}  ·  {branch}{when}";
+        }
+    }
+    public System.Windows.Visibility RerunVisibility => CanRerun ? System.Windows.Visibility.Visible : System.Windows.Visibility.Collapsed;
 }
 
 public sealed class RepositoryFile

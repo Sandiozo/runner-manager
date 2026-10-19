@@ -12,12 +12,12 @@ public static class WorkflowManager
         string repositoryPath, IEnumerable<string> customLabels, Action<string> log)
     {
         if (string.IsNullOrWhiteSpace(repositoryPath))
-            throw new InvalidOperationException("Runner repository information is missing.");
+            throw new InvalidOperationException("The runner configuration does not include a GitHub repository or organization.");
 
         var files = await GitHubApi.GetWorkflowFilesAsync(repositoryPath);
         if (files.Count == 0)
         {
-            log("No workflow YAML files found.");
+            log("No workflow YAML files were found.");
             return;
         }
 
@@ -32,19 +32,19 @@ public static class WorkflowManager
                 log($"{file.Path}: {warning}");
 
             if (!result.Changed) continue;
-            log($"Updating {file.Path} for the self-hosted Windows runner...");
+            log($"Updating {file.Path} to use the self-hosted Windows runner…");
             await GitHubApi.UpdateRepositoryFileAsync(
                 repositoryPath, file, result.Content, "Configure workflow for self-hosted Windows runner");
             changed++;
         }
 
         if (changed == 0 && warnings == 0)
-            log("Workflow check complete: no changes needed.");
+            log("Workflow check complete. No changes are needed.");
         else
-            log($"Workflow check complete: {changed} file(s) updated, {warnings} item(s) left for review.");
+            log($"Workflow check complete. {changed} file(s) updated. {warnings} item(s) need review.");
     }
 
-    private static WorkflowTransformResult Transform(
+    internal static WorkflowTransformResult Transform(
         string content, string selector, IEnumerable<string> customLabels)
     {
         var warnings = new List<string>();
@@ -77,7 +77,7 @@ public static class WorkflowManager
                     return match.Value;
 
                 if (required.Any(x => x.Equals("self-hosted", StringComparison.OrdinalIgnoreCase)))
-                    warnings.Add($"kept incompatible self-hosted selector {value}");
+                    warnings.Add($"left self-hosted selector {value} unchanged because its labels do not match this runner");
                 return match.Value;
             }
             if (plain.Contains("${{", StringComparison.Ordinal)
@@ -104,7 +104,7 @@ public static class WorkflowManager
     private static string[] ParseInlineLabels(string value)
         => value.Trim('[', ']').Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .Select(Unquote).Where(x => !string.IsNullOrWhiteSpace(x)).ToArray();
-    private static string BuildSelector(IEnumerable<string> customLabels)
+    internal static string BuildSelector(IEnumerable<string> customLabels)
     {
         var labels = new List<string> { "self-hosted", "Windows", "X64" };
         labels.AddRange(customLabels.Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => x.Trim()).Distinct());

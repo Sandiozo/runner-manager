@@ -1,0 +1,61 @@
+name: Release
+
+# Push a tag like v2.1.0 (or run this workflow manually with a version) to publish RunnerWidget.exe.
+# Runner Manager installs and updates itself from these releases.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release, e.g. 2.1.0'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Resolve version
+        id: version
+        shell: pwsh
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          $raw = if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') { $env:INPUT_VERSION } else { $env:REF_NAME }
+          $version = $raw.Trim().TrimStart('v', 'V')
+          if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "Version '$raw' must look like 2.1.0" }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Test
+        run: dotnet test tests/RunnerWidget.Tests -c Release
+
+      - name: Publish single-file exe
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: >
+          dotnet publish src/RunnerWidget/RunnerWidget.csproj -c Release -r win-x64 -p:SelfContained=false
+          -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
+          -p:Version=$env:VERSION -o publish
+
+      - name: Create GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $tag = "v$env:VERSION"
+          # The same single-file exe twice: RunnerManagerSetup.exe opens the setup wizard, RunnerWidget.exe is what installed copies update to.
+          Copy-Item publish/RunnerWidget.exe publish/RunnerManagerSetup.exe
+          $hash = (Get-FileHash publish/RunnerWidget.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          $notes = "Runner Manager $tag`n`n**New install:** download and run RunnerManagerSetup.exe.`nExisting installs update themselves from Settings or the machine card.`n`nSHA-256 of the exe: ``$hash```nRequires the .NET 8 Desktop Runtime."
+          gh release create $tag publish/RunnerManagerSetup.exe publish/RunnerWidget.exe --title "Runner Manager $tag" --notes $notes --generate-notes --target $env:GITHUB_SHA
