@@ -684,10 +684,25 @@ public static class RunnerService
     private static async Task ConfigureAsync(string root, string repositoryUrl, string token,
         string name, string workFolder, IEnumerable<string> labels, bool runAsService, bool replace = false)
     {
+        repositoryUrl = await CurrentRepositoryUrlAsync(repositoryUrl);
         var arguments = BuildConfigureArguments(repositoryUrl, token, name, workFolder, labels, runAsService, replace);
         var result = await RunConfigAsync(root, arguments);
         if (result.ExitCode != 0)
             throw new InvalidOperationException(CleanConfigError(result.Error, result.Output));
+    }
+
+    /// <summary>
+    /// The repository's URL under its current name. The GitHub API follows a renamed repository, but config.cmd does
+    /// not, so registering with the old name fails with "Not Found".
+    /// </summary>
+    private static async Task<string> CurrentRepositoryUrlAsync(string registrationUrl)
+    {
+        var path = RepositoryPath(registrationUrl);
+        if (string.IsNullOrWhiteSpace(path)) return registrationUrl;
+        var result = await GitHubCli.RunAsync($"api repos/{path} --jq .html_url");
+        var current = result.ExitCode == 0 ? result.Output.Trim() : string.Empty;
+        return RegistrationUrlProblem(current) == null && !current.Equals(registrationUrl.TrimEnd('/'), StringComparison.OrdinalIgnoreCase)
+            ? current : registrationUrl;
     }
 
     private static async Task RunConfigRemoveAsync(string root, string token)
