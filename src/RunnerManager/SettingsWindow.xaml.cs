@@ -37,6 +37,7 @@ public partial class SettingsWindow : Window
         NavVersionText.Text = $"Runner Manager {AppUpdater.CurrentVersion}";
         VersionRow.Title = $"Runner Manager {AppUpdater.CurrentVersion}";
         DataRow.Description = FleetConfig.StateDir;
+        ProgramRow.Description = $"{AppUpdater.InstallDir}. To move it, run the setup again and choose another folder.";
         UpdateRdcStatus();
         UpdateRunnerFolder();
         UpdateKeyStatus();
@@ -398,6 +399,11 @@ public partial class SettingsWindow : Window
     {
         var url = _release?.HtmlUrl is { Length: > 0 } html ? html : AppUpdater.ReleasesUrl;
         Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+    }
+
+    private void OpenProgramFolder_Click(object sender, RoutedEventArgs e)
+    {
+        if (Directory.Exists(AppUpdater.InstallDir)) Process.Start(new ProcessStartInfo(AppUpdater.InstallDir) { UseShellExecute = true });
     }
 
     private void OpenDataFolder_Click(object sender, RoutedEventArgs e)

@@ -17,8 +17,16 @@ public static class AppUpdater
     public const string AssetName = AppPaths.ExeName;
     /// <summary>The first version that answers --probe, so an update can be test-started before it replaces this one.</summary>
     private const string ProbeSupportedSince = "2.2.0";
-    public static readonly string InstallDir = Path.Combine(
+    public static readonly string DefaultInstallDir = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "RunnerManager");
+    private static string? _installDir;
+    /// <summary>Where Runner Manager is installed: the folder chosen in setup (kept in the Settings → Apps entry), or the default.</summary>
+    public static string InstallDir => _installDir ??= Installer.RegisteredInstallDir() ?? DefaultInstallDir;
+    /// <summary>Setup installs into the folder the user chose.</summary>
+    internal static void UseInstallDir(string folder) => _installDir = folder;
+    internal static bool IsDefaultInstallDir(string folder) => SameFolder(folder, DefaultInstallDir);
+    internal static bool SameFolder(string a, string b) => string.Equals(
+        Path.TrimEndingDirectorySeparator(Path.GetFullPath(a)), Path.TrimEndingDirectorySeparator(Path.GetFullPath(b)), StringComparison.OrdinalIgnoreCase);
     public static string InstalledExe => Path.Combine(InstallDir, AssetName);
     /// <summary>The installed copy when there is one, otherwise the running exe.</summary>
     public static string PreferredExe => File.Exists(InstalledExe) ? InstalledExe : Environment.ProcessPath!;
@@ -334,7 +342,8 @@ public static class AppUpdater
         await Task.Run(() => WithUpdateLock(() =>
         {
             // Going from a multi-file build to a single-file exe: clear the old app files so only the exe remains.
-            if (files.Count == 1)
+            // Only builds before 2.2 were multi-file, and they always used the default folder, which only holds this app.
+            if (files.Count == 1 && IsDefaultInstallDir(InstallDir))
             {
                 foreach (var stale in Directory.EnumerateFiles(InstallDir)
                              .Where(f => !Path.GetFileName(f).Equals(AssetName, StringComparison.OrdinalIgnoreCase) && !f.Contains(".old.")))

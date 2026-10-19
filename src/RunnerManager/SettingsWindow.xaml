@@ -289,6 +289,10 @@
                     <TextBlock Text="ADVANCED" Style="{StaticResource GroupLabel}"/>
                     <Border Style="{StaticResource Group}">
                         <StackPanel>
+                            <local:SettingRow x:Name="ProgramRow" Glyph="&#xE74C;" Title="Program folder">
+                                <Button Content="Open folder" Style="{StaticResource GhostButton}" Click="OpenProgramFolder_Click"/>
+                            </local:SettingRow>
+                            <Border Style="{StaticResource Divider}"/>
                             <local:SettingRow x:Name="DataRow" Glyph="&#xE838;" Title="Data and logs">
                                 <Button Content="Open folder" Style="{StaticResource GhostButton}" Click="OpenDataFolder_Click"/>
                             </local:SettingRow>

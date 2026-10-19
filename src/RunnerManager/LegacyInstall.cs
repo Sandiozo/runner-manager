@@ -10,7 +10,8 @@ namespace RunnerManager;
 public static class LegacyInstall
 {
     private const string Check = "legacy-install";
-    private static string LegacyExe => Path.Combine(AppUpdater.InstallDir, AppPaths.LegacyExeName);
+    // Versions before 2.2 always installed to the default folder.
+    private static string LegacyExe => Path.Combine(AppUpdater.DefaultInstallDir, AppPaths.LegacyExeName);
 
     public static Task MigrateAsync(Action<string> log) => MigrateAsync(log, fromSetup: false);
 

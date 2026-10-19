@@ -53,10 +53,16 @@
                 <TextBlock Style="{StaticResource OptionText}" FontSize="12.5" Margin="0,6,0,18"
                            Text="Runner Manager monitors your GitHub self-hosted runners. Start and stop runners, view their jobs, repair and clean them, and get notifications when a problem occurs."/>
                 <TextBlock Text="Install to" FontWeight="SemiBold" FontSize="12"/>
-                <Border Background="{DynamicResource Bg0Brush}" BorderBrush="{DynamicResource BorderSubtleBrush}" BorderThickness="1"
-                        CornerRadius="6" Padding="10,7" Margin="0,6,0,18">
-                    <TextBlock x:Name="InstallPathText" FontFamily="{StaticResource MonoFont}" FontSize="11.5" TextTrimming="CharacterEllipsis"/>
-                </Border>
+                <DockPanel Margin="0,6,0,18">
+                    <Button DockPanel.Dock="Right" Content="Change…" Margin="8,0,0,0" Click="ChangeInstallFolder_Click"/>
+                    <Button x:Name="DefaultInstallFolderButton" DockPanel.Dock="Right" Content="Default" Style="{StaticResource GhostButton}"
+                            Margin="8,0,0,0" Visibility="Collapsed" Click="DefaultInstallFolder_Click"/>
+                    <Border Background="{DynamicResource Bg0Brush}" BorderBrush="{DynamicResource BorderSubtleBrush}" BorderThickness="1"
+                            CornerRadius="6" Padding="10,7">
+                        <TextBlock x:Name="InstallPathText" FontFamily="{StaticResource MonoFont}" FontSize="11.5" TextTrimming="CharacterEllipsis"
+                                   ToolTip="{Binding Text, RelativeSource={RelativeSource Self}}"/>
+                    </Border>
+                </DockPanel>
                 <CheckBox x:Name="DesktopShortcutToggle" Style="{StaticResource ToggleSwitch}" Margin="0,4">
                     <TextBlock Text="Desktop shortcut"/>
                 </CheckBox>

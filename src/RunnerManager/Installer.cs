@@ -36,9 +36,48 @@ public static class Installer
         }
     }
 
+    /// <summary>The install folder saved in the Settings → Apps entry, when it still exists.</summary>
+    internal static string? RegisteredInstallDir()
+    {
+        try
+        {
+            using var key = Registry.CurrentUser.OpenSubKey(UninstallKey);
+            return key?.GetValue("InstallLocation") is string { Length: > 0 } folder && Path.IsPathFullyQualified(folder) && Directory.Exists(folder)
+                ? folder : null;
+        }
+        catch { return null; }
+    }
+
+    /// <summary>
+    /// The folder to install into for a folder the user picked. It gets its own RunnerManager subfolder, unless it already
+    /// is one, so uninstalling never touches other files.
+    /// </summary>
+    public static string InstallFolderFor(string chosen)
+    {
+        var full = Path.TrimEndingDirectorySeparator(Path.GetFullPath(chosen));
+        return Path.GetFileName(full).Equals("RunnerManager", StringComparison.OrdinalIgnoreCase) || File.Exists(Path.Combine(full, AppPaths.ExeName))
+            ? full : Path.Combine(full, "RunnerManager");
+    }
+
+    /// <summary>Null when Runner Manager can be installed to the folder, otherwise the message to show.</summary>
+    public static string? InstallFolderProblem(string? folder)
+    {
+        if (string.IsNullOrWhiteSpace(folder) || !Path.IsPathFullyQualified(folder)) return @"Choose a full folder path, such as D:\Apps.";
+        if (folder.StartsWith(@"\\", StringComparison.Ordinal)) return "Choose a folder on this PC. Network folders are not supported.";
+        var windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+        if (windows.Length > 0 && (Path.GetFullPath(folder) + Path.DirectorySeparatorChar)
+                .StartsWith(Path.TrimEndingDirectorySeparator(windows) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+            return "Choose a folder outside the Windows folder.";
+        return null;
+    }
+
     public static async Task<string> InstallAsync(SetupChoices choices, Action<string> log)
     {
-        CloseRunningDashboards(log);
+        // The copy that is installed now, when setup moves it to another folder.
+        var previous = RegisteredInstallDir()
+                       ?? (File.Exists(Path.Combine(AppUpdater.DefaultInstallDir, AppPaths.ExeName)) ? AppUpdater.DefaultInstallDir : null);
+        var moving = previous != null && !AppUpdater.SameFolder(previous, AppUpdater.InstallDir);
+        CloseRunningDashboards(log, moving ? new[] { AppUpdater.InstallDir, previous! } : new[] { AppUpdater.InstallDir });
         var exe = await AppUpdater.InstallCurrentBuildAsync(log, createShortcut: false);
 
         log("Adding shortcuts...");
@@ -59,6 +98,13 @@ public static class Installer
         {
             log("Updating the fleet agent...");
             await MachineRelay.UpdateLocalAgentAsync(log);
+        }
+
+        if (moving)
+        {
+            // The old copy may still be in use until this process exits (its agent was just switched over).
+            log($"Removing the copy in {previous}...");
+            AppUpdater.RunAfterExit(RemoveProgramFilesScript(previous!), TimeSpan.FromMinutes(5), TimeSpan.FromSeconds(3));
         }
 
         var settings = AppSettings.Load();
@@ -121,9 +167,11 @@ public static class Installer
     /// Closes every dashboard that runs from the install folder, including one hidden in the notification area, so it
     /// can be replaced or removed and its single-instance lock is freed. The fleet agent (--agent) is handled separately.
     /// </summary>
-    private static void CloseRunningDashboards(Action<string> log)
+    private static void CloseRunningDashboards(Action<string> log) => CloseRunningDashboards(log, new[] { AppUpdater.InstallDir });
+
+    private static void CloseRunningDashboards(Action<string> log, IEnumerable<string> folders)
     {
-        var installDir = Path.TrimEndingDirectorySeparator(Path.GetFullPath(AppUpdater.InstallDir)) + Path.DirectorySeparatorChar;
+        var installDirs = folders.Select(f => Path.TrimEndingDirectorySeparator(Path.GetFullPath(f)) + Path.DirectorySeparatorChar).ToList();
         var dashboards = new List<Process>();
         try
         {
@@ -137,7 +185,7 @@ public static class Installer
                     var path = item["ExecutablePath"]?.ToString() ?? string.Empty;
                     var commandLine = item["CommandLine"]?.ToString() ?? string.Empty;
                     if (id == Environment.ProcessId || IsAgentCommandLine(commandLine)) continue;
-                    if (!path.StartsWith(installDir, StringComparison.OrdinalIgnoreCase)) continue;
+                    if (!installDirs.Any(dir => path.StartsWith(dir, StringComparison.OrdinalIgnoreCase))) continue;
                     try { dashboards.Add(Process.GetProcessById(id)); } catch (ArgumentException) { }
                 }
             }
@@ -192,6 +240,8 @@ public static class Installer
     /// </summary>
     public static async Task UninstallAsync(bool removeData, Action<string> log)
     {
+        // Read before the Settings → Apps entry that records a chosen folder is deleted below.
+        var installDir = AppUpdater.InstallDir;
         CloseRunningDashboards(log);
         if (FleetConfig.Current.FleetKey != null || await MachineRelay.IsAgentInstalledAsync())
             await MachineRelay.LeaveFleetAsync(log);
@@ -203,12 +253,25 @@ public static class Installer
         try { Registry.CurrentUser.DeleteSubKeyTree(UninstallKey, throwOnMissingSubKey: false); } catch { }
 
         // The running exe can't delete its own folder; a helper does it once this process has exited.
-        var folders = new List<string> { AppUpdater.InstallDir };
-        if (removeData) folders.Add(FleetConfig.StateDir);
-        AppUpdater.RunAfterExit(
-            string.Join("; ", folders.Select(f => $"Remove-Item -LiteralPath '{f.Replace("'", "''")}' -Recurse -Force -ErrorAction SilentlyContinue")),
-            TimeSpan.FromSeconds(60), TimeSpan.FromSeconds(1));
+        var script = RemoveProgramFilesScript(installDir);
+        if (removeData) script += $"; Remove-Item -LiteralPath '{FleetConfig.StateDir.Replace("'", "''")}' -Recurse -Force -ErrorAction SilentlyContinue";
+        AppUpdater.RunAfterExit(script, TimeSpan.FromSeconds(60), TimeSpan.FromSeconds(1));
         log("Runner Manager was removed.");
+    }
+
+    /// <summary>
+    /// PowerShell that removes Runner Manager from a program folder. The default folder only holds this app and is removed
+    /// completely; a folder chosen in setup loses only Runner Manager's own files, and is removed when it is then empty.
+    /// </summary>
+    internal static string RemoveProgramFilesScript(string folder)
+    {
+        var path = folder.Replace("'", "''");
+        if (AppUpdater.IsDefaultInstallDir(folder))
+            return $"Remove-Item -LiteralPath '{path}' -Recurse -Force -ErrorAction SilentlyContinue";
+        return $"$f = '{path}'; foreach ($p in 'RunnerManager.exe', 'RunnerManager.exe.new', 'RunnerManager.*.old.exe') " +
+               "{ Get-ChildItem -LiteralPath $f -Filter $p -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue }; " +
+               "if ((Test-Path -LiteralPath $f) -and -not (Get-ChildItem -LiteralPath $f -Force -ErrorAction SilentlyContinue)) " +
+               "{ Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue }";
     }
 
     /// <summary>Creates or updates a shortcut to <paramref name="target"/>.</summary>

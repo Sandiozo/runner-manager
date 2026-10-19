@@ -46,8 +46,10 @@ A Windows dashboard for GitHub Actions self-hosted runners, on one PC or several
 2. Download **RunnerManagerSetup.exe** from [Releases](https://github.com/Sandiozo/runner-manager/releases) and run it.
 3. Choose **This PC only** or **Several PCs**, and whether you use Remote Desktop Commander.
 
-Runner Manager installs for the current user to `%LOCALAPPDATA%\Programs\RunnerManager`. To uninstall, use
-**Settings → Apps** in Windows, or **Settings → Updates → Uninstall…** in Runner Manager. Your runners keep running.
+Runner Manager installs for the current user, by default to `%LOCALAPPDATA%\Programs\RunnerManager`. To install it
+somewhere else, click **Change…** on the first page of the setup; it gets its own `RunnerManager` folder there. To move
+an existing install, run the setup again and choose another folder. To uninstall, use **Settings → Apps** in Windows,
+or **Settings → Updates → Uninstall…** in Runner Manager. Your runners keep running.
 
 Updates install a newer .NET Desktop Runtime automatically when a release needs one. Installs from version 2.1 or
 earlier (called RunnerWidget) need the setup run once on each PC; it moves the settings and scheduled tasks over.

@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 
@@ -14,16 +15,17 @@ public partial class SetupWindow : Window
     private bool _installed;
     private bool _installing;
     private string _installedExe = string.Empty;
+    private string _installFolder = AppUpdater.InstallDir;
 
     public SetupWindow()
     {
         InitializeComponent();
         WindowTheme.Apply(this);
         VersionText.Text = $"Setup · version {AppUpdater.CurrentVersion}";
-        InstallPathText.Text = AppUpdater.InstallDir;
+        ShowInstallFolder();
         if (Installer.IsInstalled)
         {
-            ExistingText.Text = "Runner Manager is already installed. Continue to update it. Your settings are kept.";
+            ExistingText.Text = "Runner Manager is already installed. Continue to update it. Your settings are kept. To move it, choose another folder.";
             ExistingText.Visibility = Visibility.Visible;
         }
         if (RemoteDesktopManager.IsConfigured())
@@ -85,6 +87,7 @@ public partial class SetupWindow : Window
         _installing = true;
         try
         {
+            AppUpdater.UseInstallDir(_installFolder);
             _installedExe = await Installer.InstallAsync(choices, message => Dispatcher.Invoke(() => InstallStatus.Text = message));
             _installed = true;
             InstallTitle.Text = "Runner Manager is installed";
@@ -136,6 +139,37 @@ public partial class SetupWindow : Window
             try { Process.Start(start); } catch { }
         }
         Close();
+    }
+
+    private void ShowInstallFolder()
+    {
+        InstallPathText.Text = _installFolder;
+        DefaultInstallFolderButton.Visibility = AppUpdater.IsDefaultInstallDir(_installFolder) ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    private void ChangeInstallFolder_Click(object sender, RoutedEventArgs e)
+    {
+        var current = Directory.Exists(_installFolder) ? _installFolder : Path.GetDirectoryName(_installFolder);
+        var dialog = new Microsoft.Win32.OpenFolderDialog
+        {
+            Title = "Choose where to install Runner Manager",
+            InitialDirectory = current != null && Directory.Exists(current) ? current : null
+        };
+        if (dialog.ShowDialog(this) != true) return;
+        var folder = Installer.InstallFolderFor(dialog.FolderName);
+        if (Installer.InstallFolderProblem(folder) is { } problem)
+        {
+            DialogWindow.Info(this, "Choose another folder", problem);
+            return;
+        }
+        _installFolder = folder;
+        ShowInstallFolder();
+    }
+
+    private void DefaultInstallFolder_Click(object sender, RoutedEventArgs e)
+    {
+        _installFolder = AppUpdater.DefaultInstallDir;
+        ShowInstallFolder();
     }
 
     private void Cancel_Click(object sender, RoutedEventArgs e)
