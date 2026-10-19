@@ -78,11 +78,6 @@ public static class Menus
     }
 }
 
-public static class AppLinks
-{
-    public static string ReleasesUrl => $"https://github.com/{AppUpdater.ReleaseRepository}/releases";
-}
-
 public enum AppTheme { System, Dark, Light }
 
 /// <summary>Switches the color dictionary (index 0 of the app's merged dictionaries) between dark and light.</summary>

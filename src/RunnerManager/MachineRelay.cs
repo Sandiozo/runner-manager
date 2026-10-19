@@ -696,7 +696,7 @@ public static class MachineRelay
     public static async Task InstallAndStartAgentTaskAsync()
     {
         // Prefer the installed release copy so the agent doesn't depend on a build folder that gets rebuilt.
-        var exe = File.Exists(AppUpdater.InstalledExe) ? AppUpdater.InstalledExe : Environment.ProcessPath;
+        var exe = AppUpdater.PreferredExe;
         if (string.IsNullOrWhiteSpace(exe) || !exe.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("Run RunnerManager.exe from a build output before installing the fleet agent.");
         await ReplaceAndStartAgentTaskAsync(exe);

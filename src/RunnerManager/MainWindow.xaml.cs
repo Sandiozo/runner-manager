@@ -1011,7 +1011,7 @@ public partial class MainWindow : Window
         => OpenFolder(FleetConfig.StateDir);
 
     private void OpenReleases_Click(object sender, RoutedEventArgs e)
-        => OpenUrl(AppLinks.ReleasesUrl);
+        => OpenUrl(AppUpdater.ReleasesUrl);
 
     private void ShowShortcuts_Click(object sender, RoutedEventArgs e)
         => DialogWindow.Info(this, "Keyboard shortcuts",

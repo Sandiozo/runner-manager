@@ -319,10 +319,6 @@ public sealed class WorkflowRunSummary
         : Conclusion == "success" ? ""
         : IsFailure ? ""
         : "";
-    public System.Windows.Media.Brush Brush => !IsCompleted ? Palette.Warning
-        : Conclusion == "success" ? Palette.Success
-        : IsFailure ? Palette.Danger
-        : Palette.Muted;
     public string StateText => !IsCompleted ? (Status == "queued" ? "Queued" : "Running")
         : Conclusion switch
         {

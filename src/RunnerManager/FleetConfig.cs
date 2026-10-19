@@ -93,6 +93,15 @@ public sealed class FleetConfig
                 }
                 return JsonSerializer.Deserialize<FleetConfig>(json, JsonOptions) ?? new FleetConfig();
             }
+            catch (JsonException) when (attempt >= ReadAttempts - 1)
+            {
+                // Writes are atomic, so a file that stays invalid is damaged rather than half-written. Keep a copy for
+                // inspection and continue with defaults, instead of blocking every later save.
+                hasPlainKey = false;
+                try { File.Move(ConfigPath, $"{ConfigPath}.damaged-{DateTime.Now:yyyyMMdd-HHmmss}", overwrite: true); }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+                return new FleetConfig();
+            }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
             {
                 if (attempt >= ReadAttempts - 1)

@@ -113,7 +113,7 @@ public partial class SettingsWindow : Window
         try
         {
             if (StartupToggle.IsChecked == true)
-                await Installer.RegisterStartupTaskAsync(File.Exists(AppUpdater.InstalledExe) ? AppUpdater.InstalledExe : Environment.ProcessPath!);
+                await Installer.RegisterStartupTaskAsync(AppUpdater.PreferredExe);
             else
                 await ScheduledTasks.DeleteTaskAsync(ScheduledTasks.DashboardTaskName);
         }
@@ -363,7 +363,7 @@ public partial class SettingsWindow : Window
 
     private void Releases_Click(object sender, RoutedEventArgs e)
     {
-        var url = _release?.HtmlUrl is { Length: > 0 } html ? html : AppLinks.ReleasesUrl;
+        var url = _release?.HtmlUrl is { Length: > 0 } html ? html : AppUpdater.ReleasesUrl;
         Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
     }
 
@@ -375,7 +375,7 @@ public partial class SettingsWindow : Window
 
     private void Uninstall_Click(object sender, RoutedEventArgs e)
     {
-        var exe = File.Exists(AppUpdater.InstalledExe) ? AppUpdater.InstalledExe : Environment.ProcessPath!;
+        var exe = AppUpdater.PreferredExe;
         Process.Start(new ProcessStartInfo(exe) { UseShellExecute = true, ArgumentList = { "--uninstall" } });
         ((App)Application.Current).ExitApplication();
     }

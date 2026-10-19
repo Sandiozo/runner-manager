@@ -500,16 +500,36 @@ public class FleetConfigTests
     }
 
     [Fact]
-    public void UnreadableSettings_AreNotReplacedWithDefaults()
+    public void LockedSettings_AreNotReplacedWithDefaults()
+    {
+        const string saved = "{\"Watchdog\":false}";
+        try
+        {
+            WriteRaw(saved);
+            using (new FileStream(ConfigPath, FileMode.Open, FileAccess.Read, FileShare.None))
+                Assert.Throws<IOException>(() => FleetConfig.Update(c => c.ManualAddresses.Add("example-pc")));
+            Assert.Equal(saved, File.ReadAllText(ConfigPath));
+        }
+        finally { File.Delete(ConfigPath); }
+    }
+
+    [Fact]
+    public void DamagedSettings_AreKeptAsBackup_AndSavingContinues()
     {
         const string broken = "{\"Watchdog\":false,\"ManualAddresses\":[";
         try
         {
             WriteRaw(broken);
-            Assert.Throws<IOException>(() => FleetConfig.Update(c => c.Watchdog = true));
-            Assert.Equal(broken, File.ReadAllText(ConfigPath));
+            FleetConfig.Update(c => c.ManualAddresses.Add("example-pc"));
+            var backup = Assert.Single(Directory.GetFiles(FleetConfig.StateDir, "fleet.json.damaged-*"));
+            Assert.Equal(broken, File.ReadAllText(backup));
+            Assert.Contains("example-pc", FleetConfig.Current.ManualAddresses);
         }
-        finally { File.Delete(ConfigPath); }
+        finally
+        {
+            File.Delete(ConfigPath);
+            foreach (var file in Directory.GetFiles(FleetConfig.StateDir, "fleet.json.damaged-*")) File.Delete(file);
+        }
     }
 
     [Fact]
