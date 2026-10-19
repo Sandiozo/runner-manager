@@ -1,14 +1,14 @@
 <div align="center">
 
-<img src="src/RunnerWidget/assets/RunnerManager.png" width="72" alt="">
+<img src="src/RunnerManager/assets/RunnerManager.png" width="72" alt="">
 
 # Runner Manager
 
 A Windows dashboard for GitHub Actions self-hosted runners, on one PC or several.
 
-[![CI](https://github.com/Sandiozo/runner-widget/actions/workflows/ci.yml/badge.svg)](https://github.com/Sandiozo/runner-widget/actions/workflows/ci.yml)
+[![CI](https://github.com/Sandiozo/runner-manager/actions/workflows/ci.yml/badge.svg)](https://github.com/Sandiozo/runner-manager/actions/workflows/ci.yml)
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D4)
-![.NET](https://img.shields.io/badge/.NET-8.0-512BD4)
+![.NET](https://img.shields.io/badge/.NET-10-512BD4)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 </div>
@@ -41,12 +41,15 @@ A Windows dashboard for GitHub Actions self-hosted runners, on one PC or several
 
 ## Install
 
-1. Install the [.NET 8 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/8.0).
-2. Download **RunnerManagerSetup.exe** from [Releases](https://github.com/Sandiozo/runner-widget/releases) and run it.
+1. Install the [.NET 10 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/10.0).
+2. Download **RunnerManagerSetup.exe** from [Releases](https://github.com/Sandiozo/runner-manager/releases) and run it.
 3. Choose **This PC only** or **Several PCs**, and whether you use Remote Desktop Commander.
 
 Runner Manager installs for the current user to `%LOCALAPPDATA%\Programs\RunnerManager`. To uninstall, use
 **Settings → Apps** in Windows, or **Settings → Updates → Uninstall…** in Runner Manager. Your runners keep running.
+
+Updates install a newer .NET Desktop Runtime automatically when a release needs one. Installs from version 2.1 or
+earlier (called RunnerWidget) need the setup run once on each PC; it moves the settings and scheduled tasks over.
 
 To add, repair or remove runners, sign in with the [GitHub CLI](https://cli.github.com): click **Connect GitHub** in
 the account menu. Runner Manager does not store GitHub credentials.
@@ -73,7 +76,7 @@ not restart anything you stop from Runner Manager. Turn it on or off for each PC
 
 ## Build from source
 
-Requires Windows and the .NET 8 SDK.
+Requires Windows and the .NET 10 SDK.
 
 ```powershell
 dotnet build -c Release
@@ -83,8 +86,8 @@ dotnet test
 To build the installer:
 
 ```powershell
-dotnet publish src/RunnerWidget -c Release -r win-x64 -p:SelfContained=false -p:PublishSingleFile=true -o publish
-Copy-Item publish/RunnerWidget.exe publish/RunnerManagerSetup.exe
+dotnet publish src/RunnerManager -c Release -r win-x64 -p:SelfContained=false -p:PublishSingleFile=true -o publish
+Copy-Item publish/RunnerManager.exe publish/RunnerManagerSetup.exe
 ```
 
 Any copy named `RunnerManagerSetup.exe`, or started with `--setup`, opens the setup wizard.
@@ -93,20 +96,21 @@ To publish a release, push a version tag. The **Release** workflow runs the test
 a GitHub release.
 
 ```powershell
-git tag v2.1.0
-git push origin v2.1.0
+git tag v2.2.0
+git push origin v2.2.0
 ```
 
 ## Project layout
 
 ```text
-src/RunnerWidget/          WPF app: dashboard, setup wizard and fleet agent
-tests/RunnerWidget.Tests/  xUnit tests
-docs/images/               README screenshots
+src/RunnerManager/          WPF app: dashboard, setup wizard and fleet agent
+tests/RunnerManager.Tests/  xUnit tests
+docs/images/                README screenshots
 ```
 
-The app requests administrator rights, because it installs and controls Windows services. Settings and logs are
-stored in `%LOCALAPPDATA%\RunnerWidget`.
+Runner Manager needs administrator rights to install and control Windows services. Setup registers a scheduled task
+that starts it with those rights, so opening it from the Start menu shows no UAC prompt. Settings and logs are stored
+in `%LOCALAPPDATA%\RunnerManager`.
 
 ## Keyboard shortcuts
 

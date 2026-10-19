@@ -1,0 +1,34 @@
+<Window x:Class="RunnerManager.DialogWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Runner Manager" Icon="assets/RunnerManager.ico" Width="460" SizeToContent="Height"
+        ResizeMode="NoResize" WindowStartupLocation="CenterOwner" ShowInTaskbar="False"
+        Background="{DynamicResource Bg1Brush}" Foreground="{DynamicResource TextBrush}" FontFamily="{StaticResource UiFont}">
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <Grid Margin="24,22,24,20">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <Border x:Name="IconBadge" Width="36" Height="36" CornerRadius="18" VerticalAlignment="Top" Margin="0,0,14,0">
+                <TextBlock x:Name="IconGlyph" Style="{StaticResource Icon}" FontSize="16"/>
+            </Border>
+            <StackPanel Grid.Column="1">
+                <TextBlock x:Name="HeadingText" FontSize="16" FontWeight="SemiBold" TextWrapping="Wrap"/>
+                <TextBlock x:Name="MessageText" Foreground="{DynamicResource TextMutedBrush}" FontSize="13" TextWrapping="Wrap"
+                           Margin="0,8,0,0" LineHeight="19"/>
+                <Border x:Name="DetailBox" Background="{DynamicResource Bg0Brush}" BorderBrush="{DynamicResource BorderSubtleBrush}"
+                        BorderThickness="1" CornerRadius="6" Padding="10,8" Margin="0,12,0,0" Visibility="Collapsed">
+                    <TextBlock x:Name="DetailText" FontFamily="{StaticResource MonoFont}" FontSize="12" Foreground="{DynamicResource TextMutedBrush}" TextWrapping="Wrap"/>
+                </Border>
+            </StackPanel>
+        </Grid>
+        <Border Grid.Row="1" Background="{DynamicResource Bg0Brush}" BorderBrush="{DynamicResource BorderSubtleBrush}" BorderThickness="0,1,0,0" Padding="24,14">
+            <StackPanel x:Name="ButtonPanel" Orientation="Horizontal" HorizontalAlignment="Right"/>
+        </Border>
+    </Grid>
+</Window>

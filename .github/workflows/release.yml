@@ -1,6 +1,6 @@
 name: Release
 
-# Push a tag like v2.1.0 (or run this workflow manually with a version) to publish RunnerWidget.exe.
+# Push a tag like v2.2.0 (or run this workflow manually with a version) to publish RunnerManager.exe.
 # Runner Manager installs and updates itself from these releases.
 on:
   push:
@@ -22,7 +22,7 @@ jobs:
 
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '8.0.x'
+          dotnet-version: '10.0.x'
 
       - name: Resolve version
         id: version
@@ -37,13 +37,13 @@ jobs:
           "version=$version" >> $env:GITHUB_OUTPUT
 
       - name: Test
-        run: dotnet test tests/RunnerWidget.Tests -c Release
+        run: dotnet test tests/RunnerManager.Tests -c Release
 
       - name: Publish single-file exe
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: >
-          dotnet publish src/RunnerWidget/RunnerWidget.csproj -c Release -r win-x64 -p:SelfContained=false
+          dotnet publish src/RunnerManager/RunnerManager.csproj -c Release -r win-x64 -p:SelfContained=false
           -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
           -p:Version=$env:VERSION -o publish
 
@@ -54,8 +54,10 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           $tag = "v$env:VERSION"
-          # The same single-file exe twice: RunnerManagerSetup.exe opens the setup wizard, RunnerWidget.exe is what installed copies update to.
-          Copy-Item publish/RunnerWidget.exe publish/RunnerManagerSetup.exe
-          $hash = (Get-FileHash publish/RunnerWidget.exe -Algorithm SHA256).Hash.ToLowerInvariant()
-          $notes = "Runner Manager $tag`n`n**New install:** download and run RunnerManagerSetup.exe.`nExisting installs update from Settings or the PC card.`n`nSHA-256 of the exe: ``$hash```nRequires the .NET 8 Desktop Runtime."
-          gh release create $tag publish/RunnerManagerSetup.exe publish/RunnerWidget.exe --title "Runner Manager $tag" --notes $notes --generate-notes --target $env:GITHUB_SHA
+          # One single-file exe under two names: RunnerManagerSetup.exe opens the setup wizard, RunnerManager.exe is what
+          # installed copies update to. There is deliberately no RunnerWidget.exe: agents from 2.1 and earlier cannot check
+          # for the .NET runtime first, so they keep their version until setup runs on that PC.
+          Copy-Item publish/RunnerManager.exe publish/RunnerManagerSetup.exe
+          $hash = (Get-FileHash publish/RunnerManager.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          $notes = "Runner Manager $tag`n`n**New install:** download and run RunnerManagerSetup.exe.`nExisting installs update from Settings or the PC card. From 2.1 or earlier, run the setup once on each PC.`n`nSHA-256 of the exe: ``$hash```nRequires the .NET 10 Desktop Runtime. Updates install it automatically when it is missing."
+          gh release create $tag publish/RunnerManagerSetup.exe publish/RunnerManager.exe --title "Runner Manager $tag" --notes $notes --generate-notes --target $env:GITHUB_SHA

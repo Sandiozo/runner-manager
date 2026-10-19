@@ -1,0 +1,156 @@
+<Window x:Class="RunnerManager.SetupWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Runner Manager Setup" Icon="assets/RunnerManager.ico" Width="560" Height="560"
+        ResizeMode="NoResize" WindowStartupLocation="CenterScreen"
+        Background="{DynamicResource Bg1Brush}" Foreground="{DynamicResource TextBrush}" FontFamily="{StaticResource UiFont}" FontSize="12.5">
+    <Window.Resources>
+        <Style x:Key="OptionTitle" TargetType="TextBlock" BasedOn="{StaticResource {x:Type TextBlock}}">
+            <Setter Property="FontSize" Value="13.5"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+        </Style>
+        <Style x:Key="OptionText" TargetType="TextBlock" BasedOn="{StaticResource Caption}">
+            <Setter Property="TextWrapping" Value="Wrap"/>
+            <Setter Property="Margin" Value="0,2,0,0"/>
+        </Style>
+        <Style x:Key="StepDot" TargetType="Border">
+            <Setter Property="Width" Value="22"/>
+            <Setter Property="Height" Value="4"/>
+            <Setter Property="CornerRadius" Value="2"/>
+            <Setter Property="Margin" Value="0,0,5,0"/>
+            <Setter Property="Background" Value="{DynamicResource BorderBrush}"/>
+        </Style>
+    </Window.Resources>
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <!-- Header -->
+        <DockPanel Margin="28,22,28,0">
+            <StackPanel x:Name="StepDots" DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Top" Margin="0,8,0,0">
+                <Border x:Name="Dot1" Style="{StaticResource StepDot}"/>
+                <Border x:Name="Dot2" Style="{StaticResource StepDot}"/>
+                <Border x:Name="Dot3" Style="{StaticResource StepDot}"/>
+                <Border x:Name="Dot4" Style="{StaticResource StepDot}" Margin="0"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal">
+                <Image Source="assets/RunnerManager.png" Width="34" Height="34" RenderOptions.BitmapScalingMode="HighQuality"/>
+                <StackPanel Margin="12,0,0,0" VerticalAlignment="Center">
+                    <TextBlock Text="Runner Manager" FontSize="16" FontWeight="SemiBold"/>
+                    <TextBlock x:Name="VersionText" Style="{StaticResource Caption}" FontSize="11"/>
+                </StackPanel>
+            </StackPanel>
+        </DockPanel>
+
+        <!-- Pages -->
+        <Grid Grid.Row="1" Margin="28,20,28,16">
+            <!-- 1. Welcome -->
+            <StackPanel x:Name="PageWelcome">
+                <TextBlock Text="Welcome" FontSize="20" FontWeight="SemiBold"/>
+                <TextBlock Style="{StaticResource OptionText}" FontSize="12.5" Margin="0,6,0,18"
+                           Text="Runner Manager monitors your GitHub self-hosted runners. Start and stop runners, view their jobs, repair and clean them, and get notifications when a problem occurs."/>
+                <TextBlock Text="Install to" FontWeight="SemiBold" FontSize="12"/>
+                <Border Background="{DynamicResource Bg0Brush}" BorderBrush="{DynamicResource BorderSubtleBrush}" BorderThickness="1"
+                        CornerRadius="6" Padding="10,7" Margin="0,6,0,18">
+                    <TextBlock x:Name="InstallPathText" FontFamily="{StaticResource MonoFont}" FontSize="11.5" TextTrimming="CharacterEllipsis"/>
+                </Border>
+                <CheckBox x:Name="DesktopShortcutToggle" Style="{StaticResource ToggleSwitch}" Margin="0,4">
+                    <TextBlock Text="Desktop shortcut"/>
+                </CheckBox>
+                <CheckBox x:Name="StartupToggle" Style="{StaticResource ToggleSwitch}" Margin="0,4">
+                    <StackPanel>
+                        <TextBlock Text="Start with Windows"/>
+                        <TextBlock Text="Opens minimized in the notification area and notifies you when a runner stops." Style="{StaticResource OptionText}"/>
+                    </StackPanel>
+                </CheckBox>
+                <TextBlock x:Name="ExistingText" Style="{StaticResource OptionText}" Foreground="{DynamicResource AccentBrush}" Margin="0,12,0,0" Visibility="Collapsed"/>
+            </StackPanel>
+
+            <!-- 2. PCs -->
+            <StackPanel x:Name="PagePcs" Visibility="Collapsed">
+                <TextBlock Text="How many PCs run your runners?" FontSize="20" FontWeight="SemiBold"/>
+                <TextBlock Style="{StaticResource OptionText}" FontSize="12.5" Margin="0,6,0,16"
+                           Text="You can change this later from the sidebar."/>
+                <RadioButton x:Name="SinglePcOption" Style="{StaticResource OptionCard}" GroupName="Pcs" IsChecked="True" Checked="PcsOption_Checked">
+                    <StackPanel>
+                        <TextBlock Text="This PC only" Style="{StaticResource OptionTitle}"/>
+                        <TextBlock Text="Manage the runners on this PC." Style="{StaticResource OptionText}"/>
+                    </StackPanel>
+                </RadioButton>
+                <RadioButton x:Name="SeveralPcsOption" Style="{StaticResource OptionCard}" GroupName="Pcs" Checked="PcsOption_Checked">
+                    <StackPanel>
+                        <TextBlock Text="Several PCs" Style="{StaticResource OptionTitle}"/>
+                        <TextBlock Text="View and control the runners on all your PCs from any one of them. The PCs connect directly over your network with encryption." Style="{StaticResource OptionText}"/>
+                    </StackPanel>
+                </RadioButton>
+                <StackPanel x:Name="FleetOptions" Margin="22,4,0,0" Visibility="Collapsed">
+                    <RadioButton x:Name="NewFleetOption" Style="{StaticResource OptionCard}" GroupName="Fleet" IsChecked="True">
+                        <StackPanel>
+                            <TextBlock Text="Start a new fleet" Style="{StaticResource OptionTitle}" FontSize="12.5"/>
+                            <TextBlock Text="This is the first PC. Add the other PCs later with a 6-digit code." Style="{StaticResource OptionText}"/>
+                        </StackPanel>
+                    </RadioButton>
+                    <RadioButton x:Name="JoinFleetOption" Style="{StaticResource OptionCard}" GroupName="Fleet">
+                        <StackPanel>
+                            <TextBlock Text="Join an existing fleet" Style="{StaticResource OptionTitle}" FontSize="12.5"/>
+                            <TextBlock Text="Another PC already runs a fleet. On that PC, click “Add a PC” when asked." Style="{StaticResource OptionText}"/>
+                        </StackPanel>
+                    </RadioButton>
+                </StackPanel>
+            </StackPanel>
+
+            <!-- 3. Remote Desktop Commander -->
+            <StackPanel x:Name="PageRdc" Visibility="Collapsed">
+                <TextBlock Text="Do you use Remote Desktop Commander?" FontSize="20" FontWeight="SemiBold"/>
+                <TextBlock Style="{StaticResource OptionText}" FontSize="12.5" Margin="0,6,0,16"
+                           Text="Remote Desktop Commander lets AI assistants operate this PC remotely. This step is optional. If you use it, Runner Manager monitors it and restarts it when it disconnects."/>
+                <RadioButton x:Name="RdcNoneOption" Style="{StaticResource OptionCard}" GroupName="Rdc" IsChecked="True">
+                    <StackPanel>
+                        <TextBlock Text="No, I do not use it" Style="{StaticResource OptionTitle}"/>
+                        <TextBlock Text="It is hidden in Runner Manager. You can set it up later in Settings." Style="{StaticResource OptionText}"/>
+                    </StackPanel>
+                </RadioButton>
+                <RadioButton x:Name="RdcExistingOption" Style="{StaticResource OptionCard}" GroupName="Rdc">
+                    <StackPanel>
+                        <TextBlock Text="Yes, it is already set up" Style="{StaticResource OptionTitle}"/>
+                        <TextBlock x:Name="RdcExistingText" Text="Runner Manager monitors it and keeps it connected." Style="{StaticResource OptionText}"/>
+                    </StackPanel>
+                </RadioButton>
+                <RadioButton x:Name="RdcSetupOption" Style="{StaticResource OptionCard}" GroupName="Rdc">
+                    <StackPanel>
+                        <TextBlock Text="Yes, set it up now" Style="{StaticResource OptionTitle}"/>
+                        <TextBlock Text="After installation, a console window opens for sign-in. Requires Node.js." Style="{StaticResource OptionText}"/>
+                    </StackPanel>
+                </RadioButton>
+            </StackPanel>
+
+            <!-- 4. Install / done -->
+            <StackPanel x:Name="PageInstall" Visibility="Collapsed">
+                <Border x:Name="DoneBadge" Width="52" Height="52" CornerRadius="26" HorizontalAlignment="Left" Background="{DynamicResource SelectedBrush}">
+                    <TextBlock x:Name="DoneGlyph" Text="&#xE896;" Style="{StaticResource Icon}" FontSize="22" Foreground="{DynamicResource AccentBrush}"/>
+                </Border>
+                <TextBlock x:Name="InstallTitle" Text="Installing…" FontSize="20" FontWeight="SemiBold" Margin="0,16,0,0"/>
+                <ProgressBar x:Name="InstallProgress" Style="{StaticResource ThinProgress}" IsIndeterminate="True" Margin="0,12,0,0"/>
+                <TextBlock x:Name="InstallStatus" Style="{StaticResource OptionText}" FontSize="12.5" Margin="0,12,0,0"/>
+                <TextBlock x:Name="NextStepsText" Style="{StaticResource OptionText}" FontSize="12.5" Margin="0,12,0,0" Visibility="Collapsed"/>
+                <CheckBox x:Name="LaunchToggle" Style="{StaticResource ToggleSwitch}" IsChecked="True" Margin="0,18,0,0" Visibility="Collapsed">
+                    <TextBlock Text="Open Runner Manager now"/>
+                </CheckBox>
+            </StackPanel>
+        </Grid>
+
+        <!-- Footer -->
+        <Border Grid.Row="2" Background="{DynamicResource Bg0Brush}" BorderBrush="{DynamicResource BorderSubtleBrush}" BorderThickness="0,1,0,0" Padding="28,14">
+            <DockPanel>
+                <Button x:Name="CancelButton" Content="Cancel" Style="{StaticResource GhostButton}" Click="Cancel_Click" MinWidth="80"/>
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                    <Button x:Name="BackButton" Content="Back" Style="{StaticResource GhostButton}" Click="Back_Click" MinWidth="80" Visibility="Collapsed"/>
+                    <Button x:Name="NextButton" Content="Next" Style="{StaticResource PrimaryButton}" Click="Next_Click" MinWidth="110" Margin="8,0,0,0" IsDefault="True"/>
+                </StackPanel>
+            </DockPanel>
+        </Border>
+    </Grid>
+</Window>
