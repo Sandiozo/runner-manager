@@ -395,7 +395,10 @@ public static class AppUpdater
     internal static List<(string Source, string Relative)> AppFiles()
     {
         var exe = Environment.ProcessPath ?? throw new InvalidOperationException("Could not find the path of the running program.");
+        // An empty Location is exactly how a single-file build is recognized here.
+#pragma warning disable IL3000
         var isSingleFile = string.IsNullOrEmpty(typeof(AppUpdater).Assembly.Location);
+#pragma warning restore IL3000
         if (isSingleFile) return new List<(string, string)> { (exe, AssetName) };
 
         var folder = AppContext.BaseDirectory;

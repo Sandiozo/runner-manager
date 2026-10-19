@@ -1,0 +1,20 @@
+name: Feature request
+description: An idea that would make Runner Manager more useful.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What do you want to do?
+      description: Describe the task or problem, not only the solution.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: How could Runner Manager help?
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else
+      description: Number of PCs and runners, screenshots, or links that help explain it.

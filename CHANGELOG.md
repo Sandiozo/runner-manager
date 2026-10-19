@@ -1,0 +1,61 @@
+# Changelog
+
+Runner Manager updates itself from [Releases](https://github.com/Sandiozo/runner-manager/releases): open
+**Settings → Updates**, or click **Update** on a PC's card.
+
+## 2.2.4
+
+- Moving, repairing or converting a runner of a renamed repository works. Runner Manager now registers runners with
+  the repository's current name, because the runner's own `config.cmd` does not follow GitHub's redirect.
+
+## 2.2.3
+
+- **Install update** installs the update right away instead of opening Settings.
+
+## 2.2.2
+
+- Remote Desktop Commander starts in the data folder, so it no longer keeps an old install folder in use.
+- Removing an old install folder retries briefly when a file is still in use.
+
+## 2.2.1
+
+- **Choose the install folder** in setup. A folder you pick gets its own `RunnerManager` subfolder. Running setup
+  again with another folder moves the install.
+- Uninstall removes only Runner Manager's own files outside the default folder.
+
+## 2.2.0
+
+**New**
+- **Live job view**: a busy runner shows its job and every step with its state and duration, the latest output of the
+  running step, and the processes of the job with their CPU and memory, on every PC.
+- **Runner folder setting**: choose where new and moved runners are installed on each PC.
+- **No UAC prompt**: Runner Manager opens from the Start menu with administrator rights through a scheduled task.
+- **Redesigned Settings** with sidebar pages and compact rows.
+- New app icon and logo.
+
+**Changed**
+- Runs on .NET 10. Updates install the .NET Desktop Runtime automatically when a release needs a newer one.
+- Renamed from RunnerWidget to Runner Manager: exe, data folder, scheduled tasks and repository. Run the setup once on
+  each PC that has version 2.1 or earlier; it moves the settings and tasks over.
+- "Restart pending" appears only when Windows Update or a Windows component needs a restart.
+
+**Security**
+- The pairing code is no longer also saved unencrypted in `fleet.json`. If you used an earlier version, replace the
+  pairing code (Settings → Fleet → ⋯ → Replace pairing code…) and pair your PCs again.
+- Runner names, labels and URLs are checked before they reach `config.cmd`.
+- Requests larger than 1 MB are refused before they are authenticated.
+
+**Fixed**
+- Settings could be overwritten with defaults when the dashboard and the fleet agent saved at the same time.
+- Repairing a runner could remove its custom labels when GitHub did not answer.
+- An update interrupted at the wrong moment could leave no working exe.
+- With one PC, the sidebar could fail to refresh or show a PC twice.
+- Workflow files with Windows line endings were not updated by "Check workflows".
+
+## 2.1.0
+
+- Setup wizard (`RunnerManagerSetup.exe`) for one PC or several, with optional Remote Desktop Commander.
+- Direct, encrypted PC-to-PC fleet with 6-digit pairing, instead of a relay through GitHub.
+- Add repository or organization runners, edit, move them between PCs, run console runners as services, and clean
+  work folders.
+- Auto-recovery, recent workflow runs, failure notifications and PC health.

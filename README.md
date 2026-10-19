@@ -42,11 +42,32 @@ A Windows dashboard for GitHub Actions self-hosted runners, on one PC or several
   </tr>
 </table>
 
+## Why Runner Manager
+
+Self-hosted runners on Windows PCs are easy to start and hard to keep an overview of: each one is a folder, a Windows
+service and a page on GitHub. Runner Manager puts them in one window, across all your PCs, without any server.
+
+| | Runner Manager | GitHub runner settings | actions-runner-controller |
+| --- | --- | --- | --- |
+| Runs on | Your Windows PCs | Web page per repository or organization | A Kubernetes cluster |
+| Installs and removes runners | Yes, as Windows services | Shows the commands to run | Yes, as containers |
+| Live job steps, output and processes | Yes | Job logs on GitHub | Job logs on GitHub |
+| PC health, auto-recovery, notifications | Yes | No | Through Kubernetes |
+| Moves runners between PCs | Yes | No | Not applicable |
+| Extra infrastructure | None | None | Cluster and controller |
+
+If you run many short-lived Linux runners, a Kubernetes-based setup such as actions-runner-controller scales better.
+Runner Manager is for the PCs you already have.
+
 ## Install
 
-1. Install the [.NET 10 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/10.0).
-2. Download **RunnerManagerSetup.exe** from [Releases](https://github.com/Sandiozo/runner-manager/releases) and run it.
-3. Choose **This PC only** or **Several PCs**, and whether you use Remote Desktop Commander.
+1. Download a setup from [Releases](https://github.com/Sandiozo/runner-manager/releases) and run it:
+   - **RunnerManagerSetup-standalone.exe** includes .NET. Choose this one if you are not sure.
+   - **RunnerManagerSetup.exe** is smaller and needs the [.NET 10 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/10.0).
+2. Choose **This PC only** or **Several PCs**, and whether you use Remote Desktop Commander.
+
+Windows may show "Windows protected your PC", because the setup is not code-signed. Click **More info → Run anyway**.
+You can check the file against the SHA-256 checksum in the release notes.
 
 Runner Manager installs for the current user, by default to `%LOCALAPPDATA%\Programs\RunnerManager`. To install it
 somewhere else, click **Change…** on the first page of the setup; it gets its own `RunnerManager` folder there. To move
@@ -130,6 +151,11 @@ in `%LOCALAPPDATA%\RunnerManager`.
 | `Esc` | Clear search |
 | `Ctrl+0` | All PCs |
 | `Ctrl+1…9` | Go to a PC |
+
+## Contributing
+
+Bug reports, ideas and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md), and report security problems
+as described in [SECURITY.md](SECURITY.md). Changes per version are in [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 

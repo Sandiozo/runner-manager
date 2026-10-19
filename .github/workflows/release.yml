@@ -52,12 +52,22 @@ jobs:
           -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
           -p:Version=$env:VERSION -o publish
 
-      - name: Smoke-test the exe
+      - name: Publish standalone exe (includes .NET)
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: >
+          dotnet publish src/RunnerManager/RunnerManager.csproj -c Release -r win-x64 -p:SelfContained=true
+          -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true
+          -p:Version=$env:VERSION -o publish-standalone
+
+      - name: Smoke-test both exes
         shell: pwsh
         run: |
           # --probe starts the app and exits right away; a non-zero exit code means the build cannot start.
-          $p = Start-Process publish/RunnerManager.exe -ArgumentList '--probe' -Wait -PassThru
-          if ($p.ExitCode -ne 0) { throw "RunnerManager.exe --probe exited with code $($p.ExitCode)." }
+          foreach ($exe in 'publish/RunnerManager.exe', 'publish-standalone/RunnerManager.exe') {
+            $p = Start-Process $exe -ArgumentList '--probe' -Wait -PassThru
+            if ($p.ExitCode -ne 0) { throw "$exe --probe exited with code $($p.ExitCode)." }
+          }
 
       - name: Create GitHub release
         shell: pwsh
@@ -69,7 +79,29 @@ jobs:
           # One single-file exe under two names: RunnerManagerSetup.exe opens the setup wizard, RunnerManager.exe is what
           # installed copies update to. There is deliberately no RunnerWidget.exe: agents from 2.1 and earlier cannot check
           # for the .NET runtime first, so they keep their version until setup runs on that PC.
+          # The standalone setup includes .NET, for PCs without the .NET 10 Desktop Runtime. Updates always use
+          # RunnerManager.exe and install the runtime when it is missing.
           Copy-Item publish/RunnerManager.exe publish/RunnerManagerSetup.exe
-          $hash = (Get-FileHash publish/RunnerManager.exe -Algorithm SHA256).Hash.ToLowerInvariant()
-          $notes = "Runner Manager $tag`n`n**New install:** download and run RunnerManagerSetup.exe.`nExisting installs update from Settings or the PC card. From 2.1 or earlier, run the setup once on each PC.`n`nSHA-256 of the exe: ``$hash```nRequires the .NET 10 Desktop Runtime. Updates install it automatically when it is missing."
-          gh release create $tag publish/RunnerManagerSetup.exe publish/RunnerManager.exe --title "Runner Manager $tag" --notes $notes --generate-notes --target $env:GITHUB_SHA
+          Copy-Item publish-standalone/RunnerManager.exe publish/RunnerManagerSetup-standalone.exe
+          function Hash($file) { (Get-FileHash $file -Algorithm SHA256).Hash.ToLowerInvariant() }
+
+          # The release notes take this version's section of CHANGELOG.md.
+          $changelog = Get-Content CHANGELOG.md -Raw
+          $section = [regex]::Match($changelog, "(?ms)^## $([regex]::Escape($env:VERSION))\s*\r?\n(.*?)(?=^## |\z)")
+          $changes = if ($section.Success) { $section.Groups[1].Value.Trim() } else { 'See CHANGELOG.md.' }
+
+          $notes = @(
+            '## Download', '',
+            '| File | Use it for |', '| --- | --- |',
+            '| **RunnerManagerSetup-standalone.exe** | New installs. Includes .NET; choose this one if you are not sure. |',
+            '| **RunnerManagerSetup.exe** | New installs on PCs that have the .NET 10 Desktop Runtime. |',
+            '| RunnerManager.exe | Used by updates. You do not need to download it. |', '',
+            'Existing installs update from Settings or the PC card. From 2.1 or earlier, run the setup once on each PC.',
+            'The setup is not code-signed: if Windows shows "Windows protected your PC", click **More info → Run anyway**.', '',
+            '## Changes', '', $changes, '',
+            '## SHA-256', '',
+            "- RunnerManagerSetup-standalone.exe: ``$(Hash publish/RunnerManagerSetup-standalone.exe)``",
+            "- RunnerManagerSetup.exe and RunnerManager.exe: ``$(Hash publish/RunnerManager.exe)``"
+          ) -join "`n"
+          gh release create $tag publish/RunnerManagerSetup-standalone.exe publish/RunnerManagerSetup.exe publish/RunnerManager.exe `
+            --title "Runner Manager $tag" --notes $notes --target $env:GITHUB_SHA
