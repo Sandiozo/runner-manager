@@ -57,5 +57,5 @@ jobs:
           # The same single-file exe twice: RunnerManagerSetup.exe opens the setup wizard, RunnerWidget.exe is what installed copies update to.
           Copy-Item publish/RunnerWidget.exe publish/RunnerManagerSetup.exe
           $hash = (Get-FileHash publish/RunnerWidget.exe -Algorithm SHA256).Hash.ToLowerInvariant()
-          $notes = "Runner Manager $tag`n`n**New install:** download and run RunnerManagerSetup.exe.`nExisting installs update themselves from Settings or the machine card.`n`nSHA-256 of the exe: ``$hash```nRequires the .NET 8 Desktop Runtime."
+          $notes = "Runner Manager $tag`n`n**New install:** download and run RunnerManagerSetup.exe.`nExisting installs update from Settings or the PC card.`n`nSHA-256 of the exe: ``$hash```nRequires the .NET 8 Desktop Runtime."
           gh release create $tag publish/RunnerManagerSetup.exe publish/RunnerWidget.exe --title "Runner Manager $tag" --notes $notes --generate-notes --target $env:GITHUB_SHA
