@@ -6,7 +6,7 @@ Thank you for helping. Bug reports, ideas and pull requests are all welcome.
 
 Questions and general ideas go to [Discussions](https://github.com/Sandiozo/runner-manager/discussions).
 
-Use the [issue forms](https://github.com/Sandiozo/runner-manager/issues/new/choose). For a bug, include the Runner
+For bugs and feature requests, use the [issue forms](https://github.com/Sandiozo/runner-manager/issues/new/choose). For a bug, include the Runner
 Manager version (Settings → Updates), the Windows version, and the steps to reproduce it. The fleet agent log helps a
 lot: open it from the PC's ⋯ menu → **View fleet agent log**, and remove anything private before you paste it.
 
