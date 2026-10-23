@@ -3,6 +3,15 @@
 Runner Manager updates itself from [Releases](https://github.com/Sandiozo/runner-manager/releases): open
 **Settings → Updates**, or click **Update** on a PC's card.
 
+## 2.3.0
+
+- **AI assistants.** Runner Manager is now an MCP server, so Claude, Codex, VS Code with Copilot, Cursor, Windsurf,
+  Gemini CLI, LM Studio and other MCP clients can list PCs and runners, read job status and logs, and create, start,
+  stop, move and remove runners. Turn it on in **Settings → AI assistants**, which also has the setup for each tool.
+- Changes ask for approval in a Runner Manager window. Moving and deleting runners always ask.
+- Optional HTTP endpoint for AI tools that connect by URL, on this PC only and with a token.
+- `RunnerManager.exe ai <tool>` runs the same tools from the command line and prints JSON.
+
 ## 2.2.5
 
 - New download, **RunnerManagerSetup-standalone.exe**, that includes .NET, for PCs without the .NET 10 Desktop

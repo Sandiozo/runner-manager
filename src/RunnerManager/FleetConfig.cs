@@ -36,6 +36,8 @@ public sealed class FleetConfig
     public List<string> KnownRunnerRoots { get; set; } = new();
     /// <summary>Where new and moved runners are installed on this PC; empty means C:\GitHub-Runners.</summary>
     public string RunnerFolder { get; set; } = string.Empty;
+    /// <summary>What AI assistants may do through Runner Manager (Settings → AI assistants).</summary>
+    public AssistantOptions Assistant { get; set; } = new();
 
     public static FleetConfig Current
     {
@@ -228,6 +230,32 @@ public static class CommandSigner
     /// <summary>Short public fingerprint of a key, sent in status answers so dashboards can spot mismatched keys.</summary>
     public static string KeyId(byte[]? key)
         => key == null ? string.Empty : Convert.ToHexString(SHA256.HashData(key))[..8].ToLowerInvariant();
+}
+
+/// <summary>AI assistant access: off by default; reading is always allowed once on, changes follow these rules.</summary>
+public sealed class AssistantOptions
+{
+    public bool Enabled { get; set; }
+    /// <summary>Ask before an assistant creates, starts, stops or restarts a runner. Moving and removing always ask.</summary>
+    public bool AskBeforeChanges { get; set; } = true;
+    /// <summary>Also serve MCP over HTTP on this PC only (127.0.0.1), for AI tools that connect to a URL.</summary>
+    public bool HttpEnabled { get; set; }
+    /// <summary>The HTTP endpoint's access token, encrypted for this Windows user with DPAPI.</summary>
+    public string ProtectedHttpToken { get; set; } = string.Empty;
+
+    [JsonIgnore]
+    public string HttpToken
+    {
+        get
+        {
+            if (string.IsNullOrEmpty(ProtectedHttpToken)) return string.Empty;
+            try { return Encoding.UTF8.GetString(ProtectedData.Unprotect(Convert.FromBase64String(ProtectedHttpToken), null, DataProtectionScope.CurrentUser)); }
+            catch { return string.Empty; }
+        }
+    }
+
+    public static string ProtectToken(string token)
+        => Convert.ToBase64String(ProtectedData.Protect(Encoding.UTF8.GetBytes(token), null, DataProtectionScope.CurrentUser));
 }
 
 public sealed class PeerRecord

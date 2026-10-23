@@ -192,8 +192,11 @@ public static class MachineRelay
     }
 
     private static string AddressOf(string machineKey)
-        => FleetConfig.Current.KnownPeers.FirstOrDefault(p => Sanitize(p.Name) == Sanitize(machineKey))?.Address
-           ?? throw new InvalidOperationException($"Could not reach {machineKey}. Check that it is on and on the same network.");
+        => Sanitize(machineKey) == LocalMachineKey
+            // This PC's own agent: AI assistant tools run without administrator rights and hand their work to it.
+            ? $"127.0.0.1:{FleetNetwork.AgentPort}"
+            : FleetConfig.Current.KnownPeers.FirstOrDefault(p => Sanitize(p.Name) == Sanitize(machineKey))?.Address
+              ?? throw new InvalidOperationException($"Could not reach {machineKey}. Check that it is on and on the same network.");
 
     /// <summary>Why commands to a machine would fail, or null when it can be reached.</summary>
     public static string? SigningProblem(MachineInfo machine) => machine.IsLocal ? null : machine.ConnectionProblem.Length > 0 ? machine.ConnectionProblem : null;
@@ -319,6 +322,10 @@ public static class MachineRelay
         // After the listener is up, so a freshly started agent answers right away.
         try { await FleetNetwork.EnsureFirewallRulesAsync(); }
         catch (Exception ex) { AppendAgentLog($"Could not add firewall rules: {ex.Message}"); }
+
+        // The MCP endpoint for AI assistants, while it is turned on in Settings → AI assistants.
+        using var assistantEndpoint = new AssistantHttpServer();
+        _ = assistantEndpoint.RunAsync();
 
         var initialRdc = RemoteDesktopManager.ReadSnapshot();
         if (RemoteDesktopManager.IsConfigured() && !IsManuallyStopped("rdc"))

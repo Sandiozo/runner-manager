@@ -88,6 +88,12 @@
                         <TextBlock Text="Remote Desktop Commander" TextTrimming="CharacterEllipsis"/>
                     </StackPanel>
                 </ListBoxItem>
+                <ListBoxItem Tag="Assistants">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="&#xE99A;" Style="{StaticResource Icon}" Width="26"/>
+                        <TextBlock Text="AI assistants"/>
+                    </StackPanel>
+                </ListBoxItem>
                 <ListBoxItem Tag="Updates">
                     <StackPanel Orientation="Horizontal">
                         <TextBlock Text="&#xE895;" Style="{StaticResource Icon}" Width="26"/>
@@ -266,6 +272,66 @@
                     </Border>
                     <TextBlock Style="{StaticResource Hint}" Margin="2,0,0,0"
                                Text="Optional. Lets AI assistants operate this PC remotely. Runner Manager shows, monitors and restarts it only on PCs where it is set up. Setup needs Node.js and opens a console window for sign-in."/>
+                </StackPanel>
+
+                <!-- AI assistants -->
+                <StackPanel x:Name="AssistantsPage" Visibility="Collapsed">
+                    <TextBlock Text="AI assistants" Style="{StaticResource PageTitle}"/>
+                    <Border Style="{StaticResource Group}">
+                        <StackPanel>
+                            <local:SettingRow Glyph="&#xE99A;" Title="Allow AI assistants"
+                                              Description="AI tools that support MCP can see your PCs and runners, and create and manage runners.">
+                                <CheckBox x:Name="AssistantToggle" Style="{StaticResource ToggleSwitch}" AutomationProperties.Name="Allow AI assistants" Click="AssistantToggle_Click"/>
+                            </local:SettingRow>
+                            <Border Style="{StaticResource Divider}"/>
+                            <local:SettingRow Glyph="&#xE8FB;" Title="Ask before changes"
+                                              Description="Before an assistant creates, starts, stops or restarts a runner. Moving and deleting runners always ask.">
+                                <CheckBox x:Name="AssistantAskToggle" Style="{StaticResource ToggleSwitch}" AutomationProperties.Name="Ask before changes" Click="AssistantAskToggle_Click"/>
+                            </local:SettingRow>
+                            <Border Style="{StaticResource Divider}"/>
+                            <local:SettingRow x:Name="AssistantHttpRow" Glyph="&#xE71B;" Title="Connect by URL">
+                                <StackPanel Orientation="Horizontal">
+                                    <Button x:Name="AssistantNewTokenButton" Content="New token" Style="{StaticResource GhostButton}" Margin="0,0,6,0" Click="AssistantNewToken_Click"/>
+                                    <CheckBox x:Name="AssistantHttpToggle" Style="{StaticResource ToggleSwitch}" AutomationProperties.Name="Connect by URL" Click="AssistantHttpToggle_Click"/>
+                                </StackPanel>
+                            </local:SettingRow>
+                        </StackPanel>
+                    </Border>
+
+                    <TextBlock Text="CONNECT AN AI TOOL" Style="{StaticResource GroupLabel}"/>
+                    <Border Style="{StaticResource Group}">
+                        <StackPanel Margin="14,12">
+                            <Border Style="{StaticResource SegmentHost}">
+                                <WrapPanel x:Name="AssistantClientPanel"/>
+                            </Border>
+                            <DockPanel Margin="2,12,0,8">
+                                <Button DockPanel.Dock="Right" Content="Copy" Padding="12,3" Margin="12,0,0,0" VerticalAlignment="Top" Click="AssistantCopy_Click"/>
+                                <TextBlock x:Name="AssistantWhereText" Style="{StaticResource Hint}" VerticalAlignment="Center"/>
+                            </DockPanel>
+                            <TextBox x:Name="AssistantSnippetBox" IsReadOnly="True" FontFamily="{StaticResource MonoFont}" FontSize="12"
+                                     TextWrapping="Wrap" AcceptsReturn="True"/>
+                            <TextBlock x:Name="AssistantHttpHint" Style="{StaticResource Hint}" Margin="2,8,0,0" Visibility="Collapsed"
+                                       Text="Turn on “Connect by URL” above to use this."/>
+                        </StackPanel>
+                    </Border>
+
+                    <TextBlock Text="RECENT ACTIONS" Style="{StaticResource GroupLabel}"/>
+                    <Border Style="{StaticResource Group}">
+                        <StackPanel Margin="14,10">
+                            <TextBlock x:Name="AssistantLogEmpty" Style="{StaticResource Hint}"
+                                       Text="Nothing yet. Changes made by assistants, and the requests you allow or decline, are listed here."/>
+                            <ItemsControl x:Name="AssistantLogList">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <TextBlock Text="{Binding}" FontFamily="{StaticResource MonoFont}" FontSize="11.5" TextWrapping="Wrap" Margin="0,2"
+                                                   Foreground="{DynamicResource TextMutedBrush}"/>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </StackPanel>
+                    </Border>
+                    <TextBlock Style="{StaticResource Hint}" Margin="2,0,0,8"
+                               Text="Assistants work through this PC's fleet agent and reach your other PCs over the encrypted fleet connection. Requests to approve appear on this PC."/>
                 </StackPanel>
 
                 <!-- Updates -->

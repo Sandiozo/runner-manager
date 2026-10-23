@@ -25,6 +25,8 @@ A Windows dashboard for GitHub Actions self-hosted runners, on one PC or several
   shows CPU, memory, disk space, uptime and pending restarts.
 - **Several PCs.** PCs connect directly over the local network, encrypted. Control the runners on every PC from any
   of them. A single PC works without any fleet setup.
+- **AI assistants.** Claude, Codex, Copilot, Cursor, Gemini and other AI tools that support MCP can list your runners,
+  check jobs and create a runner for a new project. Changes ask for your approval first.
 - **Auto-recovery.** The fleet agent restarts runners that stop unexpectedly.
 - **Notifications.** Alerts in the notification area when a PC goes offline, a runner stops or a workflow run fails.
 - **Remote Desktop Commander (optional).** Monitor and restart it on each PC. It is shown only where it is set up, and
@@ -126,6 +128,42 @@ builds the exe, checks that it starts, and attaches it to a GitHub release.
 git tag v2.2.6
 git push origin v2.2.6
 ```
+
+## AI assistants
+
+Runner Manager is an [MCP](https://modelcontextprotocol.io) server, so any AI tool that supports MCP can use it. Tell
+the assistant which repository a new project uses, and it can check whether the repository has a runner, create one
+on the least busy PC, and tell you which `runs-on` labels to use.
+
+1. Open **Settings → AI assistants** and turn on **Allow AI assistants**.
+2. Choose your AI tool, click **Copy**, and paste the setup where the page says. For most tools it is:
+
+   ```json
+   {
+     "mcpServers": {
+       "runner-manager": {
+         "command": "C:\\Users\\you\\AppData\\Local\\Programs\\RunnerManager\\RunnerManager.exe",
+         "args": ["--mcp"]
+       }
+     }
+   }
+   ```
+
+| Tool | What it does | Approval |
+| --- | --- | --- |
+| `list_pcs`, `list_runners` | PCs with CPU, memory and disk space; runners and their state | No |
+| `find_runner_for_repo` | Whether a repository already has a runner, and the `runs-on` labels | No |
+| `job_status`, `runner_log`, `recent_runs` | A runner's current job, steps, output and processes; its log; recent workflow runs | No |
+| `create_runner` | Creates a runner on a PC you name, or on the least busy one | Asks first (setting) |
+| `control_runner` | Starts, stops or restarts a runner | Asks first (setting) |
+| `move_runner`, `remove_runner` | Moves a runner to another PC, or deletes it | Always asks |
+
+The approval window opens on the PC where the assistant runs. Changes go through the fleet agent, so the assistant
+needs no administrator rights. Assistant access is off until you turn it on, and Settings lists the recent actions.
+
+For tools that connect by URL, turn on **Connect by URL**: `http://127.0.0.1:47830/mcp`, with a bearer token, for
+programs on the same PC only. For assistants that run commands instead of MCP, `RunnerManager.exe ai help` lists the
+same tools on the command line, with JSON output.
 
 ## Project layout
 

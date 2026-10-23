@@ -29,6 +29,26 @@ public partial class App : Application
             Shutdown(0);
             return;
         }
+        // Started by an AI tool, without administrator rights: changes go through the fleet agent.
+        if (AssistantHost.IsAssistantLaunch(e.Args))
+        {
+            ShutdownMode = ShutdownMode.OnExplicitShutdown;
+            ThemeManager.Apply(AppSettings.Load().Theme);
+            DispatcherUnhandledException += (_, args) =>
+            {
+                MachineRelay.AppendAgentLog($"Assistant error: {args.Exception.GetBaseException().Message}");
+                args.Handled = true;
+            };
+            int exitCode;
+            try { exitCode = await AssistantHost.RunAsync(e.Args); }
+            catch (Exception ex)
+            {
+                MachineRelay.AppendAgentLog($"Assistant stopped after an unexpected error: {ex.Message}");
+                exitCode = 1;
+            }
+            Shutdown(exitCode);
+            return;
+        }
         if (!Elevation.IsElevated)
         {
             ShutdownMode = ShutdownMode.OnExplicitShutdown;

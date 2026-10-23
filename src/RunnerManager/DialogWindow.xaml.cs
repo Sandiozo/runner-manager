@@ -24,11 +24,18 @@ public partial class DialogWindow : Window
 
     /// <summary>Shows the dialog and returns the label of the chosen button, or null when closed.</summary>
     public static string? Show(Window? owner, DialogTone tone, string heading, string message,
-        string primary, string? secondary = null, string? cancel = "Cancel", string? detail = null)
+        string primary, string? secondary = null, string? cancel = "Cancel", string? detail = null, bool topmost = false)
     {
         var dialog = new DialogWindow { Title = heading };
         if (owner is { IsLoaded: true, IsVisible: true }) dialog.Owner = owner;
         else dialog.WindowStartupLocation = WindowStartupLocation.CenterScreen;
+        if (topmost)
+        {
+            // Asked from a process with no window of its own (an AI assistant's request), so keep it in front.
+            dialog.Topmost = true;
+            dialog.ShowInTaskbar = true;
+            dialog.Loaded += (_, _) => dialog.Activate();
+        }
 
         dialog.HeadingText.Text = heading;
         dialog.MessageText.Text = message;

@@ -42,6 +42,8 @@ public partial class SettingsWindow : Window
         UpdateRunnerFolder();
         UpdateKeyStatus();
         RefreshPeers();
+        BuildAssistantClients();
+        UpdateAssistants();
         ShowPage(_lastPage);
         Loaded += async (_, _) =>
         {
@@ -66,6 +68,8 @@ public partial class SettingsWindow : Window
         GeneralPage.Visibility = page == "General" ? Visibility.Visible : Visibility.Collapsed;
         FleetPage.Visibility = page == "Fleet" ? Visibility.Visible : Visibility.Collapsed;
         RdcPage.Visibility = page == "Rdc" ? Visibility.Visible : Visibility.Collapsed;
+        AssistantsPage.Visibility = page == "Assistants" ? Visibility.Visible : Visibility.Collapsed;
+        if (page == "Assistants") UpdateAssistants();
         UpdatesPage.Visibility = page == "Updates" ? Visibility.Visible : Visibility.Collapsed;
         PageScroller.ScrollToTop();
     }
@@ -337,6 +341,132 @@ public partial class SettingsWindow : Window
                 : "Setup window opened. Sign in there. Runner Manager detects the connection automatically.");
         });
         UpdateRdcStatus();
+    }
+
+    // ----- AI assistants -----
+
+    /// <summary>The AI tool chosen last, so the page reopens on it during this session.</summary>
+    private static string _lastAssistantClient = AssistantSetup.Clients[0].Name;
+
+    private void BuildAssistantClients()
+    {
+        foreach (var client in AssistantSetup.Clients)
+        {
+            var option = new RadioButton
+            {
+                Content = client.Name,
+                GroupName = "AssistantClient",
+                Style = (Style)FindResource("Segment"),
+                Padding = new Thickness(10, 5, 10, 5),
+                IsChecked = client.Name == _lastAssistantClient
+            };
+            option.Checked += (_, _) =>
+            {
+                _lastAssistantClient = client.Name;
+                ShowAssistantSnippet();
+            };
+            AssistantClientPanel.Children.Add(option);
+        }
+    }
+
+    private static AssistantClient SelectedAssistantClient
+        => AssistantSetup.Clients.FirstOrDefault(c => c.Name == _lastAssistantClient) ?? AssistantSetup.Clients[0];
+
+    private void UpdateAssistants()
+    {
+        var options = FleetConfig.Current.Assistant;
+        AssistantToggle.IsChecked = options.Enabled;
+        AssistantAskToggle.IsChecked = options.AskBeforeChanges;
+        AssistantHttpToggle.IsChecked = options.HttpEnabled;
+        AssistantAskToggle.IsEnabled = options.Enabled;
+        AssistantHttpToggle.IsEnabled = options.Enabled;
+        AssistantNewTokenButton.Visibility = options.HttpEnabled ? Visibility.Visible : Visibility.Collapsed;
+        AssistantHttpRow.Description = options.HttpEnabled
+            ? $"{AssistantHttpServer.Url}. Only programs on this PC can connect, and they need the token."
+            : "For AI tools that connect to a URL instead of starting a program.";
+        ShowAssistantSnippet();
+
+        var log = AssistantLog.Recent(8);
+        AssistantLogList.ItemsSource = log;
+        AssistantLogEmpty.Visibility = log.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void ShowAssistantSnippet()
+    {
+        var client = SelectedAssistantClient;
+        var options = FleetConfig.Current.Assistant;
+        var token = options.HttpToken;
+        // The token stays hidden on screen; Copy puts the real one on the clipboard.
+        var shown = token.Length > 0 ? token[..Math.Min(9, token.Length)] + "…" : "<turn on Connect by URL>";
+        AssistantWhereText.Text = client.Where;
+        AssistantSnippetBox.Text = client.Snippet(AppUpdater.InstalledExe, shown);
+        AssistantHttpHint.Visibility = client.NeedsHttp && !options.HttpEnabled ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void AssistantCopy_Click(object sender, RoutedEventArgs e)
+    {
+        var options = FleetConfig.Current.Assistant;
+        var client = SelectedAssistantClient;
+        if (client.NeedsHttp && (!options.HttpEnabled || options.HttpToken.Length == 0))
+        {
+            DialogWindow.Info(this, "Turn on Connect by URL first", "This setup uses the URL endpoint and its token.");
+            return;
+        }
+        try { Clipboard.SetText(client.Snippet(AppUpdater.InstalledExe, options.HttpToken)); }
+        catch (Exception ex) { DialogWindow.Error(this, "Could not copy", ex.Message); }
+    }
+
+    private async void AssistantToggle_Click(object sender, RoutedEventArgs e)
+    {
+        var enable = AssistantToggle.IsChecked == true;
+        if (enable && (FleetConfig.Current.FleetKey == null || !await MachineRelay.IsAgentRunningAsync()))
+        {
+            // Assistants hand their changes to this PC's fleet agent, which needs a pairing code even with only this PC.
+            var ready = false;
+            await _runOperation("Turn on AI assistants", async log =>
+            {
+                if (FleetConfig.Current.FleetKey == null) FleetConfig.SetFleetKey(CommandSigner.NewKey());
+                await AppUpdater.InstallCurrentBuildAsync(log);
+                log("Starting the fleet agent…");
+                await MachineRelay.InstallAndStartAgentTaskAsync();
+                ready = true;
+            });
+            UpdateKeyStatus();
+            if (!ready)
+            {
+                AssistantToggle.IsChecked = false;
+                return;
+            }
+        }
+        FleetConfig.Update(c => c.Assistant.Enabled = enable);
+        AssistantLog.Append(enable ? "Assistant access turned on." : "Assistant access turned off.");
+        UpdateAssistants();
+        if (enable) await _fleetChanged();
+    }
+
+    private void AssistantAskToggle_Click(object sender, RoutedEventArgs e)
+    {
+        FleetConfig.Update(c => c.Assistant.AskBeforeChanges = AssistantAskToggle.IsChecked == true);
+        UpdateAssistants();
+    }
+
+    private void AssistantHttpToggle_Click(object sender, RoutedEventArgs e)
+    {
+        var on = AssistantHttpToggle.IsChecked == true;
+        FleetConfig.Update(c =>
+        {
+            c.Assistant.HttpEnabled = on;
+            if (on && c.Assistant.HttpToken.Length == 0) c.Assistant.ProtectedHttpToken = AssistantOptions.ProtectToken(AssistantHttpServer.NewToken());
+        });
+        UpdateAssistants();
+    }
+
+    private void AssistantNewToken_Click(object sender, RoutedEventArgs e)
+    {
+        if (!DialogWindow.Confirm(this, "Create a new token?",
+                "AI tools that use the current token cannot connect until you give them the new one.", "New token", danger: true)) return;
+        FleetConfig.Update(c => c.Assistant.ProtectedHttpToken = AssistantOptions.ProtectToken(AssistantHttpServer.NewToken()));
+        UpdateAssistants();
     }
 
     // ----- Updates -----

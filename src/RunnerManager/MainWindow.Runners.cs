@@ -5,6 +5,9 @@ namespace RunnerManager;
 /// <summary>Runner lifecycle: delete, convert console runners to services, and move runners between PCs.</summary>
 public partial class MainWindow
 {
+    // The dashboard has administrator rights, so work on this PC runs directly.
+    private readonly FleetActions _fleetActions = new(viaLocalAgent: false);
+
     private async void RunnerRemove_Click(object sender, RoutedEventArgs e)
     {
         if (ItemFrom<MachineRunnerStatus>(sender) is not { CanRemove: true } runner) return;
@@ -51,8 +54,7 @@ public partial class MainWindow
         if (dialog.ShowDialog() != true || dialog.Target is not { } target) return;
         if (!CanSendTo(source.MachineKey) || !CanSendTo(target.MachineKey)) return;
 
-        var url = RegistrationUrl(runner.Scope);
-        if (string.IsNullOrEmpty(url))
+        if (string.IsNullOrEmpty(FleetActions.RegistrationUrl(runner.Scope)))
         {
             DialogWindow.Error(this, "Cannot move this runner", "Its repository or organization is unknown.");
             return;
@@ -64,75 +66,8 @@ public partial class MainWindow
         {
             MarkUserAction(key);
             runner.SetPending("Move");
-            var labels = runner.LocalRunner?.CustomLabels;
-            if (labels == null || labels.Length == 0)
-                labels = (await GitHubCli.GetRunnerStateAsync(runner.Scope, runner.AgentId))?.Labels ?? Array.Empty<string>();
-            log(labels.Length > 0 ? $"Keeping labels: {string.Join(", ", labels)}" : "No custom labels to keep.");
-
-            // 1. Stop the old copy so it can't pick up a job mid-move (and so auto-recovery leaves it alone).
-            log($"Stopping the runner on {source.MachineName}…");
-            await RunOnMachineAsync(source, "runner", runner.CommandKey, "Stop", log,
-                () => { FleetConfig.SetManuallyStopped(runner.CommandKey, true); return RunnerService.ControlServiceAsync(runner.CommandKey, "Stop"); },
-                TimeSpan.FromMinutes(2));
-
-            // 2. Register it on the target, replacing the old registration.
-            try
-            {
-                log($"Installing and registering the runner on {target.MachineName}. The download takes about 1–3 minutes…");
-                await RunOnMachineAsync(target, "runner", url, "Create", log,
-                    () => RunnerService.CreateRunnerAsync(new RunnerSetup
-                    {
-                        RepositoryUrl = url,
-                        RunnerName = runner.AgentName,
-                        InstallPath = RunnerService.SuggestInstallPath(url),
-                        Labels = labels,
-                        ReplaceExisting = true
-                    }, log),
-                    TimeSpan.FromMinutes(10), runnerName: runner.AgentName, labels: labels, value: "replace");
-            }
-            catch
-            {
-                if (!runner.IsInteractive)
-                {
-                    log($"Move failed. Starting the runner on {source.MachineName} again…");
-                    try
-                    {
-                        await RunOnMachineAsync(source, "runner", runner.CommandKey, "Start", log,
-                            () => { FleetConfig.SetManuallyStopped(runner.CommandKey, false); return RunnerService.ControlServiceAsync(runner.CommandKey, "Start"); },
-                            TimeSpan.FromMinutes(2));
-                    }
-                    catch (Exception restartError) { log($"Could not start the runner again: {restartError.Message}"); }
-                }
-                throw;
-            }
-
-            // 3. Remove the old copy (its registration now belongs to the target).
-            log($"Removing the old copy from {source.MachineName}…");
-            await RunOnMachineAsync(source, "runner", runner.CommandKey, "Retire", log,
-                () => RunnerService.RetireMovedRunnerAsync(runner.CommandKey, deleteOld, log),
-                TimeSpan.FromMinutes(3), value: deleteOld ? "delete" : "keep");
-            FleetConfig.SetManuallyStopped(runner.CommandKey, false);
-            log($"{runner.TitleText} now runs on {target.MachineName}.");
+            await _fleetActions.MoveRunnerAsync(source, runner, target, deleteOld, runner.LocalRunner?.CustomLabels, log);
         });
         _pendingRunnerCommands.Remove(key);
     }
-
-    /// <summary>Runs an action on this PC directly, or sends it to another PC's agent and waits for its result.</summary>
-    private async Task RunOnMachineAsync(MachineInfo machine, string target, string targetKey, string action, Action<string> log,
-        Func<Task> local, TimeSpan timeout, string runnerName = "", string[]? labels = null, string value = "")
-    {
-        if (machine.IsLocal)
-        {
-            await local();
-            return;
-        }
-        var id = await MachineRelay.SendCommandAsync(machine.MachineKey, target, targetKey, action, runnerName, labels, value);
-        var result = await MachineRelay.WaitForCommandAsync(machine.MachineKey, id, timeout);
-        log($"{machine.MachineName}: {result}");
-    }
-
-    private static string RegistrationUrl(string scope)
-        => scope.StartsWith("repos/", StringComparison.OrdinalIgnoreCase) ? $"https://github.com/{scope[6..]}"
-            : scope.StartsWith("orgs/", StringComparison.OrdinalIgnoreCase) ? $"https://github.com/{scope[5..]}"
-            : string.Empty;
 }
