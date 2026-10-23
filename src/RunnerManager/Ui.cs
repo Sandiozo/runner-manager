@@ -153,7 +153,8 @@ public sealed class AppSettings
 
     public bool Notifications { get; set; } = true;
     public bool NotifyOnFailedRuns { get; set; } = true;
-    public bool CloseToTray { get; set; }
+    /// <summary>Closing the window hides it to the notification area, so monitoring continues. Exit from the tray icon.</summary>
+    public bool CloseToTray { get; set; } = true;
     public bool ActivityPanelOpen { get; set; } = true;
     public double ActivityPanelHeight { get; set; } = 130;
     /// <summary>The setup wizard ran (installed copies only).</summary>

@@ -178,6 +178,14 @@ public class WorkflowManagerTests
 
 public class MiscTests
 {
+    [Fact]
+    public void KeepRunningWhenClosed_IsOnForNewInstalls_AndAChoiceIsKept()
+    {
+        Assert.True(new AppSettings().CloseToTray);
+        Assert.True(JsonSerializer.Deserialize<AppSettings>("{}")!.CloseToTray);
+        Assert.False(JsonSerializer.Deserialize<AppSettings>("""{"CloseToTray":false}""")!.CloseToTray);
+    }
+
     [Theory]
     [InlineData("v2.1.0", "2.1.0")]
     [InlineData("2.1", "2.1.0")]

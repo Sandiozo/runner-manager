@@ -3,6 +3,11 @@
 Runner Manager updates itself from [Releases](https://github.com/Sandiozo/runner-manager/releases): open
 **Settings → Updates**, or click **Update** on a PC's card.
 
+## Unreleased
+
+- **Keep running when closed** is on for new installs: closing the window hides it to the notification area, and
+  monitoring continues. Exit from the tray icon. Existing installs keep their setting.
+
 ## 2.3.0
 
 - **AI assistants.** Runner Manager is now an MCP server, so Claude, Codex, VS Code with Copilot, Cursor, Windsurf,
