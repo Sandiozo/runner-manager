@@ -1,4 +1,3 @@
-using System.IO.Pipes;
 using System.Windows;
 using System.Windows.Threading;
 
@@ -14,12 +13,17 @@ public partial class App : Application
     private const string ElevationAttemptedArgument = "--elevation-attempted";
     // Kept from the RunnerWidget versions, so an older and a newer dashboard never run side by side.
     private const string DashboardMutexName = @"Local\RunnerWidgetDashboard";
-    private const string ActivatePipeName = "RunnerWidgetDashboard.Activate";
+    /// <summary>
+    /// Set by a second launch to bring the running dashboard to the front. An event, because a named pipe limited to the
+    /// current user refuses elevated dashboards (their objects are owned by the Administrators group, not the user).
+    /// </summary>
+    private const string ActivateEventName = @"Local\RunnerManagerDashboard.Activate";
     /// <summary>How long a new dashboard waits for one that is exiting (for example after "Restart now").</summary>
     private static readonly TimeSpan PreviousDashboardExitTimeout = TimeSpan.FromSeconds(10);
     private Mutex? _dashboardMutex;
     private bool _ownsDashboardMutex;
-    private CancellationTokenSource? _pipeCts;
+    private EventWaitHandle? _activateEvent;
+    private RegisteredWaitHandle? _activateWait;
 
     protected override async void OnStartup(StartupEventArgs e)
     {
@@ -129,6 +133,12 @@ public partial class App : Application
                 await Task.Delay(250);
                 _ownsDashboardMutex = TryOwnDashboardMutex();
             }
+            // Still running: it may have started listening meanwhile. Never open a second dashboard if it answers.
+            if (!_ownsDashboardMutex && await SignalRunningDashboardAsync())
+            {
+                Shutdown();
+                return;
+            }
         }
 
         var settings = AppSettings.Load();
@@ -203,7 +213,10 @@ public partial class App : Application
     public void ExitApplication()
     {
         // Stop answering activation first, so a dashboard that starts now takes over instead of signalling this one.
-        _pipeCts?.Cancel();
+        _activateWait?.Unregister(null);
+        _activateWait = null;
+        _activateEvent?.Dispose();
+        _activateEvent = null;
         if (MainWindow is MainWindow window) window.PrepareExit();
         if (_ownsDashboardMutex)
         {
@@ -224,35 +237,24 @@ public partial class App : Application
 
     private void ListenForActivation(MainWindow window)
     {
-        _pipeCts = new CancellationTokenSource();
-        var token = _pipeCts.Token;
-        _ = Task.Run(async () =>
+        try
         {
-            while (!token.IsCancellationRequested)
-            {
-                try
-                {
-                    await using var server = new NamedPipeServerStream(ActivatePipeName, PipeDirection.In, 1,
-                        PipeTransmissionMode.Byte, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
-                    await server.WaitForConnectionAsync(token);
-                    await Dispatcher.InvokeAsync(window.ShowFromTray);
-                }
-                catch (OperationCanceledException) { return; }
-                catch { await Task.Delay(1000, CancellationToken.None); }
-            }
-        });
+            _activateEvent = new EventWaitHandle(false, EventResetMode.AutoReset, ActivateEventName);
+            _activateWait = ThreadPool.RegisterWaitForSingleObject(_activateEvent,
+                (_, _) => Dispatcher.BeginInvoke(window.ShowFromTray), null, Timeout.Infinite, executeOnlyOnce: false);
+        }
+        catch (Exception ex) { MachineRelay.AppendAgentLog($"Could not listen for activation: {ex.Message}"); }
     }
 
     /// <summary>Asks the running dashboard to come to the front. Returns false when no dashboard is listening.</summary>
-    private static async Task<bool> SignalRunningDashboardAsync()
+    private static Task<bool> SignalRunningDashboardAsync()
     {
         try
         {
-            await using var client = new NamedPipeClientStream(".", ActivatePipeName, PipeDirection.Out, PipeOptions.CurrentUserOnly);
-            await client.ConnectAsync(2000);
-            return true;
+            using var activate = EventWaitHandle.OpenExisting(ActivateEventName);
+            return Task.FromResult(activate.Set());
         }
-        catch { return false; }
+        catch { return Task.FromResult(false); }
     }
 
     private void OnUiUnhandledException(object sender, DispatcherUnhandledExceptionEventArgs e)

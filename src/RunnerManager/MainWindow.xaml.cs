@@ -142,6 +142,7 @@ public partial class MainWindow : Window
             UpdateNavShape();
             ApplyEnrollmentStatus();
             ScheduleLocalAgentUpdate(machines.FirstOrDefault(m => m.IsLocal));
+            StartStoppedLocalAgent(machines.FirstOrDefault(m => m.IsLocal));
             ApplyPendingStates();
             ApplyFilter();
             UpdateSummary();
@@ -179,6 +180,26 @@ public partial class MainWindow : Window
                 AddActivity("Updated the fleet agent task to run on battery and without the 3-day time limit.");
         }
         catch (Exception ex) { AddActivity($"Could not update fleet agent task settings: {ex.Message}"); }
+    }
+
+    private DateTime _localAgentStartedUtc = DateTime.MinValue;
+
+    /// <summary>
+    /// Starts this PC's fleet agent again when it stopped, for example after it was ended in Task Manager. The scheduled
+    /// task restarts it only when it fails to start, not when it is ended.
+    /// </summary>
+    private async void StartStoppedLocalAgent(MachineInfo? local)
+    {
+        if (!_isEnrolled || FleetConfig.Current.FleetKey == null || local is not { IsLocalOnly: true, FleetAgentRunning: false }) return;
+        if (DateTime.UtcNow - _localAgentStartedUtc < TimeSpan.FromMinutes(2)) return;
+        _localAgentStartedUtc = DateTime.UtcNow;
+        try
+        {
+            if (!await MachineRelay.IsAgentInstalledAsync()) return;
+            var (exitCode, output) = await ScheduledTasks.RunTaskAsync(ScheduledTasks.AgentTaskName);
+            AddActivity(exitCode == 0 ? "The fleet agent on this PC was not running. Started it again." : $"Could not start the fleet agent: {output.Trim()}");
+        }
+        catch (Exception ex) { AddActivity($"Could not start the fleet agent: {ex.Message}"); }
     }
 
     private bool _localAgentUpdateTried;

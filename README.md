@@ -158,8 +158,9 @@ on the least busy PC, and tell you which `runs-on` labels to use.
 | `control_runner` | Starts, stops or restarts a runner | Asks first (setting) |
 | `move_runner`, `remove_runner` | Moves a runner to another PC, or deletes it | Always asks |
 
-The approval window opens on the PC where the assistant runs. Changes go through the fleet agent, so the assistant
-needs no administrator rights. Assistant access is off until you turn it on, and Settings lists the recent actions.
+The tools run in the fleet agent, so the assistant needs no administrator rights, and it works the same when an AI
+tool runs MCP servers in a sandbox. The approval window opens on the PC where the assistant runs. Assistant access
+is off until you turn it on, and Settings lists the recent actions.
 
 For tools that connect by URL, turn on **Connect by URL**: `http://127.0.0.1:47830/mcp`, with a bearer token, for
 programs on the same PC only. For assistants that run commands instead of MCP, `RunnerManager.exe ai help` lists the

@@ -10,7 +10,8 @@ namespace RunnerManager;
 /// <summary>
 /// Entry points for AI assistants, started by the AI tool itself (no administrator rights needed):
 /// <c>RunnerManager.exe --mcp</c> serves MCP over stdin/stdout, and <c>RunnerManager.exe ai &lt;tool&gt; --name value</c>
-/// runs one tool and prints JSON, for assistants that run commands instead of MCP.
+/// runs one tool and prints JSON, for assistants that run commands instead of MCP. Both forward to this PC's fleet
+/// agent, which runs the tools with Runner Manager's real settings (see <see cref="AssistantHttpServer"/>).
 /// </summary>
 public static class AssistantHost
 {
@@ -55,18 +56,37 @@ public static class AssistantHost
             finally { writeGate.Release(); }
         }
 
-        var server = new McpServer(ApproveAsync, notification => SendAsync(notification));
+        using var link = new AgentLink();
+        // Answers on its own only when the agent cannot be reached, so the AI tool still connects and can say why.
+        var fallback = new McpServer((_, _, _) => Task.FromResult(false), _ => Task.CompletedTask);
         var pending = new List<Task>();
         while (await input.ReadLineAsync() is { } line)
         {
             if (string.IsNullOrWhiteSpace(line)) continue;
             pending.RemoveAll(t => t.IsCompleted);
             // Each request runs on its own, so a long tool call (creating a runner) does not hold up pings or reads.
-            pending.Add(HandleLineAsync(server, line, SendAsync));
+            pending.Add(ForwardLineAsync(link, fallback, line, SendAsync));
         }
         // The client closed stdin. Changes already sent to a fleet agent finish there regardless.
         await Task.WhenAny(Task.WhenAll(pending), Task.Delay(TimeSpan.FromSeconds(5)));
         return 0;
+    }
+
+    private static async Task ForwardLineAsync(AgentLink link, McpServer fallback, string line, Func<JsonNode, Task> send)
+    {
+        try
+        {
+            if (await link.SendAsync(line) is { } answer && JsonNode.Parse(answer) is { } node) await send(node);
+        }
+        catch (AgentLinkException ex)
+        {
+            fallback.ToolsUnavailable = ex.Message;
+            await HandleLineAsync(fallback, line, send);
+        }
+        catch (Exception ex)
+        {
+            MachineRelay.AppendAgentLog($"MCP request failed: {ex.Message}");
+        }
     }
 
     private static async Task HandleLineAsync(McpServer server, string line, Func<JsonNode, Task> send)
@@ -127,14 +147,33 @@ public static class AssistantHost
         }
         try
         {
-            var result = await AssistantTools.CallAsync(args[0], arguments, (title, message) => ApproveAsync("An AI assistant", title, message),
-                message => Console.Error.WriteLine(message));
-            stdout.WriteLine(JsonSerializer.Serialize(result, McpServer.ResultJson));
+            using var link = new AgentLink();
+            await link.SendAsync(new JsonObject
+            {
+                ["jsonrpc"] = "2.0", ["id"] = 0, ["method"] = "initialize",
+                ["params"] = new JsonObject
+                {
+                    ["protocolVersion"] = McpServer.SupportedVersions[0],
+                    ["clientInfo"] = new JsonObject { ["name"] = "An AI assistant (command line)" }
+                }
+            }.ToJsonString());
+            var answer = await link.SendAsync(new JsonObject
+            {
+                ["jsonrpc"] = "2.0", ["id"] = 1, ["method"] = "tools/call",
+                ["params"] = new JsonObject { ["name"] = args[0], ["arguments"] = JsonNode.Parse(arguments.GetRawText()) }
+            }.ToJsonString());
+            var reply = JsonNode.Parse(answer ?? "{}");
+            if (reply?["result"] is not { } result)
+                throw new AgentLinkException(reply?["error"]?["message"]?.GetValue<string>() ?? "The fleet agent sent no answer.");
+            var text = result["content"]?[0]?["text"]?.GetValue<string>() ?? string.Empty;
+            if (result["isError"]?.GetValue<bool>() == true) throw new AssistantException(text);
+            stdout.WriteLine(text);
             return 0;
         }
         catch (Exception ex)
         {
-            stdout.WriteLine(JsonSerializer.Serialize(new { error = ex is AssistantException ? ex.Message : ex.GetBaseException().Message }, McpServer.ResultJson));
+            stdout.WriteLine(JsonSerializer.Serialize(new { error = ex is AssistantException or AgentLinkException ? ex.Message : ex.GetBaseException().Message },
+                McpServer.ResultJson));
             return 1;
         }
     }

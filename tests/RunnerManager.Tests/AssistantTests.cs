@@ -159,11 +159,8 @@ public class AssistantTests
 
     private static async Task CheckEndpointAsync(string token)
     {
-        var port = TestPorts.FreeRange(1);
-        using var server = new AssistantHttpServer(port, "localhost");
-        _ = server.RunAsync();
+        using var server = StartEndpoint(out var url);
         using var http = new HttpClient();
-        var url = $"http://localhost:{port}/mcp/";
         const string initialize = """{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","clientInfo":{"name":"Test"}}}""";
 
         HttpResponseMessage? response = null;
@@ -194,17 +191,91 @@ public class AssistantTests
         Assert.Equal(HttpStatusCode.Forbidden, (await Send(HttpMethod.Post, initialize, origin: "https://evil.example")).StatusCode);
         Assert.Equal(HttpStatusCode.MethodNotAllowed, (await Send(HttpMethod.Get, null)).StatusCode);
         Assert.Equal(HttpStatusCode.BadRequest, (await Send(HttpMethod.Post, "{not json")).StatusCode);
+
+        // The token only works while Connect by URL is on.
+        FleetConfig.Update(c => c.Assistant.HttpEnabled = false);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await Send(HttpMethod.Post, initialize)).StatusCode);
     }
 
-    /// <summary>A real MCP session over stdio with the built program, the way AI tools start it.</summary>
     [Fact]
-    public async Task StdioServer_AnswersAnMcpSession()
+    public async Task LocalSignIn_AcceptsOnlyAChallengeEncryptedForThisUser()
+    {
+        using var server = StartEndpoint(out var url);
+        using var link = new AgentLink(url);
+        var answer = await WithRetry(() => link.SendAsync("""{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"Test"}}}"""));
+        Assert.Equal("runner-manager", JsonNode.Parse(answer!)!["result"]!["serverInfo"]!["name"]!.GetValue<string>());
+
+        using var http = new HttpClient();
+        var challenge = JsonNode.Parse(await (await http.PostAsync($"{url}/local/challenge", null)).Content.ReadAsStringAsync())!["nonce"]!.GetValue<string>();
+        var forged = new JsonObject { ["nonce"] = challenge, ["proof"] = Convert.ToBase64String(new byte[64]) }.ToJsonString();
+        var refused = await http.PostAsync($"{url}/local/session", new StringContent(forged, Encoding.UTF8, "application/json"));
+        Assert.Equal(HttpStatusCode.Forbidden, refused.StatusCode);
+        Assert.False(AssistantHttpServer.ProofMatches(challenge, Convert.ToBase64String(new byte[64])));
+    }
+
+    /// <summary>A real MCP session over stdio with the built program, the way AI tools start it. It forwards to the agent.</summary>
+    [Fact]
+    public async Task StdioServer_ForwardsAnMcpSessionToTheAgent()
+    {
+        FleetConfig.Update(c => c.Assistant.Enabled = true);
+        try
+        {
+            using var server = StartEndpoint(out var url);
+            await WithRetry(async () => { using var link = new AgentLink(url); return await link.SendAsync("""{"jsonrpc":"2.0","id":0,"method":"ping"}"""); });
+            var responses = await RunStdioAsync(url,
+                """{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"Test","version":"1"}}}""",
+                """{"jsonrpc":"2.0","method":"notifications/initialized"}""",
+                """{"jsonrpc":"2.0","id":2,"method":"tools/list"}""",
+                """{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"recent_runs","arguments":{"repository":"not a repository"}}}""");
+
+            Assert.Equal("2025-06-18", responses[1]["result"]!["protocolVersion"]!.GetValue<string>());
+            Assert.Equal(AssistantTools.All.Count, responses[2]["result"]!["tools"]!.AsArray().Count);
+            Assert.True(responses[3]["result"]!["isError"]!.GetValue<bool>());
+            // Answered by the agent, which has assistant access on; the child process has no settings of its own.
+            Assert.Contains("not a GitHub repository", responses[3]["result"]!["content"]![0]!["text"]!.GetValue<string>());
+        }
+        finally
+        {
+            FleetConfig.Update(c => c.Assistant = new AssistantOptions());
+        }
+    }
+
+    [Fact]
+    public async Task StdioServer_ExplainsWhenTheAgentIsNotRunning()
+    {
+        var responses = await RunStdioAsync($"http://localhost:{TestPorts.FreeRange(1)}/mcp",
+            """{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","clientInfo":{"name":"Test"}}}""",
+            """{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_pcs","arguments":{}}}""");
+
+        Assert.Equal("runner-manager", responses[1]["result"]!["serverInfo"]!["name"]!.GetValue<string>());
+        Assert.True(responses[2]["result"]!["isError"]!.GetValue<bool>());
+        Assert.Contains("fleet agent is not running", responses[2]["result"]!["content"]![0]!["text"]!.GetValue<string>());
+    }
+
+    private static AssistantHttpServer StartEndpoint(out string url)
+    {
+        var port = TestPorts.FreeRange(1);
+        var server = new AssistantHttpServer(port, "localhost");
+        _ = server.RunAsync();
+        url = $"http://localhost:{port}/mcp";
+        return server;
+    }
+
+    private static async Task<T> WithRetry<T>(Func<Task<T>> action)
+    {
+        for (var attempt = 0; ; attempt++)
+        {
+            try { return await action(); }
+            catch (AgentLinkException) when (attempt < 50) { await Task.Delay(100); }
+        }
+    }
+
+    private static async Task<Dictionary<int, JsonNode>> RunStdioAsync(string agentUrl, params string[] lines)
     {
         var exe = Path.Combine(AppContext.BaseDirectory, AppPaths.ExeName);
         Assert.True(File.Exists(exe), $"{exe} is missing");
         var state = Path.Combine(Path.GetTempPath(), $"runner-manager-mcp-test-{Guid.NewGuid():N}");
         Directory.CreateDirectory(state);
-        File.WriteAllText(Path.Combine(state, "fleet.json"), """{"Assistant":{"Enabled":true}}""");
         try
         {
             var start = new ProcessStartInfo(exe, AssistantHost.McpArgument)
@@ -215,13 +286,11 @@ public class AssistantTests
                 StandardOutputEncoding = Encoding.UTF8
             };
             start.Environment["RUNNER_MANAGER_STATE_DIR"] = state;
+            start.Environment[AgentLink.UrlVariable] = agentUrl;
             using var process = Process.Start(start)!;
             var input = process.StandardInput;
             input.AutoFlush = true;
-            await input.WriteLineAsync("""{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"Test","version":"1"}}}""");
-            await input.WriteLineAsync("""{"jsonrpc":"2.0","method":"notifications/initialized"}""");
-            await input.WriteLineAsync("""{"jsonrpc":"2.0","id":2,"method":"tools/list"}""");
-            await input.WriteLineAsync("""{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"recent_runs","arguments":{"repository":"not a repository"}}}""");
+            foreach (var line in lines) await input.WriteLineAsync(line);
             input.Close();
 
             var responses = new Dictionary<int, JsonNode>();
@@ -232,12 +301,8 @@ public class AssistantTests
                 responses[message["id"]!.GetValue<int>()] = message;
             }
             await process.WaitForExitAsync(timeout.Token);
-
             Assert.Equal(0, process.ExitCode);
-            Assert.Equal("2025-06-18", responses[1]["result"]!["protocolVersion"]!.GetValue<string>());
-            Assert.Equal(AssistantTools.All.Count, responses[2]["result"]!["tools"]!.AsArray().Count);
-            Assert.True(responses[3]["result"]!["isError"]!.GetValue<bool>());
-            Assert.Contains("not a GitHub repository", responses[3]["result"]!["content"]![0]!["text"]!.GetValue<string>());
+            return responses;
         }
         finally
         {

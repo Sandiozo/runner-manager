@@ -33,6 +33,9 @@ public sealed class McpServer
     private readonly Func<JsonObject, Task> _notify;
     private string _client = "An AI assistant";
 
+    /// <summary>When set, tool calls answer with this error instead of running (the fleet agent cannot be reached).</summary>
+    public string? ToolsUnavailable { get; set; }
+
     /// <param name="approve">Asks the user (client name, title, message) and returns whether they approved.</param>
     /// <param name="notify">Sends a notification to the client, such as progress.</param>
     public McpServer(Func<string, string, string, Task<bool>> approve, Func<JsonObject, Task> notify)
@@ -125,6 +128,7 @@ public sealed class McpServer
             ["params"] = new JsonObject { ["progressToken"] = progressToken.DeepClone(), ["progress"] = ++progress, ["message"] = message }
         });
 
+        if (ToolsUnavailable is { } unavailable) return ToolResult(unavailable, isError: true);
         try
         {
             var result = await AssistantTools.CallAsync(name, arguments, (title, message) => _approve(_client, title, message), log);

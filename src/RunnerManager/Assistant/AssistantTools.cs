@@ -465,7 +465,7 @@ public static class AssistantTools
     {
         if (CanManage(machine)) return;
         throw new AssistantException(machine.IsLocal
-            ? "This PC's fleet agent is not running, so Runner Manager cannot make changes for an assistant. Turn assistant access off and on again in Settings → AI assistants to start it."
+            ? "This PC's fleet agent is not running, so Runner Manager cannot make changes for an assistant. Open Runner Manager, which starts it again."
             : $"{machine.MachineName} cannot be reached or runs an older Runner Manager. {machine.ConnectionProblem}".Trim());
     }
 

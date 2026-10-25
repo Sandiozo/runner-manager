@@ -3,8 +3,15 @@
 Runner Manager updates itself from [Releases](https://github.com/Sandiozo/runner-manager/releases): open
 **Settings → Updates**, or click **Update** on a PC's card.
 
-## Unreleased
+## 2.3.1
 
+- **AI assistants work when the AI tool runs them in a sandbox**, such as the Code tab of the Claude desktop app.
+  `RunnerManager.exe --mcp` and `ai` now forward every request to this PC's fleet agent, which uses Runner Manager's
+  real settings. Before, a sandbox could show them an old copy of the settings: access looked turned off, this PC's
+  agent looked stopped, and other PCs reported a pairing code mismatch. The setup is unchanged.
+- Opening Runner Manager while it runs in the notification area brings that window to the front again, instead of
+  starting a second dashboard.
+- The dashboard starts this PC's fleet agent again when it was ended.
 - **Keep running when closed** is on for new installs: closing the window hides it to the notification area, and
   monitoring continues. Exit from the tray icon. Existing installs keep their setting.
 
