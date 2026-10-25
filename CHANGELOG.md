@@ -3,6 +3,12 @@
 Runner Manager updates itself from [Releases](https://github.com/Sandiozo/runner-manager/releases): open
 **Settings → Updates**, or click **Update** on a PC's card.
 
+## 2.3.2
+
+- Updating Runner Manager also replaces a fleet agent that was started by hand. Before, such an agent kept running the
+  old version and the new one did not start.
+- `RunnerManager.exe --mcp` answers every request it received, even when the AI tool closes the connection early.
+
 ## 2.3.1
 
 - **AI assistants work when the AI tool runs them in a sandbox**, such as the Code tab of the Claude desktop app.

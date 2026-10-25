@@ -735,8 +735,36 @@ public static class MachineRelay
     public static async Task RestartLocalAgentAsync()
     {
         await ScheduledTasks.EndTaskAsync(ScheduledTasks.AgentTaskName);
+        await Task.Run(EndOtherAgents);
         await Task.Delay(1500);
         await ScheduledTasks.RunTaskAsync(ScheduledTasks.AgentTaskName);
+    }
+
+    /// <summary>
+    /// Ends agents the task did not start (for example one started by hand). Otherwise such an agent keeps running the
+    /// old build after an update, and the new one exits because only one agent may run.
+    /// </summary>
+    private static void EndOtherAgents()
+    {
+        try
+        {
+            using var searcher = new System.Management.ManagementObjectSearcher(
+                $"SELECT ProcessId, CommandLine FROM Win32_Process WHERE Name = '{AppPaths.ExeName}' OR Name = '{AppPaths.LegacyExeName}'");
+            foreach (System.Management.ManagementObject process in searcher.Get())
+            {
+                var id = Convert.ToInt32(process["ProcessId"]);
+                if (id == Environment.ProcessId || process["CommandLine"]?.ToString()?.Contains("--agent", StringComparison.OrdinalIgnoreCase) != true) continue;
+                try
+                {
+                    using var agent = Process.GetProcessById(id);
+                    agent.Kill();
+                    agent.WaitForExit(5000);
+                    AppendAgentLog($"Ended a fleet agent that was not started by its task (process {id}).");
+                }
+                catch { }
+            }
+        }
+        catch { }
     }
 
     /// <summary>The executable the installed agent task runs, or empty when the task doesn't exist.</summary>

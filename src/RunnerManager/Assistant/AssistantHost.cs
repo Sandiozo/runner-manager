@@ -67,8 +67,8 @@ public static class AssistantHost
             // Each request runs on its own, so a long tool call (creating a runner) does not hold up pings or reads.
             pending.Add(ForwardLineAsync(link, fallback, line, SendAsync));
         }
-        // The client closed stdin. Changes already sent to a fleet agent finish there regardless.
-        await Task.WhenAny(Task.WhenAll(pending), Task.Delay(TimeSpan.FromSeconds(5)));
+        // The client closed stdin: still answer what it asked (a script may pipe requests in), within reason.
+        await Task.WhenAny(Task.WhenAll(pending), Task.Delay(TimeSpan.FromMinutes(15)));
         return 0;
     }
 
