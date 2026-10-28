@@ -33,7 +33,15 @@ public static class RunnerService
         // The default folder is scanned too, for runners installed before the folder setting was changed.
         foreach (var folder in new[] { RunnersRoot, DefaultRoot }.Distinct(StringComparer.OrdinalIgnoreCase).Where(Directory.Exists))
         {
-            foreach (var dir in Directory.GetDirectories(folder))
+            // An offline network folder or one without access must not hide the other runners.
+            string[] dirs;
+            try { dirs = Directory.GetDirectories(folder); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                LogOnce($"runners-folder:{folder}", $"Could not read the runners folder {folder}: {ex.Message}");
+                continue;
+            }
+            foreach (var dir in dirs)
                 if (File.Exists(Path.Combine(dir, ".runner"))) roots.Add(dir);
         }
         // Runners started from a console (run.cmd) instead of a service live anywhere; find them by their
@@ -48,12 +56,42 @@ public static class RunnerService
         if (newRoots.Count > 0) FleetConfig.Update(c => c.KnownRunnerRoots.AddRange(newRoots));
         foreach (var root in consoleRoots) roots.Add(root);
         foreach (var root in FleetConfig.Current.KnownRunnerRoots)
-            if (File.Exists(Path.Combine(root, ".runner"))) roots.Add(root);
+            if (File.Exists(Path.Combine(root, ".runner"))) roots.Add(LongPath(root));
 
         var runners = await Task.WhenAll(roots.OrderBy(x => x)
             .Select(root => BuildRunnerInfoAsync(root, services, processes, queryGitHub)));
         return runners.ToList();
     });
+
+    private static readonly HashSet<string> LoggedProblems = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Writes a problem to the agent log once per run of the app, since the runner list is read every few seconds.</summary>
+    private static void LogOnce(string key, string message)
+    {
+        lock (LoggedProblems)
+            if (!LoggedProblems.Add(key)) return;
+        MachineRelay.AppendAgentLog(message);
+    }
+
+    /// <summary>How long a console runner that stopped is still shown as a console runner (it restarts while it updates itself).</summary>
+    private static readonly TimeSpan ConsoleRestartGrace = TimeSpan.FromMinutes(3);
+    /// <summary>Folders of console runners and when their listener was last seen running.</summary>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, DateTime> ConsoleSeenUtc = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// True when a console runner's listener is gone but was running a moment ago. A console runner that updates itself
+    /// has no listener for a few seconds; it must not look like a runner without a service, or Repair would install a
+    /// second copy of it as a service.
+    /// </summary>
+    internal static bool IsConsoleRestarting(string root, bool listenerRunning, DateTime nowUtc)
+    {
+        if (listenerRunning)
+        {
+            ConsoleSeenUtc[root] = nowUtc;
+            return false;
+        }
+        return ConsoleSeenUtc.TryGetValue(root, out var seen) && nowUtc - seen < ConsoleRestartGrace;
+    }
 
     private static async Task<RunnerInfo> BuildRunnerInfoAsync(
         string root, List<RunnerServiceRecord> services, List<ProcessInfo> processes, bool queryGitHub)
@@ -64,8 +102,9 @@ public static class RunnerService
         var consoleListener = serviceInstalled ? null : processes.FirstOrDefault(p =>
             p.Name.Equals("Runner.Listener.exe", StringComparison.OrdinalIgnoreCase)
             && RootFromExecutable(p.ExecutablePath).Equals(root, StringComparison.OrdinalIgnoreCase));
-        var interactive = consoleListener != null;
-        var running = service?.State.Equals("Running", StringComparison.OrdinalIgnoreCase) == true || interactive;
+        var restarting = !serviceInstalled && IsConsoleRestarting(root, consoleListener != null, DateTime.UtcNow);
+        var interactive = consoleListener != null || restarting;
+        var running = service?.State.Equals("Running", StringComparison.OrdinalIgnoreCase) == true || consoleListener != null;
         var busy = running && HasDescendantWorker(service?.ProcessId ?? consoleListener!.ProcessId, processes);
         var repoPath = RepositoryPath(config.GitHubUrl);
         var scope = ApiScope(config.GitHubUrl);
@@ -87,9 +126,10 @@ public static class RunnerService
         {
             Name = service?.Name ?? string.Empty,
             DisplayName = label,
-            StatusText = serviceInstalled ? service!.State : interactive ? "Console window" : "No service",
-            ActivityText = running ? (busy ? "Busy" : "Idle") : "Offline",
+            StatusText = serviceInstalled ? service!.State : restarting ? "Console window (restarting)" : interactive ? "Console window" : "No service",
+            ActivityText = running ? (busy ? "Busy" : "Idle") : restarting ? "Restarting" : "Offline",
             IsInteractive = interactive,
+            ConsoleRestarting = restarting,
             LastActivityText = GetLatestRunnerActivity(root),
             InstallPath = root,
             GitHubUrl = config.GitHubUrl,
@@ -288,6 +328,7 @@ public static class RunnerService
         if (string.IsNullOrWhiteSpace(scope)) throw new InvalidOperationException("Enter a valid GitHub repository or organization URL.");
         EnsureValidConfigInput(setup.RepositoryUrl, setup.RunnerName, setup.Labels);
         EnsureSafeFolder(setup.InstallPath);
+        if (NetworkFolderProblem(setup.InstallPath) is { } networkProblem) throw new InvalidOperationException(networkProblem);
         if (Directory.Exists(setup.InstallPath) && Directory.EnumerateFileSystemEntries(setup.InstallPath).Any())
             throw new InvalidOperationException("The runner folder already contains files. Choose an empty or new folder.");
 
@@ -925,6 +966,8 @@ public static class RunnerService
 
     private static void StopConsoleRunner(string root)
     {
+        // Stopped on purpose, so it is not shown as restarting.
+        ConsoleSeenUtc.TryRemove(root, out _);
         var all = new List<(uint Pid, uint Parent, string Name, string CommandLine, string Path)>();
         using (var searcher = new ManagementObjectSearcher("SELECT ProcessId, ParentProcessId, Name, CommandLine, ExecutablePath FROM Win32_Process"))
             foreach (ManagementObject p in searcher.Get())
@@ -1198,13 +1241,46 @@ public static class RunnerService
         catch { }
     }
 
-    private static string RootFromExecutable(string executable)
+    /// <summary>
+    /// The runner folder of a runner executable: the parent of its bin folder (or of bin.2.x.y, where a runner that
+    /// updated itself can run from). Short 8.3 names (C:\GITHUB~1) are expanded, so a runner is not listed twice.
+    /// </summary>
+    internal static string RootFromExecutable(string executable)
     {
         if (string.IsNullOrWhiteSpace(executable)) return string.Empty;
-        var directory = Path.GetDirectoryName(executable);
+        var directory = Path.GetDirectoryName(LongPath(executable));
         if (string.IsNullOrEmpty(directory)) return string.Empty;
         var info = new DirectoryInfo(directory);
-        return info.Name.Equals("bin", StringComparison.OrdinalIgnoreCase) && info.Parent != null ? info.Parent.FullName : info.FullName;
+        var isBin = info.Name.Equals("bin", StringComparison.OrdinalIgnoreCase) || info.Name.StartsWith("bin.", StringComparison.OrdinalIgnoreCase);
+        return isBin && info.Parent != null ? info.Parent.FullName : info.FullName;
+    }
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+    private static extern uint GetLongPathName(string shortPath, System.Text.StringBuilder longPath, uint bufferLength);
+
+    /// <summary>The path with 8.3 short names expanded, or the path unchanged when it has none or does not exist.</summary>
+    internal static string LongPath(string path)
+    {
+        if (string.IsNullOrEmpty(path) || !path.Contains('~')) return path;
+        var buffer = new System.Text.StringBuilder(260);
+        var length = GetLongPathName(path, buffer, (uint)buffer.Capacity);
+        if (length > buffer.Capacity)
+        {
+            buffer = new System.Text.StringBuilder((int)length);
+            length = GetLongPathName(path, buffer, (uint)buffer.Capacity);
+        }
+        return length == 0 || length > buffer.Capacity ? path : buffer.ToString();
+    }
+
+    /// <summary>
+    /// A folder name for a repository or organization name. Windows drops trailing dots and spaces from folder names
+    /// (a repository can be named "tools."), so they are removed here, or the folder would not be the one asked for.
+    /// </summary>
+    internal static string SafeFolderName(string name)
+    {
+        var invalid = Path.GetInvalidFileNameChars();
+        var safe = new string(name.Select(c => invalid.Contains(c) ? '-' : c).ToArray()).TrimEnd('.', ' ').TrimStart(' ');
+        return safe.Length == 0 ? "runner" : safe;
     }
 
     /// <summary>A free folder in the runner folder for a runner of this repository or organization.</summary>
@@ -1212,8 +1288,7 @@ public static class RunnerService
     {
         var name = RepositoryPath(registrationUrl).Split('/').LastOrDefault(s => s.Length > 0)
                    ?? OrganizationName(registrationUrl);
-        if (string.IsNullOrWhiteSpace(name)) name = "runner";
-        var safe = new string(name.Select(c => Path.GetInvalidFileNameChars().Contains(c) ? '-' : c).ToArray());
+        var safe = SafeFolderName(name);
         var root = RunnersRoot;
         var path = Path.Combine(root, safe);
         for (var i = 2; Directory.Exists(path) && Directory.EnumerateFileSystemEntries(path).Any(); i++)
@@ -1347,7 +1422,31 @@ public static class RunnerService
         if (string.IsNullOrWhiteSpace(path) || !Path.IsPathFullyQualified(path)) return @"Choose a full folder path, such as D:\Runners.";
         return path.IndexOfAny(UnsafeInQuotes) >= 0 || path.Any(char.IsControl)
             ? "The runner folder path cannot contain the characters \", % or !."
-            : null;
+            : NetworkFolderProblem(path);
+    }
+
+    private const string NetworkFolderRule = "Choose a folder on a drive in this PC. Runners run as a Windows service, " +
+        "and services cannot use network folders or mapped drives.";
+
+    /// <summary>
+    /// Null when the folder is on a drive in this PC. Services run without the user's mapped drives, and the service
+    /// account usually cannot reach network shares, so UNC paths and mapped drives are refused.
+    /// </summary>
+    internal static string? NetworkFolderProblem(string path, Func<string, bool>? isNetworkDrive = null)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return null;
+        var text = path.Trim();
+        if (text.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase)) return NetworkFolderRule;
+        if (text.StartsWith(@"\\?\", StringComparison.Ordinal) || text.StartsWith(@"\\.\", StringComparison.Ordinal)) text = text[4..];
+        else if (text.StartsWith(@"\\", StringComparison.Ordinal) || text.StartsWith("//", StringComparison.Ordinal)) return NetworkFolderRule;
+        if (text.Length < 2 || text[1] != ':' || !char.IsAsciiLetter(text[0])) return null;
+        return (isNetworkDrive ?? IsNetworkDrive)($"{char.ToUpperInvariant(text[0])}:\\") ? NetworkFolderRule : null;
+    }
+
+    private static bool IsNetworkDrive(string root)
+    {
+        try { return new DriveInfo(root).DriveType == DriveType.Network; }
+        catch (Exception ex) when (ex is ArgumentException or IOException or UnauthorizedAccessException) { return false; }
     }
 
     private static void EnsureSafeFolder(string path)
@@ -1386,18 +1485,25 @@ public static class RunnerService
         using var json = JsonDocument.Parse(jsonText);
         var root = json.RootElement;
         var version = root.GetProperty("tag_name").GetString() ?? "latest";
+        var prefix = $"actions-runner-win-{(IsArm64 ? "arm64" : "x64")}-";
         foreach (var asset in root.GetProperty("assets").EnumerateArray())
         {
             var name = asset.GetProperty("name").GetString() ?? string.Empty;
-            if (!name.StartsWith("actions-runner-win-x64-", StringComparison.OrdinalIgnoreCase) || !name.EndsWith(".zip"))
+            if (!name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) || !name.EndsWith(".zip"))
                 continue;
             var url = asset.GetProperty("browser_download_url").GetString();
             var digest = asset.TryGetProperty("digest", out var digestValue) ? digestValue.GetString() ?? string.Empty : string.Empty;
             var sha256 = digest.StartsWith("sha256:", StringComparison.OrdinalIgnoreCase) ? digest[7..] : string.Empty;
             if (!string.IsNullOrWhiteSpace(url)) return new RunnerPackage(version, name, url, sha256);
         }
-        throw new InvalidOperationException("The latest GitHub Actions runner release has no Windows x64 package.");
+        throw new InvalidOperationException($"The latest GitHub Actions runner release has no Windows {ArchitectureLabel} package.");
     }
+
+    private static bool IsArm64 => System.Runtime.InteropServices.RuntimeInformation.OSArchitecture
+                                   == System.Runtime.InteropServices.Architecture.Arm64;
+
+    /// <summary>The architecture label runners on this PC get from GitHub: "ARM64" on ARM64 Windows, otherwise "X64".</summary>
+    public static string ArchitectureLabel => IsArm64 ? "ARM64" : "X64";
 
     private static async Task DownloadFileAsync(string url, string destination)
     {
@@ -1685,8 +1791,16 @@ public sealed class RunnerInfo : INotifyPropertyChanged
     /// <summary>The settings to pass to config.cmd when this runner is registered again, on this PC or another one.</summary>
     public RunnerRegistrationOptions RegistrationOptions => new(RunnerGroup, Ephemeral, DisableUpdate, NoDefaultLabels);
     public bool ServiceInstalled { get; init; }
-    /// <summary>Running from a console window (run.cmd) rather than as a Windows service.</summary>
+    /// <summary>
+    /// Running from a console window (run.cmd) rather than as a Windows service. Also true for a few minutes after the
+    /// console's listener stopped (see <see cref="ConsoleRestarting"/>).
+    /// </summary>
     public bool IsInteractive { get; init; }
+    /// <summary>
+    /// A console runner whose listener stopped a moment ago, as it does while it updates itself. It is shown as a console
+    /// runner (not "No service", which would offer Repair and install a second copy) and is not running.
+    /// </summary>
+    public bool ConsoleRestarting { get; init; }
     public bool IsRunning { get; init; }
     /// <summary>How commands address this runner: its service name, or its folder when it has no service.</summary>
     public string CommandKey => string.IsNullOrEmpty(Name) ? InstallPath : Name;

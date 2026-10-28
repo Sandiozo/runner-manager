@@ -129,7 +129,8 @@ public static class WorkflowManager
 /// <summary>The labels every runner registered by Runner Manager has, and how GitHub matches jobs to runners.</summary>
 internal static class RunnerLabels
 {
-    internal static readonly string[] Defaults = { "self-hosted", "Windows", "X64" };
+    /// <summary>The architecture label is ARM64 for runners on ARM64 Windows.</summary>
+    internal static readonly string[] Defaults = { "self-hosted", "Windows", RunnerService.ArchitectureLabel };
 
     /// <summary>The default labels plus the runner's custom labels.</summary>
     internal static HashSet<string> Available(IEnumerable<string> customLabels)

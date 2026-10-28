@@ -130,8 +130,77 @@ public static class GitHubCli
         return result.Output.Trim();
     }
 
+    /// <summary>
+    /// The runner's state for the dashboard. Read from one list per repository or organization, shared by its runners
+    /// and polled with an ETag (unchanged answers do not count against the rate limit), instead of one request per
+    /// runner. Runners beyond the first 100 of a scope are looked up one by one.
+    /// </summary>
     public static async Task<RemoteRunnerState?> GetRunnerStateAsync(string scope, long agentId)
-        => (await LookUpRunnerAsync(scope, agentId)).State;
+    {
+        if (agentId <= 0 || string.IsNullOrWhiteSpace(scope)) return null;
+        var list = await GetRunnerListAsync(scope);
+        if (list != null && list.Runners.TryGetValue(agentId, out var state)) return state;
+        // A complete list without this runner means GitHub has no such registration, as a 404 from the lookup would.
+        if (list is { Complete: true }) return null;
+        return (await LookUpRunnerAsync(scope, agentId)).State;
+    }
+
+    private sealed record RunnerList(Dictionary<long, RemoteRunnerState> Runners, bool Complete);
+
+    private static readonly TimeSpan RunnerListLifetime = TimeSpan.FromSeconds(8);
+    private static readonly object RunnerListLock = new();
+    /// <summary>One request per scope and refresh: runners of the same scope share the task. A failed task (null) is not reused.</summary>
+    private static readonly Dictionary<string, (DateTime Time, Task<RunnerList?> List)> RunnerLists = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly Dictionary<string, (string ETag, RunnerList List)> RunnerListETags = new(StringComparer.OrdinalIgnoreCase);
+
+    private static Task<RunnerList?> GetRunnerListAsync(string scope)
+    {
+        lock (RunnerListLock)
+        {
+            if (RunnerLists.TryGetValue(scope, out var cached) && DateTime.UtcNow - cached.Time < RunnerListLifetime
+                && !(cached.List.IsFaulted || cached.List.IsCanceled || (cached.List.IsCompletedSuccessfully && cached.List.Result == null)))
+                return cached.List;
+            var task = Task.Run(() => ReadRunnerListAsync(scope));
+            RunnerLists[scope] = (DateTime.UtcNow, task);
+            return task;
+        }
+    }
+
+    private static async Task<RunnerList?> ReadRunnerListAsync(string scope)
+    {
+        (string ETag, RunnerList List)? previous;
+        lock (RunnerListLock) previous = RunnerListETags.TryGetValue(scope, out var entry) ? entry : null;
+        var response = await GetConditionalAsync($"{scope}/actions/runners?per_page=100", previous?.ETag);
+        if (response.NotModified && previous != null) return previous.Value.List;
+        if (!response.Ok) return null;
+        try
+        {
+            using var json = JsonDocument.Parse(response.Body);
+            var list = ParseRunnerList(json.RootElement);
+            lock (RunnerListLock) RunnerListETags[scope] = (response.ETag, list);
+            return list;
+        }
+        catch { return null; }
+    }
+
+    /// <summary>The runners in a list response by ID; Complete is false when GitHub has more than this page holds.</summary>
+    private static RunnerList ParseRunnerList(JsonElement root)
+    {
+        var runners = new Dictionary<long, RemoteRunnerState>();
+        if (root.TryGetProperty("runners", out var items) && items.ValueKind == JsonValueKind.Array)
+            foreach (var item in items.EnumerateArray())
+                if (item.TryGetProperty("id", out var id) && id.ValueKind == JsonValueKind.Number)
+                    runners[id.GetInt64()] = ReadRunnerState(item);
+        var total = root.TryGetProperty("total_count", out var count) && count.ValueKind == JsonValueKind.Number ? count.GetInt32() : int.MaxValue;
+        return new RunnerList(runners, total <= runners.Count);
+    }
+
+    /// <summary>For tests: the IDs in a list response and whether the list is complete.</summary>
+    internal static (long[] Ids, bool Complete) ReadRunnerList(JsonElement root)
+    {
+        var list = ParseRunnerList(root);
+        return (list.Runners.Keys.Order().ToArray(), list.Complete);
+    }
 
     /// <summary>
     /// The runner's registration on GitHub. State is null when it could not be read; NotFound tells a confirmed

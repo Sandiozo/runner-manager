@@ -15,6 +15,7 @@ public partial class AddRunnerWindow : Window
         InitializeComponent();
         WindowTheme.Apply(this);
         RunnerNameBox.Text = Environment.MachineName;
+        LabelsHint.Text = $"The labels self-hosted, Windows and {RunnerService.ArchitectureLabel} are always added.";
         InstallPathBox.Text = Path.Combine(RunnerService.RunnersRoot, "NewRunner");
         InstallPathBox.TextChanged += (_, _) =>
         {
@@ -76,7 +77,8 @@ public partial class AddRunnerWindow : Window
         var problem = string.Empty;
         try
         {
-            if (path.Length > 0 && Directory.Exists(path) && Directory.EnumerateFileSystemEntries(path).Any())
+            if (path.Length > 0 && RunnerService.NetworkFolderProblem(path) is { } network) problem = network;
+            else if (path.Length > 0 && Directory.Exists(path) && Directory.EnumerateFileSystemEntries(path).Any())
                 problem = "This folder already contains files. Choose an empty or new folder.";
         }
         catch { }
@@ -132,6 +134,11 @@ public partial class AddRunnerWindow : Window
             LabelsBox.Focus();
             return;
         }
+        if (RunnerService.NetworkFolderProblem(install) is { } networkProblem)
+        {
+            DialogWindow.Info(this, "Choose a local folder", networkProblem);
+            return;
+        }
         if (Directory.Exists(install) && Directory.EnumerateFileSystemEntries(install).Any())
         {
             DialogWindow.Info(this, "Folder is not empty", "Choose an empty or new folder for the runner.");
@@ -150,9 +157,5 @@ public partial class AddRunnerWindow : Window
 
     private void Cancel_Click(object sender, RoutedEventArgs e) => DialogResult = false;
 
-    private static string Sanitize(string value)
-    {
-        var invalid = Path.GetInvalidFileNameChars();
-        return new string(value.Select(c => invalid.Contains(c) ? '-' : c).ToArray());
-    }
+    private static string Sanitize(string value) => RunnerService.SafeFolderName(value);
 }

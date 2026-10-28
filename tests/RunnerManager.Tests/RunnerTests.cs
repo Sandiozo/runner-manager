@@ -1,4 +1,5 @@
 using System.IO;
+using System.Runtime.InteropServices;
 
 namespace RunnerManager.Tests;
 
@@ -341,9 +342,97 @@ public class StartupScriptTests
     }
 }
 
+public class RunnerListingTests
+{
+    [Fact]
+    public void ConsoleRunner_ThatJustStopped_IsShownAsRestarting()
+    {
+        var root = $@"C:\GitHub-Runners\console-{Guid.NewGuid():N}";
+        var now = DateTime.UtcNow;
+        Assert.False(RunnerService.IsConsoleRestarting(root, listenerRunning: false, now));
+        Assert.False(RunnerService.IsConsoleRestarting(root, listenerRunning: true, now));
+        Assert.True(RunnerService.IsConsoleRestarting(root, listenerRunning: false, now.AddSeconds(20)));
+        Assert.False(RunnerService.IsConsoleRestarting(root, listenerRunning: false, now.AddMinutes(10)));
+    }
+
+    [Theory]
+    [InlineData(@"C:\GitHub-Runners\a\bin\Runner.Listener.exe", @"C:\GitHub-Runners\a")]
+    [InlineData(@"C:\GitHub-Runners\a\bin.2.330.0\Runner.Listener.exe", @"C:\GitHub-Runners\a")]
+    [InlineData(@"D:\Git-Runners\bin\RunnerService.exe", @"D:\Git-Runners")]
+    [InlineData("", "")]
+    public void RunnerFolder_IsFoundFromItsExecutable(string exe, string root)
+        => Assert.Equal(root, RunnerService.RootFromExecutable(exe));
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    private static extern uint GetShortPathName(string longPath, System.Text.StringBuilder shortPath, uint length);
+
+    [Fact]
+    public void ShortPaths_AreExpanded()
+    {
+        var folder = Path.Combine(Path.GetTempPath(), $"Long Runner Folder {Guid.NewGuid():N}");
+        Directory.CreateDirectory(Path.Combine(folder, "bin"));
+        try
+        {
+            var buffer = new System.Text.StringBuilder(520);
+            Assert.NotEqual(0u, GetShortPathName(Path.Combine(folder, "bin"), buffer, (uint)buffer.Capacity));
+            // The volume may have 8.3 names turned off; the long path must come back either way.
+            Assert.Equal(Path.GetFullPath(folder), RunnerService.RootFromExecutable(Path.Combine(buffer.ToString(), "Runner.Listener.exe")),
+                StringComparer.OrdinalIgnoreCase);
+            Assert.Equal(@"C:\NO~SUCH\x", RunnerService.LongPath(@"C:\NO~SUCH\x"));
+        }
+        finally { Directory.Delete(folder, recursive: true); }
+    }
+
+    [Theory]
+    [InlineData("{\"total_count\":2,\"runners\":[{\"id\":4,\"name\":\"a\",\"status\":\"online\"},{\"id\":9,\"name\":\"b\",\"status\":\"offline\"}]}", true)]
+    [InlineData("{\"total_count\":150,\"runners\":[{\"id\":4,\"name\":\"a\",\"status\":\"online\"}]}", false)]
+    public void RunnerList_KnowsWhenItHoldsEveryRunner(string json, bool complete)
+    {
+        using var document = System.Text.Json.JsonDocument.Parse(json);
+        var (ids, isComplete) = GitHubCli.ReadRunnerList(document.RootElement);
+        Assert.Contains(4L, ids);
+        Assert.Equal(complete, isComplete);
+    }
+
+    [Fact]
+    public void DefaultLabels_MatchThisPcsArchitecture()
+    {
+        Assert.Contains(RunnerService.ArchitectureLabel, RunnerLabels.Defaults);
+        Assert.Contains(RunnerService.ArchitectureLabel, new[] { "X64", "ARM64" });
+    }
+}
+
 [Collection(FleetSettingsCollection.Name)]
 public class RunnerFolderTests
 {
+    [Theory]
+    [InlineData(@"\\server\share\runners")]
+    [InlineData(@"//server/share/runners")]
+    [InlineData(@"\\?\UNC\server\share\runners")]
+    public void NetworkPaths_AreRefused(string path)
+        => Assert.NotNull(RunnerService.NetworkFolderProblem(path, _ => false));
+
+    [Fact]
+    public void MappedDrives_AreRefused()
+    {
+        Assert.NotNull(RunnerService.NetworkFolderProblem(@"Z:\runners", root => root == @"Z:\"));
+        Assert.NotNull(RunnerService.NetworkFolderProblem(@"\\?\z:\runners", root => root == @"Z:\"));
+        Assert.Null(RunnerService.NetworkFolderProblem(@"C:\runners", root => root == @"Z:\"));
+        Assert.Null(RunnerService.NetworkFolderProblem(@"\\?\C:\runners", root => root == @"Z:\"));
+    }
+
+    [Theory]
+    [InlineData("tools.", "tools")]
+    [InlineData("my.repo..", "my.repo")]
+    [InlineData("...", "runner")]
+    [InlineData("a:b", "a-b")]
+    public void FolderNames_DropWhatWindowsDrops(string name, string expected)
+        => Assert.Equal(expected, RunnerService.SafeFolderName(name));
+
+    [Fact]
+    public void RepositoryEndingInADot_GetsAFolderWithoutIt()
+        => Assert.Equal("tools", Path.GetFileName(RunnerService.SuggestInstallPath("https://github.com/acme/tools.")));
+
     [Theory]
     [InlineData(@"D:\Runners", true)]
     [InlineData(@"C:\GitHub Runners\Build", true)]

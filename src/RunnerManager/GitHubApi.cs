@@ -84,14 +84,35 @@ public static class GitHubApi
         return state;
     }
 
+    private static readonly Dictionary<string, (string ETag, string Body)> PolledBodies = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// GET with an ETag for the queue view's requests: while a run and its jobs don't change, GitHub answers 304, which
+    /// does not count against the rate limit, and the last answer is reused. Null when the request failed.
+    /// </summary>
+    private static async Task<string?> GetPolledAsync(string endpoint)
+    {
+        (string ETag, string Body)? cached;
+        lock (CacheLock) cached = PolledBodies.TryGetValue(endpoint, out var entry) ? entry : null;
+        var response = await GitHubCli.GetConditionalAsync(endpoint, cached?.ETag);
+        if (response.NotModified && cached != null) return cached.Value.Body;
+        if (!response.Ok) return null;
+        lock (CacheLock)
+        {
+            // Job lists are per run, so old runs' entries are dropped now and then.
+            if (PolledBodies.Count > 500) PolledBodies.Clear();
+            PolledBodies[endpoint] = (response.ETag, response.Body);
+        }
+        return response.Body;
+    }
+
     private static async Task<List<WorkflowRunState>?> GetRunsAsync(string repositoryPath, string status)
     {
-        var result = await GitHubCli.RunPollAsync(
-            $"api repos/{repositoryPath}/actions/runs?status={status}&per_page=20");
-        if (result.ExitCode != 0) return null;
+        var body = await GetPolledAsync($"repos/{repositoryPath}/actions/runs?status={status}&per_page=20");
+        if (body == null) return null;
         try
         {
-            using var json = JsonDocument.Parse(result.Output);
+            using var json = JsonDocument.Parse(body);
             var list = new List<WorkflowRunState>();
             foreach (var run in json.RootElement.GetProperty("workflow_runs").EnumerateArray())
                 list.Add(ReadRun(run));
@@ -112,12 +133,11 @@ public static class GitHubApi
 
     private static async Task<List<GitHubJobState>?> GetJobsAsync(string repositoryPath, WorkflowRunState run)
     {
-        var result = await GitHubCli.RunPollAsync(
-            $"api repos/{repositoryPath}/actions/runs/{run.Id}/jobs?filter=latest&per_page=100");
-        if (result.ExitCode != 0) return null;
+        var body = await GetPolledAsync($"repos/{repositoryPath}/actions/runs/{run.Id}/jobs?filter=latest&per_page=100");
+        if (body == null) return null;
         try
         {
-            using var json = JsonDocument.Parse(result.Output);
+            using var json = JsonDocument.Parse(body);
             var list = new List<GitHubJobState>();
             foreach (var job in json.RootElement.GetProperty("jobs").EnumerateArray())
                 list.Add(ReadJob(job, run));

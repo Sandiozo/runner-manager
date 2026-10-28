@@ -17,7 +17,7 @@ public partial class EditRunnerWindow : Window
         var currentLabels = runner.LocalRunner?.CustomLabels ?? Array.Empty<string>();
         LabelsBox.Text = string.Join(", ", currentLabels);
         LabelsHint.Text = runner.LocalRunner != null
-            ? "The labels self-hosted, Windows and X64 are always added. Leave blank to keep the current labels."
+            ? $"The labels self-hosted, Windows and {RunnerService.ArchitectureLabel} are always added. Leave blank to keep the current labels."
             : "Leave blank to keep the current labels.";
         Loaded += (_, _) => { RunnerNameBox.Focus(); RunnerNameBox.SelectAll(); };
     }

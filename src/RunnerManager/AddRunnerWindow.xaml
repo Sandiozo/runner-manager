@@ -45,7 +45,7 @@
                     <TextBox x:Name="LabelsBox" Tag="Optional, comma-separated"/>
                 </StackPanel>
             </Grid>
-            <TextBlock Style="{StaticResource FieldHint}" Text="The labels self-hosted, Windows and X64 are always added."/>
+            <TextBlock x:Name="LabelsHint" Style="{StaticResource FieldHint}" Text="The labels self-hosted, Windows and X64 are always added."/>
 
             <TextBlock Text="Install folder" Style="{StaticResource FieldLabel}" Margin="0,16,0,6"/>
             <Grid>
