@@ -878,6 +878,7 @@ public static class MachineRelay
                 Scope = r.ApiScope,
                 AgentName = r.AgentName,
                 AgentId = r.AgentId,
+                CustomLabels = r.CustomLabels,
                 IsRunning = r.IsRunning,
                 ActivityText = r.ActivityText,
                 ServiceInstalled = r.ServiceInstalled,

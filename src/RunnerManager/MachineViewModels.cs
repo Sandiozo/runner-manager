@@ -33,6 +33,8 @@ public sealed class MachineRunnerStatus : INotifyPropertyChanged
     public string Scope { get; init; } = string.Empty;
     public string AgentName { get; init; } = string.Empty;
     public long AgentId { get; init; }
+    /// <summary>Labels besides self-hosted, Windows and X64 (empty from older agents, or when GitHub could not be read).</summary>
+    public string[] CustomLabels { get; init; } = Array.Empty<string>();
     public bool IsRunning { get; init; }
     public string ActivityText { get; init; } = string.Empty;
     public bool ServiceInstalled { get; init; }
@@ -294,6 +296,7 @@ public sealed class MachineInfo : INotifyPropertyChanged
                 Scope = r.ApiScope,
                 AgentName = r.AgentName,
                 AgentId = r.AgentId,
+                CustomLabels = r.CustomLabels,
                 IsRunning = r.IsRunning,
                 ActivityText = r.ActivityText,
                 ServiceInstalled = r.ServiceInstalled,
