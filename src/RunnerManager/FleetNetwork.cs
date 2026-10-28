@@ -182,7 +182,7 @@ public static class FleetNetwork
     /// </summary>
     internal static async Task<IPAddress[]> ResolveIPv4Async(IEnumerable<string> hosts)
     {
-        var lookups = hosts.Select(h => h.Split(':')[0].Trim())
+        var lookups = hosts.Select(HostOf)
             .Where(h => h.Length > 0)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .Select(async name =>
@@ -218,7 +218,40 @@ public static class FleetNetwork
     }
 
     public static string WithPort(string address)
-        => address.Contains(':') ? address : $"{address}:{AgentPort}";
+    {
+        var (host, port) = SplitHostPort(address);
+        return JoinHostPort(host, port ?? AgentPort);
+    }
+
+    /// <summary>
+    /// Splits "host", "host:port", "1.2.3.4:port", "[v6]:port", "[v6]" or a bare IPv6 address. The port is null when
+    /// none was given.
+    /// </summary>
+    public static (string Host, int? Port) SplitHostPort(string address)
+    {
+        var text = address.Trim();
+        if (text.StartsWith('['))
+        {
+            var end = text.IndexOf(']');
+            if (end > 0)
+            {
+                var host = text[1..end];
+                var rest = text[(end + 1)..];
+                return (host, rest.StartsWith(':') && int.TryParse(rest[1..], out var v6Port) ? v6Port : null);
+            }
+        }
+        var colon = text.LastIndexOf(':');
+        // More than one colon without brackets is an IPv6 address without a port.
+        if (colon < 0 || text.IndexOf(':') != colon) return (text, null);
+        return int.TryParse(text[(colon + 1)..], out var port) ? (text[..colon], port) : (text[..colon], null);
+    }
+
+    /// <summary>"host:port", with IPv6 addresses in brackets.</summary>
+    public static string JoinHostPort(string host, int port)
+        => host.Contains(':') ? $"[{host}]:{port}" : $"{host}:{port}";
+
+    /// <summary>The host part of an address, without the port or IPv6 brackets.</summary>
+    public static string HostOf(string address) => SplitHostPort(address).Host;
 
     // ================= Firewall =================
 

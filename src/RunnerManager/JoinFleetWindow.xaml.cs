@@ -60,7 +60,14 @@ public partial class JoinFleetWindow : Window
 
     private async void Host_Click(object sender, RoutedEventArgs e)
     {
-        if (sender is FrameworkElement { Tag: Pairing.Host host }) await JoinAsync(host.Address, host.Name);
+        if (sender is not FrameworkElement { Tag: Pairing.Host host }) return;
+        if (host.IsOutdated)
+        {
+            DialogWindow.Info(this, "Update Runner Manager first",
+                $"{host.Name} runs an older Runner Manager that can't pair with this one. Update Runner Manager on {host.Name}, then try again.");
+            return;
+        }
+        await JoinAsync(host.Address, host.Name);
     }
 
     private async void ConnectAddress_Click(object sender, RoutedEventArgs e)

@@ -49,16 +49,30 @@ public partial class PairingHostWindow : Window
         Closed += (_, _) =>
         {
             _expiry.Stop();
-            _current?.Deny();
-            while (_pending.TryDequeue(out var request)) request.Deny();
-            _host.Dispose();
+            // Denies the open requests and lets the other PCs hear it before the connections close.
+            _ = _host.StopAsync();
         };
     }
 
     private void Enqueue(Pairing.JoinRequest request)
     {
+        if (request.Ended.IsCompleted) return;
+        // The host stops waiting after a few minutes, or when the other PC gives up: take the request off the screen then.
+        request.Ended.ContinueWith(_ => Dispatcher.BeginInvoke(() => Remove(request)), TaskScheduler.Default);
         if (_current != null) { _pending.Enqueue(request); return; }
         ShowRequest(request);
+    }
+
+    private void Remove(Pairing.JoinRequest request)
+    {
+        if (_current == request)
+        {
+            Next();
+            return;
+        }
+        var others = _pending.Where(r => r != request).ToList();
+        _pending.Clear();
+        foreach (var other in others) _pending.Enqueue(other);
     }
 
     private void ShowRequest(Pairing.JoinRequest request)
