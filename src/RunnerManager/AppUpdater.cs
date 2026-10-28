@@ -560,7 +560,7 @@ public static class AppUpdater
     {
         var exe = await DownloadAndInstallAsync(release, log);
         await CreateStartMenuShortcutAsync();
-        if (await MachineRelay.IsAgentInstalledAsync())
+        if (await MachineRelay.IsAgentInstalledAsync() && await AgentOwnership.OtherUserAsync() == null)
         {
             log("Switching the fleet agent to the new version...");
             await MachineRelay.RegisterAgentTaskAsync(exe);

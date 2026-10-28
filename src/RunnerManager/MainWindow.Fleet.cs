@@ -34,7 +34,7 @@ public partial class MainWindow
         try
         {
             await LegacyInstall.MigrateAsync(AddActivity);
-            await Installer.EnsureLaunchTaskAsync();
+            await Installer.EnsureLaunchTaskAsync(force: App.ElevatedByPrompt);
         }
         catch (Exception ex) { AddActivity($"Could not update the install: {ex.Message}"); }
         if (UpdateGuard.TakeRollbackNotice() is { } notice) RaiseAlert(notice, warning: true);
@@ -382,6 +382,11 @@ public partial class MainWindow
         if (ItemFrom<MachineInfo>(sender) is not { CanUpdateAgent: true } machine) return;
         if (machine.LocalAgentOutdated)
         {
+            if (_agentOwner != null)
+            {
+                DialogWindow.Info(this, "Another Windows user runs the fleet agent", AgentOwnership.Describe(_agentOwner));
+                return;
+            }
             if (!DialogWindow.Confirm(this, "Update the fleet agent on this PC?",
                     $"The fleet agent is updated to v{AppUpdater.CurrentVersion} and installed to {AppUpdater.InstallDir}. " +
                     "Runners and Remote Desktop Commander keep running.", "Update fleet agent")) return;
@@ -475,7 +480,8 @@ public partial class MainWindow
         var busy = machine.Runners.Where(r => r.IsBusy).Select(r => r.TitleText).ToList();
         var warning = busy.Count > 0 ? $"\n\nJobs on these runners are cancelled: {string.Join(", ", busy)}." : string.Empty;
         if (!DialogWindow.Confirm(this, $"Restart {machine.MachineName}?",
-                $"Windows restarts in 60 seconds. Runner services and the fleet agent start again automatically after sign-in.{warning}",
+                $"Windows restarts in 60 seconds. Runner services start again on their own. {machine.MachineName} rejoins the fleet " +
+                $"once the Windows user who runs Runner Manager there signs in.{warning}",
                 "Restart PC", danger: true)) return;
         if (machine.IsLocal)
         {

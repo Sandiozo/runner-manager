@@ -25,9 +25,16 @@ public partial class App : Application
     private EventWaitHandle? _activateEvent;
     private RegisteredWaitHandle? _activateWait;
 
+    /// <summary>
+    /// This copy got administrator rights from a UAC prompt, not from the launch task: the task may be missing, turned off
+    /// or point at another exe, so the dashboard checks it again.
+    /// </summary>
+    internal static bool ElevatedByPrompt { get; private set; }
+
     protected override async void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
+        ElevatedByPrompt = e.Args.Contains(ElevationAttemptedArgument, StringComparer.OrdinalIgnoreCase);
         if (e.Args.Contains(ProbeArgument, StringComparer.OrdinalIgnoreCase))
         {
             Shutdown(0);
@@ -92,6 +99,19 @@ public partial class App : Application
                 Shutdown(1);
                 return;
             }
+            // A task registered by an older version lacks the keep-alive trigger. Checked once the agent has proven
+            // itself, because re-registering may restart it.
+            if (!another)
+                _ = Task.Run(async () =>
+                {
+                    await Task.Delay(UpdateGuard.HealthyAfter + TimeSpan.FromMinutes(1));
+                    try
+                    {
+                        if (await ScheduledTasks.UpdateAgentTaskIfOutdatedAsync(fromAgent: true))
+                            MachineRelay.AppendAgentLog("Updated the fleet agent task: it now starts again by itself when it stopped.");
+                    }
+                    catch (Exception ex) { MachineRelay.AppendAgentLog($"Could not update the fleet agent task: {ex.Message}"); }
+                });
             try { await MachineRelay.RunAgentAsync(CancellationToken.None); }
             catch (Exception ex)
             {
@@ -236,6 +256,20 @@ public partial class App : Application
         _dashboardMutex?.Dispose();
         _dashboardMutex = null;
         Shutdown();
+    }
+
+    /// <summary>Whether a dashboard runs in this Windows session (also from a copy without administrator rights).</summary>
+    internal static bool DashboardIsRunning()
+    {
+        try
+        {
+            using var mutex = Mutex.OpenExisting(DashboardMutexName);
+            return true;
+        }
+        catch (WaitHandleCannotBeOpenedException) { return false; }
+        // It exists, but belongs to the elevated dashboard.
+        catch (UnauthorizedAccessException) { return true; }
+        catch { return false; }
     }
 
     private bool TryOwnDashboardMutex()

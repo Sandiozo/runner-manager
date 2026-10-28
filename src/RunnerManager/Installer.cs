@@ -89,16 +89,23 @@ public static class Installer
         log("Registering Runner Manager in Settings → Apps...");
         RegisterUninstallEntry(exe);
 
+        await ScheduledTasks.RegisterLaunchTaskAsync(exe);
+        await MigrateSharedTasksAsync(exe);
         if (choices.StartWithWindows) await RegisterStartupTaskAsync(exe);
         else await ScheduledTasks.DeleteTaskAsync(ScheduledTasks.DashboardTaskName);
-        await ScheduledTasks.RegisterLaunchTaskAsync(exe);
         await LegacyInstall.MigrateAsync(log, fromSetup: true);
 
-        // An agent from an earlier install keeps running from the old place; point it at the new copy.
+        // An agent from an earlier install keeps running from the old place; point it at the new copy. Another Windows
+        // user's agent is left alone.
         if (await MachineRelay.IsAgentInstalledAsync())
         {
-            log("Updating the fleet agent...");
-            await MachineRelay.UpdateLocalAgentAsync(log);
+            if (await AgentOwnership.OtherUserAsync() is { } other)
+                log($"The fleet agent on this PC runs for {other}, so it was left alone.");
+            else
+            {
+                log("Updating the fleet agent...");
+                await MachineRelay.UpdateLocalAgentAsync(log);
+            }
         }
 
         if (moving)
@@ -124,18 +131,41 @@ public static class Installer
     private const string LaunchTaskCheck = "launch-task";
 
     /// <summary>
-    /// The installed dashboard opens through the launch task, so make sure it exists (older installs lack it), and keep
-    /// the version in Settings → Apps current after updates. The task is checked once per version.
+    /// The installed dashboard opens through the launch task, so make sure this user's task exists, is turned on and starts
+    /// the installed exe, and keep the version in Settings → Apps current after updates. The task is checked once per
+    /// version, or again when <paramref name="force"/> is set (the dashboard had to ask with UAC).
     /// </summary>
-    public static async Task EnsureLaunchTaskAsync()
+    public static async Task EnsureLaunchTaskAsync(bool force = false)
     {
         if (!AppUpdater.IsRunningInstalledCopy) return;
         RefreshUninstallEntryVersion();
-        if (InstallChecks.IsDone(LaunchTaskCheck)) return;
-        var command = ScheduledTasks.CommandOf(await ScheduledTasks.QueryXmlAsync(ScheduledTasks.LaunchTaskName));
-        if (!string.Equals(command, AppUpdater.InstalledExe, StringComparison.OrdinalIgnoreCase))
+        if (!force && InstallChecks.IsDone(LaunchTaskCheck)) return;
+        var xml = await ScheduledTasks.QueryXmlAsync(ScheduledTasks.LaunchTaskName);
+        if (xml.Length == 0 || !Elevation.IsUsableLaunchTask(xml, AppUpdater.InstalledExe))
             await ScheduledTasks.RegisterLaunchTaskAsync(AppUpdater.InstalledExe);
+        await MigrateSharedTasksAsync(AppUpdater.InstalledExe);
         InstallChecks.MarkDone(LaunchTaskCheck);
+    }
+
+    /// <summary>
+    /// 2.3 and earlier named the launch and startup tasks the same for every Windows user, so a second user's setup took
+    /// them over. When they are this user's, they move to this user's own names; another user's are left alone.
+    /// </summary>
+    private static async Task MigrateSharedTasksAsync(string exe)
+    {
+        if (await IsOwnTaskAsync(ScheduledTasks.SharedDashboardTaskName))
+        {
+            await RegisterStartupTaskAsync(exe);
+            await ScheduledTasks.DeleteTaskAsync(ScheduledTasks.SharedDashboardTaskName);
+        }
+        if (await IsOwnTaskAsync(ScheduledTasks.SharedLaunchTaskName))
+            await ScheduledTasks.DeleteTaskAsync(ScheduledTasks.SharedLaunchTaskName);
+    }
+
+    private static async Task<bool> IsOwnTaskAsync(string name)
+    {
+        var principal = ScheduledTasks.PrincipalOf(await ScheduledTasks.QueryXmlAsync(name));
+        return principal.Length > 0 && ScheduledTasks.IsCurrentUser(principal);
     }
 
     /// <summary>Setup writes DisplayVersion, and updates replace the exe without setup, so refresh it when it is outdated.</summary>
@@ -244,11 +274,16 @@ public static class Installer
         // Read before the Settings → Apps entry that records a chosen folder is deleted below.
         var installDir = AppUpdater.InstallDir;
         CloseRunningDashboards(log);
-        if (FleetConfig.Current.FleetKey != null || await MachineRelay.IsAgentInstalledAsync())
+        // Another Windows user's agent stays: it is their fleet membership, not this user's.
+        if (await AgentOwnership.OtherUserAsync() is { } other)
+            log($"The fleet agent on this PC runs for {other}, so it was left alone.");
+        else if (FleetConfig.Current.FleetKey != null || await MachineRelay.IsAgentInstalledAsync())
             await MachineRelay.LeaveFleetAsync(log);
         log("Removing the scheduled tasks and shortcuts...");
         foreach (var task in new[] { ScheduledTasks.DashboardTaskName, ScheduledTasks.LaunchTaskName, ScheduledTasks.LegacyDashboardTaskName })
             await ScheduledTasks.DeleteTaskAsync(task);
+        foreach (var task in new[] { ScheduledTasks.SharedDashboardTaskName, ScheduledTasks.SharedLaunchTaskName })
+            if (await IsOwnTaskAsync(task)) await ScheduledTasks.DeleteTaskAsync(task);
         TryDelete(StartMenuShortcut);
         TryDelete(DesktopShortcut);
         try { Registry.CurrentUser.DeleteSubKeyTree(UninstallKey, throwOnMissingSubKey: false); } catch { }

@@ -45,6 +45,9 @@ public partial class MainWindow : Window
     private string _githubLogin = string.Empty;
     private bool _isEnrolled;
     private bool _agentTaskChecked;
+    /// <summary>Another Windows user whose fleet agent runs on this PC, or null.</summary>
+    private string? _agentOwner;
+    private bool _agentOwnerReported;
     private bool _exiting;
     private bool _trayHintShown;
     private bool _suppressNavSelection;
@@ -116,6 +119,14 @@ public partial class MainWindow : Window
                 ApplyGitHubStatus();
             }
             _isEnrolled = await enrollmentTask;
+            // Another Windows user runs this PC's fleet agent: this dashboard shows the PC but leaves the agent alone.
+            _agentOwner = await AgentOwnership.OtherUserAsync();
+            if (_agentOwner != null)
+            {
+                _isEnrolled = false;
+                if (!_agentOwnerReported) AddActivity(AgentOwnership.Describe(_agentOwner));
+                _agentOwnerReported = true;
+            }
             ApplyEnrollmentStatus();
             await EnsureAgentTaskSettingsAsync();
 
@@ -150,8 +161,12 @@ public partial class MainWindow : Window
             ReportAgentEvents();
             await RefreshFleetExtrasAsync();
             LastUpdatedText.Text = $"Updated {DateTime.Now:HH:mm:ss}  ·  Refreshes every {_settings.RefreshSeconds}s";
-            if (!_operationRunning) SetStatus(_githubAuthenticated ? "Ready" : "GitHub not connected. Showing this PC only.",
-                _githubAuthenticated ? StatusKind.Ok : StatusKind.Warning);
+            if (!_operationRunning)
+            {
+                if (_agentOwner != null) SetStatus($"The fleet agent on this PC runs for {_agentOwner}.", StatusKind.Warning);
+                else SetStatus(_githubAuthenticated ? "Ready" : "GitHub not connected. Showing this PC only.",
+                    _githubAuthenticated ? StatusKind.Ok : StatusKind.Warning);
+            }
         }
         catch (Exception ex)
         {
@@ -178,6 +193,8 @@ public partial class MainWindow : Window
         {
             if (await MachineRelay.RepairAgentTaskSettingsAsync())
                 AddActivity("Updated the fleet agent task to run on battery and without the 3-day time limit.");
+            if (await ScheduledTasks.UpdateAgentTaskIfOutdatedAsync(fromAgent: false))
+                AddActivity("Updated the fleet agent task: it now starts again by itself when it stopped.");
         }
         catch (Exception ex) { AddActivity($"Could not update fleet agent task settings: {ex.Message}"); }
     }
@@ -208,7 +225,7 @@ public partial class MainWindow : Window
     /// <summary>When this PC's agent is older than this dashboard, update it once, automatically.</summary>
     private void ScheduleLocalAgentUpdate(MachineInfo? local)
     {
-        if (_localAgentUpdateTried || _localAgentUpdateScheduled
+        if (_localAgentUpdateTried || _localAgentUpdateScheduled || _agentOwner != null
             || local is not { LocalAgentOutdated: true } || FleetConfig.Current.FleetKey == null) return;
         // This version was just undone because its agent did not work; do not put it back.
         if (UpdateGuard.WasRolledBack(AppUpdater.CurrentVersion)) return;
@@ -861,6 +878,11 @@ public partial class MainWindow : Window
     /// <summary>Joins or starts a fleet (from the sidebar, or right after setup), then installs the agent.</summary>
     private async Task SetUpFleetAsync(FleetStart start)
     {
+        if (await AgentOwnership.OtherUserAsync() is { } owner)
+        {
+            DialogWindow.Info(this, "Another Windows user runs the fleet agent", AgentOwnership.Describe(owner));
+            return;
+        }
         var newFleet = false;
         if (start == FleetStart.New && FleetConfig.Current.FleetKey == null)
         {
