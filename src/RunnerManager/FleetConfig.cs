@@ -275,6 +275,7 @@ public sealed class FleetConfig
     private void Normalize()
     {
         ProtectedFleetKey ??= string.Empty;
+        ProtectedPendingFleetKey ??= string.Empty;
         KnownPeers ??= new();
         KnownPeers.RemoveAll(p => p == null);
         foreach (var peer in KnownPeers)
@@ -339,8 +340,32 @@ public sealed class FleetConfig
     }
 
     public static void SetFleetKey(byte[]? key) => Update(c =>
-        c.ProtectedFleetKey = key == null ? string.Empty
-            : Convert.ToBase64String(ProtectedData.Protect(key, null, DataProtectionScope.CurrentUser)));
+    {
+        c.ProtectedFleetKey = Protect(key);
+        c.ProtectedPendingFleetKey = string.Empty;
+    });
+
+    private static string Protect(byte[]? key)
+        => key == null ? string.Empty : Convert.ToBase64String(ProtectedData.Protect(key, null, DataProtectionScope.CurrentUser));
+
+    /// <summary>
+    /// A new pairing code sent by "Change fleet code" on another PC, encrypted like the pairing code. The agent
+    /// accepts it next to the current code until the first request that uses it; then it replaces the current code.
+    /// </summary>
+    public string ProtectedPendingFleetKey { get; set; } = string.Empty;
+
+    [JsonIgnore]
+    public byte[]? PendingFleetKey => Unprotect(ProtectedPendingFleetKey);
+
+    public static void SetPendingFleetKey(byte[] key) => Update(c => c.ProtectedPendingFleetKey = Protect(key));
+
+    /// <summary>Makes the pending code the pairing code, if it still is <paramref name="key"/>. The old code stops working.</summary>
+    public static void UsePendingFleetKey(byte[] key) => Update(c =>
+    {
+        if (c.PendingFleetKey is not { } pending || !CryptographicOperations.FixedTimeEquals(pending, key)) return;
+        c.ProtectedFleetKey = c.ProtectedPendingFleetKey;
+        c.ProtectedPendingFleetKey = string.Empty;
+    });
 }
 
 /// <summary>The fleet pairing code: 32 random bytes, shown as "rwk_…" so it can be copied between PCs.</summary>

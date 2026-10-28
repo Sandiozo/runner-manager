@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.IO;
 using System.Diagnostics;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Channels;
@@ -915,10 +916,101 @@ public static class MachineRelay
         FleetConfig.Update(c =>
         {
             c.ProtectedFleetKey = string.Empty;
+            c.ProtectedPendingFleetKey = string.Empty;
             c.KnownPeers.Clear();
         });
         lock (LastStatus) LastStatus.Clear();
         return told;
+    }
+
+    /// <summary>The first protocol whose agents can receive a new pairing code from Change fleet code.</summary>
+    public const int RekeyProtocolVersion = 12;
+
+    /// <summary>What Change fleet code did, by PC name.</summary>
+    /// <param name="Switched">PCs that use the new code now.</param>
+    /// <param name="NotConfirmed">PCs that got the new code but didn't answer with it yet; they switch the next time a PC contacts them.</param>
+    /// <param name="Failed">PCs that didn't get the new code, with the reason. They must pair again.</param>
+    /// <param name="LeftOut">PCs the user left out. They were forgotten and must pair again.</param>
+    public sealed record FleetCodeChange(List<string> Switched, List<string> NotConfirmed, List<string> Failed, List<string> LeftOut);
+
+    /// <summary>
+    /// Change fleet code: makes a new pairing code and gives it to the PCs in <paramref name="keep"/>, encrypted with
+    /// the current code and a fresh key exchange. This PC switches only after at least one of them confirmed it (or
+    /// when there are none to give it to). Each of them switches at the first request that uses the new code; this
+    /// sends one to each right away. PCs that are left out, offline or too old keep the old code, so they can no
+    /// longer reach the fleet and must pair again. The ones left out are forgotten here and on the PCs that switched.
+    /// </summary>
+    public static async Task<FleetCodeChange> ChangeFleetCodeAsync(IReadOnlyList<MachineInfo> keep, IReadOnlyList<MachineInfo> leaveOut, Action<string> log)
+    {
+        var oldKey = FleetConfig.Current.FleetKey ?? throw new InvalidOperationException("This PC has no pairing code.");
+        var newKey = CommandSigner.NewKey();
+        var prepared = new List<MachineInfo>();
+        var failed = new List<string>();
+        if (keep.Count > 0) log($"Sending the new code to {string.Join(", ", keep.Select(m => m.MachineName))}…");
+        await Task.WhenAll(keep.Select(async machine =>
+        {
+            try
+            {
+                await SendNewKeyAsync(machine, oldKey, newKey);
+                lock (prepared) prepared.Add(machine);
+            }
+            catch (Exception ex)
+            {
+                var reason = ex.Message.StartsWith("Unknown request", StringComparison.Ordinal) ? "Update Runner Manager on it first." : ex.Message;
+                lock (failed) failed.Add($"{machine.MachineName}: {reason}");
+            }
+        }));
+        if (keep.Count > 0 && prepared.Count == 0)
+            throw new InvalidOperationException($"No PC received the new code, so nothing was changed. {string.Join(" ", failed)}");
+
+        FleetConfig.SetFleetKey(newKey);
+        log($"This PC uses the new code now (fingerprint {CommandSigner.KeyId(newKey)}).");
+        var switched = new List<string>();
+        var notConfirmed = new List<string>();
+        await Task.WhenAll(prepared.Select(async machine =>
+        {
+            try
+            {
+                var (address, machineId) = Route(machine.MachineKey);
+                await FleetNetwork.CallAsync(address, Sanitize(machine.MachineKey), new FleetRequest { Op = "status", TargetId = machineId }, pairingKey: newKey);
+                lock (switched) switched.Add(machine.MachineName);
+            }
+            catch { lock (notConfirmed) notConfirmed.Add(machine.MachineName); }
+        }));
+
+        // The PCs left out can't reach the fleet any more: forget them here and on the PCs that switched.
+        var leftOut = leaveOut.Select(m => m.MachineName).ToList();
+        foreach (var name in leftOut) ForgetPeer(name);
+        await Task.WhenAll(prepared.Where(m => switched.Contains(m.MachineName)).SelectMany(machine => leftOut.Select(async name =>
+        {
+            try
+            {
+                var (address, machineId) = Route(machine.MachineKey);
+                await FleetNetwork.CallAsync(address, Sanitize(machine.MachineKey),
+                    new FleetRequest { Op = "leave", From = name, TargetId = machineId }, TimeSpan.FromSeconds(4), pairingKey: newKey);
+            }
+            catch { }
+        })));
+        lock (LastStatus) LastStatus.Clear();
+        return new FleetCodeChange(switched, notConfirmed, failed, leftOut);
+    }
+
+    /// <summary>Gives one PC the new code (see <see cref="ChangeFleetCodeAsync"/>), and checks that it got the same one.</summary>
+    private static async Task SendNewKeyAsync(MachineInfo machine, byte[] oldKey, byte[] newKey)
+    {
+        var (address, machineId) = Route(machine.MachineKey);
+        var key = Sanitize(machine.MachineKey);
+        using var ecdh = ECDiffieHellman.Create(ECCurve.NamedCurves.nistP256);
+        var mine = Convert.ToBase64String(ecdh.PublicKey.ExportSubjectPublicKeyInfo());
+        var offer = await FleetNetwork.CallAsync(address, key,
+            new FleetRequest { Op = "rekey", RekeyPublicKey = mine, From = Environment.MachineName, TargetId = machineId }, pairingKey: oldKey);
+        var shared = FleetCrypto.EcdhSecret(ecdh, Convert.FromBase64String(offer.RekeyPublicKey));
+        var sealedKey = FleetCrypto.Seal(FleetCrypto.RekeyKey(shared), newKey, FleetCrypto.RekeyContext);
+        var done = await FleetNetwork.CallAsync(address, key, new FleetRequest
+        {
+            Op = "rekey", RekeyPublicKey = mine, NewKey = Convert.ToBase64String(sealedKey), From = Environment.MachineName, TargetId = machineId
+        }, pairingKey: oldKey);
+        if (done.KeyId != CommandSigner.KeyId(newKey)) throw new InvalidOperationException("It did not confirm the new code.");
     }
 
     public static async Task InstallAndStartAgentTaskAsync()

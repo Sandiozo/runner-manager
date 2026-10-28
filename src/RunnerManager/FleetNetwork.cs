@@ -4,6 +4,7 @@ using System.Net;
 using System.Net.Http;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 
@@ -11,7 +12,10 @@ namespace RunnerManager;
 
 public sealed record FleetRequest
 {
-    /// <summary>"status", "command", "log", "leave", or "job" (protocol 11: a runner's live output and processes).</summary>
+    /// <summary>
+    /// "status", "command", "log", "leave", "job" (protocol 11: a runner's live output and processes), or "rekey"
+    /// (protocol 12: a new pairing code from Change fleet code).
+    /// </summary>
     public string Op { get; init; } = "status";
     public MachineCommand? Command { get; init; }
     public string LogKey { get; init; } = string.Empty;
@@ -22,6 +26,10 @@ public sealed record FleetRequest
     /// PC that shares a name with the intended one can't act on it. Older agents ignore it.
     /// </summary>
     public string TargetId { get; init; } = string.Empty;
+    /// <summary>"rekey": the sender's ECDH public key for this change (base64 SubjectPublicKeyInfo).</summary>
+    public string RekeyPublicKey { get; init; } = string.Empty;
+    /// <summary>"rekey", second step: the new pairing code, sealed with the key from the exchange (base64).</summary>
+    public string NewKey { get; init; } = string.Empty;
 }
 
 public sealed record FleetResponse
@@ -32,6 +40,45 @@ public sealed record FleetResponse
     public LogPayload? Log { get; init; }
     public RunnerJobActivity? Job { get; init; }
     public string CommandId { get; init; } = string.Empty;
+    /// <summary>"rekey", first step: the agent's ECDH public key.</summary>
+    public string RekeyPublicKey { get; init; } = string.Empty;
+    /// <summary>"rekey", second step: the fingerprint of the code the agent received, to confirm it.</summary>
+    public string KeyId { get; init; } = string.Empty;
+}
+
+/// <summary>Where an agent finds its pairing code, and the new one from "Change fleet code" until it is first used.</summary>
+public interface IAgentKeys
+{
+    byte[]? Current { get; }
+    byte[]? Pending { get; }
+    void SetPending(byte[] key);
+    /// <summary>A request came with the pending code: it becomes the pairing code, and the old one stops working.</summary>
+    void UsePending(byte[] key);
+}
+
+/// <summary>The agent's codes in fleet.json, so this PC's dashboard follows when the agent switches.</summary>
+internal sealed class ConfigAgentKeys : IAgentKeys
+{
+    public byte[]? Current => FleetConfig.Current.FleetKey;
+    public byte[]? Pending => FleetConfig.Current.PendingFleetKey;
+    public void SetPending(byte[] key) => FleetConfig.SetPendingFleetKey(key);
+    public void UsePending(byte[] key) => FleetConfig.UsePendingFleetKey(key);
+}
+
+/// <summary>Codes kept in memory, for an agent given its code as a function (tests).</summary>
+internal sealed class MemoryAgentKeys(Func<byte[]?> current) : IAgentKeys
+{
+    private byte[]? _current;
+    private byte[]? _pending;
+    public byte[]? Current => _current ?? current();
+    public byte[]? Pending => _pending;
+    public void SetPending(byte[] key) => _pending = key;
+
+    public void UsePending(byte[] key)
+    {
+        _current = key;
+        _pending = null;
+    }
 }
 
 /// <param name="MachineId">The PC's machine ID; empty from agents before protocol 12.</param>
@@ -370,7 +417,7 @@ public sealed class AgentServer : IDisposable
     private readonly Func<MachineCommand, string> _enqueue;
     private readonly Func<string, Task<LogPayload>> _log;
     private readonly Func<string, Task<RunnerJobActivity>>? _job;
-    private readonly Func<byte[]?> _pairingKey;
+    private readonly IAgentKeys _keys;
     private readonly string _prefix;
     private readonly int _discoveryPort;
     private readonly string _machineKey;
@@ -385,18 +432,22 @@ public sealed class AgentServer : IDisposable
     private HttpListener? _http;
     private UdpClient? _udp;
     private bool _retrying;
+    // The first step of a rekey, by the sender's public key; each is kept for RekeyOfferTime.
+    private readonly Dictionary<string, (ECDiffieHellman Key, DateTime CreatedUtc)> _rekeyOffers = new(StringComparer.Ordinal);
+    private static readonly TimeSpan RekeyOfferTime = TimeSpan.FromMinutes(2);
 
     /// <param name="prefix">HTTP prefix to listen on (tests use a localhost one; the agent listens on all interfaces).</param>
     /// <param name="machineId">This PC's machine ID; by default the one in fleet.json for the real agent, none for tests.</param>
+    /// <param name="keys">Where the pairing codes are kept; by default fleet.json, or memory when <paramref name="pairingKey"/> is given.</param>
     public AgentServer(Func<Task<MachineStatusPayload>> status, Func<MachineCommand, string> enqueue, Func<string, Task<LogPayload>> log,
         Func<byte[]?>? pairingKey = null, string? prefix = null, int discoveryPort = FleetNetwork.DiscoveryPort, string? machineKey = null,
-        Func<string, Task<RunnerJobActivity>>? job = null, string? machineId = null)
+        Func<string, Task<RunnerJobActivity>>? job = null, string? machineId = null, IAgentKeys? keys = null)
     {
         _status = status;
         _enqueue = enqueue;
         _log = log;
         _job = job;
-        _pairingKey = pairingKey ?? (() => FleetConfig.Current.FleetKey);
+        _keys = keys ?? (pairingKey != null ? new MemoryAgentKeys(pairingKey) : new ConfigAgentKeys());
         _prefix = prefix ?? $"http://+:{FleetNetwork.AgentPort}/rw/";
         _discoveryPort = discoveryPort;
         // Requests are addressed by the sanitized key; discovery announces the real PC name.
@@ -514,7 +565,7 @@ public sealed class AgentServer : IDisposable
         var holdsSlot = false;
         try
         {
-            var pairingKey = _pairingKey();
+            var pairingKey = _keys.Current;
             if (pairingKey == null) { await Reply(response, 503, "not paired"); return; }
             // Only requests with a known, limited length (no chunked bodies).
             if (context.Request.HttpMethod != "POST" || context.Request.ContentLength64 is < 0 or > MaxRequestBytes
@@ -539,11 +590,25 @@ public sealed class AgentServer : IDisposable
             if (body == null) { await Reply(response, 400, "bad request"); return; }
             var transportKey = FleetNetwork.KeysFor(pairingKey).Transport;
             var target = context.Request.Headers["X-RW-To"] ?? string.Empty;
+            var requestContext = FleetCrypto.RequestContext(target, time);
             // Authenticate before saying anything about the target, so strangers can't use the answer to guess PC names.
-            var plain = FleetCrypto.Open(transportKey, body, FleetCrypto.RequestContext(target, time));
+            var plain = FleetCrypto.Open(transportKey, body, requestContext);
+            var pending = plain == null ? _keys.Pending : null;
+            if (pending != null)
+            {
+                // Sent with the new code from Change fleet code: from now on, only that code works.
+                plain = FleetCrypto.Open(FleetNetwork.KeysFor(pending).Transport, body, requestContext);
+                if (plain != null) transportKey = FleetNetwork.KeysFor(pending).Transport;
+                else pending = null;
+            }
             if (plain == null || !_replay.TryUse(FleetCrypto.NonceOf(body))) { await Reply(response, 403, "denied"); return; }
             _unauthenticated.Release();
             holdsSlot = false;
+            if (pending != null)
+            {
+                _keys.UsePending(pending);
+                MachineRelay.AppendAgentLog("Switched to the new pairing code. The old one no longer works.");
+            }
 
             // "*" is only accepted for status requests (used to identify a PC added by address).
             if (!target.Equals(_machineKey, StringComparison.OrdinalIgnoreCase) && target != "*")
@@ -563,6 +628,7 @@ public sealed class AgentServer : IDisposable
                     "log" => new FleetResponse { Ok = true, Log = await _log(request.LogKey) },
                     "job" when _job != null => new FleetResponse { Ok = true, Job = await _job(request.LogKey) },
                     "leave" when request.From.Length > 0 => Leave(request.From),
+                    "rekey" => Rekey(request),
                     _ => new FleetResponse { Ok = false, Error = $"Unknown request: {request.Op}" }
                 };
             }
@@ -610,6 +676,42 @@ public sealed class AgentServer : IDisposable
         }
     }
 
+    /// <summary>
+    /// "Change fleet code" on another PC. First step: answer with a key of our own for a key exchange. Second step:
+    /// the new code arrives sealed with the exchanged key, so even someone who has the old code can't read it off the
+    /// network. It is kept as pending, and used from the first request that comes with it.
+    /// </summary>
+    private FleetResponse Rekey(FleetRequest request)
+    {
+        if (request.RekeyPublicKey.Length == 0) return new FleetResponse { Ok = false, Error = "No key exchange." };
+        lock (_rekeyOffers)
+        {
+            foreach (var old in _rekeyOffers.Where(o => DateTime.UtcNow - o.Value.CreatedUtc > RekeyOfferTime).ToList())
+            {
+                old.Value.Key.Dispose();
+                _rekeyOffers.Remove(old.Key);
+            }
+            if (request.NewKey.Length == 0)
+            {
+                if (_rekeyOffers.Count >= 8) return new FleetResponse { Ok = false, Error = "Too many fleet code changes at once. Try again in a few minutes." };
+                var ecdh = ECDiffieHellman.Create(ECCurve.NamedCurves.nistP256);
+                _rekeyOffers[request.RekeyPublicKey] = (ecdh, DateTime.UtcNow);
+                return new FleetResponse { Ok = true, RekeyPublicKey = Convert.ToBase64String(ecdh.PublicKey.ExportSubjectPublicKeyInfo()) };
+            }
+            if (!_rekeyOffers.Remove(request.RekeyPublicKey, out var offer))
+                return new FleetResponse { Ok = false, Error = "The new fleet code came too late. Try again." };
+            using (offer.Key)
+            {
+                var shared = FleetCrypto.EcdhSecret(offer.Key, Convert.FromBase64String(request.RekeyPublicKey));
+                var newKey = FleetCrypto.Open(FleetCrypto.RekeyKey(shared), Convert.FromBase64String(request.NewKey), FleetCrypto.RekeyContext);
+                if (newKey is not { Length: 32 }) return new FleetResponse { Ok = false, Error = "Could not read the new fleet code." };
+                _keys.SetPending(newKey);
+                MachineRelay.AppendAgentLog($"Received a new pairing code{(request.From.Length > 0 ? $" from {request.From}" : "")}. It is used from the first request that comes with it.");
+                return new FleetResponse { Ok = true, KeyId = CommandSigner.KeyId(newKey) };
+            }
+        }
+    }
+
     /// <summary>Another PC left the fleet: forget it here so dashboards stop listing it.</summary>
     private static FleetResponse Leave(string name)
     {
@@ -633,10 +735,16 @@ public sealed class AgentServer : IDisposable
             try
             {
                 var packet = await udp.ReceiveAsync(_cts.Token);
-                var pairingKey = _pairingKey();
+                var pairingKey = _keys.Current;
                 if (pairingKey == null) continue;
                 var discoveryKey = FleetNetwork.KeysFor(pairingKey).Discovery;
                 var nonce = FleetCrypto.VerifyProbe(discoveryKey, packet.Buffer);
+                // A PC that already uses the new code from Change fleet code.
+                if (nonce == null && _keys.Pending is { } pending)
+                {
+                    discoveryKey = FleetNetwork.KeysFor(pending).Discovery;
+                    nonce = FleetCrypto.VerifyProbe(discoveryKey, packet.Buffer);
+                }
                 if (nonce == null) continue;
                 var answer = FleetCrypto.Answer(discoveryKey, nonce, _discoveryBody);
                 await udp.SendAsync(answer, answer.Length, packet.RemoteEndPoint);
@@ -650,6 +758,11 @@ public sealed class AgentServer : IDisposable
     public void Dispose()
     {
         _cts.Cancel();
+        lock (_rekeyOffers)
+        {
+            foreach (var offer in _rekeyOffers.Values) offer.Key.Dispose();
+            _rekeyOffers.Clear();
+        }
         // Close also releases the URL, so a new listener on the same port can start right away.
         try { _http?.Close(); } catch { }
         try { _udp?.Dispose(); } catch { }

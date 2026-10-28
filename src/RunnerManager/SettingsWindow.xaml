@@ -254,6 +254,14 @@
                         </StackPanel>
                     </Border>
 
+                    <!-- Change fleet code -->
+                    <Border Style="{StaticResource Group}">
+                        <local:SettingRow Glyph="&#xE72E;" Title="Change fleet code"
+                                          Description="Gives the PCs you keep a new pairing code. Use it when a PC was lost or the code got out.">
+                            <Button x:Name="ChangeFleetCodeButton" Content="Change code…" Click="ChangeFleetCode_Click"/>
+                        </local:SettingRow>
+                    </Border>
+
                     <Border Style="{StaticResource Group}">
                         <local:SettingRow Glyph="&#xE711;" Title="Leave the fleet" Description="Removes this PC and its fleet agent. Other PCs forget it.">
                             <Button x:Name="LeaveFleetButton" Content="Leave fleet…" Style="{StaticResource DangerButton}" Click="LeaveFleet_Click"/>

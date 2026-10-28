@@ -213,6 +213,8 @@ internal sealed class TestAgent : IDisposable
     public string Address => $"localhost:{Port}";
 
     public List<MachineCommand> Commands { get; } = new();
+    public string Name { get; }
+    public string MachineId { get; }
 
     /// <summary>Changes what the agent reports, for example its command results.</summary>
     public Func<MachineStatusPayload, MachineStatusPayload> Status { get; set; } = s => s;
@@ -220,6 +222,8 @@ internal sealed class TestAgent : IDisposable
     public TestAgent(string name = "TESTPC", bool start = true, string machineId = "", byte[]? key = null)
     {
         if (key != null) Key = key;
+        Name = name;
+        MachineId = machineId;
         Server = new AgentServer(
             () => Task.FromResult(Status(new MachineStatusPayload
             {
@@ -726,5 +730,87 @@ public class RunnerMoveTests
         Assert.Contains("now runs on TARGETPC", error!.Message);
         Assert.Contains("Don't unregister it from GitHub", error.Message);
         Assert.Equal("Stop:disable Retire:keep", Steps(source));
+    }
+}
+
+[Collection(FleetSettingsCollection.Name)]
+public class ChangeFleetCodeTests
+{
+    private static void UseFleet(byte[] key, params TestAgent[] agents) => FleetConfig.Update(c =>
+    {
+        c.ProtectedFleetKey = Convert.ToBase64String(ProtectedData.Protect(key, null, DataProtectionScope.CurrentUser));
+        c.ProtectedPendingFleetKey = string.Empty;
+        c.KnownPeers.Clear();
+        foreach (var agent in agents)
+            c.KnownPeers.Add(new PeerRecord { Name = agent.Name, Address = agent.Address, MachineId = agent.MachineId });
+    });
+
+    private static void Reset() => FleetConfig.Update(c =>
+    {
+        c.ProtectedFleetKey = string.Empty;
+        c.ProtectedPendingFleetKey = string.Empty;
+        c.KnownPeers.Clear();
+    });
+
+    private static MachineInfo Pc(TestAgent agent) => new() { MachineKey = agent.Name, MachineName = agent.Name, MachineId = agent.MachineId };
+
+    private static Task<FleetResponse> StatusAsync(TestAgent agent, byte[] key)
+        => FleetNetwork.CallAsync(agent.Address, agent.Name, new FleetRequest { Op = "status" }, pairingKey: key);
+
+    [Fact]
+    public async Task KeptPcsSwitch_TheOldCodeStopsWorking_AndLeftOutPcsAreForgotten()
+    {
+        var oldKey = CommandSigner.NewKey();
+        using var kept = new TestAgent("KEPTPC", machineId: "id-kept", key: oldKey);
+        using var lost = new TestAgent("LOSTPC", machineId: "id-lost", key: oldKey);
+        try
+        {
+            UseFleet(oldKey, kept, lost);
+            var change = await MachineRelay.ChangeFleetCodeAsync(new[] { Pc(kept) }, new[] { Pc(lost) }, _ => { });
+
+            var newKey = FleetConfig.Current.FleetKey!;
+            Assert.NotEqual(oldKey, newKey);
+            Assert.Equal(new[] { "KEPTPC" }, change.Switched);
+            Assert.Equal(new[] { "LOSTPC" }, change.LeftOut);
+            Assert.Empty(change.Failed);
+            Assert.DoesNotContain(FleetConfig.Current.KnownPeers, p => p.Name == "LOSTPC");
+
+            await StatusAsync(kept, newKey);
+            var refused = await Assert.ThrowsAsync<PairingMismatchException>(() => StatusAsync(kept, oldKey));
+            Assert.Equal("denied", refused.Reason);
+            // The PC left out never learned the new code.
+            await Assert.ThrowsAsync<PairingMismatchException>(() => StatusAsync(lost, newKey));
+            await StatusAsync(lost, oldKey);
+        }
+        finally { Reset(); }
+    }
+
+    [Fact]
+    public async Task WhenNoPcGetsTheNewCode_NothingChanges()
+    {
+        var oldKey = CommandSigner.NewKey();
+        using var offline = new TestAgent("GONEPC", machineId: "id-gone", key: oldKey, start: false);
+        try
+        {
+            UseFleet(oldKey, offline);
+            var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                MachineRelay.ChangeFleetCodeAsync(new[] { Pc(offline) }, Array.Empty<MachineInfo>(), _ => { }));
+            Assert.Contains("nothing was changed", error.Message);
+            Assert.Equal(oldKey, FleetConfig.Current.FleetKey);
+        }
+        finally { Reset(); }
+    }
+
+    [Fact]
+    public async Task ANewCodeWithoutTheKeyExchange_IsRefused()
+    {
+        using var agent = new TestAgent("TESTPC");
+        using var ecdh = ECDiffieHellman.Create(ECCurve.NamedCurves.nistP256);
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => FleetNetwork.CallAsync(agent.Address, "TESTPC", new FleetRequest
+        {
+            Op = "rekey", RekeyPublicKey = Convert.ToBase64String(ecdh.PublicKey.ExportSubjectPublicKeyInfo()), NewKey = "AAAA"
+        }, pairingKey: agent.Key));
+        Assert.Contains("too late", error.Message);
+        await StatusAsync(agent, agent.Key);
     }
 }

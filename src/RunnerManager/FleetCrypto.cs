@@ -107,6 +107,22 @@ public static class FleetCrypto
         return CryptographicOperations.FixedTimeEquals(expected, packet.AsSpan(4, 32)) ? Encoding.UTF8.GetString(body) : null;
     }
 
+    // ----- Rekey: a new pairing code sent to a PC, under the old code and a fresh key exchange -----
+
+    /// <summary>The ECDH secret between our key and the other side's public key (SubjectPublicKeyInfo).</summary>
+    internal static byte[] EcdhSecret(ECDiffieHellman mine, byte[] otherPublicKey)
+    {
+        using var other = ECDiffieHellman.Create();
+        other.ImportSubjectPublicKeyInfo(otherPublicKey, out _);
+        return mine.DeriveKeyFromHash(other.PublicKey, HashAlgorithmName.SHA256);
+    }
+
+    /// <summary>The key a new pairing code is sealed with, so that someone who has the old code can't read it off the network.</summary>
+    internal static byte[] RekeyKey(byte[] sharedSecret)
+        => HKDF.DeriveKey(HashAlgorithmName.SHA256, sharedSecret, 32, info: Encoding.ASCII.GetBytes("rw-rekey"));
+
+    internal const string RekeyContext = "rw-rekey";
+
     internal static byte[] Concat(params byte[][] parts)
     {
         var result = new byte[parts.Sum(p => p.Length)];

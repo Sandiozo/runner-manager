@@ -318,6 +318,116 @@ public partial class SettingsWindow : Window
         RefreshPeers();
     }
 
+    // ----- Change fleet code -----
+
+    private async void ChangeFleetCode_Click(object sender, RoutedEventArgs e)
+    {
+        if (FleetConfig.Current.FleetKey == null)
+        {
+            DialogWindow.Info(this, "No fleet yet", "Start a fleet or join one first.");
+            return;
+        }
+        List<MachineInfo> pcs;
+        ChangeFleetCodeButton.IsEnabled = false;
+        ChangeFleetCodeButton.Content = "Checking PCs…";
+        try
+        {
+            pcs = (await MachineRelay.ReadFleetAsync(forceDiscovery: true))
+                .Where(m => !m.IsLocal && !m.MachineKey.StartsWith("ADDR_") && !m.MachineKey.StartsWith("DUPLICATE_")).ToList();
+        }
+        catch (Exception ex)
+        {
+            DialogWindow.Error(this, "Could not check the other PCs", ex.Message);
+            return;
+        }
+        finally
+        {
+            ChangeFleetCodeButton.Content = "Change code…";
+            ChangeFleetCodeButton.IsEnabled = true;
+        }
+        if (ChooseFleetCodePcs(pcs) is not { } choice) return;
+
+        MachineRelay.FleetCodeChange? result = null;
+        Exception? failure = null;
+        await _runOperation("Change fleet code", async log =>
+        {
+            try { result = await MachineRelay.ChangeFleetCodeAsync(choice.Keep, choice.LeaveOut, log); }
+            catch (Exception ex)
+            {
+                failure = ex;
+                throw;
+            }
+        });
+        UpdateKeyStatus();
+        RefreshPeers();
+        await _fleetChanged();
+        if (failure != null) DialogWindow.Error(this, "Could not change the fleet code", failure.Message);
+        if (result == null) return;
+
+        var lines = new List<string>();
+        if (result.Switched.Count > 0) lines.Add($"Use the new code: {string.Join(", ", result.Switched)}.");
+        if (result.NotConfirmed.Count > 0) lines.Add($"Got the new code and switch when contacted next: {string.Join(", ", result.NotConfirmed)}.");
+        if (result.Failed.Count > 0) lines.Add($"Did not get it, and must be paired again:\n{string.Join("\n", result.Failed)}");
+        if (result.LeftOut.Count > 0) lines.Add($"Left out and forgotten: {string.Join(", ", result.LeftOut)}. Pair them again to bring them back.");
+        if (lines.Count == 0) lines.Add("No other PCs are in the fleet.");
+        DialogWindow.Show(this, result.Failed.Count > 0 ? DialogTone.Warning : DialogTone.Info, "The fleet has a new pairing code",
+            string.Join("\n\n", lines), "OK", cancel: null);
+    }
+
+    /// <summary>Asks which PCs get the new code. Only online PCs with a current agent can; the others are left out.</summary>
+    private (List<MachineInfo> Keep, List<MachineInfo> LeaveOut)? ChooseFleetCodePcs(IReadOnlyList<MachineInfo> pcs)
+    {
+        var window = new Window
+        {
+            Title = "Change fleet code", Owner = this, Width = 480, SizeToContent = SizeToContent.Height, ResizeMode = ResizeMode.NoResize,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner, ShowInTaskbar = false, FontSize = 13,
+            FontFamily = (System.Windows.Media.FontFamily)FindResource("UiFont")
+        };
+        window.SetResourceReference(BackgroundProperty, "Bg1Brush");
+        window.SetResourceReference(ForegroundProperty, "TextBrush");
+        WindowTheme.Apply(window);
+
+        var body = new StackPanel { Margin = new Thickness(28, 26, 28, 20) };
+        body.Children.Add(new TextBlock { Text = "Change the fleet code?", FontSize = 20, FontWeight = FontWeights.SemiBold });
+        var intro = new TextBlock
+        {
+            TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 14),
+            Text = "The PCs you keep get a new pairing code, and the old one stops working. PCs you leave out, and PCs that are " +
+                   "offline or too old, keep the old code: they can no longer reach the fleet and must be paired again."
+        };
+        intro.SetResourceReference(TextBlock.ForegroundProperty, "TextMutedBrush");
+        body.Children.Add(intro);
+
+        var boxes = new List<(CheckBox Box, MachineInfo Pc)>();
+        foreach (var pc in pcs.OrderBy(p => p.MachineName, StringComparer.OrdinalIgnoreCase))
+        {
+            var ready = pc.IsOnline && pc.AgentProtocolVersion >= MachineRelay.RekeyProtocolVersion;
+            var note = ready ? string.Empty : pc.IsOnline ? "  ·  update Runner Manager on it first" : "  ·  offline";
+            var box = new CheckBox { Content = pc.MachineName + note, IsChecked = ready, IsEnabled = ready, Margin = new Thickness(0, 4, 0, 4) };
+            boxes.Add((box, pc));
+            body.Children.Add(box);
+        }
+        if (boxes.Count == 0) body.Children.Add(new TextBlock { Text = "No other PCs are in the fleet. Only this PC gets the new code.", TextWrapping = TextWrapping.Wrap });
+
+        var confirmed = false;
+        var change = new Button { Content = "Change code", MinWidth = 110, Margin = new Thickness(8, 0, 0, 0), IsDefault = true, Style = (Style)FindResource("SolidDangerButton") };
+        change.Click += (_, _) =>
+        {
+            confirmed = true;
+            window.DialogResult = true;
+        };
+        var cancel = new Button { Content = "Cancel", MinWidth = 88, IsCancel = true, Style = (Style)FindResource("GhostButton") };
+        var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Children = { cancel, change } };
+        var footer = new Border { Padding = new Thickness(28, 14, 28, 14), BorderThickness = new Thickness(0, 1, 0, 0), Child = buttons };
+        footer.SetResourceReference(Border.BackgroundProperty, "Bg0Brush");
+        footer.SetResourceReference(Border.BorderBrushProperty, "BorderSubtleBrush");
+        window.Content = new StackPanel { Children = { body, footer } };
+        window.ShowDialog();
+        if (!confirmed) return null;
+        return (boxes.Where(b => b.Box.IsChecked == true).Select(b => b.Pc).ToList(),
+                boxes.Where(b => b.Box.IsChecked != true).Select(b => b.Pc).ToList());
+    }
+
     // ----- Remote Desktop Commander -----
 
     private void UpdateRdcStatus()
