@@ -100,6 +100,10 @@ public static class RunnerService
             AgentName = config.AgentName,
             AgentId = config.AgentId,
             WorkFolder = config.WorkFolder,
+            RunnerGroup = config.RunnerGroup,
+            Ephemeral = config.Ephemeral,
+            DisableUpdate = config.DisableUpdate,
+            NoDefaultLabels = remote is { HasDefaultLabels: false },
             ServiceInstalled = serviceInstalled,
             IsRunning = running,
             StatusBrush = interactive ? Palette.Warning : running ? Palette.Success : serviceInstalled ? Palette.Danger : Palette.Warning,
@@ -118,19 +122,28 @@ public static class RunnerService
     {
         var file = Path.Combine(root, ".runner");
         if (!File.Exists(file)) return new RunnerConfig();
-        try
-        {
-            using var json = JsonDocument.Parse(File.ReadAllText(file));
-            var e = json.RootElement;
-            return new RunnerConfig
-            {
-                AgentId = e.TryGetProperty("agentId", out var id) ? id.GetInt64() : 0,
-                AgentName = e.TryGetProperty("agentName", out var name) ? name.GetString() ?? "Runner" : "Runner",
-                GitHubUrl = e.TryGetProperty("gitHubUrl", out var url) ? url.GetString() ?? string.Empty : string.Empty,
-                WorkFolder = e.TryGetProperty("workFolder", out var work) ? work.GetString() ?? "_work" : "_work"
-            };
-        }
+        try { return ParseRunnerConfig(File.ReadAllText(file)); }
         catch { return new RunnerConfig(); }
+    }
+
+    /// <summary>
+    /// The settings config.cmd saved in .runner. poolName is the runner group; ephemeral and disableUpdate are only
+    /// written when they were set.
+    /// </summary>
+    internal static RunnerConfig ParseRunnerConfig(string json)
+    {
+        using var document = JsonDocument.Parse(json.TrimStart('﻿'));
+        var e = document.RootElement;
+        return new RunnerConfig
+        {
+            AgentId = e.TryGetProperty("agentId", out var id) ? id.GetInt64() : 0,
+            AgentName = e.TryGetProperty("agentName", out var name) ? name.GetString() ?? "Runner" : "Runner",
+            GitHubUrl = e.TryGetProperty("gitHubUrl", out var url) ? url.GetString() ?? string.Empty : string.Empty,
+            WorkFolder = e.TryGetProperty("workFolder", out var work) ? work.GetString() ?? "_work" : "_work",
+            RunnerGroup = e.TryGetProperty("poolName", out var pool) && pool.ValueKind == JsonValueKind.String ? pool.GetString() ?? string.Empty : string.Empty,
+            Ephemeral = e.TryGetProperty("ephemeral", out var ephemeral) && ephemeral.ValueKind == JsonValueKind.True,
+            DisableUpdate = e.TryGetProperty("disableUpdate", out var disableUpdate) && disableUpdate.ValueKind == JsonValueKind.True
+        };
     }
 
     private static List<RunnerServiceRecord> ReadRunnerServices()
@@ -300,7 +313,7 @@ public static class RunnerService
             var token = await GitHubCli.GetRunnerTokenAsync(scope, removal: false);
             log("Configuring the runner as a Windows service…");
             await ConfigureAsync(setup.InstallPath, setup.RepositoryUrl, token, setup.RunnerName,
-                "_work", setup.Labels, runAsService: true, replace: setup.ReplaceExisting);
+                "_work", setup.Labels, runAsService: true, replace: setup.ReplaceExisting, setup.Options);
         }
         catch
         {
@@ -323,19 +336,13 @@ public static class RunnerService
         if (string.IsNullOrWhiteSpace(runner.ApiScope) || string.IsNullOrWhiteSpace(runner.GitHubUrl))
             throw new InvalidOperationException("The runner configuration does not include a GitHub repository or organization.");
 
-        var labels = await ReadLabelsBeforeRemovalAsync(runner);
-        // Check the input before config remove, so an invalid value cannot leave the runner unregistered.
-        EnsureValidConfigInput(runner.GitHubUrl, runner.AgentName, labels);
+        var current = await ReadRegistrationBeforeRemovalAsync(runner);
+        // Check everything before config remove, so an invalid value or a taken name cannot leave the runner unregistered.
+        EnsureValidConfigInput(current.Url, current.Name, current.Labels);
+        await EnsureNameIsFreeAsync(runner, current.Name);
+        EnsureNotBusyNow(runner);
         await DetachConsoleRunnerAsync(runner, log);
-        log("Requesting a removal token…");
-        var removeToken = await GitHubCli.GetRunnerTokenAsync(runner.ApiScope, removal: true);
-        await RunConfigRemoveAsync(runner.InstallPath, removeToken);
-
-        log("Requesting a registration token…");
-        var registerToken = await GitHubCli.GetRunnerTokenAsync(runner.ApiScope, removal: false);
-        log("Configuring the runner as a Windows service…");
-        await ConfigureAsync(runner.InstallPath, runner.GitHubUrl, registerToken,
-            runner.AgentName, runner.WorkFolder, labels, runAsService: true);
+        await RegisterAgainAsync(runner, current, current, log);
         log("Runner service repaired.");
     }
 
@@ -353,20 +360,23 @@ public static class RunnerService
 
         var labels = (requestedLabels ?? Array.Empty<string>()).Where(x => !string.IsNullOrWhiteSpace(x))
             .Select(x => x.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-        // Blank labels mean "keep the current ones", which have to be read from GitHub before config remove.
-        if (labels.Length == 0) labels = await ReadLabelsBeforeRemovalAsync(local);
-        EnsureValidConfigInput(local.GitHubUrl, newName.Trim(), labels);
+        // The current name, labels and settings are read before config remove: blank labels mean "keep the current
+        // ones", and a failed registration is rolled back to them.
+        var current = await ReadRegistrationBeforeRemovalAsync(local);
+        var wanted = current with { Name = newName.Trim(), Labels = labels.Length == 0 ? current.Labels : labels };
+        EnsureValidConfigInput(wanted.Url, wanted.Name, wanted.Labels);
+        await EnsureNameIsFreeAsync(local, wanted.Name);
         var wasRunning = local.IsRunning;
-        if (local.IsInteractive) await DetachConsoleRunnerAsync(local, log);
-        else if (wasRunning) await ControlServiceAsync(local.Name, "Stop");
-
-        log("Requesting a removal token…");
-        var removeToken = await GitHubCli.GetRunnerTokenAsync(local.ApiScope, removal: true);
-        await RunConfigRemoveAsync(local.InstallPath, removeToken);
-        log("Requesting a registration token…");
-        var registerToken = await GitHubCli.GetRunnerTokenAsync(local.ApiScope, removal: false);
-        await ConfigureAsync(local.InstallPath, local.GitHubUrl, registerToken, newName.Trim(),
-            local.WorkFolder, labels, runAsService: true);
+        var restoreRecovery = HoldAutoRecovery(local.Name);
+        try
+        {
+            // A job may have started while GitHub was read.
+            EnsureNotBusyNow(local);
+            if (local.IsInteractive) await DetachConsoleRunnerAsync(local, log);
+            else if (wasRunning) await ControlServiceAsync(local.Name, "Stop");
+            await RegisterAgainAsync(local, wanted, current, log);
+        }
+        finally { restoreRecovery(); }
 
         if (wasRunning)
         {
@@ -430,18 +440,141 @@ public static class RunnerService
             throw new InvalidOperationException("The runner is busy. Wait for the current job to finish and try again.");
     }
 
+    /// <summary>What config.cmd needs to register a runner: used for the new values and to roll back to the old ones.</summary>
+    private sealed record Registration(string Url, string Name, string[] Labels, RunnerRegistrationOptions Options);
+
     /// <summary>
-    /// The runner's custom labels from GitHub, read before config remove so that registering it again keeps them.
-    /// Stops when GitHub cannot be read (timeout, rate limit); continues only when GitHub confirms the runner is gone.
+    /// The runner's current registration: custom labels from GitHub (read before config remove so that registering it
+    /// again keeps them), and its group and other settings from .runner. Stops when GitHub cannot be read (timeout, rate
+    /// limit); continues only when GitHub confirms the runner is gone.
     /// </summary>
-    private static async Task<string[]> ReadLabelsBeforeRemovalAsync(RunnerInfo runner)
+    private static async Task<Registration> ReadRegistrationBeforeRemovalAsync(RunnerInfo runner)
     {
+        var labels = runner.CustomLabels;
+        var noDefaultLabels = runner.NoDefaultLabels;
         // Without a runner ID there is no registration on GitHub to read labels from.
-        if (runner.AgentId <= 0) return runner.CustomLabels;
-        var lookup = await GitHubCli.LookUpRunnerAsync(runner.ApiScope, runner.AgentId);
-        if (lookup.State != null) return lookup.State.Labels;
-        if (lookup.NotFound) return runner.CustomLabels;
-        throw new InvalidOperationException("Could not read the runner's labels from GitHub. Try again.");
+        if (runner.AgentId > 0)
+        {
+            var lookup = await GitHubCli.LookUpRunnerAsync(runner.ApiScope, runner.AgentId);
+            if (IsInUseElsewhere(runner, lookup.State))
+                throw new InvalidOperationException(InUseElsewhereMessage);
+            if (lookup.State != null)
+            {
+                labels = lookup.State.Labels;
+                noDefaultLabels = !lookup.State.HasDefaultLabels;
+            }
+            else if (!lookup.NotFound)
+                throw new InvalidOperationException("Could not read the runner's labels from GitHub. Try again.");
+        }
+        return new Registration(NormalizeRegistrationUrl(runner.GitHubUrl), runner.AgentName, labels,
+            runner.RegistrationOptions with { NoDefaultLabels = noDefaultLabels });
+    }
+
+    private const string InUseElsewhereMessage = "GitHub shows this runner online, but it is not running on this PC. Another copy, " +
+        "for example one moved to another PC, uses the same registration. Delete this copy instead, or stop the other one first.";
+
+    /// <summary>
+    /// True when this copy is not running but GitHub shows its registration online or busy. config --replace (used by
+    /// moves) keeps the runner ID, so an old copy left behind still has the ID of the registration the new copy uses.
+    /// </summary>
+    internal static bool IsInUseElsewhere(RunnerInfo runner, RemoteRunnerState? state)
+        => !runner.IsRunning && state != null && (state.Busy || state.Status.Equals("online", StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>
+    /// Refuses a name that another runner in the repository or organization already has. Checked before config remove:
+    /// registering with a taken name fails only after the old registration is gone.
+    /// </summary>
+    private static async Task EnsureNameIsFreeAsync(RunnerInfo runner, string name)
+    {
+        var ids = await GitHubCli.FindRunnerIdsByNameAsync(runner.ApiScope, name)
+                  ?? throw new InvalidOperationException($"Could not check on GitHub whether the name {name} is free. Try again.");
+        if (ids.Any(id => id != runner.AgentId))
+            throw new InvalidOperationException($"Another runner named {name} is already registered for {RepositoryName(runner.GitHubUrl)}. Choose a different name.");
+    }
+
+    /// <summary>
+    /// Unregisters the runner and registers it again with new values. If registering fails after config remove, the
+    /// runner is registered again with its old values so it doesn't disappear, and both errors are reported.
+    /// </summary>
+    private static async Task RegisterAgainAsync(RunnerInfo runner, Registration wanted, Registration current, Action<string> log)
+    {
+        log("Requesting a removal token…");
+        var removeToken = await GitHubCli.GetRunnerTokenAsync(runner.ApiScope, removal: true);
+        await RunConfigRemoveAsync(runner.InstallPath, removeToken);
+        try
+        {
+            await RegisterAsync(runner, wanted, log);
+        }
+        catch (Exception error)
+        {
+            log($"Registering failed: {FirstLine(error.Message)} Registering the runner again with its old name and labels…");
+            try
+            {
+                // A half-finished config.cmd run can leave .runner behind, and config.cmd refuses to configure over it.
+                if (File.Exists(Path.Combine(runner.InstallPath, ".runner")))
+                    await RunConfigRemoveAsync(runner.InstallPath, await GitHubCli.GetRunnerTokenAsync(runner.ApiScope, removal: true));
+                await RegisterAsync(runner, current, log);
+            }
+            catch (Exception rollback)
+            {
+                throw new InvalidOperationException(
+                    $"{error.Message}\nRegistering the runner again with its old name and labels also failed: {rollback.Message}");
+            }
+            throw new InvalidOperationException($"{error.Message}\nThe runner was registered again with its old name and labels.");
+        }
+    }
+
+    private static async Task RegisterAsync(RunnerInfo runner, Registration registration, Action<string> log)
+    {
+        log("Requesting a registration token…");
+        var token = await GitHubCli.GetRunnerTokenAsync(runner.ApiScope, removal: false);
+        log("Configuring the runner as a Windows service…");
+        await ConfigureAsync(runner.InstallPath, registration.Url, token, registration.Name, runner.WorkFolder,
+            registration.Labels, runAsService: true, options: registration.Options);
+    }
+
+    /// <summary>
+    /// Checks again right before a stop that no job started since the runner list was read: a job's worker process runs
+    /// from the runner's bin folder.
+    /// </summary>
+    private static void EnsureNotBusyNow(RunnerInfo runner)
+    {
+        if (ReadProcesses().Any(p => p.Name.Equals("Runner.Worker.exe", StringComparison.OrdinalIgnoreCase)
+                                     && RootFromExecutable(p.ExecutablePath).Equals(runner.InstallPath, StringComparison.OrdinalIgnoreCase)))
+            throw new InvalidOperationException("The runner just started a job. Wait for it to finish and try again.");
+    }
+
+    /// <summary>
+    /// Stops a runner only when it is idle, checked right before stopping. For callers that stop a runner to change it
+    /// (such as a move), so that a job that started a moment ago is not cut off.
+    /// </summary>
+    public static async Task StopIfIdleAsync(string key)
+    {
+        var runner = await FindRunnerAsync(key) ?? throw new InvalidOperationException("The runner was not found on this PC.");
+        EnsureNotBusy(runner);
+        EnsureNotBusyNow(runner);
+        await ControlServiceAsync(runner.CommandKey, "Stop");
+    }
+
+    /// <summary>
+    /// Marks the runner as stopped on purpose while an operation has it stopped, so the fleet agent's auto-recovery (a
+    /// separate process that checks every few seconds) doesn't start it again halfway. Returns how to restore the mark.
+    /// </summary>
+    private static Action HoldAutoRecovery(string serviceName)
+    {
+        if (string.IsNullOrWhiteSpace(serviceName)) return () => { };
+        bool was;
+        try
+        {
+            was = FleetConfig.Current.ManuallyStopped.Contains(serviceName, StringComparer.OrdinalIgnoreCase);
+            FleetConfig.SetManuallyStopped(serviceName, true);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return () => { }; }
+        return () =>
+        {
+            try { FleetConfig.SetManuallyStopped(serviceName, was); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        };
     }
 
     /// <summary>GitHub answers 404 when the repository, organization or runner registration no longer exists.</summary>
@@ -808,11 +941,11 @@ public static class RunnerService
         return path;
     }
 
-    private static async Task ConfigureAsync(string root, string repositoryUrl, string token,
-        string name, string workFolder, IEnumerable<string> labels, bool runAsService, bool replace = false)
+    private static async Task ConfigureAsync(string root, string repositoryUrl, string token, string name, string workFolder,
+        IEnumerable<string> labels, bool runAsService, bool replace = false, RunnerRegistrationOptions? options = null)
     {
         repositoryUrl = await CurrentRepositoryUrlAsync(repositoryUrl);
-        var arguments = BuildConfigureArguments(repositoryUrl, token, name, workFolder, labels, runAsService, replace);
+        var arguments = BuildConfigureArguments(repositoryUrl, token, name, workFolder, labels, runAsService, replace, options);
         var result = await RunConfigAsync(root, arguments);
         if (result.ExitCode != 0)
             throw new InvalidOperationException(CleanConfigError(result.Error, result.Output));
@@ -884,8 +1017,9 @@ public static class RunnerService
 
     /// <summary>The config.cmd arguments for registering a runner. Throws when a value is not allowed.</summary>
     internal static string BuildConfigureArguments(string url, string token, string name, string workFolder,
-        IEnumerable<string>? labels, bool runAsService, bool replace)
+        IEnumerable<string>? labels, bool runAsService, bool replace, RunnerRegistrationOptions? options = null)
     {
+        options ??= RunnerRegistrationOptions.None;
         var labelList = CleanLabels(labels);
         EnsureValidConfigInput(url, name, labelList);
         EnsureSafeValue(token, "runner token");
@@ -902,6 +1036,17 @@ public static class RunnerService
             args.Add("--labels");
             args.Add(Quote(string.Join(',', labelList)));
         }
+        // Without --runnergroup, config.cmd uses the default group, so only another group needs passing.
+        var group = options.RunnerGroup.Trim();
+        if (group.Length > 0 && !group.Equals("Default", StringComparison.OrdinalIgnoreCase))
+        {
+            EnsureSafeValue(group, "runner group");
+            args.Add("--runnergroup");
+            args.Add(Quote(group));
+        }
+        if (options.NoDefaultLabels && labelList.Length > 0) args.Add("--no-default-labels");
+        if (options.Ephemeral) args.Add("--ephemeral");
+        if (options.DisableUpdate) args.Add("--disableupdate");
         if (runAsService) args.Add("--runasservice");
         if (replace) args.Add("--replace");
         return string.Join(' ', args);
@@ -1096,13 +1241,15 @@ public static class RunnerService
             throw new InvalidOperationException($"Cannot clean {fullFolder}: it is outside the runner folder.");
 
         var wasRunning = runner.IsRunning;
-        if (wasRunning)
-        {
-            log("Stopping the runner service…");
-            await ControlServiceAsync(runner.Name, "Stop");
-        }
+        var restoreRecovery = HoldAutoRecovery(runner.Name);
         try
         {
+            if (wasRunning)
+            {
+                EnsureNotBusyNow(runner);
+                log("Stopping the runner service…");
+                await ControlServiceAsync(runner.Name, "Stop");
+            }
             log($"Deleting the contents of {fullFolder}…");
             var failures = await Task.Run(() =>
             {
@@ -1117,11 +1264,15 @@ public static class RunnerService
         }
         finally
         {
-            if (wasRunning)
+            try
             {
-                log("Starting the runner service…");
-                await ControlServiceAsync(runner.Name, "Start");
+                if (wasRunning)
+                {
+                    log("Starting the runner service…");
+                    await ControlServiceAsync(runner.Name, "Start");
+                }
             }
+            finally { restoreRecovery(); }
         }
     }
 
@@ -1186,6 +1337,8 @@ public sealed class RunnerSetup
     public bool CheckWorkflows { get; init; }
     /// <summary>Replace an existing runner with the same name (used when moving a runner to this PC).</summary>
     public bool ReplaceExisting { get; init; }
+    /// <summary>Runner group, ephemeral and the other settings to keep (used when moving a runner to this PC).</summary>
+    public RunnerRegistrationOptions Options { get; init; } = RunnerRegistrationOptions.None;
 }
 
 public sealed class RunnerConfig
@@ -1194,6 +1347,20 @@ public sealed class RunnerConfig
     public string AgentName { get; init; } = "Runner";
     public string GitHubUrl { get; init; } = string.Empty;
     public string WorkFolder { get; init; } = "_work";
+    /// <summary>The runner group (poolName in .runner); "Default" for repository runners.</summary>
+    public string RunnerGroup { get; init; } = string.Empty;
+    public bool Ephemeral { get; init; }
+    public bool DisableUpdate { get; init; }
+}
+
+/// <summary>
+/// Registration settings besides the name and labels, which config.cmd needs again when a runner is registered again
+/// (edit, repair, convert, move).
+/// </summary>
+public sealed record RunnerRegistrationOptions(string RunnerGroup = "", bool Ephemeral = false, bool DisableUpdate = false,
+    bool NoDefaultLabels = false)
+{
+    public static readonly RunnerRegistrationOptions None = new();
 }
 
 public sealed class RunnerServiceRecord
@@ -1226,6 +1393,16 @@ public sealed class RunnerInfo : INotifyPropertyChanged
     public string AgentName { get; init; } = string.Empty;
     public long AgentId { get; init; }
     public string WorkFolder { get; init; } = "_work";
+    /// <summary>The runner group from .runner ("Default" for repository runners).</summary>
+    public string RunnerGroup { get; init; } = string.Empty;
+    /// <summary>Registered with --ephemeral (from .runner).</summary>
+    public bool Ephemeral { get; init; }
+    /// <summary>Registered with --disableupdate (from .runner).</summary>
+    public bool DisableUpdate { get; init; }
+    /// <summary>Registered with --no-default-labels: GitHub lists no "self-hosted" label. Only known when GitHub was read.</summary>
+    public bool NoDefaultLabels { get; init; }
+    /// <summary>The settings to pass to config.cmd when this runner is registered again, on this PC or another one.</summary>
+    public RunnerRegistrationOptions RegistrationOptions => new(RunnerGroup, Ephemeral, DisableUpdate, NoDefaultLabels);
     public bool ServiceInstalled { get; init; }
     /// <summary>Running from a console window (run.cmd) rather than as a Windows service.</summary>
     public bool IsInteractive { get; init; }

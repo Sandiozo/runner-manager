@@ -115,6 +115,74 @@ public class ConfigInputTests
             "--work \"D:\\runner work\\\\\" --labels \"gpu,cuda\" --runasservice --replace", args);
     }
 
+    [Fact]
+    public void ConfigureArguments_KeepGroupEphemeralAndUpdateSettings()
+    {
+        var args = RunnerService.BuildConfigureArguments("https://github.com/my-org", "ABC123", "BUILD-01", "_work",
+            new[] { "gpu" }, runAsService: true, replace: false,
+            new RunnerRegistrationOptions("GPU machines", Ephemeral: true, DisableUpdate: true, NoDefaultLabels: true));
+        Assert.Equal(
+            "--unattended --url \"https://github.com/my-org\" --token \"ABC123\" --name \"BUILD-01\" --work \"_work\" " +
+            "--labels \"gpu\" --runnergroup \"GPU machines\" --no-default-labels --ephemeral --disableupdate --runasservice", args);
+    }
+
+    [Fact]
+    public void ConfigureArguments_LeaveOutTheDefaultGroup()
+    {
+        var args = RunnerService.BuildConfigureArguments("https://github.com/Owner/repo", "ABC123", "BUILD-01", "_work",
+            Array.Empty<string>(), runAsService: true, replace: false, new RunnerRegistrationOptions("Default", NoDefaultLabels: true));
+        Assert.DoesNotContain("--runnergroup", args);
+        // config.cmd needs at least one label without the default ones, so the flag is dropped when there are none.
+        Assert.DoesNotContain("--no-default-labels", args);
+        Assert.Throws<InvalidOperationException>(() => RunnerService.BuildConfigureArguments("https://github.com/Owner/repo",
+            "ABC123", "BUILD-01", "_work", Array.Empty<string>(), true, false, new RunnerRegistrationOptions("a\"&calc")));
+    }
+
+    [Fact]
+    public void RunnerFile_GivesGroupEphemeralAndUpdateSettings()
+    {
+        var config = RunnerService.ParseRunnerConfig("﻿{\"agentId\":42,\"agentName\":\"BUILD-01\",\"poolId\":3,\"poolName\":\"GPU machines\"," +
+            "\"disableUpdate\":true,\"ephemeral\":true,\"gitHubUrl\":\"https://github.com/my-org\",\"workFolder\":\"_work\"}");
+        Assert.Equal(42, config.AgentId);
+        Assert.Equal("GPU machines", config.RunnerGroup);
+        Assert.True(config.Ephemeral);
+        Assert.True(config.DisableUpdate);
+
+        var plain = RunnerService.ParseRunnerConfig("{\"agentId\":7,\"agentName\":\"a\",\"poolName\":\"Default\",\"gitHubUrl\":\"https://github.com/o/r\"}");
+        Assert.False(plain.Ephemeral);
+        Assert.False(plain.DisableUpdate);
+        Assert.Equal("Default", plain.RunnerGroup);
+    }
+
+    [Theory]
+    [InlineData("{\"id\":5,\"name\":\"a\",\"status\":\"online\",\"busy\":false,\"labels\":[{\"name\":\"self-hosted\",\"type\":\"read-only\"},{\"name\":\"gpu\",\"type\":\"custom\"}]}", true)]
+    [InlineData("{\"id\":5,\"name\":\"a\",\"status\":\"online\",\"busy\":false,\"labels\":[{\"name\":\"gpu\",\"type\":\"custom\"}]}", false)]
+    public void RunnerWithoutSelfHostedLabel_WasRegisteredWithoutDefaultLabels(string json, bool hasDefaults)
+    {
+        using var document = System.Text.Json.JsonDocument.Parse(json);
+        var state = GitHubCli.ReadRunnerState(document.RootElement);
+        Assert.Equal(hasDefaults, state.HasDefaultLabels);
+        Assert.Equal(new[] { "gpu" }, state.Labels);
+    }
+
+    [Fact]
+    public void RunnerNames_AreMatchedIgnoringCase()
+    {
+        using var document = System.Text.Json.JsonDocument.Parse(
+            "{\"total_count\":3,\"runners\":[{\"id\":1,\"name\":\"build-01\"},{\"id\":2,\"name\":\"BUILD-02\"},{\"id\":3,\"name\":\"Build-01\"}]}");
+        Assert.Equal(new long[] { 1, 3 }, GitHubCli.ReadRunnerIdsNamed(document.RootElement, "BUILD-01"));
+        Assert.Empty(GitHubCli.ReadRunnerIdsNamed(document.RootElement, "other"));
+    }
+
+    [Theory]
+    [InlineData(false, "online", false, true)]
+    [InlineData(false, "offline", true, true)]
+    [InlineData(false, "offline", false, false)]
+    [InlineData(true, "online", true, false)]
+    public void StoppedCopy_OfAnOnlineRunner_IsInUseElsewhere(bool runningHere, string status, bool busy, bool expected)
+        => Assert.Equal(expected, RunnerService.IsInUseElsewhere(new RunnerInfo { IsRunning = runningHere },
+            new RemoteRunnerState { Status = status, Busy = busy }));
+
     [Theory]
     [InlineData("https://github.com/Owner/repo", "BUILD&calc", "gpu")]
     [InlineData("https://github.com/Owner/repo", "BUILD-01", "gpu|calc")]

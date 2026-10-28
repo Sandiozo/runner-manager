@@ -77,18 +77,52 @@ public static class GitHubCli
         {
             using var json = JsonDocument.Parse(result.Output);
             var root = json.RootElement;
-            return new RunnerLookup(new RemoteRunnerState
-            {
-                Status = root.TryGetProperty("status", out var status) ? status.GetString() ?? "unknown" : "unknown",
-                Busy = root.TryGetProperty("busy", out var busy) && busy.GetBoolean(),
-                Labels = ReadCustomLabels(root)
-            }, NotFound: false);
+            return new RunnerLookup(ReadRunnerState(root), NotFound: false);
         }
         catch { return new RunnerLookup(null, NotFound: false); }
     }
 
+    internal static RemoteRunnerState ReadRunnerState(JsonElement root) => new()
+    {
+        Status = root.TryGetProperty("status", out var status) ? status.GetString() ?? "unknown" : "unknown",
+        Busy = root.TryGetProperty("busy", out var busy) && busy.ValueKind == JsonValueKind.True,
+        Labels = ReadCustomLabels(root),
+        HasDefaultLabels = HasLabel(root, "self-hosted")
+    };
+
+    /// <summary>
+    /// The IDs of the runners registered with this name in a repository or organization (names are unique per scope,
+    /// ignoring case). Null when GitHub could not be read.
+    /// </summary>
+    public static async Task<long[]?> FindRunnerIdsByNameAsync(string scope, string name)
+    {
+        var result = await RunAsync($"api {scope}/actions/runners?name={Uri.EscapeDataString(name)}&per_page=100");
+        if (result.ExitCode != 0) return null;
+        try
+        {
+            using var json = JsonDocument.Parse(result.Output);
+            return ReadRunnerIdsNamed(json.RootElement, name);
+        }
+        catch { return null; }
+    }
+
+    /// <summary>The IDs in a runner list response whose name matches, ignoring case (older APIs ignore the name filter).</summary>
+    internal static long[] ReadRunnerIdsNamed(JsonElement list, string name)
+    {
+        if (!list.TryGetProperty("runners", out var runners) || runners.ValueKind != JsonValueKind.Array) return Array.Empty<long>();
+        return runners.EnumerateArray()
+            .Where(r => r.TryGetProperty("name", out var n) && string.Equals(n.GetString(), name, StringComparison.OrdinalIgnoreCase))
+            .Select(r => r.TryGetProperty("id", out var id) && id.ValueKind == JsonValueKind.Number ? id.GetInt64() : 0)
+            .ToArray();
+    }
+
     /// <summary>gh reports a GitHub 404 as "gh: Not Found (HTTP 404)".</summary>
     internal static bool IsNotFound(string error) => error.Contains("(HTTP 404)", StringComparison.Ordinal);
+
+    private static bool HasLabel(JsonElement root, string label)
+        => root.TryGetProperty("labels", out var labels) && labels.ValueKind == JsonValueKind.Array
+           && labels.EnumerateArray().Any(l => l.TryGetProperty("name", out var n)
+                                               && string.Equals(n.GetString(), label, StringComparison.OrdinalIgnoreCase));
 
     private static string[] ReadCustomLabels(JsonElement root)
     {
@@ -223,4 +257,6 @@ public sealed class RemoteRunnerState
     public string Status { get; init; } = "unknown";
     public bool Busy { get; init; }
     public string[] Labels { get; init; } = Array.Empty<string>();
+    /// <summary>False when the runner was registered with --no-default-labels (it has no "self-hosted" label).</summary>
+    public bool HasDefaultLabels { get; init; } = true;
 }
