@@ -483,9 +483,14 @@ public partial class SettingsWindow : Window
             _release = check.Release;
             var current = AppUpdater.CurrentVersion;
             var available = _release != null && AppUpdater.IsNewer(_release.Version, current);
-            var installable = available || _release != null && !AppUpdater.IsRunningInstalledCopy;
+            // Never offer to replace a newer installed copy (for example from a build folder of an older version).
+            var installed = AppUpdater.InstalledVersion;
+            var replacesNewer = _release != null && installed != null && AppUpdater.IsOlder(_release.Version, installed);
+            var installable = !replacesNewer && (available || _release != null && !AppUpdater.IsRunningInstalledCopy);
             VersionRow.Description = _release == null
                 ? $"Couldn't check for updates: {check.Problem}"
+                : replacesNewer
+                    ? $"The newest release is v{_release.Version}. v{installed} is installed, which is newer."
                 : available
                     ? $"Version {_release.Version} is available."
                     : AppUpdater.IsRunningInstalledCopy
@@ -493,7 +498,7 @@ public partial class SettingsWindow : Window
                         : $"Running from a build folder. Install v{_release.Version} to run from a fixed location.";
             InstallUpdateButton.Content = available ? $"Install {_release!.Version}" : "Install";
             InstallUpdateButton.Visibility = installable ? Visibility.Visible : Visibility.Collapsed;
-            UpdateDot.Visibility = available ? Visibility.Visible : Visibility.Collapsed;
+            UpdateDot.Visibility = available && !replacesNewer ? Visibility.Visible : Visibility.Collapsed;
         }
         finally { CheckUpdatesButton.IsEnabled = true; }
     }

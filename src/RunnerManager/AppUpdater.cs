@@ -63,19 +63,73 @@ public static class AppUpdater
     public static bool IsRunningInstalledCopy => string.Equals(
         Path.GetFullPath(Environment.ProcessPath ?? string.Empty), Path.GetFullPath(InstalledExe), StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>"v2.1.0", "2.1.0+abc" or "2.1.0-beta" → "2.1.0".</summary>
+    /// <summary>"v2.1.0", "2.1" or "2.1.0+abc" → "2.1.0". A pre-release keeps its label: "2.4.0-beta.1".</summary>
     public static string Normalize(string version)
     {
         var text = version.Trim().TrimStart('v', 'V');
-        var cut = text.IndexOfAny(new[] { '+', '-', ' ' });
+        var cut = text.IndexOfAny(new[] { '+', ' ' });
         if (cut > 0) text = text[..cut];
-        return Version.TryParse(text, out var parsed)
-            ? new Version(parsed.Major, parsed.Minor, Math.Max(parsed.Build, 0)).ToString(3)
-            : text;
+        var dash = text.IndexOf('-');
+        var core = dash > 0 ? text[..dash] : text;
+        var label = dash > 0 ? text[(dash + 1)..] : string.Empty;
+        if (!Version.TryParse(core, out var parsed)) return text;
+        var normalized = new Version(parsed.Major, parsed.Minor, Math.Max(parsed.Build, 0)).ToString(3);
+        return label.Length > 0 ? $"{normalized}-{label}" : normalized;
     }
 
     public static bool IsNewer(string candidate, string current)
-        => Version.TryParse(Normalize(candidate), out var a) && Version.TryParse(Normalize(current), out var b) && a > b;
+        => CompareVersions(candidate, current) is > 0;
+
+    public static bool IsOlder(string candidate, string current)
+        => CompareVersions(candidate, current) is < 0;
+
+    /// <summary>
+    /// Compares two versions like semantic versioning does: 2.4.0-beta &lt; 2.4.0-beta.2 &lt; 2.4.0-rc.1 &lt; 2.4.0.
+    /// Null when either is not a version.
+    /// </summary>
+    internal static int? CompareVersions(string a, string b)
+    {
+        if (!TrySplit(a, out var coreA, out var labelA) || !TrySplit(b, out var coreB, out var labelB)) return null;
+        var core = coreA.CompareTo(coreB);
+        if (core != 0) return core;
+        // A release is newer than its pre-releases.
+        if (labelA.Length == 0 || labelB.Length == 0) return labelB.Length.CompareTo(labelA.Length) switch { > 0 => 1, < 0 => -1, _ => 0 };
+        var partsA = labelA.Split('.');
+        var partsB = labelB.Split('.');
+        for (var i = 0; i < Math.Min(partsA.Length, partsB.Length); i++)
+        {
+            var numericA = long.TryParse(partsA[i], out var numberA);
+            var numericB = long.TryParse(partsB[i], out var numberB);
+            var part = numericA && numericB ? numberA.CompareTo(numberB)
+                : numericA ? -1
+                : numericB ? 1
+                : string.CompareOrdinal(partsA[i], partsB[i]);
+            if (part != 0) return Math.Sign(part);
+        }
+        return partsA.Length.CompareTo(partsB.Length);
+    }
+
+    private static bool TrySplit(string version, out Version core, out string label)
+    {
+        var text = Normalize(version);
+        var dash = text.IndexOf('-');
+        label = dash > 0 ? text[(dash + 1)..] : string.Empty;
+        return Version.TryParse(dash > 0 ? text[..dash] : text, out core!);
+    }
+
+    /// <summary>The version of the installed copy, or null when there is none.</summary>
+    public static string? InstalledVersion
+    {
+        get
+        {
+            try
+            {
+                return File.Exists(InstalledExe) && FileVersionInfo.GetVersionInfo(InstalledExe).ProductVersion is { Length: > 0 } version
+                    ? Normalize(version) : null;
+            }
+            catch { return null; }
+        }
+    }
 
     /// <summary>
     /// The newest release. Throws with the reason when it could not be checked, so a failed check is never mistaken for
@@ -235,11 +289,16 @@ public static class AppUpdater
             : $"{expected}{Uri.EscapeDataString(release.Tag)}/{AssetName}";
     }
 
-    /// <summary>Downloads the release, verifies its checksum and swaps it into the install folder.</summary>
-    public static async Task<string> DownloadAndInstallAsync(ReleaseInfo release, Action<string> log)
+    /// <summary>
+    /// Downloads the release, verifies its checksum and swaps it into the install folder. Refuses to replace a newer
+    /// installed copy unless <paramref name="allowOlder"/> is set (the user picked that version).
+    /// </summary>
+    public static async Task<string> DownloadAndInstallAsync(ReleaseInfo release, Action<string> log, bool allowOlder = false)
     {
         if (string.IsNullOrEmpty(release.Sha256))
             throw new InvalidOperationException("This release has no checksum, so it was not installed.");
+        if (!allowOlder && InstalledVersion is { } installed && IsOlder(release.Version, installed))
+            throw new InvalidOperationException($"Runner Manager v{installed} is installed, which is newer than {release.Tag}. It was kept.");
 
         // Each process downloads into its own folder, so the agent and the dashboard never share files.
         var staging = Path.Combine(FleetConfig.StateDir, $"update-{Environment.ProcessId}");
@@ -472,12 +531,18 @@ public static class AppUpdater
 
     /// <summary>
     /// Like <see cref="InstallCurrentBuildAsync(Action{string})"/>; setup passes false for <paramref name="createShortcut"/>
-    /// because it creates the shortcuts itself. Copies the build only once per process.
+    /// because it creates the shortcuts itself. Copies the build only once per process. A newer installed copy is kept
+    /// and used instead, unless <paramref name="allowOlder"/> is set (setup, after the user was told).
     /// </summary>
-    internal static async Task<string> InstallCurrentBuildAsync(Action<string> log, bool createShortcut)
+    internal static async Task<string> InstallCurrentBuildAsync(Action<string> log, bool createShortcut, bool allowOlder = false)
     {
         if (IsRunningInstalledCopy) return InstalledExe;
         if (_installedThisBuild && File.Exists(InstalledExe)) return InstalledExe;
+        if (!allowOlder && InstalledVersion is { } installed && IsOlder(CurrentVersion, installed))
+        {
+            log($"Runner Manager v{installed} is installed, which is newer than this copy (v{CurrentVersion}). Using the installed copy.");
+            return InstalledExe;
+        }
         Directory.CreateDirectory(InstallDir);
         foreach (var old in Directory.EnumerateFiles(InstallDir, "*.old.*"))
         {

@@ -25,7 +25,9 @@ public partial class SetupWindow : Window
         ShowInstallFolder();
         if (Installer.IsInstalled)
         {
-            ExistingText.Text = "Runner Manager is already installed. Continue to update it. Your settings are kept. To move it, choose another folder.";
+            ExistingText.Text = AppUpdater.InstalledVersion is { } installed && AppUpdater.IsOlder(AppUpdater.CurrentVersion, installed)
+                ? $"Runner Manager v{installed} is installed, which is newer than this setup (v{AppUpdater.CurrentVersion}). Continue only to go back to the older version. Your settings are kept."
+                : "Runner Manager is already installed. Continue to update it. Your settings are kept. To move it, choose another folder.";
             ExistingText.Visibility = Visibility.Visible;
         }
         if (RemoteDesktopManager.IsConfigured())

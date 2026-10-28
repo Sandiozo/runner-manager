@@ -78,7 +78,8 @@ public static class Installer
                        ?? (File.Exists(Path.Combine(AppUpdater.DefaultInstallDir, AppPaths.ExeName)) ? AppUpdater.DefaultInstallDir : null);
         var moving = previous != null && !AppUpdater.SameFolder(previous, AppUpdater.InstallDir);
         CloseRunningDashboards(log, moving ? new[] { AppUpdater.InstallDir, previous! } : new[] { AppUpdater.InstallDir });
-        var exe = await AppUpdater.InstallCurrentBuildAsync(log, createShortcut: false);
+        // Setup warns on its first page when it is older than the installed copy, so going ahead is the user's choice.
+        var exe = await AppUpdater.InstallCurrentBuildAsync(log, createShortcut: false, allowOlder: true);
 
         log("Adding shortcuts...");
         await CreateShortcutAsync(StartMenuShortcut, exe);
