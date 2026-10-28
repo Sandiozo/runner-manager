@@ -31,8 +31,12 @@ public sealed record FleetResponse
 
 public sealed record DiscoveredPeer(string Name, string Address, string Version);
 
-/// <summary>Thrown when a PC answers but can't read our messages (different pairing code).</summary>
-public sealed class PairingMismatchException(string message) : Exception(message);
+/// <summary>Thrown when a PC answers but refuses the request (different pairing code, wrong PC, clocks apart).</summary>
+public sealed class PairingMismatchException(string message, string reason = "") : Exception(message)
+{
+    /// <summary>The agent's short reason, for example "denied" or "wrong PC"; empty when it gave none.</summary>
+    public string Reason { get; } = reason;
+}
 
 /// <summary>
 /// Direct PC-to-PC fleet transport. Each PC's agent listens on TCP 47821 (encrypted requests) and UDP 47822
@@ -49,6 +53,12 @@ public static class FleetNetwork
     private static readonly JsonSerializerOptions Json = new() { PropertyNameCaseInsensitive = true };
     private static readonly TimeSpan HostLookupTimeout = TimeSpan.FromSeconds(1.5);
     private const int MaxRefusalLength = 200;
+    /// <summary>
+    /// The largest answer read from an agent. Logs and job output are cut to about 30 KB by the agent, and a status
+    /// with many runners is well under 1 MB, so this only stops a broken or hostile answer from filling memory.
+    /// </summary>
+    internal const int MaxResponseBytes = 8 * 1024 * 1024;
+    private const int MaxErrorBodyBytes = 4 * 1024;
 
     /// <summary>The keys derived from one pairing code (HKDF runs once per code, not once per request).</summary>
     internal sealed record DerivedKeys(byte[] Transport, byte[] Discovery);
@@ -83,14 +93,22 @@ public static class FleetNetwork
         message.Headers.Add("X-RW-To", targetMachineKey);
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         cts.CancelAfter(timeout ?? TimeSpan.FromSeconds(6));
-        using var response = await Http.SendAsync(message, cts.Token);
-        var bytes = await response.Content.ReadAsByteArrayAsync(cts.Token);
-        if (response.StatusCode == HttpStatusCode.Forbidden)
-            throw new PairingMismatchException(RefusalMessage(bytes));
-        if (response.StatusCode == HttpStatusCode.ServiceUnavailable)
-            throw new PairingMismatchException("The fleet agent on that PC has no pairing code.");
+        using var response = await Http.SendAsync(message, HttpCompletionOption.ResponseHeadersRead, cts.Token);
         if (!response.IsSuccessStatusCode)
-            throw new InvalidOperationException($"The fleet agent returned HTTP {(int)response.StatusCode}: {Encoding.UTF8.GetString(bytes)}");
+        {
+            var error = await ReadLimitedAsync(await response.Content.ReadAsStreamAsync(cts.Token), MaxErrorBodyBytes, truncate: true, cts.Token);
+            var reason = Encoding.UTF8.GetString(error!).Trim();
+            if (response.StatusCode == HttpStatusCode.Forbidden)
+                throw new PairingMismatchException(RefusalMessage(reason), reason);
+            if (response.StatusCode == HttpStatusCode.ServiceUnavailable)
+                throw new PairingMismatchException("The fleet agent on that PC has no pairing code.", reason);
+            if (reason.Length > MaxRefusalLength) reason = reason[..MaxRefusalLength];
+            throw new InvalidOperationException($"The fleet agent returned HTTP {(int)response.StatusCode}: {reason}");
+        }
+        if (response.Content.Headers.ContentLength > MaxResponseBytes)
+            throw new InvalidDataException("The fleet agent's answer is too large.");
+        var bytes = await ReadLimitedAsync(await response.Content.ReadAsStreamAsync(cts.Token), MaxResponseBytes, truncate: false, cts.Token)
+                    ?? throw new InvalidDataException("The fleet agent's answer is too large.");
         var plain = FleetCrypto.Open(transportKey, bytes, FleetCrypto.ResponseContext(FleetCrypto.NonceOf(body)))
             ?? throw new PairingMismatchException("Could not verify the response with this PC's pairing code.");
         var result = JsonSerializer.Deserialize<FleetResponse>(plain, Json) ?? throw new InvalidOperationException("The fleet agent returned an empty response.");
@@ -102,13 +120,55 @@ public static class FleetNetwork
     /// Explains a 403 answer. Agents send a short reason ("denied" when the pairing code does not match, or for
     /// example a clock or PC name problem); anything else is shown as the reason.
     /// </summary>
-    private static string RefusalMessage(byte[] body)
+    internal static string RefusalMessage(string reason)
     {
-        var reason = Encoding.UTF8.GetString(body).Trim();
         if (reason.Length == 0 || reason.Equals("denied", StringComparison.OrdinalIgnoreCase))
             return "The pairing code does not match. Use the same pairing code on every PC.";
+        if (reason.Contains("clock", StringComparison.OrdinalIgnoreCase))
+            return ClockMessage(reason);
         if (reason.Length > MaxRefusalLength) reason = reason[..MaxRefusalLength];
         return $"The other PC refused the request: {reason}";
+    }
+
+    /// <summary>The time a newer agent reports with a clock refusal, as Unix milliseconds.</summary>
+    private static readonly System.Text.RegularExpressions.Regex AgentTimePattern = new(@"\(time there: (\d+)\)");
+
+    private static string ClockMessage(string reason)
+    {
+        const string fix = "Set both to the correct time (Windows Settings → Time & language → Date & time → Sync now).";
+        var match = AgentTimePattern.Match(reason);
+        if (!match.Success || !long.TryParse(match.Groups[1].Value, out var agentTime))
+            return $"The clocks on this PC and the other PC differ by more than {(int)FleetCrypto.MaxClockSkew.TotalMinutes} minutes. {fix}";
+        var apart = TimeSpan.FromMilliseconds(Math.Abs(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - agentTime));
+        var text = apart.TotalHours >= 2 ? $"{Math.Round(apart.TotalHours)} hours"
+            : apart.TotalMinutes >= 2 ? $"{Math.Round(apart.TotalMinutes)} minutes"
+            : $"{Math.Max(1, Math.Round(apart.TotalSeconds))} seconds";
+        return $"The clocks on this PC and the other PC differ by {text}. {fix}";
+    }
+
+    /// <summary>
+    /// Reads at most <paramref name="limit"/> bytes. Returns null when there is more, or with
+    /// <paramref name="truncate"/> the first <paramref name="limit"/> bytes.
+    /// </summary>
+    internal static async Task<byte[]?> ReadLimitedAsync(Stream input, int limit, bool truncate, CancellationToken cancellationToken)
+    {
+        await using (input)
+        {
+            using var buffer = new MemoryStream();
+            var chunk = new byte[16 * 1024];
+            int read;
+            while ((read = await input.ReadAsync(chunk, cancellationToken)) > 0)
+            {
+                if (buffer.Length + read > limit)
+                {
+                    if (!truncate) return null;
+                    buffer.Write(chunk, 0, (int)(limit - buffer.Length));
+                    break;
+                }
+                buffer.Write(chunk, 0, read);
+            }
+            return buffer.ToArray();
+        }
     }
 
     /// <summary>Finds fleet agents on the local network (broadcast) and at known or manually added addresses.</summary>
@@ -309,8 +369,12 @@ public sealed class AgentServer : IDisposable
     private readonly ReplayGuard _replay = new();
     private readonly byte[] _discoveryBody;
     private readonly CancellationTokenSource _cts = new();
+    // Requests that are not authenticated yet; each may buffer up to MaxRequestBytes.
+    private readonly SemaphoreSlim _unauthenticated = new(MaxUnauthenticatedRequests);
+    private readonly object _listenGate = new();
     private HttpListener? _http;
     private UdpClient? _udp;
+    private bool _retrying;
 
     /// <param name="prefix">HTTP prefix to listen on (tests use a localhost one; the agent listens on all interfaces).</param>
     public AgentServer(Func<Task<MachineStatusPayload>> status, Func<MachineCommand, string> enqueue, Func<string, Task<LogPayload>> log,
@@ -331,32 +395,101 @@ public sealed class AgentServer : IDisposable
         _discoveryBody = JsonSerializer.SerializeToUtf8Bytes(new
         {
             name = _displayName,
-            port = new Uri(_prefix.Replace("+", "localhost")).Port,
+            port = Port,
             protocol = MachineRelay.ProtocolVersion,
             version = AppUpdater.CurrentVersion
         });
     }
 
     private const int MaxRequestBytes = 1024 * 1024;
+    private const int MaxUnauthenticatedRequests = 16;
+    private static readonly TimeSpan BodyTimeout = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan SlotWait = TimeSpan.FromSeconds(2);
+    /// <summary>How often a listener that could not start is tried again.</summary>
+    internal static TimeSpan ListenRetryInterval { get; set; } = TimeSpan.FromSeconds(30);
 
+    private int Port => new Uri(_prefix.Replace("+", "localhost")).Port;
+
+    /// <summary>Whether both listeners are running.</summary>
+    public bool IsListening => _http != null && _udp != null;
+
+    /// <summary>
+    /// Starts both listeners. One that can't start (its port is taken, for example) is logged once and tried again
+    /// every <see cref="ListenRetryInterval"/>; the first such error is also thrown.
+    /// </summary>
     public void Start()
     {
-        _http = new HttpListener();
-        _http.Prefixes.Add(_prefix);
-        _http.Start();
-        _ = Task.Run(AcceptLoopAsync);
+        var httpError = TryStartHttp();
+        var udpError = TryStartUdp();
+        var retry = $"Trying again every {(int)ListenRetryInterval.TotalSeconds} seconds.";
+        if (httpError != null) MachineRelay.AppendAgentLog($"Could not listen on TCP port {Port}: {httpError.Message} {retry}");
+        if (udpError != null) MachineRelay.AppendAgentLog($"Could not listen for discovery on UDP port {_discoveryPort}: {udpError.Message} {retry}");
+        if (httpError == null && udpError == null) return;
+        lock (_listenGate)
+        {
+            if (!_retrying) _ = Task.Run(RetryListenersAsync);
+            _retrying = true;
+        }
+        throw httpError ?? udpError!;
+    }
 
-        _udp = new UdpClient(new IPEndPoint(IPAddress.Any, _discoveryPort)) { EnableBroadcast = true };
-        FleetNetwork.IgnoreConnectionResets(_udp);
+    private Exception? TryStartHttp()
+    {
+        var http = new HttpListener();
+        try
+        {
+            http.Prefixes.Add(_prefix);
+            http.Start();
+        }
+        catch (Exception ex)
+        {
+            try { http.Close(); } catch { }
+            return ex;
+        }
+        // A client that sends its request slowly holds a request slot; http.sys ends it sooner with these.
+        try
+        {
+            http.TimeoutManager.EntityBody = BodyTimeout;
+            http.TimeoutManager.HeaderWait = BodyTimeout;
+        }
+        catch { }
+        _http = http;
+        _ = Task.Run(AcceptLoopAsync);
+        return null;
+    }
+
+    private Exception? TryStartUdp()
+    {
+        try
+        {
+            var udp = new UdpClient(new IPEndPoint(IPAddress.Any, _discoveryPort)) { EnableBroadcast = true };
+            FleetNetwork.IgnoreConnectionResets(udp);
+            _udp = udp;
+        }
+        catch (Exception ex) { return ex; }
         _ = Task.Run(DiscoveryLoopAsync);
+        return null;
+    }
+
+    private async Task RetryListenersAsync()
+    {
+        while (!_cts.IsCancellationRequested && !IsListening)
+        {
+            try { await Task.Delay(ListenRetryInterval, _cts.Token); }
+            catch (OperationCanceledException) { return; }
+            // Failures were logged once already; only the recovery is.
+            if (_http == null && TryStartHttp() == null) MachineRelay.AppendAgentLog($"Listening on TCP port {Port} now.");
+            if (_udp == null && TryStartUdp() == null) MachineRelay.AppendAgentLog($"Listening for discovery on UDP port {_discoveryPort} now.");
+        }
+        lock (_listenGate) _retrying = false;
     }
 
     private async Task AcceptLoopAsync()
     {
-        while (!_cts.IsCancellationRequested && _http is { IsListening: true })
+        while (!_cts.IsCancellationRequested && _http is { IsListening: true } http)
         {
             HttpListenerContext context;
-            try { context = await _http.GetContextAsync(); }
+            try { context = await http.GetContextAsync(); }
             catch { if (_cts.IsCancellationRequested) return; await Task.Delay(500); continue; }
             _ = Task.Run(() => HandleAsync(context));
         }
@@ -365,6 +498,7 @@ public sealed class AgentServer : IDisposable
     private async Task HandleAsync(HttpListenerContext context)
     {
         var response = context.Response;
+        var holdsSlot = false;
         try
         {
             var pairingKey = _pairingKey();
@@ -374,19 +508,33 @@ public sealed class AgentServer : IDisposable
                 || context.Request.Headers["Transfer-Encoding"] != null)
             { await Reply(response, 400, "bad request"); return; }
             if (!long.TryParse(context.Request.Headers["X-RW-Time"], out var time) || !FleetCrypto.IsFresh(time))
-            { await Reply(response, 403, "stale or missing timestamp; check the PC clocks"); return; }
+            {
+                await Reply(response, 403, $"the PC clocks differ by more than {(int)FleetCrypto.MaxClockSkew.TotalMinutes} minutes; set both to the correct time {TimeHere()}");
+                return;
+            }
+            // The agent restarted after this was sent, and no longer knows whether it saw it before.
+            if (_replay.IsFromBeforeStart(time))
+            {
+                await Reply(response, 403, "the request is older than the fleet agent, which has restarted since; try again, and check that both PCs show the correct time");
+                return;
+            }
 
-            var body = await ReadBodyAsync(context.Request.InputStream, MaxRequestBytes, _cts.Token);
+            if (!await _unauthenticated.WaitAsync(SlotWait, _cts.Token)) { await Reply(response, 429, "busy"); return; }
+            holdsSlot = true;
+            var body = await FleetNetwork.ReadLimitedAsync(context.Request.InputStream, MaxRequestBytes, truncate: false, _cts.Token)
+                .WaitAsync(BodyTimeout, _cts.Token);
             if (body == null) { await Reply(response, 400, "bad request"); return; }
             var transportKey = FleetNetwork.KeysFor(pairingKey).Transport;
             var target = context.Request.Headers["X-RW-To"] ?? string.Empty;
-            var me = _machineKey;
-            // "*" is only accepted for status requests (used to identify a PC added by address).
-            if (!target.Equals(me, StringComparison.OrdinalIgnoreCase) && target != "*")
-            { await Reply(response, 403, "wrong PC"); return; }
+            // Authenticate before saying anything about the target, so strangers can't use the answer to guess PC names.
             var plain = FleetCrypto.Open(transportKey, body, FleetCrypto.RequestContext(target, time));
             if (plain == null || !_replay.TryUse(FleetCrypto.NonceOf(body))) { await Reply(response, 403, "denied"); return; }
+            _unauthenticated.Release();
+            holdsSlot = false;
 
+            // "*" is only accepted for status requests (used to identify a PC added by address).
+            if (!target.Equals(_machineKey, StringComparison.OrdinalIgnoreCase) && target != "*")
+            { await Reply(response, 403, "wrong PC"); return; }
             var request = JsonSerializer.Deserialize<FleetRequest>(plain) ?? new FleetRequest();
             if (target == "*" && request.Op != "status") { await Reply(response, 403, "wrong PC"); return; }
             FleetResponse result;
@@ -413,23 +561,37 @@ public sealed class AgentServer : IDisposable
         }
         catch (Exception ex)
         {
-            MachineRelay.AppendAgentLog($"Request failed: {ex.Message}");
+            LogFailure(ex);
             try { response.Abort(); } catch { }
+        }
+        finally
+        {
+            if (holdsSlot) _unauthenticated.Release();
         }
     }
 
-    /// <summary>Reads at most <paramref name="limit"/> bytes; returns null when the body is longer.</summary>
-    private static async Task<byte[]?> ReadBodyAsync(Stream input, int limit, CancellationToken cancellationToken)
+    /// <summary>This PC's clock, so the other PC can say how far apart the clocks are.</summary>
+    private static string TimeHere() => $"(time there: {DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()})";
+
+    private static readonly object FailureLogGate = new();
+    private static DateTime _lastFailureLogUtc = DateTime.MinValue;
+    private static int _unloggedFailures;
+
+    /// <summary>Logs failed requests at most once a minute, so a flood of broken requests can't fill the log.</summary>
+    private static void LogFailure(Exception ex)
     {
-        using var buffer = new MemoryStream();
-        var chunk = new byte[16 * 1024];
-        int read;
-        while ((read = await input.ReadAsync(chunk, cancellationToken)) > 0)
+        lock (FailureLogGate)
         {
-            if (buffer.Length + read > limit) return null;
-            buffer.Write(chunk, 0, read);
+            if (DateTime.UtcNow - _lastFailureLogUtc < TimeSpan.FromMinutes(1))
+            {
+                _unloggedFailures++;
+                return;
+            }
+            var more = _unloggedFailures > 0 ? $" ({_unloggedFailures} more since the last one was logged)" : string.Empty;
+            _lastFailureLogUtc = DateTime.UtcNow;
+            _unloggedFailures = 0;
+            MachineRelay.AppendAgentLog($"Request failed: {ex.Message}{more}");
         }
-        return buffer.ToArray();
     }
 
     /// <summary>Another PC left the fleet: forget it here so dashboards stop listing it.</summary>
@@ -450,20 +612,21 @@ public sealed class AgentServer : IDisposable
 
     private async Task DiscoveryLoopAsync()
     {
-        while (!_cts.IsCancellationRequested && _udp != null)
+        while (!_cts.IsCancellationRequested && _udp is { } udp)
         {
             try
             {
-                var packet = await _udp.ReceiveAsync(_cts.Token);
+                var packet = await udp.ReceiveAsync(_cts.Token);
                 var pairingKey = _pairingKey();
                 if (pairingKey == null) continue;
                 var discoveryKey = FleetNetwork.KeysFor(pairingKey).Discovery;
                 var nonce = FleetCrypto.VerifyProbe(discoveryKey, packet.Buffer);
                 if (nonce == null) continue;
                 var answer = FleetCrypto.Answer(discoveryKey, nonce, _discoveryBody);
-                await _udp.SendAsync(answer, answer.Length, packet.RemoteEndPoint);
+                await udp.SendAsync(answer, answer.Length, packet.RemoteEndPoint);
             }
             catch (OperationCanceledException) { return; }
+            catch (ObjectDisposedException) { return; }
             catch { await Task.Delay(200); }
         }
     }

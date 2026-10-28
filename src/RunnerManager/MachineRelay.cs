@@ -316,8 +316,9 @@ public static class MachineRelay
         }
 
         using var server = new AgentServer(StatusAsync, Enqueue, LogReader.ReadAsync, job: RunnerActivity.ReadAsync);
+        // A listener that can't start is logged and tried again in the background.
         try { server.Start(); }
-        catch (Exception ex) { AppendAgentLog($"Could not listen on port {FleetNetwork.AgentPort}: {ex.Message}"); }
+        catch { }
 
         // After the listener is up, so a freshly started agent answers right away.
         try { await FleetNetwork.EnsureFirewallRulesAsync(); }
