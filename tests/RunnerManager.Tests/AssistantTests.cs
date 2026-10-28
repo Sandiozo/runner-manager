@@ -19,6 +19,7 @@ public class AssistantTests
     [InlineData("github.com/octocat/web-app/", "octocat/web-app", false)]
     [InlineData("https://github.com/octo-org", "octo-org", true)]
     [InlineData("orgs/octo-org", "octo-org", true)]
+    [InlineData("octocat/.github", "octocat/.github", false)]
     public void Targets_AcceptRepositoriesOrganizationsAndUrls(string text, string path, bool organization)
     {
         var target = AssistantTools.ParseTarget(text);
@@ -31,6 +32,13 @@ public class AssistantTests
     [InlineData("a/b/c")]
     [InlineData("octocat/web app")]
     [InlineData("octocat/$(whoami)")]
+    [InlineData("../user")]
+    [InlineData("octocat/..")]
+    [InlineData("octocat/.")]
+    [InlineData("..")]
+    [InlineData("-octocat/web-app")]
+    [InlineData("octo.cat/web-app")]
+    [InlineData("octocat//web-app")]
     public void Targets_RejectAnythingElse(string text)
         => Assert.Throws<AssistantException>(() => AssistantTools.ParseTarget(text));
 
@@ -56,12 +64,15 @@ public class AssistantTests
     [Fact]
     public void ToolArguments_AreReadSafely()
     {
-        using var document = JsonDocument.Parse("""{"repository":"  octocat/web-app ","labels":["gpu"," ",""],"delete_files":"yes","count":99}""");
+        using var document = JsonDocument.Parse("""{"repository":"  octocat/web-app ","labels":["gpu"," ",""],"delete_files":"yes","count":99,"lines":"200","even_if_exists":"true","n":"x"}""");
         var call = new AssistantCall(document.RootElement, (_, _) => Task.FromResult(true), _ => { });
         Assert.Equal("octocat/web-app", call.Text("repository"));
         Assert.Equal(new[] { "gpu" }, call.TextList("labels"));
-        Assert.False(call.Flag("delete_files")); // only a JSON true counts
+        Assert.False(call.Flag("delete_files")); // only true or "true" counts
+        Assert.True(call.Flag("even_if_exists"));
         Assert.Equal(20, call.Number("count", 10, 1, 20));
+        Assert.Equal(200, call.Number("lines", 150, 20, 400));
+        Assert.Equal(7, call.Number("n", 7, 1, 20));
         Assert.Throws<AssistantException>(() => call.RequiredText("pc"));
     }
 
@@ -89,10 +100,91 @@ public class AssistantTests
             var properties = tool.InputSchema["properties"]!.AsObject();
             foreach (var required in tool.InputSchema["required"]?.AsArray() ?? new JsonArray())
                 Assert.True(properties.ContainsKey(required!.GetValue<string>()), $"{tool.Name}: {required}");
+            // Every tool that names a runner can also say which repository's, since names repeat across repositories.
+            if (properties.ContainsKey("runner")) Assert.True(properties.ContainsKey("repository"), tool.Name);
         }
         Assert.Equal(AssistantToolKind.Destructive, AssistantTools.All.Single(t => t.Name == "remove_runner").Kind);
         Assert.Equal(AssistantToolKind.Destructive, AssistantTools.All.Single(t => t.Name == "move_runner").Kind);
         Assert.Equal(AssistantToolKind.Change, AssistantTools.All.Single(t => t.Name == "create_runner").Kind);
+    }
+
+    // ----- Finding PCs and runners -----
+
+    [Fact]
+    public void Pcs_AreFoundByNameButNeverGuessedWhenTwoLookAlike()
+    {
+        var machines = new[] { new MachineInfo { MachineName = "BUILD-01" }, new MachineInfo { MachineName = "BUILD_01" }, new MachineInfo { MachineName = "GPU" } };
+        Assert.Equal("BUILD-01", AssistantTools.FindPc(machines, "build-01").MachineName);
+        Assert.Equal("GPU", AssistantTools.FindPc(machines, "gpu").MachineName);
+        var ambiguous = Assert.Throws<AssistantException>(() => AssistantTools.FindPc(machines, "build 01"));
+        Assert.Contains("BUILD-01, BUILD_01", ambiguous.Message);
+        Assert.Throws<AssistantException>(() => AssistantTools.FindPc(machines, "nope"));
+    }
+
+    [Fact]
+    public void Runners_WithTheSameNameNeedTheirRepository()
+    {
+        var pc = Machine("BUILD", "2.4.0",
+            Runner("build", "repos/octocat/web", "svc-web"),
+            Runner("build", "repos/octocat/api", "svc-api"),
+            Runner("other", "orgs/octo-org", "svc-org"));
+
+        var ambiguous = Assert.Throws<AssistantException>(() =>
+            AssistantTools.PickRunner(pc, "build", null, AssistantTools.RunnerCandidates(pc, "build", null, p => p)));
+        Assert.Contains("octocat/web", ambiguous.Message);
+        Assert.Contains("octocat/api", ambiguous.Message);
+        Assert.Contains("repository", ambiguous.Message);
+
+        var api = AssistantTools.ParseTarget("octocat/api");
+        Assert.Equal("svc-api", AssistantTools.PickRunner(pc, "build", api, AssistantTools.RunnerCandidates(pc, "build", api, p => p)).ServiceName);
+        // The service name is unique on the PC.
+        Assert.Single(AssistantTools.RunnerCandidates(pc, "svc-web", null, p => p));
+        var org = AssistantTools.ParseTarget("orgs/octo-org");
+        Assert.Single(AssistantTools.RunnerCandidates(pc, "other", org, p => p));
+    }
+
+    [Fact]
+    public void Runners_OfARenamedRepositoryStillMatchIt()
+    {
+        var pc = Machine("BUILD", "2.4.0", Runner("web", "repos/octocat/old-name", "svc-web"));
+        var target = new AssistantTools.Target("octocat/new-name", false);
+        Assert.Empty(AssistantTools.RunnersFor(new[] { pc }, target, p => p));
+        Assert.Single(AssistantTools.RunnersFor(new[] { pc }, target, p => p == "octocat/old-name" ? "octocat/new-name" : p));
+    }
+
+    [Fact]
+    public void RunsOn_UsesTheRunnersLabels_AndSaysWhenTheyAreUnknown()
+    {
+        var gpu = Machine("GPU", "2.4.0", Runner("a", "repos/octocat/web", "svc-a", "gpu", "cuda"), Runner("b", "repos/octocat/web", "svc-b", "gpu"));
+        var both = gpu.Runners.Select(r => (gpu, r)).ToList();
+        var (labels, note) = AssistantTools.RunsOn(both);
+        Assert.Equal(new[] { "self-hosted", "Windows", "X64", "gpu" }, labels);
+        Assert.Empty(note);
+
+        var old = Machine("OLD", "2.3.1", Runner("c", "repos/octocat/web", "svc-c"));
+        var (mixed, unknown) = AssistantTools.RunsOn(both.Append((old, old.Runners[0])).ToList());
+        Assert.Equal(new[] { "self-hosted", "Windows", "X64" }, mixed);
+        Assert.Contains("unknown", unknown);
+    }
+
+    [Fact]
+    public void Creates_AreClaimedPerRepository_SoARetryMakesNoDuplicate()
+    {
+        var target = new AssistantTools.Target($"octocat/claim-{Guid.NewGuid():N}", false);
+        var pc1 = new MachineInfo { MachineKey = "PC1", MachineName = "PC1" };
+        var pc2 = new MachineInfo { MachineKey = "PC2", MachineName = "PC2" };
+
+        using (AssistantTools.CreateClaims.Claim(target, pc1, evenIfExists: false))
+        {
+            var busy = Assert.Throws<AssistantException>(() => AssistantTools.CreateClaims.Claim(target, pc2, evenIfExists: false));
+            Assert.Contains("already being created", busy.Message);
+            // With even_if_exists another PC may get one, but never two at once on the same PC.
+            using (AssistantTools.CreateClaims.Claim(target, pc2, evenIfExists: true)) { }
+            Assert.Throws<AssistantException>(() => AssistantTools.CreateClaims.Claim(target, pc1, evenIfExists: true));
+        }
+        // A failed or declined create frees the claim; a finished one keeps it until fleet status shows the runner.
+        using (var claim = AssistantTools.CreateClaims.Claim(target, pc1, evenIfExists: false)) claim.Succeeded();
+        Assert.Contains("just created", Assert.Throws<AssistantException>(() => AssistantTools.CreateClaims.Claim(target, pc1, evenIfExists: false)).Message);
     }
 
     [Fact]
@@ -251,6 +343,18 @@ public class AssistantTests
         Assert.True(responses[2]["result"]!["isError"]!.GetValue<bool>());
         Assert.Contains("fleet agent is not running", responses[2]["result"]!["content"]![0]!["text"]!.GetValue<string>());
     }
+
+    private static MachineInfo Machine(string name, string version, params MachineRunnerStatus[] runners)
+        => MachineInfo.FromPayload(name, new MachineStatusPayload { MachineName = name, AppVersion = version, Runners = runners });
+
+    private static MachineRunnerStatus Runner(string name, string scope, string service, params string[] labels) => new()
+    {
+        AgentName = name,
+        Scope = scope,
+        RepositoryPath = scope.StartsWith("repos/") ? scope[6..] : string.Empty,
+        ServiceName = service,
+        CustomLabels = labels
+    };
 
     private static AssistantHttpServer StartEndpoint(out string url)
     {
