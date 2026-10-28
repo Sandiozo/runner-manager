@@ -79,8 +79,13 @@ or **Settings → Updates → Uninstall…** in Runner Manager. Your runners kee
 Updates install a newer .NET Desktop Runtime automatically when a release needs one. Installs from version 2.1 or
 earlier (called RunnerWidget) need the setup run once on each PC; it moves the settings and scheduled tasks over.
 
-To add, repair or remove runners, sign in with the [GitHub CLI](https://cli.github.com): click **Connect GitHub** in
-the account menu. Runner Manager does not store GitHub credentials.
+Updates need no sign-in. To add, repair or remove runners, sign in with the [GitHub CLI](https://cli.github.com):
+click **Connect GitHub** in the account menu. Runner Manager does not store GitHub credentials. Organization runners
+need the `admin:org` permission; Runner Manager tells you how to add it when it is missing.
+
+The fleet agent runs while you are signed in to Windows. After a restart, the PC rejoins the fleet when you sign in;
+runners installed as Windows services start on their own. On a PC with several Windows users, one of them runs the
+fleet agent, and the others can't take it over.
 
 ## Several PCs
 
@@ -90,11 +95,14 @@ To add a PC to the fleet:
 2. On the new PC, click **Connect another PC → Join an existing fleet**, and select the PC it finds.
 3. Check that both PCs show the same 6-digit code, then click **Allow**.
 
+Both PCs need Runner Manager 2.4 or later to pair. To lock a PC out of the fleet, for example a lost laptop, use
+**Settings → Fleet → Change code…** and leave that PC out; the PCs you keep switch to a new code.
+
 | | |
 | --- | --- |
 | Transport | Direct PC-to-PC connections. Fleet traffic does not go through GitHub. |
 | Encryption | AES-256-GCM. The key is derived from the pairing code and bound to the target PC and a timestamp. Replayed requests are rejected. |
-| Pairing | ECDH P-256 key exchange, confirmed with a 6-digit code on both PCs. |
+| Pairing | ECDH P-256 key exchange, confirmed with a 6-digit code on both PCs. The new PC commits to its key first, so a device in between cannot make the codes match. |
 | Storage | The pairing code is encrypted for your Windows account (DPAPI). |
 | Ports | TCP 47821 and UDP 47822. TCP 47823 and UDP 47824 during pairing only. Firewall rules allow the local subnet and Tailscale (`100.64.0.0/10`). |
 | Other networks | Install [Tailscale](https://tailscale.com) on both PCs, then use **Settings → Fleet → Add a PC by address**. |
@@ -176,7 +184,7 @@ docs/brand/                 Logo and icon sources (SVG) and the GitHub social pr
 ```
 
 Runner Manager needs administrator rights to install and control Windows services. Setup registers a scheduled task
-that starts it with those rights, so opening it from the Start menu shows no UAC prompt. Settings and logs are stored
+for your Windows user that starts it with those rights, so opening it from the Start menu shows no UAC prompt. Settings and logs are stored
 in `%LOCALAPPDATA%\RunnerManager`.
 
 ## Keyboard shortcuts
