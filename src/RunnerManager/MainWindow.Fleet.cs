@@ -366,8 +366,12 @@ public partial class MainWindow
             DialogWindow.Info(this, "Runner Manager is up to date", $"This PC runs the newest version, v{AppUpdater.CurrentVersion}.");
             return;
         }
-        var installed = await RunOperationAsync($"Install Runner Manager {release.Tag}", log => AppUpdater.InstallReleaseAsync(release, log));
+        if (IsAgentWorkRunning()) return;
+        var restartAgent = false;
+        var installed = await RunOperationAsync($"Install Runner Manager {release.Tag}",
+            async log => restartAgent = await AppUpdater.InstallReleaseAsync(release, log));
         if (!installed) return;
+        if (restartAgent) RestartLocalAgentInBackground();
         UpdateBanner.Visibility = Visibility.Collapsed;
         if (DialogWindow.Show(this, DialogTone.Question, $"Runner Manager {release.Tag} is installed",
                 "Restart Runner Manager now to use the new version?", "Restart now", cancel: "Later") == "Restart now")
@@ -412,7 +416,9 @@ public partial class MainWindow
             if (!DialogWindow.Confirm(this, "Update the fleet agent on this PC?",
                     $"The fleet agent is updated to v{AppUpdater.CurrentVersion} and installed to {AppUpdater.InstallDir}. " +
                     "Runners and Remote Desktop Commander keep running.", "Update fleet agent")) return;
-            await RunOperationAsync("Update fleet agent", MachineRelay.UpdateLocalAgentAsync);
+            if (IsAgentWorkRunning()) return;
+            // The agent restarts once its running work is done, so this runs in the background.
+            RunAgentWorkInBackground("Update fleet agent", MachineRelay.UpdateLocalAgentAsync);
             return;
         }
         if (machine.IsLocal)

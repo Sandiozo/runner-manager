@@ -507,13 +507,24 @@ public partial class SettingsWindow : Window
     {
         if (_release == null) return;
         var release = _release;
+        if (Owner is MainWindow { IsAgentWorkBusy: true })
+        {
+            DialogWindow.Info(this, "The fleet agent is being updated", "Try again when it is done. Progress is shown in the activity list.");
+            return;
+        }
         var installed = false;
+        var restartAgent = false;
         await _runOperation($"Install Runner Manager {release.Tag}", async log =>
         {
-            await AppUpdater.InstallReleaseAsync(release, log);
+            restartAgent = await AppUpdater.InstallReleaseAsync(release, log);
             installed = true;
         });
         if (!installed) return;
+        if (restartAgent)
+        {
+            if (Owner is MainWindow main) main.RestartLocalAgentInBackground();
+            else await MachineRelay.RestartLocalAgentAsync();
+        }
         if (DialogWindow.Show(this, DialogTone.Question, $"Runner Manager {release.Tag} is installed",
                 "Restart Runner Manager now to use the new version?", "Restart now", cancel: "Later") == "Restart now")
             ((App)Application.Current).RestartDashboard();

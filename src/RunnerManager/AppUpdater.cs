@@ -554,21 +554,19 @@ public static class AppUpdater
 
     /// <summary>
     /// Installs a release on this PC, as "Install update" does: downloads and verifies it, refreshes the Start menu
-    /// shortcut, and switches the fleet agent and the start-up task to the new copy. Returns the installed exe.
+    /// shortcut, and switches the fleet agent's task and the start-up task to the new copy. Returns whether the fleet
+    /// agent must be restarted to run it; the caller does that, because the restart waits until the agent is idle.
     /// </summary>
-    public static async Task<string> InstallReleaseAsync(ReleaseInfo release, Action<string> log)
+    public static async Task<bool> InstallReleaseAsync(ReleaseInfo release, Action<string> log)
     {
         var exe = await DownloadAndInstallAsync(release, log);
         await CreateStartMenuShortcutAsync();
-        if (await MachineRelay.IsAgentInstalledAsync() && await AgentOwnership.OtherUserAsync() == null)
-        {
-            log("Switching the fleet agent to the new version...");
-            await MachineRelay.RegisterAgentTaskAsync(exe);
-            await MachineRelay.RestartLocalAgentAsync();
-        }
         if (await ScheduledTasks.ExistsAsync(ScheduledTasks.DashboardTaskName))
             await Installer.RegisterStartupTaskAsync(exe);
-        return exe;
+        if (!await MachineRelay.IsAgentInstalledAsync() || await AgentOwnership.OtherUserAsync() != null) return false;
+        log("Switching the fleet agent to the new version...");
+        await MachineRelay.RegisterAgentTaskAsync(exe);
+        return true;
     }
 
     /// <summary>

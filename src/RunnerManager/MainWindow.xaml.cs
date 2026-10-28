@@ -227,31 +227,83 @@ public partial class MainWindow : Window
     }
 
     private bool _localAgentUpdateTried;
-    private bool _localAgentUpdateScheduled;
 
     /// <summary>When this PC's agent is older than this dashboard, update it once, automatically.</summary>
     private void ScheduleLocalAgentUpdate(MachineInfo? local)
     {
-        if (_localAgentUpdateTried || _localAgentUpdateScheduled || _agentOwner != null
+        if (_localAgentUpdateTried || _agentOwner != null
             || local is not { LocalAgentOutdated: true } || FleetConfig.Current.FleetKey == null) return;
         // This version was just undone because its agent did not work; do not put it back.
         if (UpdateGuard.WasRolledBack(AppUpdater.CurrentVersion)) return;
-        _localAgentUpdateScheduled = true;
-        Dispatcher.BeginInvoke(async () =>
+        // Another operation is running: try again on a later refresh.
+        if (_operationRunning || IsAgentWorkBusy) return;
+        _localAgentUpdateTried = true;
+        AddActivity("The fleet agent on this PC is outdated. Updating it.");
+        RunAgentWorkInBackground("Update fleet agent", MachineRelay.UpdateLocalAgentAsync);
+    }
+
+    private Task? _agentWork;
+    private string _agentWorkTitle = string.Empty;
+
+    /// <summary>The fleet agent is being updated or restarted in the background.</summary>
+    public bool IsAgentWorkBusy => _agentWork is { IsCompleted: false };
+
+    /// <summary>Restarts this PC's fleet agent (after an update) without blocking the dashboard.</summary>
+    public void RestartLocalAgentInBackground()
+        => RunAgentWorkInBackground("Restart the fleet agent", async log =>
         {
+            await MachineRelay.RestartLocalAgentAsync();
+            log("The fleet agent runs the new version.");
+        });
+
+    /// <summary>
+    /// Runs fleet agent work that can take long: the agent restarts only once it has finished its jobs and requests. The
+    /// dashboard keeps refreshing and other actions stay available meanwhile; progress goes to the activity list.
+    /// </summary>
+    private void RunAgentWorkInBackground(string title, Func<Action<string>, Task> work)
+    {
+        if (IsAgentWorkBusy)
+        {
+            AddActivity($"{title} skipped: “{_agentWorkTitle}” is still running.");
+            return;
+        }
+        _agentWorkTitle = title;
+        _agentWork = RunAsync();
+
+        async Task RunAsync()
+        {
+            AddActivity($"{title} started. The fleet agent restarts when it is not busy.");
+            var waiting = new DispatcherTimer { Interval = TimeSpan.FromMinutes(2) };
+            waiting.Tick += (_, _) =>
+            {
+                waiting.Interval = TimeSpan.FromMinutes(30);
+                AddActivity($"{title}: waiting for the fleet agent to finish its work.");
+            };
+            waiting.Start();
             try
             {
-                // Another operation is running: try again on a later refresh.
-                if (_operationRunning) return;
-                AddActivity("The fleet agent on this PC is outdated. Updating it.");
-                await RunOperationAsync("Update fleet agent", log =>
-                {
-                    _localAgentUpdateTried = true;
-                    return MachineRelay.UpdateLocalAgentAsync(log);
-                });
+                await work(AddActivity);
+                AddActivity($"{title} completed.");
             }
-            finally { _localAgentUpdateScheduled = false; }
-        }, DispatcherPriority.Background);
+            catch (Exception ex)
+            {
+                RaiseAlert($"{title} failed: {ex.Message}", warning: true);
+            }
+            finally
+            {
+                waiting.Stop();
+                _forceDiscovery = true;
+                await RefreshAsync();
+            }
+        }
+    }
+
+    /// <summary>Tells the user to wait when the fleet agent is busy being updated. Returns true when it is.</summary>
+    private bool IsAgentWorkRunning()
+    {
+        if (!IsAgentWorkBusy) return false;
+        DialogWindow.Info(this, "The fleet agent is being updated", $"“{_agentWorkTitle}” is still running. Try again when it is done. Progress is shown in the activity list.");
+        return true;
     }
 
     private void ApplyLocalRunners(List<RunnerInfo> runners)
@@ -874,7 +926,7 @@ public partial class MainWindow : Window
     /// <summary>Takes this PC out of the fleet (the other PCs are told to forget it).</summary>
     public async Task LeaveFleetAsync()
     {
-        if (!InFleet) return;
+        if (!InFleet || IsAgentWorkRunning()) return;
         var others = Machines.Where(m => !m.IsLocal).Select(m => m.MachineName).ToList();
         if (!DialogWindow.Confirm(this, $"Remove {Environment.MachineName} from the fleet?",
                 (others.Count > 0 ? $"{string.Join(", ", others)} will forget this PC. " : string.Empty) +
@@ -904,6 +956,7 @@ public partial class MainWindow : Window
             DialogWindow.Info(this, "Another Windows user runs the fleet agent", AgentOwnership.Describe(owner));
             return;
         }
+        if (IsAgentWorkRunning()) return;
         var newFleet = false;
         if (start == FleetStart.New && FleetConfig.Current.FleetKey == null)
         {
@@ -1052,10 +1105,11 @@ public partial class MainWindow : Window
     /// <summary>While an operation runs, asks whether to exit anyway. True when nothing runs or the user agreed.</summary>
     public bool ConfirmExitDuringOperation()
     {
-        if (!_operationRunning) return true;
+        var title = _operationRunning ? _operationTitle : IsAgentWorkBusy ? _agentWorkTitle : null;
+        if (title == null) return true;
         if (!IsVisible) ShowFromTray();
         return DialogWindow.Confirm(this, "An operation is running",
-            $"“{_operationTitle}” is still running. Exiting now can leave it half done, for example with the fleet agent stopped. Exit anyway?",
+            $"“{title}” is still running. Exiting now can leave it half done, for example with the fleet agent stopped. Exit anyway?",
             "Exit anyway", danger: true);
     }
 
