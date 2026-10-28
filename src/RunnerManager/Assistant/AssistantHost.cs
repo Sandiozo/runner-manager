@@ -370,8 +370,8 @@ public sealed class ApprovalQueue
     {
         // An update restarts the agent only after the user has answered.
         using var work = AgentWork.Begin();
+        // The time to answer starts when the approval is shown. The ones ahead each time out, so the wait in line ends too.
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(_timeout);
         var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         Task previous;
         lock (_gate)
@@ -381,7 +381,8 @@ public sealed class ApprovalQueue
         }
         try
         {
-            await previous.WaitAsync(timeout.Token);
+            await previous.WaitAsync(cancellationToken);
+            timeout.CancelAfter(_timeout);
             return await _show(client, title, message, timeout.Token);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && timeout.IsCancellationRequested)

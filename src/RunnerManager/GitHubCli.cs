@@ -24,6 +24,12 @@ public static class GitHubCli
     private static readonly string[] TokenVariables = { "GH_TOKEN", "GITHUB_TOKEN" };
     /// <summary>Set by <see cref="IsAuthenticatedAsync"/>: use GH_TOKEN or GITHUB_TOKEN, because there is no stored sign-in.</summary>
     private static volatile bool _useEnvironmentToken;
+    /// <summary>
+    /// The first check of which sign-in to use, for processes that run gh before anything called
+    /// <see cref="IsAuthenticatedAsync"/> (the fleet agent, AI assistant tools).
+    /// </summary>
+    private static Task? _tokenChoice;
+    private static readonly object TokenChoiceGate = new();
 
     /// <summary>
     /// Whether gh can use a github.com sign-in, checked the way the app's own gh calls then run. The stored sign-in
@@ -32,6 +38,7 @@ public static class GitHubCli
     /// </summary>
     public static async Task<bool> IsAuthenticatedAsync()
     {
+        lock (TokenChoiceGate) _tokenChoice ??= Task.CompletedTask;
         var stored = await RunAsync("auth status --hostname github.com", environmentToken: false);
         if (stored.ExitCode == 0 || EnvironmentTokenName() == null)
         {
@@ -312,8 +319,18 @@ public static class GitHubCli
         finally { PollGate.Release(); }
     }
 
-    public static Task<CommandResult> RunAsync(string arguments, string? standardInput = null, TimeSpan? timeout = null)
-        => RunAsync(arguments, _useEnvironmentToken, standardInput, timeout);
+    public static async Task<CommandResult> RunAsync(string arguments, string? standardInput = null, TimeSpan? timeout = null)
+    {
+        await ChooseTokenOnceAsync();
+        return await RunAsync(arguments, _useEnvironmentToken, standardInput, timeout);
+    }
+
+    /// <summary>Decides once per process whether a token variable is needed, when one is set and nothing checked yet.</summary>
+    private static Task ChooseTokenOnceAsync()
+    {
+        if (EnvironmentTokenName() == null) return Task.CompletedTask;
+        lock (TokenChoiceGate) return _tokenChoice ??= IsAuthenticatedAsync();
+    }
 
     private static async Task<CommandResult> RunAsync(string arguments, bool environmentToken, string? standardInput = null, TimeSpan? timeout = null)
     {

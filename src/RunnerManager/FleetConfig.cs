@@ -59,16 +59,35 @@ public sealed class FleetConfig
     /// </summary>
     public string MachineId { get; set; } = string.Empty;
 
-    /// <summary>This PC's machine ID, created on first use; empty if fleet.json can't be saved.</summary>
+    private static string? _machineId;
+
+    /// <summary>
+    /// This PC's machine ID, created on first use; empty if fleet.json can't be saved. Once known it stays the same for
+    /// this process: a Runner Manager before 2.4 that saves fleet.json drops the ID from the file, and it is written back.
+    /// </summary>
     public static string LocalMachineId
     {
         get
         {
+            var known = _machineId;
             var id = Current.MachineId;
-            if (id.Length > 0) return id;
-            try { Update(c => { if (c.MachineId.Length == 0) c.MachineId = Guid.NewGuid().ToString("N"); }); }
-            catch (IOException) { return string.Empty; }
-            return Current.MachineId;
+            if (known != null)
+            {
+                if (id.Length == 0)
+                {
+                    try { Update(c => { if (c.MachineId.Length == 0) c.MachineId = known; }); }
+                    catch (IOException) { }
+                }
+                return known;
+            }
+            if (id.Length == 0)
+            {
+                try { Update(c => { if (c.MachineId.Length == 0) c.MachineId = Guid.NewGuid().ToString("N"); }); }
+                catch (IOException) { return string.Empty; }
+                id = Current.MachineId;
+            }
+            if (id.Length > 0) _machineId = id;
+            return id;
         }
     }
 
@@ -365,11 +384,15 @@ public sealed class FleetConfig
 
     public static void SetPendingFleetKey(byte[] key) => Update(c => c.ProtectedPendingFleetKey = Protect(key));
 
-    /// <summary>Makes the pending code the pairing code, if it still is <paramref name="key"/>. The old code stops working.</summary>
-    public static void UsePendingFleetKey(byte[] key) => Update(c =>
+    /// <summary>
+    /// Makes the pending code the pairing code, if it still is <paramref name="key"/> (in fleet.json, or the copy the agent
+    /// kept in memory). The old code stops working.
+    /// </summary>
+    public static void UsePendingFleetKey(byte[] key, byte[]? remembered = null) => Update(c =>
     {
-        if (c.PendingFleetKey is not { } pending || !CryptographicOperations.FixedTimeEquals(pending, key)) return;
-        c.ProtectedFleetKey = c.ProtectedPendingFleetKey;
+        var pending = c.PendingFleetKey ?? remembered;
+        if (pending == null || !CryptographicOperations.FixedTimeEquals(pending, key)) return;
+        c.ProtectedFleetKey = Protect(key);
         c.ProtectedPendingFleetKey = string.Empty;
     });
 }

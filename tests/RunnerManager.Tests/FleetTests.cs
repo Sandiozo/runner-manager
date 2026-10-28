@@ -857,3 +857,41 @@ public class MoveSettingsTests
         Assert.Null(old.RegistrationOptions);
     }
 }
+
+[Collection(FleetSettingsCollection.Name)]
+public class OlderVersionSaveTests
+{
+    [Fact]
+    public void MachineId_StaysTheSame_WhenAnOlderVersionSavesFleetJsonWithoutIt()
+    {
+        var id = FleetConfig.LocalMachineId;
+        Assert.NotEmpty(id);
+        // A Runner Manager before 2.4 saves fleet.json without the fields it doesn't know.
+        FleetConfig.Update(c => c.MachineId = string.Empty);
+        Assert.Equal(id, FleetConfig.LocalMachineId);
+        Assert.Equal(id, FleetConfig.Current.MachineId);
+    }
+
+    [Fact]
+    public void ReplayGuard_WithAFile_RemembersRequestsAcrossARestart()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"seen-{Guid.NewGuid():N}.txt");
+        try
+        {
+            var before = new ReplayGuard(path);
+            Assert.True(before.TryUse("nonce-1"));
+            Assert.False(before.TryUse("nonce-1"));
+
+            var after = new ReplayGuard(path);
+            Assert.False(after.TryUse("nonce-1"));
+            Assert.True(after.TryUse("nonce-2"));
+            // It knows what it saw before, so a request sent a minute before the restart (a slow clock) is accepted.
+            Assert.False(after.IsFromBeforeStart(DateTimeOffset.UtcNow.AddMinutes(-1).ToUnixTimeMilliseconds()));
+            Assert.True(new ReplayGuard().IsFromBeforeStart(DateTimeOffset.UtcNow.AddMinutes(-1).ToUnixTimeMilliseconds()));
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+}

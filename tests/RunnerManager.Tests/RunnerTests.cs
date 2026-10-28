@@ -176,13 +176,11 @@ public class ConfigInputTests
     }
 
     [Theory]
-    [InlineData(false, "online", false, true)]
-    [InlineData(false, "offline", true, true)]
-    [InlineData(false, "offline", false, false)]
-    [InlineData(true, "online", true, false)]
-    public void StoppedCopy_OfAnOnlineRunner_IsInUseElsewhere(bool runningHere, string status, bool busy, bool expected)
-        => Assert.Equal(expected, RunnerService.IsInUseElsewhere(new RunnerInfo { IsRunning = runningHere },
-            new RemoteRunnerState { Status = status, Busy = busy }));
+    [InlineData(true, false, true)]
+    [InlineData(true, true, false)]
+    [InlineData(false, false, false)]
+    public void OnlyTheMarkedOldCopyOfAMovedRunner_IsInUseElsewhere(bool movedAway, bool runningHere, bool expected)
+        => Assert.Equal(expected, RunnerService.IsInUseElsewhere(new RunnerInfo { MovedAway = movedAway, IsRunning = runningHere }));
 
     [Theory]
     [InlineData("https://github.com/Owner/repo", "BUILD&calc", "gpu")]

@@ -1,3 +1,4 @@
+using System.IO;
 using System.Security.Cryptography;
 using System.Text;
 
@@ -137,23 +138,50 @@ public static class FleetCrypto
 }
 
 /// <summary>
-/// Remembers recently seen request nonces so a captured request can't be sent again. The nonces are only kept in
-/// memory, so requests sent before the guard was created (before the agent started) are refused as well.
+/// Remembers recently seen request nonces so a captured request can't be sent again. With a file, the nonces survive
+/// a restart of the agent. Without one (or when the file can't be read), requests sent before the guard was created
+/// are refused instead, since nothing knows whether they were seen.
 /// </summary>
 public sealed class ReplayGuard
 {
     /// <summary>Room for clocks that are slightly apart, for requests sent just before the agent started.</summary>
     public static readonly TimeSpan StartAllowance = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan KeepFor = FleetCrypto.MaxClockSkew * 2;
     private readonly Dictionary<string, DateTime> _seen = new(StringComparer.Ordinal);
     private readonly object _gate = new();
     private readonly long _startedUnixMilliseconds = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+    private readonly string? _path;
+    private readonly bool _remembersEarlier;
+
+    public ReplayGuard(string? path = null)
+    {
+        _path = path;
+        if (path == null) return;
+        try
+        {
+            if (File.Exists(path))
+            {
+                var now = DateTime.UtcNow;
+                foreach (var line in File.ReadAllLines(path))
+                {
+                    var parts = line.Split(' ');
+                    if (parts.Length == 2 && long.TryParse(parts[1], out var ticks) && ticks > 0 && ticks < DateTime.MaxValue.Ticks
+                        && now - new DateTime(ticks, DateTimeKind.Utc) < KeepFor)
+                        _seen[parts[0]] = new DateTime(ticks, DateTimeKind.Utc);
+                }
+            }
+            Rewrite();
+            _remembersEarlier = true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+    }
 
     /// <summary>
-    /// Whether a request is older than this guard. Such a request could have been captured before a restart, when
-    /// its nonce was remembered by a guard that is gone now.
+    /// Whether a request is older than this guard and the guard can't know whether it saw it: it could have been
+    /// captured before a restart. Always false when the seen nonces were kept across the restart.
     /// </summary>
     public bool IsFromBeforeStart(long unixMilliseconds)
-        => unixMilliseconds < _startedUnixMilliseconds - (long)StartAllowance.TotalMilliseconds;
+        => !_remembersEarlier && unixMilliseconds < _startedUnixMilliseconds - (long)StartAllowance.TotalMilliseconds;
 
     public bool TryUse(string nonce)
     {
@@ -161,11 +189,31 @@ public sealed class ReplayGuard
         {
             var now = DateTime.UtcNow;
             if (_seen.Count > 2000)
-                foreach (var old in _seen.Where(p => now - p.Value > FleetCrypto.MaxClockSkew * 2).Select(p => p.Key).ToList())
+            {
+                foreach (var old in _seen.Where(p => now - p.Value > KeepFor).Select(p => p.Key).ToList())
                     _seen.Remove(old);
+                Rewrite();
+            }
             if (_seen.ContainsKey(nonce)) return false;
             _seen[nonce] = now;
+            if (_path != null)
+            {
+                // Written before the request is handled, so a restart right after it still knows the nonce.
+                try { File.AppendAllText(_path, $"{nonce} {now.Ticks}{Environment.NewLine}"); }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+            }
             return true;
         }
+    }
+
+    private void Rewrite()
+    {
+        if (_path == null) return;
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(_path)!);
+            File.WriteAllLines(_path, _seen.Select(p => $"{p.Key} {p.Value.Ticks}"));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
     }
 }

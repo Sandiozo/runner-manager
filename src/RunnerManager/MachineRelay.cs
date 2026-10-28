@@ -677,15 +677,19 @@ public static class MachineRelay
                     }
                     FleetConfig.SetManuallyStopped(command.TargetKey, false);
                     return "Runner removed from the old PC";
+                case "Stop" when command.Value == "disable":
+                    // Step 1 of a move: the runner leaves this PC.
+                    await FleetActions.StopForMoveAsync(command.TargetKey);
+                    WantRunning.Remove(command.TargetKey);
+                    return "Runner stopped for the move";
+                case "Start" when command.Value == "enable":
+                    // The move failed: this copy keeps the runner.
+                    await FleetActions.StartAfterFailedMoveAsync(command.TargetKey);
+                    return "Runner start completed";
                 case "Start" or "Stop" or "Restart":
-                    // A move disables the old copy's service while it runs, and enables it again if the move failed.
-                    if (command.Value == "enable") await FleetActions.SetServiceEnabledAsync(command.TargetKey, true);
-                    // A move stops the old copy only when it is idle, checked right before stopping.
-                    if (command.Value == "disable") await RunnerService.StopIfIdleAsync(command.TargetKey);
-                    else await RunnerService.ControlServiceAsync(command.TargetKey, command.Action);
+                    await RunnerService.ControlServiceAsync(command.TargetKey, command.Action);
                     FleetConfig.SetManuallyStopped(command.TargetKey, command.Action == "Stop");
                     if (command.Action == "Stop") WantRunning.Remove(command.TargetKey);
-                    if (command.Value == "disable") await FleetActions.SetServiceEnabledAsync(command.TargetKey, false);
                     return $"Runner {command.Action.ToLowerInvariant()} completed";
                 default:
                     throw new InvalidOperationException($"Unsupported runner action: {command.Action}");
@@ -1015,7 +1019,7 @@ public static class MachineRelay
         var done = await FleetNetwork.CallAsync(address, key, new FleetRequest
         {
             Op = "rekey", RekeyPublicKey = mine, NewKey = Convert.ToBase64String(sealedKey), From = Environment.MachineName, TargetId = machineId
-        }, pairingKey: oldKey);
+        }, TimeSpan.FromSeconds(30), pairingKey: oldKey); // longer than the wait for fleet.json there, so a slow save isn't a failure
         if (done.KeyId != CommandSigner.KeyId(newKey)) throw new InvalidOperationException("It did not confirm the new code.");
     }
 

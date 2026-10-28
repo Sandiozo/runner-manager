@@ -130,6 +130,7 @@ public static class RunnerService
             ActivityText = running ? (busy ? "Busy" : "Idle") : restarting ? "Restarting" : "Offline",
             IsInteractive = interactive,
             ConsoleRestarting = restarting,
+            MovedAway = File.Exists(Path.Combine(root, MovedAwayMarker)),
             LastActivityText = GetLatestRunnerActivity(root),
             InstallPath = root,
             GitHubUrl = config.GitHubUrl,
@@ -450,18 +451,14 @@ public static class RunnerService
         }
         await EnsureAuthenticatedAsync();
 
-        if (runner.AgentId > 0 && !runner.IsRunning)
+        if (IsInUseElsewhere(runner))
         {
-            var lookup = await GitHubCli.LookUpRunnerAsync(runner.ApiScope, runner.AgentId);
-            if (IsInUseElsewhere(runner, lookup.State))
-            {
-                // config remove here would unregister the copy that uses the registration now (after a move, the old
-                // copy keeps the same runner ID).
-                log("GitHub shows this runner online, but it is not running on this PC. Another copy, for example one moved to " +
-                    "another PC, uses the same registration, so it stays registered. Removing this copy from this PC only.");
-                await RemoveLocallyAsync(runner, deleteFolder, log);
-                return;
-            }
+            // config remove here would unregister the copy that uses the registration now (after a move, the old copy
+            // keeps the same runner ID).
+            log("This is the old copy of a runner that was moved to another PC, which uses the same registration now, so it " +
+                "stays registered. Removing this copy from this PC only.");
+            await RemoveLocallyAsync(runner, deleteFolder, log);
+            return;
         }
 
         var wasRunning = runner.ServiceInstalled && runner.IsRunning;
@@ -528,12 +525,11 @@ public static class RunnerService
     {
         var labels = runner.CustomLabels;
         var noDefaultLabels = runner.NoDefaultLabels;
+        if (IsInUseElsewhere(runner)) throw new InvalidOperationException(InUseElsewhereMessage);
         // Without a runner ID there is no registration on GitHub to read labels from.
         if (runner.AgentId > 0)
         {
             var lookup = await GitHubCli.LookUpRunnerAsync(runner.ApiScope, runner.AgentId);
-            if (IsInUseElsewhere(runner, lookup.State))
-                throw new InvalidOperationException(InUseElsewhereMessage);
             if (lookup.State != null)
             {
                 labels = lookup.State.Labels;
@@ -546,15 +542,31 @@ public static class RunnerService
             runner.RegistrationOptions with { NoDefaultLabels = noDefaultLabels });
     }
 
-    private const string InUseElsewhereMessage = "GitHub shows this runner online, but it is not running on this PC. Another copy, " +
-        "for example one moved to another PC, uses the same registration. Delete this copy instead, or stop the other one first.";
+    private const string InUseElsewhereMessage = "This is the old copy of a runner that was moved to another PC, which uses the " +
+        "same registration now. Delete this copy instead.";
 
     /// <summary>
-    /// True when this copy is not running but GitHub shows its registration online or busy. config --replace (used by
-    /// moves) keeps the runner ID, so an old copy left behind still has the ID of the registration the new copy uses.
+    /// True for the old copy of a runner that was moved to another PC (marked when the move stopped it). config --replace
+    /// keeps the runner ID, so that copy still has the ID of the registration the new copy uses. GitHub's online status
+    /// can't tell this: a runner that was just stopped or crashed shows online for minutes, and the new copy shows
+    /// offline while its PC is off.
     /// </summary>
-    internal static bool IsInUseElsewhere(RunnerInfo runner, RemoteRunnerState? state)
-        => !runner.IsRunning && state != null && (state.Busy || state.Status.Equals("online", StringComparison.OrdinalIgnoreCase));
+    internal static bool IsInUseElsewhere(RunnerInfo runner) => runner.MovedAway && !runner.IsRunning;
+
+    /// <summary>File in a runner's folder that marks it as the old copy of a moved runner.</summary>
+    internal const string MovedAwayMarker = ".moved-away";
+
+    /// <summary>
+    /// Marks a runner as moving away (its registration goes to another PC), or clears the mark when the move failed.
+    /// </summary>
+    public static async Task MarkMovedAwayAsync(string key, bool movedAway)
+    {
+        var runner = await FindRunnerAsync(key);
+        if (runner == null || string.IsNullOrEmpty(runner.InstallPath)) return;
+        var marker = Path.Combine(runner.InstallPath, MovedAwayMarker);
+        if (movedAway) await File.WriteAllTextAsync(marker, $"Moved to another PC on {DateTime.UtcNow:O}. Its registration belongs to that PC now.");
+        else TryDelete(marker);
+    }
 
     /// <summary>
     /// Refuses a name that another runner in the repository or organization already has. Checked before config remove:
@@ -719,7 +731,7 @@ public static class RunnerService
         else
         {
             // Keep the files but drop the stale registration so the folder isn't listed as a runner any more.
-            foreach (var file in new[] { ".runner", ".credentials", ".credentials_rsaparams", ".service" })
+            foreach (var file in new[] { ".runner", ".credentials", ".credentials_rsaparams", ".service", MovedAwayMarker })
                 TryDelete(Path.Combine(runner.InstallPath, file));
         }
         ForgetRoot(runner.InstallPath);
@@ -810,6 +822,13 @@ public static class RunnerService
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
         }
         foreach (var known in FleetConfig.Current.KnownRunnerRoots) roots.Add(known);
+        // A runner in a folder inside this one (D:\Runners\b inside D:\Runners) is another runner even when it never ran.
+        try
+        {
+            foreach (var dir in Directory.GetDirectories(root))
+                if (File.Exists(Path.Combine(dir, ".runner"))) roots.Add(dir);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
         roots.RemoveWhere(r => string.IsNullOrWhiteSpace(r) || r.TrimEnd('\\').Equals(root.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase));
         return roots.ToList();
     }
@@ -998,6 +1017,24 @@ public static class RunnerService
             catch (ArgumentException) { }
             catch (InvalidOperationException) { }
         }
+
+        // A restart loop around run.cmd (such as run-in-session.cmd) keeps running while the listener is down, for example
+        // while the runner updates itself, and would start it again later. End those too, but not the loops of a runner
+        // in a folder inside this one.
+        var others = OtherRunnerRoots(root);
+        var loops = all.Where(p => p.Name.Equals("cmd.exe", StringComparison.OrdinalIgnoreCase)
+                                   && MatchStartupEntry(p.CommandLine, root, others) == StartupMatch.ThisRunner).ToList();
+        foreach (var loop in loops.Where(p => !loops.Any(other => other.Pid == p.Parent)))
+        {
+            try
+            {
+                using var process = Process.GetProcessById((int)loop.Pid);
+                process.Kill(entireProcessTree: true);
+                process.WaitForExit(5000);
+            }
+            catch (ArgumentException) { }
+            catch (InvalidOperationException) { }
+        }
     }
 
     private static readonly System.Text.Encoding StrictUtf8 = new System.Text.UTF8Encoding(false, throwOnInvalidBytes: true);
@@ -1042,7 +1079,7 @@ public static class RunnerService
     private static readonly string[] RunnerItemPatterns =
     {
         "bin", "bin.*", "externals", "externals.*", "_diag", "_work", "_update",
-        ".runner", ".runner_migrated", ".credentials*", ".service", ".env", ".path", ".setup_info",
+        ".runner", ".runner_migrated", ".credentials*", ".service", ".env", ".path", ".setup_info", MovedAwayMarker,
         "config.cmd", "config.sh", "run.cmd", "run.sh", "run-helper.*", "svc.*", "safe_sleep.*", "env.sh", "runsvc.sh",
         "actions-runner-*.zip"
     };
@@ -1802,6 +1839,8 @@ public sealed class RunnerInfo : INotifyPropertyChanged
     /// runner (not "No service", which would offer Repair and install a second copy) and is not running.
     /// </summary>
     public bool ConsoleRestarting { get; init; }
+    /// <summary>The old copy of a runner that was moved to another PC (see <see cref="RunnerService.IsInUseElsewhere"/>).</summary>
+    public bool MovedAway { get; init; }
     public bool IsRunning { get; init; }
     /// <summary>How commands address this runner: its service name, or its folder when it has no service.</summary>
     public string CommandKey => string.IsNullOrEmpty(Name) ? InstallPath : Name;

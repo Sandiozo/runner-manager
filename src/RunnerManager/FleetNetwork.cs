@@ -56,13 +56,27 @@ public interface IAgentKeys
     void UsePending(byte[] key);
 }
 
-/// <summary>The agent's codes in fleet.json, so this PC's dashboard follows when the agent switches.</summary>
+/// <summary>
+/// The agent's codes in fleet.json, so this PC's dashboard follows when the agent switches. The pending code is also
+/// kept in memory: a Runner Manager before 2.4 that saves fleet.json meanwhile drops it from the file.
+/// </summary>
 internal sealed class ConfigAgentKeys : IAgentKeys
 {
+    private volatile byte[]? _pending;
     public byte[]? Current => FleetConfig.Current.FleetKey;
-    public byte[]? Pending => FleetConfig.Current.PendingFleetKey;
-    public void SetPending(byte[] key) => FleetConfig.SetPendingFleetKey(key);
-    public void UsePending(byte[] key) => FleetConfig.UsePendingFleetKey(key);
+    public byte[]? Pending => FleetConfig.Current.PendingFleetKey ?? _pending;
+
+    public void SetPending(byte[] key)
+    {
+        _pending = key;
+        FleetConfig.SetPendingFleetKey(key);
+    }
+
+    public void UsePending(byte[] key)
+    {
+        FleetConfig.UsePendingFleetKey(key, _pending);
+        _pending = null;
+    }
 }
 
 /// <summary>Codes kept in memory, for an agent given its code as a function (tests).</summary>
@@ -423,7 +437,7 @@ public sealed class AgentServer : IDisposable
     private readonly string _machineKey;
     private readonly string _displayName;
     private readonly string _machineId;
-    private readonly ReplayGuard _replay = new();
+    private readonly ReplayGuard _replay;
     private readonly byte[] _discoveryBody;
     private readonly CancellationTokenSource _cts = new();
     // Requests that are not authenticated yet; each may buffer up to MaxRequestBytes.
@@ -454,6 +468,8 @@ public sealed class AgentServer : IDisposable
         _displayName = machineKey ?? Environment.MachineName;
         _machineKey = MachineRelay.Sanitize(_displayName);
         _machineId = machineId ?? (prefix == null ? FleetConfig.LocalMachineId : string.Empty);
+        // The real agent remembers the requests it has seen across restarts; tests keep them in memory.
+        _replay = new ReplayGuard(prefix == null ? Path.Combine(FleetConfig.StateDir, "seen-requests.txt") : null);
         // The answer body never changes; only its signature depends on the probe.
         _discoveryBody = JsonSerializer.SerializeToUtf8Bytes(new
         {

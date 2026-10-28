@@ -91,18 +91,7 @@ public sealed class FleetActions
         //    disable its service so it doesn't start again at the next restart. Agents before protocol 12 only stop it.
         log($"Stopping the runner on {source.MachineName}…");
         await RunOnMachineAsync(source, "runner", runner.CommandKey, "Stop", log,
-            async () =>
-            {
-                FleetConfig.SetManuallyStopped(runner.CommandKey, true);
-                try { await RunnerService.StopIfIdleAsync(runner.CommandKey); }
-                catch
-                {
-                    FleetConfig.SetManuallyStopped(runner.CommandKey, false);
-                    throw;
-                }
-                await SetServiceEnabledAsync(runner.CommandKey, false);
-            },
-            TimeSpan.FromMinutes(2), value: "disable");
+            () => StopForMoveAsync(runner.CommandKey), TimeSpan.FromMinutes(2), value: "disable");
 
         // 2. Register it on the target, replacing the old registration.
         try
@@ -136,13 +125,7 @@ public sealed class FleetActions
                 try
                 {
                     await RunOnMachineAsync(source, "runner", runner.CommandKey, "Start", log,
-                        async () =>
-                        {
-                            FleetConfig.SetManuallyStopped(runner.CommandKey, false);
-                            await SetServiceEnabledAsync(runner.CommandKey, true);
-                            await RunnerService.ControlServiceAsync(runner.CommandKey, "Start");
-                        },
-                        TimeSpan.FromMinutes(2), value: "enable");
+                        () => StartAfterFailedMoveAsync(runner.CommandKey), TimeSpan.FromMinutes(2), value: "enable");
                 }
                 catch (Exception restartError) { log($"Could not start the runner again: {restartError.Message}"); }
             }
@@ -189,6 +172,38 @@ public sealed class FleetActions
         if (lookup.State != null) return lookup.State.Labels;
         if (lookup.NotFound) return Array.Empty<string>();
         throw new InvalidOperationException("Could not read the runner's labels from GitHub, so it was not moved. Try again.");
+    }
+
+    /// <summary>
+    /// Step 1 of a move, on the PC the runner leaves: stops it when idle, keeps auto-recovery away, disables its service so
+    /// it doesn't start at the next restart, and marks it as the old copy (so deleting it later doesn't unregister the
+    /// moved runner). Undone when any part fails.
+    /// </summary>
+    internal static async Task StopForMoveAsync(string key)
+    {
+        var wasStopped = FleetConfig.Current.ManuallyStopped.Contains(key, StringComparer.OrdinalIgnoreCase);
+        FleetConfig.SetManuallyStopped(key, true);
+        try
+        {
+            await RunnerService.StopIfIdleAsync(key);
+            await SetServiceEnabledAsync(key, false);
+            await RunnerService.MarkMovedAwayAsync(key, true);
+        }
+        catch
+        {
+            try { await SetServiceEnabledAsync(key, true); } catch { }
+            FleetConfig.SetManuallyStopped(key, wasStopped);
+            throw;
+        }
+    }
+
+    /// <summary>Undoes <see cref="StopForMoveAsync"/> after a move failed, and starts the runner again.</summary>
+    internal static async Task StartAfterFailedMoveAsync(string key)
+    {
+        await RunnerService.MarkMovedAwayAsync(key, false);
+        FleetConfig.SetManuallyStopped(key, false);
+        await SetServiceEnabledAsync(key, true);
+        await RunnerService.ControlServiceAsync(key, "Start");
     }
 
     /// <summary>
