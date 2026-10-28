@@ -388,6 +388,7 @@ public static class RunnerService
 
     public static async Task RemoveRunnerAsync(RunnerInfo runner, bool deleteFolder, Action<string> log)
     {
+        if (deleteFolder) EnsureFilesCanBeDeleted(runner);
         if (string.IsNullOrWhiteSpace(runner.ApiScope))
         {
             log("The runner repository is unknown, so the runner cannot be removed from GitHub. Removing it from this PC only.");
@@ -413,11 +414,7 @@ public static class RunnerService
             await RemoveLocallyAsync(runner, deleteFolder, log);
             return;
         }
-        if (deleteFolder && Directory.Exists(runner.InstallPath))
-        {
-            log("Deleting the runner folder…");
-            await Task.Run(() => DeleteFolder(runner.InstallPath));
-        }
+        if (deleteFolder) await Task.Run(() => DeleteRunnerFiles(runner, log));
         ForgetRoot(runner.InstallPath);
         log("Runner removed.");
     }
@@ -473,6 +470,7 @@ public static class RunnerService
     public static async Task RetireMovedRunnerAsync(string key, bool deleteFolder, Action<string> log)
     {
         var runner = await FindRunnerAsync(key) ?? throw new InvalidOperationException("The runner was not found on this PC.");
+        if (deleteFolder) EnsureFilesCanBeDeleted(runner);
         await RemoveLocallyAsync(runner, deleteFolder, log);
     }
 
@@ -487,11 +485,7 @@ public static class RunnerService
             var (code, output) = await ScheduledTasks.RunAsync("sc.exe", $"delete \"{runner.Name}\"", ScheduledTasks.ShortTimeout);
             if (code != 0) throw new InvalidOperationException($"Could not remove the Windows service {runner.Name}: {output.Trim()}");
         }
-        if (deleteFolder)
-        {
-            log("Deleting the runner folder…");
-            await Task.Run(() => DeleteFolder(runner.InstallPath));
-        }
+        if (deleteFolder) await Task.Run(() => DeleteRunnerFiles(runner, log));
         else
         {
             // Keep the files but drop the stale registration so the folder isn't listed as a runner any more.
@@ -624,14 +618,155 @@ public static class RunnerService
             FleetConfig.Update(c => c.KnownRunnerRoots.RemoveAll(r => r.Equals(root, StringComparison.OrdinalIgnoreCase)));
     }
 
-    private static void DeleteFolder(string path)
+    /// <summary>
+    /// The files and folders a runner install consists of: the actions/runner package, what config.cmd and the runner
+    /// write next to it (settings, logs, work folder, self-update copies), and the package zip.
+    /// </summary>
+    private static readonly string[] RunnerItemPatterns =
     {
-        if (!Directory.Exists(path)) return;
-        foreach (var file in Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories))
+        "bin", "bin.*", "externals", "externals.*", "_diag", "_work", "_update",
+        ".runner", ".runner_migrated", ".credentials*", ".service", ".env", ".path", ".setup_info",
+        "config.cmd", "config.sh", "run.cmd", "run.sh", "run-helper.*", "svc.*", "safe_sleep.*", "env.sh", "runsvc.sh",
+        "actions-runner-*.zip"
+    };
+
+    /// <summary>True when a top-level entry of a runner folder belongs to the runner install.</summary>
+    internal static bool IsRunnerItem(string name, string workFolder = "_work")
+    {
+        var work = string.IsNullOrWhiteSpace(workFolder) || Path.IsPathRooted(workFolder) ? "_work"
+            : workFolder.Split('\\', '/', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? "_work";
+        return name.Equals(work, StringComparison.OrdinalIgnoreCase)
+               || RunnerItemPatterns.Any(p => System.IO.Enumeration.FileSystemName.MatchesSimpleExpression(p, name, ignoreCase: true));
+    }
+
+    internal enum FolderDeletion { Refuse, Whole, RunnerItemsOnly }
+
+    /// <param name="Reason">Why the folder is refused or kept; empty when it can be deleted whole.</param>
+    internal sealed record FolderDeletionPlan(FolderDeletion Kind, string Reason, IReadOnlyList<string> OtherItems);
+
+    /// <summary>
+    /// How to delete a runner's files. The folder comes from the runner's service or listener path, so it can be a drive
+    /// root, a profile folder, or a folder that holds other runners and files. Those are never deleted whole: drive roots
+    /// are refused, and elsewhere only the runner's own items are deleted when anything else is there.
+    /// </summary>
+    internal static FolderDeletionPlan PlanFolderDeletion(string root, string workFolder = "_work")
+    {
+        var full = Path.GetFullPath(root).TrimEnd('\\');
+        if (IsDriveRoot(full))
+            return new FolderDeletionPlan(FolderDeletion.Refuse, $"{full}\\ is a drive root", Array.Empty<string>());
+        var others = new List<string>();
+        try
         {
-            try { File.SetAttributes(file, FileAttributes.Normal); } catch { }
+            foreach (var entry in new DirectoryInfo(full).EnumerateFileSystemInfos())
+                if (!IsRunnerItem(entry.Name, workFolder)) others.Add(entry.Name);
         }
-        Directory.Delete(path, recursive: true);
+        catch (DirectoryNotFoundException) { }
+        if (IsProtectedFolder(full))
+            return new FolderDeletionPlan(FolderDeletion.RunnerItemsOnly, $"{full} is a Windows or user folder", others);
+        if (others.Count == 0) return new FolderDeletionPlan(FolderDeletion.Whole, string.Empty, others);
+        var runners = others.Where(o => File.Exists(Path.Combine(full, o, ".runner"))).ToList();
+        var reason = runners.Count > 0
+            ? $"{full} also holds other runners ({string.Join(", ", runners.Take(3))})"
+            : $"{full} also holds other files ({string.Join(", ", others.Take(3))}{(others.Count > 3 ? ", …" : string.Empty)})";
+        return new FolderDeletionPlan(FolderDeletion.RunnerItemsOnly, reason, others);
+    }
+
+    private static bool IsDriveRoot(string fullPath)
+    {
+        var root = Path.GetPathRoot(fullPath)?.TrimEnd('\\') ?? string.Empty;
+        return root.Length == 0 || root.Equals(fullPath.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>Windows, Program Files, profile folders and their parents (such as C:\Users).</summary>
+    private static bool IsProtectedFolder(string fullPath)
+    {
+        var folders = new[]
+        {
+            Environment.SpecialFolder.Windows, Environment.SpecialFolder.System, Environment.SpecialFolder.ProgramFiles,
+            Environment.SpecialFolder.ProgramFilesX86, Environment.SpecialFolder.CommonApplicationData,
+            Environment.SpecialFolder.UserProfile, Environment.SpecialFolder.Desktop, Environment.SpecialFolder.MyDocuments,
+            Environment.SpecialFolder.ApplicationData, Environment.SpecialFolder.LocalApplicationData
+        };
+        var path = fullPath.TrimEnd('\\') + "\\";
+        return folders.Select(Environment.GetFolderPath).Where(f => !string.IsNullOrEmpty(f))
+            .Select(f => f.TrimEnd('\\') + "\\")
+            .Any(f => f.StartsWith(path, StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>Throws when the runner's files must not be deleted at all (a drive root), before anything is changed.</summary>
+    private static void EnsureFilesCanBeDeleted(RunnerInfo runner)
+    {
+        if (!Directory.Exists(runner.InstallPath)) return;
+        var plan = PlanFolderDeletion(runner.InstallPath, runner.WorkFolder);
+        if (plan.Kind == FolderDeletion.Refuse)
+            throw new InvalidOperationException($"The runner's files cannot be deleted: {plan.Reason}. Delete the runner and keep its files instead.");
+    }
+
+    /// <summary>Deletes a runner's files as planned by <see cref="PlanFolderDeletion"/>.</summary>
+    private static void DeleteRunnerFiles(RunnerInfo runner, Action<string> log)
+    {
+        if (!Directory.Exists(runner.InstallPath)) return;
+        var plan = PlanFolderDeletion(runner.InstallPath, runner.WorkFolder);
+        if (plan.Kind == FolderDeletion.Refuse) throw new InvalidOperationException($"The runner's files were not deleted: {plan.Reason}.");
+        if (plan.Kind == FolderDeletion.Whole)
+        {
+            log("Deleting the runner folder…");
+            DeleteFolder(runner.InstallPath);
+            return;
+        }
+        log($"Deleting only the runner's own files, because {plan.Reason}…");
+        DeleteRunnerItems(runner.InstallPath, runner.WorkFolder);
+    }
+
+    /// <summary>Deletes the runner's own items in a folder and keeps everything else.</summary>
+    internal static void DeleteRunnerItems(string root, string workFolder = "_work")
+    {
+        var failed = 0;
+        foreach (var entry in new DirectoryInfo(root).EnumerateFileSystemInfos().Where(e => IsRunnerItem(e.Name, workFolder)))
+            failed += DeleteEntry(entry);
+        if (failed > 0) throw new IOException($"{failed} item(s) in {root} were in use and were not deleted.");
+    }
+
+    /// <summary>Deletes a folder and everything in it. Junctions and symbolic links inside are removed, not followed.</summary>
+    internal static void DeleteFolder(string path)
+    {
+        var folder = new DirectoryInfo(path);
+        if (!folder.Exists) return;
+        var failed = 0;
+        foreach (var entry in folder.EnumerateFileSystemInfos()) failed += DeleteEntry(entry);
+        if (failed > 0) throw new IOException($"{failed} item(s) in {path} were in use and were not deleted.");
+        folder.Attributes &= ~FileAttributes.ReadOnly;
+        folder.Delete();
+    }
+
+    /// <summary>
+    /// Deletes a file or folder tree and returns how many items could not be deleted. A junction or symbolic link is
+    /// deleted itself; its target is never entered.
+    /// </summary>
+    internal static int DeleteEntry(FileSystemInfo entry)
+    {
+        try
+        {
+            if (entry.Attributes.HasFlag(FileAttributes.ReparsePoint))
+            {
+                if (entry is DirectoryInfo link) Directory.Delete(link.FullName, recursive: false);
+                else File.Delete(entry.FullName);
+                return 0;
+            }
+            if (entry is DirectoryInfo directory)
+            {
+                var failed = 0;
+                foreach (var child in directory.EnumerateFileSystemInfos()) failed += DeleteEntry(child);
+                if (failed > 0) return failed;
+                directory.Attributes &= ~FileAttributes.ReadOnly;
+                directory.Delete();
+                return 0;
+            }
+            entry.Attributes = FileAttributes.Normal;
+            entry.Delete();
+            return 0;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return 1; }
     }
 
     /// <summary>After a failed install: deletes the folder if this install created it, or empties it if it was empty before.</summary>
@@ -645,15 +780,7 @@ public static class RunnerService
                 return;
             }
             if (!Directory.Exists(path)) return;
-            foreach (var entry in new DirectoryInfo(path).EnumerateFileSystemInfos())
-            {
-                if (entry is DirectoryInfo directory) DeleteFolder(directory.FullName);
-                else
-                {
-                    entry.Attributes = FileAttributes.Normal;
-                    entry.Delete();
-                }
-            }
+            foreach (var entry in new DirectoryInfo(path).EnumerateFileSystemInfos()) DeleteEntry(entry);
         }
         catch { }
     }
@@ -979,25 +1106,10 @@ public static class RunnerService
             log($"Deleting the contents of {fullFolder}…");
             var failures = await Task.Run(() =>
             {
+                // Links (for example a junction to a shared tool cache) are removed without touching their targets.
                 var failed = 0;
                 foreach (var entry in new DirectoryInfo(fullFolder).EnumerateFileSystemInfos())
-                {
-                    try
-                    {
-                        if (entry is DirectoryInfo directory)
-                        {
-                            foreach (var file in directory.EnumerateFiles("*", SearchOption.AllDirectories))
-                                file.Attributes = FileAttributes.Normal;
-                            directory.Delete(recursive: true);
-                        }
-                        else
-                        {
-                            entry.Attributes = FileAttributes.Normal;
-                            entry.Delete();
-                        }
-                    }
-                    catch { failed++; }
-                }
+                    if (DeleteEntry(entry) > 0) failed++;
                 return failed;
             });
             SystemHealth.ForgetFolderSize(fullFolder);
