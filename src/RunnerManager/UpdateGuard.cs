@@ -46,10 +46,14 @@ public static class UpdateGuard
     internal static readonly TimeSpan AgentStartDeadline = TimeSpan.FromMinutes(10);
     /// <summary>The dashboard waits this long after its own start, so an agent that starts at sign-in is not missed.</summary>
     internal static readonly TimeSpan DashboardGrace = TimeSpan.FromMinutes(3);
+    /// <summary>The agent must have been seen stopped this long, so a restart in progress is not mistaken for a failure.</summary>
+    internal static readonly TimeSpan AgentDownLimit = TimeSpan.FromMinutes(2);
 
     private static readonly string StatePath = Path.Combine(FleetConfig.StateDir, "update-state.json");
     private static readonly object Gate = new();
     private static readonly DateTime StartedUtc = DateTime.UtcNow;
+    /// <summary>When the dashboard first saw the agent stopped (it checks once a minute), or null while it runs.</summary>
+    private static DateTime? _agentDownSinceUtc;
 
     public static string PreviousExe => AppUpdater.InstalledExe + ".previous";
 
@@ -73,7 +77,7 @@ public static class UpdateGuard
     /// on a PC without a fleet agent, or undo it when the new agent never got going.
     /// </summary>
     internal static DashboardUpdateDecision DecideForDashboard(PendingUpdate? pending, string runningVersion, string? installedVersion,
-        bool agentInstalled, bool agentRunning, DateTime nowUtc, TimeSpan uptime)
+        bool agentInstalled, TimeSpan agentDownFor, DateTime nowUtc, TimeSpan uptime)
     {
         if (pending == null) return DashboardUpdateDecision.Nothing;
         if (installedVersion == null || AppUpdater.CompareVersions(pending.Version, installedVersion) != 0) return DashboardUpdateDecision.Forget;
@@ -81,7 +85,8 @@ public static class UpdateGuard
             return AppUpdater.CompareVersions(pending.Version, runningVersion) == 0 && uptime >= HealthyAfter
                 ? DashboardUpdateDecision.MarkHealthy : DashboardUpdateDecision.Nothing;
         // An old agent may still run while it waits for a job to finish; that is no reason to undo anything.
-        if (agentRunning || uptime < DashboardGrace || nowUtc - pending.InstalledUtc < AgentStartDeadline) return DashboardUpdateDecision.Nothing;
+        if (agentDownFor < AgentDownLimit || uptime < DashboardGrace || nowUtc - pending.InstalledUtc < AgentStartDeadline)
+            return DashboardUpdateDecision.Nothing;
         return DashboardUpdateDecision.RollBack;
     }
 
@@ -175,8 +180,11 @@ public static class UpdateGuard
     {
         var state = Load();
         if (state.Pending == null) return null;
-        var agentRunning = agentInstalled && await MachineRelay.IsAgentRunningAsync();
-        switch (DecideForDashboard(state.Pending, AppUpdater.CurrentVersion, AppUpdater.InstalledVersion, agentInstalled, agentRunning,
+        var running = !agentInstalled || await MachineRelay.IsAgentRunningAsync();
+        if (running) _agentDownSinceUtc = null;
+        else _agentDownSinceUtc ??= DateTime.UtcNow;
+        var downFor = _agentDownSinceUtc is { } since ? DateTime.UtcNow - since : TimeSpan.Zero;
+        switch (DecideForDashboard(state.Pending, AppUpdater.CurrentVersion, AppUpdater.InstalledVersion, agentInstalled, downFor,
                     DateTime.UtcNow, DateTime.UtcNow - StartedUtc))
         {
             case DashboardUpdateDecision.Forget:

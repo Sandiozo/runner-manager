@@ -125,8 +125,8 @@ public class UpdateRollbackTests
     }
 
     private static DashboardUpdateDecision Dashboard(PendingUpdate? pending, string installed = "2.4.0", bool agentInstalled = true,
-        bool agentRunning = false, double minutesSinceInstall = 30, double uptimeMinutes = 10, string running = "2.4.0")
-        => UpdateGuard.DecideForDashboard(pending, running, installed, agentInstalled, agentRunning,
+        double agentDownMinutes = 5, double minutesSinceInstall = 30, double uptimeMinutes = 10, string running = "2.4.0")
+        => UpdateGuard.DecideForDashboard(pending, running, installed, agentInstalled, TimeSpan.FromMinutes(agentDownMinutes),
             Installed.AddMinutes(minutesSinceInstall), TimeSpan.FromMinutes(uptimeMinutes));
 
     [Fact]
@@ -136,7 +136,9 @@ public class UpdateRollbackTests
     [Fact]
     public void Dashboard_WaitsForTheAgent()
     {
-        Assert.Equal(DashboardUpdateDecision.Nothing, Dashboard(Pending(), agentRunning: true));
+        Assert.Equal(DashboardUpdateDecision.Nothing, Dashboard(Pending(), agentDownMinutes: 0));
+        // Seen stopped only briefly: it may be restarting.
+        Assert.Equal(DashboardUpdateDecision.Nothing, Dashboard(Pending(), agentDownMinutes: 1));
         Assert.Equal(DashboardUpdateDecision.Nothing, Dashboard(Pending(), minutesSinceInstall: 5));
         // Just signed in: the agent's logon task may not have started yet.
         Assert.Equal(DashboardUpdateDecision.Nothing, Dashboard(Pending(), uptimeMinutes: 1));

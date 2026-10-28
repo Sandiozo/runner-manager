@@ -301,6 +301,8 @@ public static class ScheduledTasks
 public static class AgentOwnership
 {
     private static readonly TimeSpan CacheTime = TimeSpan.FromSeconds(60);
+    /// <summary>The usual answer (no other user) is kept longer: it costs a process query.</summary>
+    private static readonly TimeSpan NoOtherUserCacheTime = TimeSpan.FromMinutes(5);
     private static (string? Other, DateTime CheckedUtc)? _cached;
 
     public static string Describe(string other)
@@ -309,11 +311,12 @@ public static class AgentOwnership
 
     /// <summary>
     /// The other Windows user whose agent task or running agent this is, or null when it is this user's (or there is none).
-    /// Cached for a minute.
+    /// Cached for a minute, or five when there is none; registering the agent task clears it.
     /// </summary>
     public static async Task<string?> OtherUserAsync()
     {
-        if (_cached is { } cached && DateTime.UtcNow - cached.CheckedUtc < CacheTime) return cached.Other;
+        if (_cached is { } cached && DateTime.UtcNow - cached.CheckedUtc < (cached.Other != null ? CacheTime : NoOtherUserCacheTime))
+            return cached.Other;
         var other = await ScheduledTasks.OtherOwnerAsync(ScheduledTasks.AgentTaskName) ?? await Task.Run(OtherUserOfRunningAgent);
         _cached = (other, DateTime.UtcNow);
         return other;
