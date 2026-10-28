@@ -334,6 +334,7 @@ public static class MachineRelay
                    ?? throw new InvalidOperationException($"Could not reach {machineKey}. Check that it is on and on the same network.");
         return (peer.Address, peer.MachineId);
     }
+
     /// <summary>Why commands to a machine would fail, or null when it can be reached.</summary>
     public static string? SigningProblem(MachineInfo machine) => machine.IsLocal ? null : machine.ConnectionProblem.Length > 0 ? machine.ConnectionProblem : null;
 
