@@ -10,6 +10,7 @@ using System.ServiceProcess;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Windows.Media;
+using Microsoft.Win32;
 
 namespace RunnerManager;
 
@@ -32,7 +33,15 @@ public static class RunnerService
         // The default folder is scanned too, for runners installed before the folder setting was changed.
         foreach (var folder in new[] { RunnersRoot, DefaultRoot }.Distinct(StringComparer.OrdinalIgnoreCase).Where(Directory.Exists))
         {
-            foreach (var dir in Directory.GetDirectories(folder))
+            // An offline network folder or one without access must not hide the other runners.
+            string[] dirs;
+            try { dirs = Directory.GetDirectories(folder); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                LogOnce($"runners-folder:{folder}", $"Could not read the runners folder {folder}: {ex.Message}");
+                continue;
+            }
+            foreach (var dir in dirs)
                 if (File.Exists(Path.Combine(dir, ".runner"))) roots.Add(dir);
         }
         // Runners started from a console (run.cmd) instead of a service live anywhere; find them by their
@@ -47,12 +56,42 @@ public static class RunnerService
         if (newRoots.Count > 0) FleetConfig.Update(c => c.KnownRunnerRoots.AddRange(newRoots));
         foreach (var root in consoleRoots) roots.Add(root);
         foreach (var root in FleetConfig.Current.KnownRunnerRoots)
-            if (File.Exists(Path.Combine(root, ".runner"))) roots.Add(root);
+            if (File.Exists(Path.Combine(root, ".runner"))) roots.Add(LongPath(root));
 
         var runners = await Task.WhenAll(roots.OrderBy(x => x)
             .Select(root => BuildRunnerInfoAsync(root, services, processes, queryGitHub)));
         return runners.ToList();
     });
+
+    private static readonly HashSet<string> LoggedProblems = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Writes a problem to the agent log once per run of the app, since the runner list is read every few seconds.</summary>
+    private static void LogOnce(string key, string message)
+    {
+        lock (LoggedProblems)
+            if (!LoggedProblems.Add(key)) return;
+        MachineRelay.AppendAgentLog(message);
+    }
+
+    /// <summary>How long a console runner that stopped is still shown as a console runner (it restarts while it updates itself).</summary>
+    private static readonly TimeSpan ConsoleRestartGrace = TimeSpan.FromMinutes(3);
+    /// <summary>Folders of console runners and when their listener was last seen running.</summary>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, DateTime> ConsoleSeenUtc = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// True when a console runner's listener is gone but was running a moment ago. A console runner that updates itself
+    /// has no listener for a few seconds; it must not look like a runner without a service, or Repair would install a
+    /// second copy of it as a service.
+    /// </summary>
+    internal static bool IsConsoleRestarting(string root, bool listenerRunning, DateTime nowUtc)
+    {
+        if (listenerRunning)
+        {
+            ConsoleSeenUtc[root] = nowUtc;
+            return false;
+        }
+        return ConsoleSeenUtc.TryGetValue(root, out var seen) && nowUtc - seen < ConsoleRestartGrace;
+    }
 
     private static async Task<RunnerInfo> BuildRunnerInfoAsync(
         string root, List<RunnerServiceRecord> services, List<ProcessInfo> processes, bool queryGitHub)
@@ -63,8 +102,9 @@ public static class RunnerService
         var consoleListener = serviceInstalled ? null : processes.FirstOrDefault(p =>
             p.Name.Equals("Runner.Listener.exe", StringComparison.OrdinalIgnoreCase)
             && RootFromExecutable(p.ExecutablePath).Equals(root, StringComparison.OrdinalIgnoreCase));
-        var interactive = consoleListener != null;
-        var running = service?.State.Equals("Running", StringComparison.OrdinalIgnoreCase) == true || interactive;
+        var restarting = !serviceInstalled && IsConsoleRestarting(root, consoleListener != null, DateTime.UtcNow);
+        var interactive = consoleListener != null || restarting;
+        var running = service?.State.Equals("Running", StringComparison.OrdinalIgnoreCase) == true || consoleListener != null;
         var busy = running && HasDescendantWorker(service?.ProcessId ?? consoleListener!.ProcessId, processes);
         var repoPath = RepositoryPath(config.GitHubUrl);
         var scope = ApiScope(config.GitHubUrl);
@@ -86,9 +126,10 @@ public static class RunnerService
         {
             Name = service?.Name ?? string.Empty,
             DisplayName = label,
-            StatusText = serviceInstalled ? service!.State : interactive ? "Console window" : "No service",
-            ActivityText = running ? (busy ? "Busy" : "Idle") : "Offline",
+            StatusText = serviceInstalled ? service!.State : restarting ? "Console window (restarting)" : interactive ? "Console window" : "No service",
+            ActivityText = running ? (busy ? "Busy" : "Idle") : restarting ? "Restarting" : "Offline",
             IsInteractive = interactive,
+            ConsoleRestarting = restarting,
             LastActivityText = GetLatestRunnerActivity(root),
             InstallPath = root,
             GitHubUrl = config.GitHubUrl,
@@ -100,6 +141,10 @@ public static class RunnerService
             AgentName = config.AgentName,
             AgentId = config.AgentId,
             WorkFolder = config.WorkFolder,
+            RunnerGroup = config.RunnerGroup,
+            Ephemeral = config.Ephemeral,
+            DisableUpdate = config.DisableUpdate,
+            NoDefaultLabels = remote is { HasDefaultLabels: false },
             ServiceInstalled = serviceInstalled,
             IsRunning = running,
             StatusBrush = interactive ? Palette.Warning : running ? Palette.Success : serviceInstalled ? Palette.Danger : Palette.Warning,
@@ -118,19 +163,28 @@ public static class RunnerService
     {
         var file = Path.Combine(root, ".runner");
         if (!File.Exists(file)) return new RunnerConfig();
-        try
-        {
-            using var json = JsonDocument.Parse(File.ReadAllText(file));
-            var e = json.RootElement;
-            return new RunnerConfig
-            {
-                AgentId = e.TryGetProperty("agentId", out var id) ? id.GetInt64() : 0,
-                AgentName = e.TryGetProperty("agentName", out var name) ? name.GetString() ?? "Runner" : "Runner",
-                GitHubUrl = e.TryGetProperty("gitHubUrl", out var url) ? url.GetString() ?? string.Empty : string.Empty,
-                WorkFolder = e.TryGetProperty("workFolder", out var work) ? work.GetString() ?? "_work" : "_work"
-            };
-        }
+        try { return ParseRunnerConfig(File.ReadAllText(file)); }
         catch { return new RunnerConfig(); }
+    }
+
+    /// <summary>
+    /// The settings config.cmd saved in .runner. poolName is the runner group; ephemeral and disableUpdate are only
+    /// written when they were set.
+    /// </summary>
+    internal static RunnerConfig ParseRunnerConfig(string json)
+    {
+        using var document = JsonDocument.Parse(json.TrimStart('﻿'));
+        var e = document.RootElement;
+        return new RunnerConfig
+        {
+            AgentId = e.TryGetProperty("agentId", out var id) ? id.GetInt64() : 0,
+            AgentName = e.TryGetProperty("agentName", out var name) ? name.GetString() ?? "Runner" : "Runner",
+            GitHubUrl = e.TryGetProperty("gitHubUrl", out var url) ? url.GetString() ?? string.Empty : string.Empty,
+            WorkFolder = e.TryGetProperty("workFolder", out var work) ? work.GetString() ?? "_work" : "_work",
+            RunnerGroup = e.TryGetProperty("poolName", out var pool) && pool.ValueKind == JsonValueKind.String ? pool.GetString() ?? string.Empty : string.Empty,
+            Ephemeral = e.TryGetProperty("ephemeral", out var ephemeral) && ephemeral.ValueKind == JsonValueKind.True,
+            DisableUpdate = e.TryGetProperty("disableUpdate", out var disableUpdate) && disableUpdate.ValueKind == JsonValueKind.True
+        };
     }
 
     private static List<RunnerServiceRecord> ReadRunnerServices()
@@ -274,6 +328,7 @@ public static class RunnerService
         if (string.IsNullOrWhiteSpace(scope)) throw new InvalidOperationException("Enter a valid GitHub repository or organization URL.");
         EnsureValidConfigInput(setup.RepositoryUrl, setup.RunnerName, setup.Labels);
         EnsureSafeFolder(setup.InstallPath);
+        if (NetworkFolderProblem(setup.InstallPath) is { } networkProblem) throw new InvalidOperationException(networkProblem);
         if (Directory.Exists(setup.InstallPath) && Directory.EnumerateFileSystemEntries(setup.InstallPath).Any())
             throw new InvalidOperationException("The runner folder already contains files. Choose an empty or new folder.");
 
@@ -300,11 +355,12 @@ public static class RunnerService
             var token = await GitHubCli.GetRunnerTokenAsync(scope, removal: false);
             log("Configuring the runner as a Windows service…");
             await ConfigureAsync(setup.InstallPath, setup.RepositoryUrl, token, setup.RunnerName,
-                "_work", setup.Labels, runAsService: true, replace: setup.ReplaceExisting);
+                "_work", setup.Labels, runAsService: true, replace: setup.ReplaceExisting, setup.Options);
         }
         catch
         {
             // Leave the folder as it was, so trying again with the same folder works.
+            await UndoFailedRegistrationAsync(setup, scope, log);
             await Task.Run(() => RemoveFailedInstall(setup.InstallPath, createdFolder));
             throw;
         }
@@ -323,19 +379,13 @@ public static class RunnerService
         if (string.IsNullOrWhiteSpace(runner.ApiScope) || string.IsNullOrWhiteSpace(runner.GitHubUrl))
             throw new InvalidOperationException("The runner configuration does not include a GitHub repository or organization.");
 
-        var labels = await ReadLabelsBeforeRemovalAsync(runner);
-        // Check the input before config remove, so an invalid value cannot leave the runner unregistered.
-        EnsureValidConfigInput(runner.GitHubUrl, runner.AgentName, labels);
+        var current = await ReadRegistrationBeforeRemovalAsync(runner);
+        // Check everything before config remove, so an invalid value or a taken name cannot leave the runner unregistered.
+        EnsureValidConfigInput(current.Url, current.Name, current.Labels);
+        await EnsureNameIsFreeAsync(runner, current.Name);
+        EnsureNotBusyNow(runner);
         await DetachConsoleRunnerAsync(runner, log);
-        log("Requesting a removal token…");
-        var removeToken = await GitHubCli.GetRunnerTokenAsync(runner.ApiScope, removal: true);
-        await RunConfigRemoveAsync(runner.InstallPath, removeToken);
-
-        log("Requesting a registration token…");
-        var registerToken = await GitHubCli.GetRunnerTokenAsync(runner.ApiScope, removal: false);
-        log("Configuring the runner as a Windows service…");
-        await ConfigureAsync(runner.InstallPath, runner.GitHubUrl, registerToken,
-            runner.AgentName, runner.WorkFolder, labels, runAsService: true);
+        await RegisterAgainAsync(runner, current, current, log);
         log("Runner service repaired.");
     }
 
@@ -353,20 +403,23 @@ public static class RunnerService
 
         var labels = (requestedLabels ?? Array.Empty<string>()).Where(x => !string.IsNullOrWhiteSpace(x))
             .Select(x => x.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-        // Blank labels mean "keep the current ones", which have to be read from GitHub before config remove.
-        if (labels.Length == 0) labels = await ReadLabelsBeforeRemovalAsync(local);
-        EnsureValidConfigInput(local.GitHubUrl, newName.Trim(), labels);
+        // The current name, labels and settings are read before config remove: blank labels mean "keep the current
+        // ones", and a failed registration is rolled back to them.
+        var current = await ReadRegistrationBeforeRemovalAsync(local);
+        var wanted = current with { Name = newName.Trim(), Labels = labels.Length == 0 ? current.Labels : labels };
+        EnsureValidConfigInput(wanted.Url, wanted.Name, wanted.Labels);
+        await EnsureNameIsFreeAsync(local, wanted.Name);
         var wasRunning = local.IsRunning;
-        if (local.IsInteractive) await DetachConsoleRunnerAsync(local, log);
-        else if (wasRunning) await ControlServiceAsync(local.Name, "Stop");
-
-        log("Requesting a removal token…");
-        var removeToken = await GitHubCli.GetRunnerTokenAsync(local.ApiScope, removal: true);
-        await RunConfigRemoveAsync(local.InstallPath, removeToken);
-        log("Requesting a registration token…");
-        var registerToken = await GitHubCli.GetRunnerTokenAsync(local.ApiScope, removal: false);
-        await ConfigureAsync(local.InstallPath, local.GitHubUrl, registerToken, newName.Trim(),
-            local.WorkFolder, labels, runAsService: true);
+        var restoreRecovery = HoldAutoRecovery(local.Name);
+        try
+        {
+            // A job may have started while GitHub was read.
+            EnsureNotBusyNow(local);
+            if (local.IsInteractive) await DetachConsoleRunnerAsync(local, log);
+            else if (wasRunning) await ControlServiceAsync(local.Name, "Stop");
+            await RegisterAgainAsync(local, wanted, current, log);
+        }
+        finally { restoreRecovery(); }
 
         if (wasRunning)
         {
@@ -388,36 +441,66 @@ public static class RunnerService
 
     public static async Task RemoveRunnerAsync(RunnerInfo runner, bool deleteFolder, Action<string> log)
     {
+        if (deleteFolder) EnsureFilesCanBeDeleted(runner);
         if (string.IsNullOrWhiteSpace(runner.ApiScope))
         {
-            log("The runner repository is unknown, so the runner cannot be removed from GitHub. Removing it from this PC only.");
+            log(UnknownScopeMessage(runner.GitHubUrl));
             await RemoveLocallyAsync(runner, deleteFolder, log);
             return;
         }
         await EnsureAuthenticatedAsync();
 
-        if (runner.ServiceInstalled && runner.IsRunning)
-            await ControlServiceAsync(runner.Name, "Stop");
-        await DetachConsoleRunnerAsync(runner, log);
+        if (runner.AgentId > 0 && !runner.IsRunning)
+        {
+            var lookup = await GitHubCli.LookUpRunnerAsync(runner.ApiScope, runner.AgentId);
+            if (IsInUseElsewhere(runner, lookup.State))
+            {
+                // config remove here would unregister the copy that uses the registration now (after a move, the old
+                // copy keeps the same runner ID).
+                log("GitHub shows this runner online, but it is not running on this PC. Another copy, for example one moved to " +
+                    "another PC, uses the same registration, so it stays registered. Removing this copy from this PC only.");
+                await RemoveLocallyAsync(runner, deleteFolder, log);
+                return;
+            }
+        }
+
+        var wasRunning = runner.ServiceInstalled && runner.IsRunning;
+        var restoreRecovery = HoldAutoRecovery(runner.Name);
         try
         {
-            log("Requesting a removal token…");
-            var token = await GitHubCli.GetRunnerTokenAsync(runner.ApiScope, removal: true);
-            await RunConfigRemoveAsync(runner.InstallPath, token);
+            if (wasRunning) await ControlServiceAsync(runner.Name, "Stop");
+            var startup = await DetachConsoleRunnerAsync(runner, log);
+            try
+            {
+                log("Requesting a removal token…");
+                var token = await GitHubCli.GetRunnerTokenAsync(runner.ApiScope, removal: true);
+                await RunConfigRemoveAsync(runner.InstallPath, token);
+            }
+            catch (Exception ex) when (IsGoneFromGitHub(ex))
+            {
+                // The repository (or the runner registration) was deleted on GitHub, or the account lost access to it,
+                // so there's nothing left to unregister. Clean up the service and files here instead of failing.
+                log($"GitHub reports that the runner's repository or organization does not exist, or that you no longer have access to it " +
+                    $"({FirstLine(ex.Message)}). Removing the runner from this PC only. If it still exists, remove the runner in its settings on GitHub.");
+                await RemoveLocallyAsync(runner, deleteFolder, log, detach: false);
+                return;
+            }
+            catch
+            {
+                // Leave a working runner behind: start it again and put its startup entries back.
+                log("Removing the runner failed. Restoring it…");
+                await startup.RestoreAsync(log);
+                if (runner.IsInteractive) log("The runner's console window was closed. It starts again at the next sign-in, or start it with run.cmd.");
+                if (wasRunning)
+                {
+                    try { await ControlServiceAsync(runner.Name, "Start"); }
+                    catch (Exception startError) { log($"Could not start the runner service again: {startError.Message}"); }
+                }
+                throw;
+            }
         }
-        catch (Exception ex) when (IsGoneFromGitHub(ex.Message))
-        {
-            // The repository (or the runner registration) was deleted on GitHub, so there's nothing left to
-            // unregister. Clean up the service and files here instead of failing.
-            log($"The runner or repository no longer exists on GitHub ({FirstLine(ex.Message)}). Removing the runner from this PC only.");
-            await RemoveLocallyAsync(runner, deleteFolder, log);
-            return;
-        }
-        if (deleteFolder && Directory.Exists(runner.InstallPath))
-        {
-            log("Deleting the runner folder…");
-            await Task.Run(() => DeleteFolder(runner.InstallPath));
-        }
+        finally { restoreRecovery(); }
+        if (deleteFolder) await Task.Run(() => DeleteRunnerFiles(runner, log));
         ForgetRoot(runner.InstallPath);
         log("Runner removed.");
     }
@@ -433,27 +516,170 @@ public static class RunnerService
             throw new InvalidOperationException("The runner is busy. Wait for the current job to finish and try again.");
     }
 
+    /// <summary>What config.cmd needs to register a runner: used for the new values and to roll back to the old ones.</summary>
+    private sealed record Registration(string Url, string Name, string[] Labels, RunnerRegistrationOptions Options);
+
     /// <summary>
-    /// The runner's custom labels from GitHub, read before config remove so that registering it again keeps them.
-    /// Stops when GitHub cannot be read (timeout, rate limit); continues only when GitHub confirms the runner is gone.
+    /// The runner's current registration: custom labels from GitHub (read before config remove so that registering it
+    /// again keeps them), and its group and other settings from .runner. Stops when GitHub cannot be read (timeout, rate
+    /// limit); continues only when GitHub confirms the runner is gone.
     /// </summary>
-    private static async Task<string[]> ReadLabelsBeforeRemovalAsync(RunnerInfo runner)
+    private static async Task<Registration> ReadRegistrationBeforeRemovalAsync(RunnerInfo runner)
     {
+        var labels = runner.CustomLabels;
+        var noDefaultLabels = runner.NoDefaultLabels;
         // Without a runner ID there is no registration on GitHub to read labels from.
-        if (runner.AgentId <= 0) return runner.CustomLabels;
-        var lookup = await GitHubCli.LookUpRunnerAsync(runner.ApiScope, runner.AgentId);
-        if (lookup.State != null) return lookup.State.Labels;
-        if (lookup.NotFound) return runner.CustomLabels;
-        throw new InvalidOperationException("Could not read the runner's labels from GitHub. Try again.");
+        if (runner.AgentId > 0)
+        {
+            var lookup = await GitHubCli.LookUpRunnerAsync(runner.ApiScope, runner.AgentId);
+            if (IsInUseElsewhere(runner, lookup.State))
+                throw new InvalidOperationException(InUseElsewhereMessage);
+            if (lookup.State != null)
+            {
+                labels = lookup.State.Labels;
+                noDefaultLabels = !lookup.State.HasDefaultLabels;
+            }
+            else if (!lookup.NotFound)
+                throw new InvalidOperationException("Could not read the runner's labels from GitHub. Try again.");
+        }
+        return new Registration(NormalizeRegistrationUrl(runner.GitHubUrl), runner.AgentName, labels,
+            runner.RegistrationOptions with { NoDefaultLabels = noDefaultLabels });
     }
 
-    /// <summary>GitHub answers 404 when the repository, organization or runner registration no longer exists.</summary>
+    private const string InUseElsewhereMessage = "GitHub shows this runner online, but it is not running on this PC. Another copy, " +
+        "for example one moved to another PC, uses the same registration. Delete this copy instead, or stop the other one first.";
+
+    /// <summary>
+    /// True when this copy is not running but GitHub shows its registration online or busy. config --replace (used by
+    /// moves) keeps the runner ID, so an old copy left behind still has the ID of the registration the new copy uses.
+    /// </summary>
+    internal static bool IsInUseElsewhere(RunnerInfo runner, RemoteRunnerState? state)
+        => !runner.IsRunning && state != null && (state.Busy || state.Status.Equals("online", StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>
+    /// Refuses a name that another runner in the repository or organization already has. Checked before config remove:
+    /// registering with a taken name fails only after the old registration is gone.
+    /// </summary>
+    private static async Task EnsureNameIsFreeAsync(RunnerInfo runner, string name)
+    {
+        var ids = await GitHubCli.FindRunnerIdsByNameAsync(runner.ApiScope, name)
+                  ?? throw new InvalidOperationException($"Could not check on GitHub whether the name {name} is free. Try again.");
+        if (ids.Any(id => id != runner.AgentId))
+            throw new InvalidOperationException($"Another runner named {name} is already registered for {RepositoryName(runner.GitHubUrl)}. Choose a different name.");
+    }
+
+    /// <summary>
+    /// Unregisters the runner and registers it again with new values. If registering fails after config remove, the
+    /// runner is registered again with its old values so it doesn't disappear, and both errors are reported.
+    /// </summary>
+    private static async Task RegisterAgainAsync(RunnerInfo runner, Registration wanted, Registration current, Action<string> log)
+    {
+        log("Requesting a removal token…");
+        var removeToken = await GitHubCli.GetRunnerTokenAsync(runner.ApiScope, removal: true);
+        await RunConfigRemoveAsync(runner.InstallPath, removeToken);
+        try
+        {
+            await RegisterAsync(runner, wanted, log);
+        }
+        catch (Exception error)
+        {
+            log($"Registering failed: {FirstLine(error.Message)} Registering the runner again with its old name and labels…");
+            try
+            {
+                // A half-finished config.cmd run can leave .runner behind, and config.cmd refuses to configure over it.
+                if (File.Exists(Path.Combine(runner.InstallPath, ".runner")))
+                    await RunConfigRemoveAsync(runner.InstallPath, await GitHubCli.GetRunnerTokenAsync(runner.ApiScope, removal: true));
+                await RegisterAsync(runner, current, log);
+            }
+            catch (Exception rollback)
+            {
+                throw new InvalidOperationException(
+                    $"{error.Message}\nRegistering the runner again with its old name and labels also failed: {rollback.Message}");
+            }
+            throw new InvalidOperationException($"{error.Message}\nThe runner was registered again with its old name and labels.");
+        }
+    }
+
+    private static async Task RegisterAsync(RunnerInfo runner, Registration registration, Action<string> log)
+    {
+        log("Requesting a registration token…");
+        var token = await GitHubCli.GetRunnerTokenAsync(runner.ApiScope, removal: false);
+        log("Configuring the runner as a Windows service…");
+        await ConfigureAsync(runner.InstallPath, registration.Url, token, registration.Name, runner.WorkFolder,
+            registration.Labels, runAsService: true, options: registration.Options);
+    }
+
+    /// <summary>
+    /// Checks again right before a stop that no job started since the runner list was read: a job's worker process runs
+    /// from the runner's bin folder.
+    /// </summary>
+    private static void EnsureNotBusyNow(RunnerInfo runner)
+    {
+        if (ReadProcesses().Any(p => p.Name.Equals("Runner.Worker.exe", StringComparison.OrdinalIgnoreCase)
+                                     && RootFromExecutable(p.ExecutablePath).Equals(runner.InstallPath, StringComparison.OrdinalIgnoreCase)))
+            throw new InvalidOperationException("The runner just started a job. Wait for it to finish and try again.");
+    }
+
+    /// <summary>
+    /// Stops a runner only when it is idle, checked right before stopping. For callers that stop a runner to change it
+    /// (such as a move), so that a job that started a moment ago is not cut off.
+    /// </summary>
+    public static async Task StopIfIdleAsync(string key)
+    {
+        var runner = await FindRunnerAsync(key) ?? throw new InvalidOperationException("The runner was not found on this PC.");
+        EnsureNotBusy(runner);
+        EnsureNotBusyNow(runner);
+        await ControlServiceAsync(runner.CommandKey, "Stop");
+    }
+
+    /// <summary>
+    /// Marks the runner as stopped on purpose while an operation has it stopped, so the fleet agent's auto-recovery (a
+    /// separate process that checks every few seconds) doesn't start it again halfway. Returns how to restore the mark.
+    /// </summary>
+    private static Action HoldAutoRecovery(string serviceName)
+    {
+        if (string.IsNullOrWhiteSpace(serviceName)) return () => { };
+        bool was;
+        try
+        {
+            was = FleetConfig.Current.ManuallyStopped.Contains(serviceName, StringComparer.OrdinalIgnoreCase);
+            FleetConfig.SetManuallyStopped(serviceName, true);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return () => { }; }
+        return () =>
+        {
+            try { FleetConfig.SetManuallyStopped(serviceName, was); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        };
+    }
+
+    /// <summary>
+    /// GitHub answers 404 when the repository, organization or runner registration no longer exists, and also for a
+    /// private repository the account lost access to. Only GitHub's own answers count: the app's errors (such as a
+    /// missing config.cmd) and a missing permission must not make a removal skip GitHub.
+    /// </summary>
+    internal static bool IsGoneFromGitHub(Exception error)
+        => error is not (FileNotFoundException or DirectoryNotFoundException or GitHubPermissionException)
+           && IsGoneFromGitHub(error.Message);
+
+    /// <summary>gh ("gh: Not Found (HTTP 404)", "HTTP 404: Not Found (...)") and config.cmd ("Http response code: NotFound") 404 output.</summary>
     internal static bool IsGoneFromGitHub(string message)
-        => message.Contains("404", StringComparison.Ordinal)
-           || message.Contains("Not Found", StringComparison.OrdinalIgnoreCase)
-           || message.Contains("does not exist", StringComparison.OrdinalIgnoreCase)
-           || message.Contains("doesn't exist", StringComparison.OrdinalIgnoreCase)
-           || message.Contains("Could not resolve to a Repository", StringComparison.OrdinalIgnoreCase);
+        => Regex.IsMatch(message, @"\bHTTP 404\b|\(HTTP 404\)|\b404 \(Not Found\)|response code: NotFound\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)
+           || message.Contains("Could not resolve to a Repository", StringComparison.OrdinalIgnoreCase)
+           || Regex.IsMatch(message, @"\brepository (does not|doesn't) exist\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+    /// <summary>What a removal logs when the runner's registration URL is not a github.com repository or organization.</summary>
+    internal static string UnknownScopeMessage(string registrationUrl)
+    {
+        var host = Uri.TryCreate(registrationUrl, UriKind.Absolute, out var uri) ? uri.Host : string.Empty;
+        return host.Length > 0 && !IsGitHubHost(host)
+            ? $"The runner is registered on {host}. Runner Manager only works with github.com, so its registration there is left in place: " +
+              $"remove it in the runner settings on {host}. Removing the runner from this PC only."
+            : "The runner repository is unknown, so the runner cannot be removed from GitHub. Removing it from this PC only.";
+    }
+
+    private static bool IsGitHubHost(string host)
+        => host.Equals("github.com", StringComparison.OrdinalIgnoreCase) || host.Equals("www.github.com", StringComparison.OrdinalIgnoreCase);
 
     private static string FirstLine(string text)
         => text.Split('\n', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault()?.Trim() ?? text;
@@ -463,6 +689,7 @@ public static class RunnerService
     {
         var runner = await FindRunnerAsync(key) ?? throw new InvalidOperationException("The runner was not found on this PC.");
         EnsureNotBusy(runner);
+        if (runner.IsRunning) EnsureNotBusyNow(runner);
         await RemoveRunnerAsync(runner, deleteFolder, log);
     }
 
@@ -473,13 +700,14 @@ public static class RunnerService
     public static async Task RetireMovedRunnerAsync(string key, bool deleteFolder, Action<string> log)
     {
         var runner = await FindRunnerAsync(key) ?? throw new InvalidOperationException("The runner was not found on this PC.");
+        if (deleteFolder) EnsureFilesCanBeDeleted(runner);
         await RemoveLocallyAsync(runner, deleteFolder, log);
     }
 
     /// <summary>Removes a runner from this PC without contacting GitHub: service, console autostart and files.</summary>
-    private static async Task RemoveLocallyAsync(RunnerInfo runner, bool deleteFolder, Action<string> log)
+    private static async Task RemoveLocallyAsync(RunnerInfo runner, bool deleteFolder, Action<string> log, bool detach = true)
     {
-        await DetachConsoleRunnerAsync(runner, log);
+        if (detach) await DetachConsoleRunnerAsync(runner, log);
         if (runner.ServiceInstalled)
         {
             if (runner.IsRunning) await ControlServiceAsync(runner.Name, "Stop");
@@ -487,11 +715,7 @@ public static class RunnerService
             var (code, output) = await ScheduledTasks.RunAsync("sc.exe", $"delete \"{runner.Name}\"", ScheduledTasks.ShortTimeout);
             if (code != 0) throw new InvalidOperationException($"Could not remove the Windows service {runner.Name}: {output.Trim()}");
         }
-        if (deleteFolder)
-        {
-            log("Deleting the runner folder…");
-            await Task.Run(() => DeleteFolder(runner.InstallPath));
-        }
+        if (deleteFolder) await Task.Run(() => DeleteRunnerFiles(runner, log));
         else
         {
             // Keep the files but drop the stale registration so the folder isn't listed as a runner any more.
@@ -512,22 +736,239 @@ public static class RunnerService
     }
 
     /// <summary>
-    /// For runners started from a console: stops the console (and any restart loop around it) and moves startup
-    /// scripts that launch it into %LOCALAPPDATA%\RunnerManager\disabled-startup, so it doesn't run twice.
+    /// For runners started from a console: stops the console (and any restart loop around it) and disables what starts
+    /// it at sign-in, so it doesn't run twice: startup scripts and shortcuts are moved into
+    /// %LOCALAPPDATA%\RunnerManager\disabled-startup, scheduled tasks are disabled, and Run registry values are moved
+    /// aside (saved in that folder). Returns the changes, so a failed operation can put them back.
     /// </summary>
-    private static async Task DetachConsoleRunnerAsync(RunnerInfo runner, Action<string> log)
+    private static async Task<StartupChanges> DetachConsoleRunnerAsync(RunnerInfo runner, Action<string> log)
     {
         if (runner.IsInteractive)
         {
             log("Closing the runner console window…");
             await Task.Run(() => StopConsoleRunner(runner.InstallPath));
         }
-        foreach (var moved in DisableStartupScripts(runner.InstallPath))
-            log($"Disabled the startup entry {Path.GetFileName(moved)}. It was moved to {Path.GetDirectoryName(moved)}.");
+        var changes = new StartupChanges();
+        var others = await Task.Run(() => OtherRunnerRoots(runner.InstallPath));
+        await Task.Run(() => DisableStartupFiles(runner.InstallPath, others, changes, log));
+        await DisableScheduledTasksAsync(runner.InstallPath, others, changes, log);
+        await Task.Run(() => DisableRunValues(runner.InstallPath, others, changes, log));
+        return changes;
+    }
+
+    /// <summary>Startup entries that were disabled for a runner, and how to enable them again.</summary>
+    private sealed class StartupChanges
+    {
+        public List<(string Original, string Moved)> Files { get; } = new();
+        public List<string> Tasks { get; } = new();
+        public List<(RegistryKey Hive, string Key, string Name, object Value, RegistryValueKind Kind, string SavedTo)> RunValues { get; } = new();
+
+        public async Task RestoreAsync(Action<string> log)
+        {
+            foreach (var (original, moved) in Files)
+            {
+                try
+                {
+                    File.Move(moved, original);
+                    log($"Restored the startup entry {Path.GetFileName(original)}.");
+                }
+                catch (Exception ex) { log($"Could not restore the startup entry {original} from {moved}: {ex.Message}"); }
+            }
+            foreach (var task in Tasks)
+            {
+                var (code, output) = await ScheduledTasks.RunAsync("schtasks.exe", $"/Change /TN \"{task}\" /ENABLE", ScheduledTasks.ShortTimeout);
+                log(code == 0 ? $"Enabled the scheduled task {task} again." : $"Could not enable the scheduled task {task} again: {output.Trim()}");
+            }
+            foreach (var value in RunValues)
+            {
+                try
+                {
+                    using var key = value.Hive.CreateSubKey(value.Key, writable: true);
+                    key.SetValue(value.Name, value.Value, value.Kind);
+                    TryDelete(value.SavedTo);
+                    log($"Restored the startup entry {value.Name} in {value.Hive.Name}\\{value.Key}.");
+                }
+                catch (Exception ex) { log($"Could not restore the startup entry {value.Name} (saved in {value.SavedTo}): {ex.Message}"); }
+            }
+        }
+    }
+
+    private static string DisabledStartupFolder => Path.Combine(FleetConfig.StateDir, "disabled-startup");
+
+    /// <summary>Folders of the other runners on this PC, so a startup entry that launches several runners can be told apart.</summary>
+    private static List<string> OtherRunnerRoots(string root)
+    {
+        var roots = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        try { foreach (var service in ReadRunnerServices()) roots.Add(service.Root); } catch { }
+        foreach (var folder in new[] { RunnersRoot, DefaultRoot }.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            try
+            {
+                foreach (var dir in Directory.GetDirectories(folder))
+                    if (File.Exists(Path.Combine(dir, ".runner"))) roots.Add(dir);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        }
+        foreach (var known in FleetConfig.Current.KnownRunnerRoots) roots.Add(known);
+        roots.RemoveWhere(r => string.IsNullOrWhiteSpace(r) || r.TrimEnd('\\').Equals(root.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase));
+        return roots.ToList();
+    }
+
+    internal enum StartupMatch { None, ThisRunner, SharedWithOtherRunners }
+
+    /// <summary>
+    /// Whether a startup entry launches the runner in this folder, and whether it launches other runners too. The longest
+    /// folders are matched first, so D:\Runners\b inside D:\Runners does not count as D:\Runners, and the other way round.
+    /// </summary>
+    internal static StartupMatch MatchStartupEntry(string content, string root, IEnumerable<string> otherRoots)
+    {
+        var self = root.TrimEnd('\\', '/');
+        if (self.Length == 0) return StartupMatch.None;
+        var text = content;
+        bool matchesSelf = false, matchesOther = false;
+        foreach (var folder in otherRoots.Select(r => r.TrimEnd('\\', '/')).Where(r => r.Length > 0).Append(self)
+                     .Distinct(StringComparer.OrdinalIgnoreCase).OrderByDescending(r => r.Length))
+        {
+            var pattern = new Regex(Regex.Escape(folder) + @"(?=[\\/""'\s\0]|$)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            if (!pattern.IsMatch(text)) continue;
+            if (folder.Equals(self, StringComparison.OrdinalIgnoreCase)) matchesSelf = true;
+            else matchesOther = true;
+            text = pattern.Replace(text, "\u0001");
+        }
+        return !matchesSelf ? StartupMatch.None : matchesOther ? StartupMatch.SharedWithOtherRunners : StartupMatch.ThisRunner;
+    }
+
+    /// <summary>Startup-folder scripts and shortcuts that launch the runner in this folder, moved aside (reversible).</summary>
+    private static void DisableStartupFiles(string root, List<string> others, StartupChanges changes, Action<string> log)
+    {
+        var folders = new[]
+        {
+            Environment.GetFolderPath(Environment.SpecialFolder.Startup),
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonStartup)
+        };
+        var target = DisabledStartupFolder;
+        foreach (var folder in folders.Where(Directory.Exists))
+        {
+            foreach (var file in Directory.EnumerateFiles(folder))
+            {
+                var extension = Path.GetExtension(file).ToLowerInvariant();
+                if (extension is not (".cmd" or ".bat" or ".ps1" or ".vbs" or ".lnk")) continue;
+                string content;
+                try { content = ReadStartupText(File.ReadAllBytes(file), extension == ".lnk"); }
+                catch { continue; }
+                var match = MatchStartupEntry(content, root, others);
+                if (match == StartupMatch.None) continue;
+                if (match == StartupMatch.SharedWithOtherRunners)
+                {
+                    log($"The startup entry {file} also starts other runners, so it was left in place. Remove this runner from it by hand.");
+                    continue;
+                }
+                try
+                {
+                    Directory.CreateDirectory(target);
+                    var destination = Path.Combine(target, Path.GetFileName(file));
+                    if (File.Exists(destination)) destination = Path.Combine(target, $"{Path.GetFileNameWithoutExtension(file)}-{DateTime.Now:yyyyMMddHHmmss}{extension}");
+                    File.Move(file, destination);
+                    changes.Files.Add((file, destination));
+                    log($"Disabled the startup entry {Path.GetFileName(file)}. It was moved to {target}.");
+                }
+                catch (Exception ex) { log($"Could not disable the startup entry {file}: {ex.Message}"); }
+            }
+        }
+    }
+
+    /// <summary>Lists scheduled tasks outside \Microsoft\ that are enabled: one line per task, its path and its actions.</summary>
+    private const string ListTasksScript =
+        "Get-ScheduledTask | Where-Object { $_.TaskPath -notlike '\\Microsoft\\*' -and $_.State -ne 'Disabled' } | ForEach-Object { " +
+        "$a = ($_.Actions | ForEach-Object { \"$($_.Execute) $($_.Arguments) $($_.WorkingDirectory)\" }) -join ' '; " +
+        "\"$($_.TaskPath)$($_.TaskName)`t$a\" }";
+
+    /// <summary>Task names and their action text from <see cref="ListTasksScript"/> output.</summary>
+    internal static List<(string Name, string Actions)> ParseTaskList(string output)
+        => output.Replace("\r\n", "\n").Split('\n')
+            .Select(line => line.Split('\t', 2))
+            .Where(parts => parts.Length == 2 && parts[0].StartsWith('\\'))
+            .Select(parts => (parts[0].Trim(), parts[1].Trim()))
+            .ToList();
+
+    /// <summary>Scheduled tasks whose actions run the runner in this folder are disabled (and enabled again on undo).</summary>
+    private static async Task DisableScheduledTasksAsync(string root, List<string> others, StartupChanges changes, Action<string> log)
+    {
+        var script = Convert.ToBase64String(System.Text.Encoding.Unicode.GetBytes(ListTasksScript));
+        var (code, output) = await ScheduledTasks.RunAsync("powershell.exe",
+            $"-NoLogo -NoProfile -NonInteractive -EncodedCommand {script}", ScheduledTasks.ShortTimeout);
+        if (code != 0)
+        {
+            log("Could not check scheduled tasks for ones that start this runner.");
+            return;
+        }
+        foreach (var (name, actions) in ParseTaskList(output))
+        {
+            var match = MatchStartupEntry(actions, root, others);
+            if (match == StartupMatch.None || name.Contains('"')) continue;
+            if (match == StartupMatch.SharedWithOtherRunners)
+            {
+                log($"The scheduled task {name} also starts other runners, so it was left enabled. Remove this runner from it by hand.");
+                continue;
+            }
+            var (changeCode, changeOutput) = await ScheduledTasks.RunAsync("schtasks.exe", $"/Change /TN \"{name}\" /DISABLE", ScheduledTasks.ShortTimeout);
+            if (changeCode == 0)
+            {
+                changes.Tasks.Add(name);
+                log($"Disabled the scheduled task {name}, which started this runner.");
+            }
+            else log($"Could not disable the scheduled task {name}, which starts this runner: {changeOutput.Trim()}");
+        }
+    }
+
+    private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
+    private const string RunKey32 = @"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Run";
+
+    /// <summary>
+    /// Run registry values that start the runner in this folder are deleted after saving them in a file in the
+    /// disabled-startup folder, so they can be put back.
+    /// </summary>
+    private static void DisableRunValues(string root, List<string> others, StartupChanges changes, Action<string> log)
+    {
+        foreach (var (hive, path) in new[] { (Registry.CurrentUser, RunKey), (Registry.LocalMachine, RunKey), (Registry.LocalMachine, RunKey32) })
+        {
+            try
+            {
+                // Opened for writing only when something matches: without administrator rights HKLM is read-only.
+                using var key = hive.OpenSubKey(path);
+                if (key == null) continue;
+                foreach (var name in key.GetValueNames())
+                {
+                    if (key.GetValue(name, null, RegistryValueOptions.DoNotExpandEnvironmentNames) is not { } value) continue;
+                    var match = MatchStartupEntry(value.ToString() ?? string.Empty, root, others);
+                    if (match == StartupMatch.None) continue;
+                    var where = $"{hive.Name}\\{path}";
+                    if (match == StartupMatch.SharedWithOtherRunners)
+                    {
+                        log($"The startup entry {name} in {where} also starts other runners, so it was left in place. Remove this runner from it by hand.");
+                        continue;
+                    }
+                    var kind = key.GetValueKind(name);
+                    Directory.CreateDirectory(DisabledStartupFolder);
+                    var saved = Path.Combine(DisabledStartupFolder, $"run-{string.Concat(name.Select(c => Path.GetInvalidFileNameChars().Contains(c) ? '-' : c))}-{DateTime.Now:yyyyMMddHHmmss}.json");
+                    File.WriteAllText(saved, JsonSerializer.Serialize(new { key = where, name, value = value.ToString(), kind = kind.ToString() },
+                        new JsonSerializerOptions { WriteIndented = true }));
+                    using (var writable = hive.OpenSubKey(path, writable: true)) writable?.DeleteValue(name);
+                    changes.RunValues.Add((hive, path, name, value, kind, saved));
+                    log($"Disabled the startup entry {name} in {where}. Its command was saved to {saved}.");
+                }
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+            {
+                log($"Could not check {hive.Name}\\{path} for entries that start this runner: {ex.Message}");
+            }
+        }
     }
 
     private static void StopConsoleRunner(string root)
     {
+        // Stopped on purpose, so it is not shown as restarting.
+        ConsoleSeenUtc.TryRemove(root, out _);
         var all = new List<(uint Pid, uint Parent, string Name, string CommandLine, string Path)>();
         using (var searcher = new ManagementObjectSearcher("SELECT ProcessId, ParentProcessId, Name, CommandLine, ExecutablePath FROM Win32_Process"))
             foreach (ManagementObject p in searcher.Get())
@@ -559,49 +1000,19 @@ public static class RunnerService
         }
     }
 
-    /// <summary>Startup-folder scripts and shortcuts that launch the runner in this folder, moved aside (reversible).</summary>
-    private static List<string> DisableStartupScripts(string root)
-    {
-        var moved = new List<string>();
-        var folders = new[]
-        {
-            Environment.GetFolderPath(Environment.SpecialFolder.Startup),
-            Environment.GetFolderPath(Environment.SpecialFolder.CommonStartup)
-        };
-        var target = Path.Combine(FleetConfig.StateDir, "disabled-startup");
-        foreach (var folder in folders.Where(Directory.Exists))
-        {
-            foreach (var file in Directory.EnumerateFiles(folder))
-            {
-                var extension = Path.GetExtension(file).ToLowerInvariant();
-                if (extension is not (".cmd" or ".bat" or ".ps1" or ".vbs" or ".lnk")) continue;
-                string content;
-                try { content = ReadStartupText(File.ReadAllBytes(file), extension == ".lnk"); }
-                catch { continue; }
-                if (!ReferencesFolder(content, root)) continue;
-                try
-                {
-                    Directory.CreateDirectory(target);
-                    var destination = Path.Combine(target, Path.GetFileName(file));
-                    if (File.Exists(destination)) destination = Path.Combine(target, $"{Path.GetFileNameWithoutExtension(file)}-{DateTime.Now:yyyyMMddHHmmss}{extension}");
-                    File.Move(file, destination);
-                    moved.Add(destination);
-                }
-                catch { }
-            }
-        }
-        return moved;
-    }
-
     private static readonly System.Text.Encoding StrictUtf8 = new System.Text.UTF8Encoding(false, throwOnInvalidBytes: true);
 
     /// <summary>
     /// Text to search for the runner folder. Shortcuts store paths as UTF-16 and as ANSI, so both decodings are
-    /// searched. Scripts are read as UTF-8 when they are valid UTF-8, and as Latin-1 otherwise (any byte decodes).
+    /// searched; UTF-16 strings can start at an odd offset, so it is decoded from both. Scripts are read as UTF-8 when
+    /// they are valid UTF-8, and as Latin-1 otherwise (any byte decodes).
     /// </summary>
     internal static string ReadStartupText(byte[] bytes, bool shortcut)
     {
-        if (shortcut) return System.Text.Encoding.Unicode.GetString(bytes) + System.Text.Encoding.Latin1.GetString(bytes);
+        if (shortcut)
+            return System.Text.Encoding.Unicode.GetString(bytes) + "\0"
+                   + (bytes.Length > 1 ? System.Text.Encoding.Unicode.GetString(bytes, 1, bytes.Length - 1) : string.Empty) + "\0"
+                   + System.Text.Encoding.Latin1.GetString(bytes);
         try { return StrictUtf8.GetString(bytes); }
         catch (System.Text.DecoderFallbackException) { return System.Text.Encoding.Latin1.GetString(bytes); }
     }
@@ -624,15 +1035,196 @@ public static class RunnerService
             FleetConfig.Update(c => c.KnownRunnerRoots.RemoveAll(r => r.Equals(root, StringComparison.OrdinalIgnoreCase)));
     }
 
-    private static void DeleteFolder(string path)
+    /// <summary>
+    /// The files and folders a runner install consists of: the actions/runner package, what config.cmd and the runner
+    /// write next to it (settings, logs, work folder, self-update copies), and the package zip.
+    /// </summary>
+    private static readonly string[] RunnerItemPatterns =
     {
-        if (!Directory.Exists(path)) return;
-        foreach (var file in Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories))
-        {
-            try { File.SetAttributes(file, FileAttributes.Normal); } catch { }
-        }
-        Directory.Delete(path, recursive: true);
+        "bin", "bin.*", "externals", "externals.*", "_diag", "_work", "_update",
+        ".runner", ".runner_migrated", ".credentials*", ".service", ".env", ".path", ".setup_info",
+        "config.cmd", "config.sh", "run.cmd", "run.sh", "run-helper.*", "svc.*", "safe_sleep.*", "env.sh", "runsvc.sh",
+        "actions-runner-*.zip"
+    };
+
+    /// <summary>True when a top-level entry of a runner folder belongs to the runner install.</summary>
+    internal static bool IsRunnerItem(string name, string workFolder = "_work")
+    {
+        var work = string.IsNullOrWhiteSpace(workFolder) || Path.IsPathRooted(workFolder) ? "_work"
+            : workFolder.Split('\\', '/', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? "_work";
+        return name.Equals(work, StringComparison.OrdinalIgnoreCase)
+               || RunnerItemPatterns.Any(p => System.IO.Enumeration.FileSystemName.MatchesSimpleExpression(p, name, ignoreCase: true));
     }
+
+    internal enum FolderDeletion { Refuse, Whole, RunnerItemsOnly }
+
+    /// <param name="Reason">Why the folder is refused or kept; empty when it can be deleted whole.</param>
+    internal sealed record FolderDeletionPlan(FolderDeletion Kind, string Reason, IReadOnlyList<string> OtherItems);
+
+    /// <summary>
+    /// How to delete a runner's files. The folder comes from the runner's service or listener path, so it can be a drive
+    /// root, a profile folder, or a folder that holds other runners and files. Those are never deleted whole: drive roots
+    /// are refused, and elsewhere only the runner's own items are deleted when anything else is there.
+    /// </summary>
+    internal static FolderDeletionPlan PlanFolderDeletion(string root, string workFolder = "_work")
+    {
+        var full = Path.GetFullPath(root).TrimEnd('\\');
+        if (IsDriveRoot(full))
+            return new FolderDeletionPlan(FolderDeletion.Refuse, $"{full}\\ is a drive root", Array.Empty<string>());
+        var others = new List<string>();
+        try
+        {
+            foreach (var entry in new DirectoryInfo(full).EnumerateFileSystemInfos())
+                if (!IsRunnerItem(entry.Name, workFolder)) others.Add(entry.Name);
+        }
+        catch (DirectoryNotFoundException) { }
+        if (IsProtectedFolder(full))
+            return new FolderDeletionPlan(FolderDeletion.RunnerItemsOnly, $"{full} is a Windows or user folder", others);
+        if (others.Count == 0) return new FolderDeletionPlan(FolderDeletion.Whole, string.Empty, others);
+        var runners = others.Where(o => File.Exists(Path.Combine(full, o, ".runner"))).ToList();
+        var reason = runners.Count > 0
+            ? $"{full} also holds other runners ({string.Join(", ", runners.Take(3))})"
+            : $"{full} also holds other files ({string.Join(", ", others.Take(3))}{(others.Count > 3 ? ", …" : string.Empty)})";
+        return new FolderDeletionPlan(FolderDeletion.RunnerItemsOnly, reason, others);
+    }
+
+    private static bool IsDriveRoot(string fullPath)
+    {
+        var root = Path.GetPathRoot(fullPath)?.TrimEnd('\\') ?? string.Empty;
+        return root.Length == 0 || root.Equals(fullPath.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>Windows, Program Files, profile folders and their parents (such as C:\Users).</summary>
+    private static bool IsProtectedFolder(string fullPath)
+    {
+        var folders = new[]
+        {
+            Environment.SpecialFolder.Windows, Environment.SpecialFolder.System, Environment.SpecialFolder.ProgramFiles,
+            Environment.SpecialFolder.ProgramFilesX86, Environment.SpecialFolder.CommonApplicationData,
+            Environment.SpecialFolder.UserProfile, Environment.SpecialFolder.Desktop, Environment.SpecialFolder.MyDocuments,
+            Environment.SpecialFolder.ApplicationData, Environment.SpecialFolder.LocalApplicationData
+        };
+        var path = fullPath.TrimEnd('\\') + "\\";
+        return folders.Select(Environment.GetFolderPath).Where(f => !string.IsNullOrEmpty(f))
+            .Select(f => f.TrimEnd('\\') + "\\")
+            .Any(f => f.StartsWith(path, StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>Throws when the runner's files must not be deleted at all (a drive root), before anything is changed.</summary>
+    private static void EnsureFilesCanBeDeleted(RunnerInfo runner)
+    {
+        if (!Directory.Exists(runner.InstallPath)) return;
+        var plan = PlanFolderDeletion(runner.InstallPath, runner.WorkFolder);
+        if (plan.Kind == FolderDeletion.Refuse)
+            throw new InvalidOperationException($"The runner's files cannot be deleted: {plan.Reason}. Delete the runner and keep its files instead.");
+    }
+
+    /// <summary>Deletes a runner's files as planned by <see cref="PlanFolderDeletion"/>.</summary>
+    private static void DeleteRunnerFiles(RunnerInfo runner, Action<string> log)
+    {
+        if (!Directory.Exists(runner.InstallPath)) return;
+        var plan = PlanFolderDeletion(runner.InstallPath, runner.WorkFolder);
+        if (plan.Kind == FolderDeletion.Refuse) throw new InvalidOperationException($"The runner's files were not deleted: {plan.Reason}.");
+        if (plan.Kind == FolderDeletion.Whole)
+        {
+            log("Deleting the runner folder…");
+            DeleteFolder(runner.InstallPath);
+            return;
+        }
+        log($"Deleting only the runner's own files, because {plan.Reason}…");
+        DeleteRunnerItems(runner.InstallPath, runner.WorkFolder);
+    }
+
+    /// <summary>Deletes the runner's own items in a folder and keeps everything else.</summary>
+    internal static void DeleteRunnerItems(string root, string workFolder = "_work")
+    {
+        var failed = 0;
+        foreach (var entry in new DirectoryInfo(root).EnumerateFileSystemInfos().Where(e => IsRunnerItem(e.Name, workFolder)))
+            failed += DeleteEntry(entry);
+        if (failed > 0) throw new IOException($"{failed} item(s) in {root} were in use and were not deleted.");
+    }
+
+    /// <summary>Deletes a folder and everything in it. Junctions and symbolic links inside are removed, not followed.</summary>
+    internal static void DeleteFolder(string path)
+    {
+        var folder = new DirectoryInfo(path);
+        if (!folder.Exists) return;
+        var failed = 0;
+        foreach (var entry in folder.EnumerateFileSystemInfos()) failed += DeleteEntry(entry);
+        if (failed > 0) throw new IOException($"{failed} item(s) in {path} were in use and were not deleted.");
+        folder.Attributes &= ~FileAttributes.ReadOnly;
+        folder.Delete();
+    }
+
+    /// <summary>
+    /// Deletes a file or folder tree and returns how many items could not be deleted. A junction or symbolic link is
+    /// deleted itself; its target is never entered.
+    /// </summary>
+    internal static int DeleteEntry(FileSystemInfo entry)
+    {
+        try
+        {
+            if (entry.Attributes.HasFlag(FileAttributes.ReparsePoint))
+            {
+                if (entry is DirectoryInfo link) Directory.Delete(link.FullName, recursive: false);
+                else File.Delete(entry.FullName);
+                return 0;
+            }
+            if (entry is DirectoryInfo directory)
+            {
+                var failed = 0;
+                foreach (var child in directory.EnumerateFileSystemInfos()) failed += DeleteEntry(child);
+                if (failed > 0) return failed;
+                directory.Attributes &= ~FileAttributes.ReadOnly;
+                directory.Delete();
+                return 0;
+            }
+            entry.Attributes = FileAttributes.Normal;
+            entry.Delete();
+            return 0;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return 1; }
+    }
+
+    /// <summary>
+    /// After a failed install: config.cmd may have registered the runner, or created its Windows service, before it
+    /// failed. The registration is removed, unless it replaced the registration of a runner being moved here (the old
+    /// copy needs it), and a service that points into the folder is deleted.
+    /// </summary>
+    private static async Task UndoFailedRegistrationAsync(RunnerSetup setup, string scope, Action<string> log)
+    {
+        if (File.Exists(Path.Combine(setup.InstallPath, ".runner")) && File.Exists(Path.Combine(setup.InstallPath, "config.cmd")))
+        {
+            if (setup.ReplaceExisting)
+                log("The runner registration is left in place, because it replaced the registration of the runner being moved.");
+            else
+            {
+                try
+                {
+                    log("Removing the registration the failed install made…");
+                    await RunConfigRemoveAsync(setup.InstallPath, await GitHubCli.GetRunnerTokenAsync(scope, removal: true));
+                }
+                catch (Exception ex)
+                {
+                    log($"Could not remove the registration ({FirstLine(ex.Message)}). Remove the runner {setup.RunnerName} in the runner settings on GitHub.");
+                }
+            }
+        }
+        List<RunnerServiceRecord> services;
+        try { services = await Task.Run(ReadRunnerServices); }
+        catch { return; }
+        foreach (var service in services.Where(s => SameFolder(s.Root, setup.InstallPath)))
+        {
+            log($"Removing the Windows service {service.Name} the failed install created…");
+            try { await ControlServiceAsync(service.Name, "Stop"); } catch { }
+            var (code, output) = await ScheduledTasks.RunAsync("sc.exe", $"delete \"{service.Name}\"", ScheduledTasks.ShortTimeout);
+            if (code != 0) log($"Could not remove the Windows service {service.Name}: {output.Trim()}");
+        }
+    }
+
+    private static bool SameFolder(string a, string b)
+        => !string.IsNullOrWhiteSpace(a) && !string.IsNullOrWhiteSpace(b)
+           && Path.GetFullPath(a).TrimEnd('\\').Equals(Path.GetFullPath(b).TrimEnd('\\'), StringComparison.OrdinalIgnoreCase);
 
     /// <summary>After a failed install: deletes the folder if this install created it, or empties it if it was empty before.</summary>
     private static void RemoveFailedInstall(string path, bool createdFolder)
@@ -645,26 +1237,51 @@ public static class RunnerService
                 return;
             }
             if (!Directory.Exists(path)) return;
-            foreach (var entry in new DirectoryInfo(path).EnumerateFileSystemInfos())
-            {
-                if (entry is DirectoryInfo directory) DeleteFolder(directory.FullName);
-                else
-                {
-                    entry.Attributes = FileAttributes.Normal;
-                    entry.Delete();
-                }
-            }
+            foreach (var entry in new DirectoryInfo(path).EnumerateFileSystemInfos()) DeleteEntry(entry);
         }
         catch { }
     }
 
-    private static string RootFromExecutable(string executable)
+    /// <summary>
+    /// The runner folder of a runner executable: the parent of its bin folder (or of bin.2.x.y, where a runner that
+    /// updated itself can run from). Short 8.3 names (C:\GITHUB~1) are expanded, so a runner is not listed twice.
+    /// </summary>
+    internal static string RootFromExecutable(string executable)
     {
         if (string.IsNullOrWhiteSpace(executable)) return string.Empty;
-        var directory = Path.GetDirectoryName(executable);
+        var directory = Path.GetDirectoryName(LongPath(executable));
         if (string.IsNullOrEmpty(directory)) return string.Empty;
         var info = new DirectoryInfo(directory);
-        return info.Name.Equals("bin", StringComparison.OrdinalIgnoreCase) && info.Parent != null ? info.Parent.FullName : info.FullName;
+        var isBin = info.Name.Equals("bin", StringComparison.OrdinalIgnoreCase) || info.Name.StartsWith("bin.", StringComparison.OrdinalIgnoreCase);
+        return isBin && info.Parent != null ? info.Parent.FullName : info.FullName;
+    }
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+    private static extern uint GetLongPathName(string shortPath, System.Text.StringBuilder longPath, uint bufferLength);
+
+    /// <summary>The path with 8.3 short names expanded, or the path unchanged when it has none or does not exist.</summary>
+    internal static string LongPath(string path)
+    {
+        if (string.IsNullOrEmpty(path) || !path.Contains('~')) return path;
+        var buffer = new System.Text.StringBuilder(260);
+        var length = GetLongPathName(path, buffer, (uint)buffer.Capacity);
+        if (length > buffer.Capacity)
+        {
+            buffer = new System.Text.StringBuilder((int)length);
+            length = GetLongPathName(path, buffer, (uint)buffer.Capacity);
+        }
+        return length == 0 || length > buffer.Capacity ? path : buffer.ToString();
+    }
+
+    /// <summary>
+    /// A folder name for a repository or organization name. Windows drops trailing dots and spaces from folder names
+    /// (a repository can be named "tools."), so they are removed here, or the folder would not be the one asked for.
+    /// </summary>
+    internal static string SafeFolderName(string name)
+    {
+        var invalid = Path.GetInvalidFileNameChars();
+        var safe = new string(name.Select(c => invalid.Contains(c) ? '-' : c).ToArray()).TrimEnd('.', ' ').TrimStart(' ');
+        return safe.Length == 0 ? "runner" : safe;
     }
 
     /// <summary>A free folder in the runner folder for a runner of this repository or organization.</summary>
@@ -672,8 +1289,7 @@ public static class RunnerService
     {
         var name = RepositoryPath(registrationUrl).Split('/').LastOrDefault(s => s.Length > 0)
                    ?? OrganizationName(registrationUrl);
-        if (string.IsNullOrWhiteSpace(name)) name = "runner";
-        var safe = new string(name.Select(c => Path.GetInvalidFileNameChars().Contains(c) ? '-' : c).ToArray());
+        var safe = SafeFolderName(name);
         var root = RunnersRoot;
         var path = Path.Combine(root, safe);
         for (var i = 2; Directory.Exists(path) && Directory.EnumerateFileSystemEntries(path).Any(); i++)
@@ -681,11 +1297,11 @@ public static class RunnerService
         return path;
     }
 
-    private static async Task ConfigureAsync(string root, string repositoryUrl, string token,
-        string name, string workFolder, IEnumerable<string> labels, bool runAsService, bool replace = false)
+    private static async Task ConfigureAsync(string root, string repositoryUrl, string token, string name, string workFolder,
+        IEnumerable<string> labels, bool runAsService, bool replace = false, RunnerRegistrationOptions? options = null)
     {
         repositoryUrl = await CurrentRepositoryUrlAsync(repositoryUrl);
-        var arguments = BuildConfigureArguments(repositoryUrl, token, name, workFolder, labels, runAsService, replace);
+        var arguments = BuildConfigureArguments(repositoryUrl, token, name, workFolder, labels, runAsService, replace, options);
         var result = await RunConfigAsync(root, arguments);
         if (result.ExitCode != 0)
             throw new InvalidOperationException(CleanConfigError(result.Error, result.Output));
@@ -757,8 +1373,9 @@ public static class RunnerService
 
     /// <summary>The config.cmd arguments for registering a runner. Throws when a value is not allowed.</summary>
     internal static string BuildConfigureArguments(string url, string token, string name, string workFolder,
-        IEnumerable<string>? labels, bool runAsService, bool replace)
+        IEnumerable<string>? labels, bool runAsService, bool replace, RunnerRegistrationOptions? options = null)
     {
+        options ??= RunnerRegistrationOptions.None;
         var labelList = CleanLabels(labels);
         EnsureValidConfigInput(url, name, labelList);
         EnsureSafeValue(token, "runner token");
@@ -775,6 +1392,17 @@ public static class RunnerService
             args.Add("--labels");
             args.Add(Quote(string.Join(',', labelList)));
         }
+        // Without --runnergroup, config.cmd uses the default group, so only another group needs passing.
+        var group = options.RunnerGroup.Trim();
+        if (group.Length > 0 && !group.Equals("Default", StringComparison.OrdinalIgnoreCase))
+        {
+            EnsureSafeValue(group, "runner group");
+            args.Add("--runnergroup");
+            args.Add(Quote(group));
+        }
+        if (options.NoDefaultLabels && labelList.Length > 0) args.Add("--no-default-labels");
+        if (options.Ephemeral) args.Add("--ephemeral");
+        if (options.DisableUpdate) args.Add("--disableupdate");
         if (runAsService) args.Add("--runasservice");
         if (replace) args.Add("--replace");
         return string.Join(' ', args);
@@ -795,7 +1423,31 @@ public static class RunnerService
         if (string.IsNullOrWhiteSpace(path) || !Path.IsPathFullyQualified(path)) return @"Choose a full folder path, such as D:\Runners.";
         return path.IndexOfAny(UnsafeInQuotes) >= 0 || path.Any(char.IsControl)
             ? "The runner folder path cannot contain the characters \", % or !."
-            : null;
+            : NetworkFolderProblem(path);
+    }
+
+    private const string NetworkFolderRule = "Choose a folder on a drive in this PC. Runners run as a Windows service, " +
+        "and services cannot use network folders or mapped drives.";
+
+    /// <summary>
+    /// Null when the folder is on a drive in this PC. Services run without the user's mapped drives, and the service
+    /// account usually cannot reach network shares, so UNC paths and mapped drives are refused.
+    /// </summary>
+    internal static string? NetworkFolderProblem(string path, Func<string, bool>? isNetworkDrive = null)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return null;
+        var text = path.Trim();
+        if (text.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase)) return NetworkFolderRule;
+        if (text.StartsWith(@"\\?\", StringComparison.Ordinal) || text.StartsWith(@"\\.\", StringComparison.Ordinal)) text = text[4..];
+        else if (text.StartsWith(@"\\", StringComparison.Ordinal) || text.StartsWith("//", StringComparison.Ordinal)) return NetworkFolderRule;
+        if (text.Length < 2 || text[1] != ':' || !char.IsAsciiLetter(text[0])) return null;
+        return (isNetworkDrive ?? IsNetworkDrive)($"{char.ToUpperInvariant(text[0])}:\\") ? NetworkFolderRule : null;
+    }
+
+    private static bool IsNetworkDrive(string root)
+    {
+        try { return new DriveInfo(root).DriveType == DriveType.Network; }
+        catch (Exception ex) when (ex is ArgumentException or IOException or UnauthorizedAccessException) { return false; }
     }
 
     private static void EnsureSafeFolder(string path)
@@ -834,18 +1486,25 @@ public static class RunnerService
         using var json = JsonDocument.Parse(jsonText);
         var root = json.RootElement;
         var version = root.GetProperty("tag_name").GetString() ?? "latest";
+        var prefix = $"actions-runner-win-{(IsArm64 ? "arm64" : "x64")}-";
         foreach (var asset in root.GetProperty("assets").EnumerateArray())
         {
             var name = asset.GetProperty("name").GetString() ?? string.Empty;
-            if (!name.StartsWith("actions-runner-win-x64-", StringComparison.OrdinalIgnoreCase) || !name.EndsWith(".zip"))
+            if (!name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) || !name.EndsWith(".zip"))
                 continue;
             var url = asset.GetProperty("browser_download_url").GetString();
             var digest = asset.TryGetProperty("digest", out var digestValue) ? digestValue.GetString() ?? string.Empty : string.Empty;
             var sha256 = digest.StartsWith("sha256:", StringComparison.OrdinalIgnoreCase) ? digest[7..] : string.Empty;
             if (!string.IsNullOrWhiteSpace(url)) return new RunnerPackage(version, name, url, sha256);
         }
-        throw new InvalidOperationException("The latest GitHub Actions runner release has no Windows x64 package.");
+        throw new InvalidOperationException($"The latest GitHub Actions runner release has no Windows {ArchitectureLabel} package.");
     }
+
+    private static bool IsArm64 => System.Runtime.InteropServices.RuntimeInformation.OSArchitecture
+                                   == System.Runtime.InteropServices.Architecture.Arm64;
+
+    /// <summary>The architecture label runners on this PC get from GitHub: "ARM64" on ARM64 Windows, otherwise "X64".</summary>
+    public static string ArchitectureLabel => IsArm64 ? "ARM64" : "X64";
 
     private static async Task DownloadFileAsync(string url, string destination)
     {
@@ -885,7 +1544,8 @@ public static class RunnerService
     public static string RepositoryPath(string url)
     {
         if (string.IsNullOrWhiteSpace(url)) return string.Empty;
-        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) || !uri.Host.Equals("github.com", StringComparison.OrdinalIgnoreCase))
+        // www.github.com is the same site; NormalizeRegistrationUrl turns it into github.com for config.cmd.
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) || !IsGitHubHost(uri.Host))
             return string.Empty;
         // Accept https://github.com/owner/repo, .../repo.git and deeper links like .../repo/tree/main.
         var segments = uri.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries);
@@ -912,7 +1572,7 @@ public static class RunnerService
     public static string OrganizationName(string url)
     {
         if (string.IsNullOrWhiteSpace(url)) return string.Empty;
-        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) || !uri.Host.Equals("github.com", StringComparison.OrdinalIgnoreCase))
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) || !IsGitHubHost(uri.Host))
             return string.Empty;
         var segments = uri.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries);
         if (segments.Length == 1) return segments[0];
@@ -969,35 +1629,22 @@ public static class RunnerService
             throw new InvalidOperationException($"Cannot clean {fullFolder}: it is outside the runner folder.");
 
         var wasRunning = runner.IsRunning;
-        if (wasRunning)
-        {
-            log("Stopping the runner service…");
-            await ControlServiceAsync(runner.Name, "Stop");
-        }
+        var restoreRecovery = HoldAutoRecovery(runner.Name);
         try
         {
+            if (wasRunning)
+            {
+                EnsureNotBusyNow(runner);
+                log("Stopping the runner service…");
+                await ControlServiceAsync(runner.Name, "Stop");
+            }
             log($"Deleting the contents of {fullFolder}…");
             var failures = await Task.Run(() =>
             {
+                // Links (for example a junction to a shared tool cache) are removed without touching their targets.
                 var failed = 0;
                 foreach (var entry in new DirectoryInfo(fullFolder).EnumerateFileSystemInfos())
-                {
-                    try
-                    {
-                        if (entry is DirectoryInfo directory)
-                        {
-                            foreach (var file in directory.EnumerateFiles("*", SearchOption.AllDirectories))
-                                file.Attributes = FileAttributes.Normal;
-                            directory.Delete(recursive: true);
-                        }
-                        else
-                        {
-                            entry.Attributes = FileAttributes.Normal;
-                            entry.Delete();
-                        }
-                    }
-                    catch { failed++; }
-                }
+                    if (DeleteEntry(entry) > 0) failed++;
                 return failed;
             });
             SystemHealth.ForgetFolderSize(fullFolder);
@@ -1005,11 +1652,15 @@ public static class RunnerService
         }
         finally
         {
-            if (wasRunning)
+            try
             {
-                log("Starting the runner service…");
-                await ControlServiceAsync(runner.Name, "Start");
+                if (wasRunning)
+                {
+                    log("Starting the runner service…");
+                    await ControlServiceAsync(runner.Name, "Start");
+                }
             }
+            finally { restoreRecovery(); }
         }
     }
 
@@ -1074,6 +1725,8 @@ public sealed class RunnerSetup
     public bool CheckWorkflows { get; init; }
     /// <summary>Replace an existing runner with the same name (used when moving a runner to this PC).</summary>
     public bool ReplaceExisting { get; init; }
+    /// <summary>Runner group, ephemeral and the other settings to keep (used when moving a runner to this PC).</summary>
+    public RunnerRegistrationOptions Options { get; init; } = RunnerRegistrationOptions.None;
 }
 
 public sealed class RunnerConfig
@@ -1082,6 +1735,20 @@ public sealed class RunnerConfig
     public string AgentName { get; init; } = "Runner";
     public string GitHubUrl { get; init; } = string.Empty;
     public string WorkFolder { get; init; } = "_work";
+    /// <summary>The runner group (poolName in .runner); "Default" for repository runners.</summary>
+    public string RunnerGroup { get; init; } = string.Empty;
+    public bool Ephemeral { get; init; }
+    public bool DisableUpdate { get; init; }
+}
+
+/// <summary>
+/// Registration settings besides the name and labels, which config.cmd needs again when a runner is registered again
+/// (edit, repair, convert, move).
+/// </summary>
+public sealed record RunnerRegistrationOptions(string RunnerGroup = "", bool Ephemeral = false, bool DisableUpdate = false,
+    bool NoDefaultLabels = false)
+{
+    public static readonly RunnerRegistrationOptions None = new();
 }
 
 public sealed class RunnerServiceRecord
@@ -1114,9 +1781,27 @@ public sealed class RunnerInfo : INotifyPropertyChanged
     public string AgentName { get; init; } = string.Empty;
     public long AgentId { get; init; }
     public string WorkFolder { get; init; } = "_work";
+    /// <summary>The runner group from .runner ("Default" for repository runners).</summary>
+    public string RunnerGroup { get; init; } = string.Empty;
+    /// <summary>Registered with --ephemeral (from .runner).</summary>
+    public bool Ephemeral { get; init; }
+    /// <summary>Registered with --disableupdate (from .runner).</summary>
+    public bool DisableUpdate { get; init; }
+    /// <summary>Registered with --no-default-labels: GitHub lists no "self-hosted" label. Only known when GitHub was read.</summary>
+    public bool NoDefaultLabels { get; init; }
+    /// <summary>The settings to pass to config.cmd when this runner is registered again, on this PC or another one.</summary>
+    public RunnerRegistrationOptions RegistrationOptions => new(RunnerGroup, Ephemeral, DisableUpdate, NoDefaultLabels);
     public bool ServiceInstalled { get; init; }
-    /// <summary>Running from a console window (run.cmd) rather than as a Windows service.</summary>
+    /// <summary>
+    /// Running from a console window (run.cmd) rather than as a Windows service. Also true for a few minutes after the
+    /// console's listener stopped (see <see cref="ConsoleRestarting"/>).
+    /// </summary>
     public bool IsInteractive { get; init; }
+    /// <summary>
+    /// A console runner whose listener stopped a moment ago, as it does while it updates itself. It is shown as a console
+    /// runner (not "No service", which would offer Repair and install a second copy) and is not running.
+    /// </summary>
+    public bool ConsoleRestarting { get; init; }
     public bool IsRunning { get; init; }
     /// <summary>How commands address this runner: its service name, or its folder when it has no service.</summary>
     public string CommandKey => string.IsNullOrEmpty(Name) ? InstallPath : Name;

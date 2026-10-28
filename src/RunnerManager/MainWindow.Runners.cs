@@ -16,7 +16,8 @@ public partial class MainWindow
         var where = runner.IsLocalMachine ? "this PC" : runner.MachineName;
         var choice = DialogWindow.Show(this, DialogTone.Danger, $"Delete {runner.TitleText}?",
             $"The runner is unregistered from {runner.RepositoryText} on GitHub, and its Windows service is removed from {where}. " +
-            "If the repository no longer exists on GitHub, the runner is only removed from the PC.",
+            "If the repository no longer exists on GitHub, or you no longer have access to it, the runner is only removed from the PC. " +
+            "If its folder also holds other runners or files, only the runner's own files are deleted.",
             deleteFiles, keepFiles, detail: string.IsNullOrEmpty(runner.InstallPath) ? runner.LocalRunner?.InstallPath : runner.InstallPath);
         if (choice == null) return;
         var deleteFolder = choice == deleteFiles;
@@ -28,7 +29,8 @@ public partial class MainWindow
     {
         if (ItemFrom<MachineRunnerStatus>(sender) is not { CanConvert: true } runner) return;
         if (!DialogWindow.Confirm(this, $"Run {runner.TitleText} as a Windows service?",
-                "The console window closes, and its startup entry is moved to %LOCALAPPDATA%\\RunnerManager\\disabled-startup so it does not start twice. " +
+                "The console window closes, and what starts it at sign-in is turned off so it does not start twice: startup entries are moved to " +
+                "%LOCALAPPDATA%\\RunnerManager\\disabled-startup, and scheduled tasks that start it are disabled. " +
                 "The runner is registered again as a Windows service with the same name and labels. It then starts with Windows, before sign-in.",
                 "Run as service")) return;
         await RunRunnerActionAsync(runner, "Convert", $"Convert {runner.TitleText}",
