@@ -72,6 +72,19 @@ public partial class App : Application
             MachineRelay.AppendAgentLog($"Unobserved task error: {args.Exception.GetBaseException().Message}");
             args.SetObserved();
         };
+        // Runner Manager installs per user. Elevated with another account's password, it would set itself up in that
+        // account's profile (its own %LOCALAPPDATA%, registry and tasks), so it stops instead.
+        if (Elevation.OtherUserThanStarted(e.Args) is { } started)
+        {
+            var message = $"Runner Manager needs a Windows account with administrator rights. It was started by {started}, " +
+                          $"but with the password of {Elevation.CurrentUserName}, so it would set itself up for {Elevation.CurrentUserName} instead. " +
+                          "Sign in to Windows with an administrator account and start Runner Manager there.";
+            MachineRelay.AppendAgentLog($"Stopped: elevated as {Elevation.CurrentUserName}, started by {started}.");
+            if (!e.Args.Contains("--quiet", StringComparer.OrdinalIgnoreCase))
+                MessageBox.Show(message, "Runner Manager", MessageBoxButton.OK, MessageBoxImage.Warning);
+            Shutdown(1);
+            return;
+        }
 
         if (e.Args.Any(a => a.Equals("--install-agent", StringComparison.OrdinalIgnoreCase)))
         {
@@ -208,7 +221,9 @@ public partial class App : Application
         }
         var fromTask = args.Contains(FromTaskArgument, StringComparer.OrdinalIgnoreCase);
         if (args.Length == 0 && AppUpdater.IsRunningInstalledCopy && await Elevation.TryStartLaunchTaskAsync()) return;
-        var relaunchArgs = args.Where(a => !a.Equals(FromTaskArgument, StringComparison.OrdinalIgnoreCase)).Append(ElevationAttemptedArgument);
+        // The elevated copy checks that it still runs as this user (a standard user may type an administrator's password).
+        var relaunchArgs = args.Where(a => !a.Equals(FromTaskArgument, StringComparison.OrdinalIgnoreCase))
+            .Append(ElevationAttemptedArgument).Append(Elevation.UserSidArgument + Elevation.CurrentUserSid);
         if (Elevation.RelaunchElevated(relaunchArgs) && fromTask)
             MachineRelay.AppendAgentLog("The launch task started Runner Manager without administrator rights. Asked with UAC instead.");
     }

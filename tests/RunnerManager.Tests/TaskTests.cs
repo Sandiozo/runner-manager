@@ -94,6 +94,15 @@ public class ScheduledTaskXmlTests
         Assert.False(Elevation.IsUsableLaunchTask(theirs, Exe));
     }
 
+    [Fact]
+    public void ElevatedCopy_NoticesWhenItRunsAsAnotherUser()
+    {
+        Assert.Null(Elevation.OtherUserThanStarted(Array.Empty<string>()));
+        Assert.Null(Elevation.OtherUserThanStarted(new[] { "--setup", Elevation.UserSidArgument + Elevation.CurrentUserSid }));
+        Assert.Equal("S-1-5-21-1-2-3-4242", Elevation.OtherUserThanStarted(new[] { Elevation.UserSidArgument + "S-1-5-21-1-2-3-4242" }));
+        Assert.Null(Elevation.StartedBySid(new[] { Elevation.UserSidArgument }));
+    }
+
     [Theory]
     [InlineData("anna", "anna")]
     [InlineData("a/b:c*d", "a_b_c_d")]

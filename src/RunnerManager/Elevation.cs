@@ -62,6 +62,43 @@ public static class Elevation
         return false;
     }
 
+    /// <summary>Passed to the elevated copy with the SID of the user who started it.</summary>
+    internal const string UserSidArgument = "--user-sid=";
+
+    internal static string CurrentUserSid
+    {
+        get
+        {
+            using var identity = WindowsIdentity.GetCurrent();
+            return identity.User?.Value ?? string.Empty;
+        }
+    }
+
+    internal static string CurrentUserName
+    {
+        get
+        {
+            using var identity = WindowsIdentity.GetCurrent();
+            return identity.Name;
+        }
+    }
+
+    /// <summary>
+    /// The user who started this copy (by <see cref="UserSidArgument"/>), when the UAC prompt elevated it as someone else;
+    /// otherwise null.
+    /// </summary>
+    internal static string? OtherUserThanStarted(string[] args)
+    {
+        var started = StartedBySid(args);
+        if (started == null || started.Equals(CurrentUserSid, StringComparison.OrdinalIgnoreCase)) return null;
+        try { return new SecurityIdentifier(started).Translate(typeof(NTAccount)).Value; }
+        catch { return started; }
+    }
+
+    internal static string? StartedBySid(string[] args)
+        => args.LastOrDefault(a => a.StartsWith(UserSidArgument, StringComparison.OrdinalIgnoreCase)) is { } arg && arg.Length > UserSidArgument.Length
+            ? arg[UserSidArgument.Length..] : null;
+
     /// <summary>Starts this exe again with the same arguments and a UAC prompt. Returns false when the prompt is declined.</summary>
     public static bool RelaunchElevated(IEnumerable<string> args)
     {
