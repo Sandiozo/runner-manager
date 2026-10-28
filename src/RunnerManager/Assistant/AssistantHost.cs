@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -18,25 +19,51 @@ public static class AssistantHost
     public const string McpArgument = "--mcp";
     public const string CliArgument = "ai";
 
+    /// <summary>An approval nobody answers in this time counts as declined.</summary>
+    public static readonly TimeSpan ApprovalTimeout = TimeSpan.FromMinutes(10);
+
+    /// <summary>After stdin closes, requests still running get this long to finish.</summary>
+    private static readonly TimeSpan DrainLimit = TimeSpan.FromMinutes(15);
+
+    /// <summary>The fleet agent's approvals, shown one at a time in the order they came in.</summary>
+    public static ApprovalQueue Approvals { get; } = new(ShowApprovalAsync, ApprovalTimeout);
+
     public static bool IsAssistantLaunch(string[] args)
         => args.Length > 0 && (args[0].Equals(McpArgument, StringComparison.OrdinalIgnoreCase) || args[0].Equals(CliArgument, StringComparison.OrdinalIgnoreCase));
 
     public static Task<int> RunAsync(string[] args)
         => args[0].Equals(McpArgument, StringComparison.OrdinalIgnoreCase) ? RunStdioAsync() : RunCliAsync(args.Skip(1).ToArray());
 
-    /// <summary>Asks the user in a Runner Manager window in front of other windows.</summary>
-    public static async Task<bool> ApproveAsync(string client, string title, string message)
+    /// <summary>Asks the user in a Runner Manager window in front of other windows, after any approval asked before.</summary>
+    public static async Task<bool> ApproveAsync(string client, string title, string message, CancellationToken cancellationToken = default)
     {
-        var dispatcher = Application.Current.Dispatcher;
-        return await dispatcher.InvokeAsync(() =>
+        try
         {
-            const string allow = "Allow";
-            var destructive = title.StartsWith("Delete", StringComparison.Ordinal) || title.StartsWith("Move", StringComparison.Ordinal);
-            var approved = DialogWindow.Show(null, destructive ? DialogTone.Danger : DialogTone.Question, title,
-                message.Replace("An AI assistant", client, StringComparison.Ordinal), allow, cancel: "Decline", topmost: true) == allow;
+            var approved = await Approvals.AskAsync(client, title, message, cancellationToken);
             AssistantLog.Append($"{client}: {title} {(approved ? "Allowed." : "Declined.")}");
             return approved;
-        });
+        }
+        catch (OperationCanceledException)
+        {
+            AssistantLog.Append($"{client}: {title} Cancelled by the assistant.");
+            throw;
+        }
+        catch (AssistantException)
+        {
+            AssistantLog.Append($"{client}: {title} Not answered in time, so declined.");
+            throw;
+        }
+    }
+
+    private static async Task<bool> ShowApprovalAsync(string client, string title, string message, CancellationToken cancellationToken)
+    {
+        var destructive = title.StartsWith("Delete", StringComparison.Ordinal) || title.StartsWith("Move", StringComparison.Ordinal);
+        const string allow = "Allow";
+        var choice = await Application.Current.Dispatcher.InvokeAsync(() => DialogWindow.ShowApprovalAsync(
+            destructive ? DialogTone.Danger : DialogTone.Question, title, message.Replace("An AI assistant", client, StringComparison.Ordinal),
+            allow, "Decline", cancellationToken)).Task.Unwrap();
+        cancellationToken.ThrowIfCancellationRequested();
+        return choice == allow;
     }
 
     // ----- MCP over stdio -----
@@ -46,46 +73,74 @@ public static class AssistantHost
         using var input = new StreamReader(Console.OpenStandardInput(), new UTF8Encoding(false));
         await using var output = new StreamWriter(Console.OpenStandardOutput(), new UTF8Encoding(false)) { AutoFlush = true, NewLine = "\n" };
         var writeGate = new SemaphoreSlim(1, 1);
+        // Cancelled when the client is gone (stdout broke), or stops waiting for answers: requests still open end then.
+        using var clientGone = new CancellationTokenSource();
 
+        // One JSON message per line, never two writes mixed up.
         async Task SendAsync(JsonNode message)
         {
             var line = message.ToJsonString(McpServer.WireJson);
             await writeGate.WaitAsync();
             try { await output.WriteLineAsync(line); }
-            catch (IOException) { } // the client went away
+            catch (IOException) { clientGone.Cancel(); } // the client went away
+            catch (ObjectDisposedException) { }
             finally { writeGate.Release(); }
         }
 
         using var link = new AgentLink();
         // Answers on its own only when the agent cannot be reached, so the AI tool still connects and can say why.
-        var fallback = new McpServer((_, _, _) => Task.FromResult(false), _ => Task.CompletedTask);
+        var fallback = new McpServer((_, _, _, _) => Task.FromResult(false), _ => Task.CompletedTask);
         var pending = new List<Task>();
-        while (await input.ReadLineAsync() is { } line)
+        while (await ReadLineAsync(input) is { } line)
         {
             if (string.IsNullOrWhiteSpace(line)) continue;
             pending.RemoveAll(t => t.IsCompleted);
             // Each request runs on its own, so a long tool call (creating a runner) does not hold up pings or reads.
-            pending.Add(ForwardLineAsync(link, fallback, line, SendAsync));
+            pending.Add(ForwardLineAsync(link, fallback, line, SendAsync, clientGone.Token));
         }
-        // The client closed stdin: still answer what it asked (a script may pipe requests in), within reason.
-        await Task.WhenAny(Task.WhenAll(pending), Task.Delay(TimeSpan.FromMinutes(15)));
+        // The client closed stdin: still answer what it asked (a script may pipe requests in), within reason. Then
+        // end what is still open, which also closes an approval still waiting in Runner Manager.
+        await Task.WhenAny(Task.WhenAll(pending), Task.Delay(DrainLimit, clientGone.Token).ContinueWith(_ => { }));
+        clientGone.Cancel();
+        await Task.WhenAny(Task.WhenAll(pending), Task.Delay(TimeSpan.FromSeconds(5)));
         return 0;
     }
 
-    private static async Task ForwardLineAsync(AgentLink link, McpServer fallback, string line, Func<JsonNode, Task> send)
+    /// <summary>A line from stdin, or null when it closed or broke.</summary>
+    private static async Task<string?> ReadLineAsync(StreamReader input)
+    {
+        try { return await input.ReadLineAsync(); }
+        catch (IOException) { return null; }
+    }
+
+    private static async Task ForwardLineAsync(AgentLink link, McpServer fallback, string line, Func<JsonNode, Task> send, CancellationToken clientGone)
     {
         try
         {
-            if (await link.SendAsync(line) is { } answer && JsonNode.Parse(answer) is { } node) await send(node);
+            // Progress notifications are passed on as they arrive, so a long call does not hit the client's timeout.
+            var answer = await link.SendAsync(line, async notification =>
+            {
+                if (JsonNode.Parse(notification) is { } node) await send(node);
+            }, clientGone);
+            if (answer != null && JsonNode.Parse(answer) is { } reply) await send(reply);
         }
-        catch (AgentLinkException ex)
+        catch (OperationCanceledException) when (clientGone.IsCancellationRequested)
+        {
+        }
+        catch (AgentLinkException ex) when (ex.AgentUnavailable)
         {
             fallback.ToolsUnavailable = ex.Message;
             await HandleLineAsync(fallback, line, send);
         }
+        catch (AgentLinkException ex)
+        {
+            // The agent runs but could not answer this request: say so for it alone, not "tools unavailable".
+            if (McpServer.ErrorsFor(line, ex.ErrorCode, ex.Message) is { } errors) await send(errors);
+        }
         catch (Exception ex)
         {
             MachineRelay.AppendAgentLog($"MCP request failed: {ex.Message}");
+            if (McpServer.ErrorsFor(line, McpServer.InternalError, $"Internal error: {ex.GetBaseException().Message}") is { } errors) await send(errors);
         }
     }
 
@@ -100,23 +155,7 @@ public static class AssistantHost
         }
         using (document)
         {
-            try
-            {
-                if (document.RootElement.ValueKind == JsonValueKind.Array)
-                {
-                    // JSON-RPC batches (MCP 2025-03-26).
-                    var responses = new JsonArray();
-                    foreach (var response in await Task.WhenAll(document.RootElement.EnumerateArray().Select(server.HandleAsync).ToList()))
-                        if (response != null) responses.Add(response);
-                    if (responses.Count > 0) await send(responses);
-                }
-                else if (await server.HandleAsync(document.RootElement) is { } response)
-                    await send(response);
-            }
-            catch (Exception ex)
-            {
-                MachineRelay.AppendAgentLog($"MCP request failed: {ex.Message}");
-            }
+            if (await server.HandleDocumentAsync(document.RootElement) is { } answer) await send(answer);
         }
     }
 
@@ -139,7 +178,7 @@ public static class AssistantHost
         }
 
         JsonElement arguments;
-        try { arguments = ParseArguments(args.Skip(1)); }
+        try { arguments = ParseArguments(AssistantTools.Find(args[0]), args.Skip(1)); }
         catch (AssistantException ex)
         {
             Console.Error.WriteLine(ex.Message);
@@ -160,8 +199,23 @@ public static class AssistantHost
             var answer = await link.SendAsync(new JsonObject
             {
                 ["jsonrpc"] = "2.0", ["id"] = 1, ["method"] = "tools/call",
-                ["params"] = new JsonObject { ["name"] = args[0], ["arguments"] = JsonNode.Parse(arguments.GetRawText()) }
-            }.ToJsonString());
+                ["params"] = new JsonObject
+                {
+                    ["name"] = args[0],
+                    ["arguments"] = JsonNode.Parse(arguments.GetRawText()),
+                    ["_meta"] = new JsonObject { ["progressToken"] = 1 }
+                }
+            }.ToJsonString(), notification =>
+            {
+                // Progress goes to stderr, so stdout stays one JSON answer.
+                try
+                {
+                    if (JsonNode.Parse(notification)?["params"]?["message"] is JsonValue progress && progress.TryGetValue<string>(out var text))
+                        Console.Error.WriteLine(text);
+                }
+                catch (JsonException) { }
+                return Task.CompletedTask;
+            });
             var reply = JsonNode.Parse(answer ?? "{}");
             if (reply?["result"] is not { } result)
                 throw new AgentLinkException(reply?["error"]?["message"]?.GetValue<string>() ?? "The fleet agent sent no answer.");
@@ -178,41 +232,77 @@ public static class AssistantHost
         }
     }
 
-    /// <summary>"--repository owner/name --labels gpu,cuda --even-if-exists" → a JSON object of tool arguments.</summary>
-    internal static JsonElement ParseArguments(IEnumerable<string> args)
+    /// <summary>
+    /// "--repository owner/name --labels gpu,cuda --even-if-exists" → a JSON object of tool arguments, typed by the
+    /// tool's input schema (so "--name 2024" stays text). Without a tool, values are guessed.
+    /// </summary>
+    internal static JsonElement ParseArguments(AssistantTool? tool, IEnumerable<string> args)
     {
+        var properties = tool?.InputSchema["properties"] as JsonObject;
         var values = new JsonObject();
         string? pendingName = null;
         foreach (var arg in args)
         {
             if (arg.StartsWith("--", StringComparison.Ordinal))
             {
-                if (pendingName != null) values[pendingName] = true;
+                if (pendingName != null) values[pendingName] = Value(pendingName, null);
                 var text = arg[2..];
                 var equals = text.IndexOf('=');
                 if (equals > 0)
                 {
-                    values[Key(text[..equals])] = Value(text[(equals + 1)..]);
+                    var name = Key(text[..equals]);
+                    values[name] = Value(name, text[(equals + 1)..]);
                     pendingName = null;
                 }
                 else pendingName = Key(text);
             }
             else if (pendingName != null)
             {
-                values[pendingName] = Value(arg);
+                values[pendingName] = Value(pendingName, arg);
                 pendingName = null;
             }
             else throw new AssistantException($"Unexpected \"{arg}\". Arguments are written as --name value.");
         }
-        if (pendingName != null) values[pendingName] = true;
+        if (pendingName != null) values[pendingName] = Value(pendingName, null);
         return JsonDocument.Parse(values.ToJsonString()).RootElement.Clone();
 
-        static string Key(string name) => name.Replace('-', '_').ToLowerInvariant();
-        static JsonNode Value(string text)
-            => text.Equals("true", StringComparison.OrdinalIgnoreCase) ? JsonValue.Create(true)
-                : text.Equals("false", StringComparison.OrdinalIgnoreCase) ? JsonValue.Create(false)
-                : int.TryParse(text, out var number) ? JsonValue.Create(number)
-                : JsonValue.Create(text);
+        string Key(string name)
+        {
+            var key = name.Replace('-', '_').ToLowerInvariant();
+            if (properties != null && !properties.ContainsKey(key))
+                throw new AssistantException($"{tool!.Name} has no argument --{name}. Its arguments: " +
+                                             (properties.Count == 0 ? "none" : string.Join(", ", properties.Select(p => "--" + p.Key.Replace('_', '-')))) + ".");
+            return key;
+        }
+
+        // A bare --flag is true. Otherwise the schema says what the text is.
+        JsonNode Value(string name, string? text)
+        {
+            var type = properties?[name]?["type"]?.GetValue<string>();
+            if (text == null)
+                return type is null or "boolean" ? JsonValue.Create(true)
+                    : throw new AssistantException($"--{name.Replace('_', '-')} needs a value.");
+            switch (type)
+            {
+                case "string":
+                    return JsonValue.Create(text);
+                case "array":
+                    return new JsonArray(text.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                        .Select(v => (JsonNode)JsonValue.Create(v)).ToArray());
+                case "integer":
+                    return int.TryParse(text, System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var whole) ? JsonValue.Create(whole)
+                        : throw new AssistantException($"--{name.Replace('_', '-')} needs a whole number, not \"{text}\".");
+                case "boolean":
+                    return text.Equals("true", StringComparison.OrdinalIgnoreCase) ? JsonValue.Create(true)
+                        : text.Equals("false", StringComparison.OrdinalIgnoreCase) ? JsonValue.Create(false)
+                        : throw new AssistantException($"--{name.Replace('_', '-')} is true or false, not \"{text}\".");
+                default:
+                    return text.Equals("true", StringComparison.OrdinalIgnoreCase) ? JsonValue.Create(true)
+                        : text.Equals("false", StringComparison.OrdinalIgnoreCase) ? JsonValue.Create(false)
+                        : int.TryParse(text, out var number) ? JsonValue.Create(number)
+                        : JsonValue.Create(text);
+            }
+        }
     }
 
     private static string Usage()
@@ -249,5 +339,61 @@ public static class AssistantHost
         var handle = GetStdHandle(StdOutputHandle);
         if (handle != IntPtr.Zero && handle != new IntPtr(-1)) return;
         if (AttachConsole(AttachParentProcess)) Console.WriteLine();
+    }
+}
+
+/// <summary>
+/// Approvals waiting for the user, shown one at a time in the order they were asked, so an older request is never
+/// hidden under a newer one. Each one counts as declined when nobody answers within the timeout, and ends at once
+/// when its call is cancelled.
+/// </summary>
+public sealed class ApprovalQueue
+{
+    private readonly Func<string, string, string, CancellationToken, Task<bool>> _show;
+    private readonly TimeSpan _timeout;
+    private readonly object _gate = new();
+    /// <summary>Completes when the last approval in line is done; the next one waits for it.</summary>
+    private Task _tail = Task.CompletedTask;
+
+    /// <param name="show">Shows one approval (client, title, message) and returns whether it was allowed; closes it when the token is cancelled.</param>
+    public ApprovalQueue(Func<string, string, string, CancellationToken, Task<bool>> show, TimeSpan timeout)
+    {
+        _show = show;
+        _timeout = timeout;
+    }
+
+    /// <summary>
+    /// Waits for its turn, then asks. Throws <see cref="OperationCanceledException"/> when the call is cancelled, and
+    /// <see cref="AssistantException"/> when nobody answered in time.
+    /// </summary>
+    public async Task<bool> AskAsync(string client, string title, string message, CancellationToken cancellationToken)
+    {
+        // An update restarts the agent only after the user has answered.
+        using var work = AgentWork.Begin();
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(_timeout);
+        var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        Task previous;
+        lock (_gate)
+        {
+            previous = _tail;
+            _tail = done.Task;
+        }
+        try
+        {
+            await previous.WaitAsync(timeout.Token);
+            return await _show(client, title, message, timeout.Token);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && timeout.IsCancellationRequested)
+        {
+            var wait = _timeout.TotalMinutes >= 1 ? $"{(int)_timeout.TotalMinutes} minutes" : $"{Math.Max(1, (int)_timeout.TotalSeconds)} seconds";
+            throw new AssistantException($"Nobody answered the approval in Runner Manager within {wait}, so it counts as declined. " +
+                                         "Ask the user before trying again.");
+        }
+        finally
+        {
+            // The next one goes after this one, and never before the ones ahead of this one.
+            _ = previous.ContinueWith(_ => done.TrySetResult(), TaskScheduler.Default);
+        }
     }
 }
