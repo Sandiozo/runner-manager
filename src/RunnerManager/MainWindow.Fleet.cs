@@ -38,6 +38,7 @@ public partial class MainWindow
         }
         catch (Exception ex) { AddActivity($"Could not update the install: {ex.Message}"); }
         if (UpdateGuard.TakeRollbackNotice() is { } notice) RaiseAlert(notice, warning: true);
+        if (AppSettings.LoadProblem is { } settingsProblem) AddActivity($"Settings: {settingsProblem}");
         await RefreshAsync(forceAuthCheck: true);
         _refreshTimer.Start();
         StartLiveJobs();

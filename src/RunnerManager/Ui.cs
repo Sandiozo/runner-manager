@@ -164,29 +164,113 @@ public sealed class AppSettings
     public int RefreshSeconds { get; set; } = 5;
     public string DismissedUpdateVersion { get; set; } = string.Empty;
 
-    public static AppSettings Load()
+    /// <summary>Why settings.json could not be used as it was, or null. The dashboard shows it once.</summary>
+    public static string? LoadProblem { get; private set; }
+
+    /// <summary>
+    /// The file could not be read at all (for example it was locked), so saving is skipped: writing now would replace
+    /// the user's settings with defaults.
+    /// </summary>
+    private bool _readFailed;
+
+    public static AppSettings Load() => Load(SettingsPath);
+
+    internal static AppSettings Load(string path)
     {
+        if (!File.Exists(path)) return new AppSettings();
+        string json;
+        try { json = ReadWithRetry(path); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            LoadProblem = $"Could not read the settings ({ex.Message}). Defaults are used until Runner Manager restarts, and changes are not saved.";
+            return new AppSettings { _readFailed = true };
+        }
+
+        AppSettings settings;
         try
         {
-            if (File.Exists(SettingsPath))
-            {
-                var settings = JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(SettingsPath)) ?? new AppSettings();
-                settings.RefreshSeconds = Math.Clamp(settings.RefreshSeconds, 5, 60);
-                return settings;
-            }
+            settings = JsonSerializer.Deserialize<AppSettings>(json) ?? new AppSettings();
         }
-        catch { }
-        return new AppSettings();
+        catch (JsonException)
+        {
+            // Keep what can still be read, and a copy of the damaged file.
+            var copy = $"{path}.damaged-{DateTime.Now:yyyyMMdd-HHmmss}";
+            try { File.Copy(path, copy, overwrite: true); } catch { copy = path; }
+            settings = Salvage(json);
+            LoadProblem = $"Some settings could not be read and were reset. A copy of the old settings file is in {copy}.";
+            MachineRelay.AppendAgentLog($"settings.json could not be read; kept a copy in {copy}.");
+        }
+        settings.RefreshSeconds = Math.Clamp(settings.RefreshSeconds, 5, 60);
+        return settings;
     }
 
-    public void Save()
+    private static string ReadWithRetry(string path)
     {
+        for (var attempt = 1; ; attempt++)
+        {
+            try { return File.ReadAllText(path); }
+            catch (IOException) when (attempt < 5) { Thread.Sleep(100 * attempt); }
+        }
+    }
+
+    /// <summary>Reads each setting on its own, so one bad value (or a cut-off file) does not reset the others.</summary>
+    private static AppSettings Salvage(string json)
+    {
+        var settings = new AppSettings();
+        var properties = typeof(AppSettings).GetProperties().Where(p => p.CanWrite).ToDictionary(p => p.Name, StringComparer.Ordinal);
+        var reader = new Utf8JsonReader(System.Text.Encoding.UTF8.GetBytes(json),
+            new JsonReaderOptions { AllowTrailingCommas = true, CommentHandling = JsonCommentHandling.Skip });
         try
         {
-            Directory.CreateDirectory(Path.GetDirectoryName(SettingsPath)!);
-            File.WriteAllText(SettingsPath, JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true }));
+            if (!reader.Read() || reader.TokenType != JsonTokenType.StartObject) return settings;
+            while (reader.Read() && reader.TokenType == JsonTokenType.PropertyName)
+            {
+                var name = reader.GetString() ?? string.Empty;
+                if (!reader.Read()) break;
+                if (properties.TryGetValue(name, out var property))
+                {
+                    var start = reader;
+                    try
+                    {
+                        property.SetValue(settings, JsonSerializer.Deserialize(ref reader, property.PropertyType));
+                        continue;
+                    }
+                    catch (JsonException) { reader = start; }
+                }
+                reader.Skip();
+            }
         }
-        catch { }
+        // The file is cut off here: keep what was read before.
+        catch (JsonException) { }
+        return settings;
+    }
+
+    public void Save() => Save(SettingsPath);
+
+    /// <summary>Writes a temporary file and moves it into place, so a crash or full disk never leaves a half-written file.</summary>
+    internal void Save(string path)
+    {
+        if (_readFailed) return;
+        var temp = $"{path}.{Environment.ProcessId}.tmp";
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            File.WriteAllText(temp, JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true }));
+            for (var attempt = 1; ; attempt++)
+            {
+                try
+                {
+                    File.Move(temp, path, overwrite: true);
+                    return;
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException && attempt < 5) { Thread.Sleep(100 * attempt); }
+            }
+        }
+        catch (Exception ex)
+        {
+            try { File.Delete(temp); } catch { }
+            MachineRelay.AppendAgentLog($"Could not save the settings: {ex.Message}");
+        }
     }
 }
 

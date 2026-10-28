@@ -96,6 +96,67 @@ public class InstallFolderTests
     }
 }
 
+public class AppSettingsFileTests
+{
+    private static string TempFile() => Path.Combine(Path.GetTempPath(), $"rm-settings-{Guid.NewGuid():N}", "settings.json");
+
+    [Fact]
+    public void Save_ReplacesTheFileAtOnce_AndLoadReadsItBack()
+    {
+        var path = TempFile();
+        try
+        {
+            new AppSettings { RefreshSeconds = 30, Theme = AppTheme.Light }.Save(path);
+            var loaded = AppSettings.Load(path);
+            Assert.Equal(30, loaded.RefreshSeconds);
+            Assert.Equal(AppTheme.Light, loaded.Theme);
+            Assert.Single(Directory.GetFiles(Path.GetDirectoryName(path)!));
+        }
+        finally { Directory.Delete(Path.GetDirectoryName(path)!, recursive: true); }
+    }
+
+    [Fact]
+    public void DamagedFile_KeepsWhatCanBeRead_AndACopy()
+    {
+        var path = TempFile();
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        try
+        {
+            File.WriteAllText(path, """{ "CloseToTray": false, "Theme": "Purple", "RefreshSeconds": 10 }""");
+            var loaded = AppSettings.Load(path);
+            Assert.False(loaded.CloseToTray);
+            Assert.Equal(10, loaded.RefreshSeconds);
+            Assert.Equal(AppTheme.Dark, loaded.Theme);
+            Assert.Contains(Directory.GetFiles(Path.GetDirectoryName(path)!), f => f.Contains(".damaged-"));
+            Assert.NotNull(AppSettings.LoadProblem);
+
+            // A cut-off file keeps the settings before the cut.
+            File.WriteAllText(path, """{ "CloseToTray": false, "Refresh""");
+            var cut = AppSettings.Load(path);
+            Assert.False(cut.CloseToTray);
+            Assert.True(cut.NotifyOnFailedRuns);
+        }
+        finally { Directory.Delete(Path.GetDirectoryName(path)!, recursive: true); }
+    }
+
+    [Fact]
+    public void UnreadableFile_IsNeverOverwrittenWithDefaults()
+    {
+        var path = TempFile();
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        try
+        {
+            File.WriteAllText(path, """{ "RefreshSeconds": 30 }""");
+            AppSettings loaded;
+            using (new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+                loaded = AppSettings.Load(path);
+            loaded.Save(path);
+            Assert.Equal(30, AppSettings.Load(path).RefreshSeconds);
+        }
+        finally { Directory.Delete(Path.GetDirectoryName(path)!, recursive: true); }
+    }
+}
+
 [Collection(FleetSettingsCollection.Name)]
 public class UninstallDataTests
 {
