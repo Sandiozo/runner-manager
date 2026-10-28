@@ -257,6 +257,20 @@ public sealed class MachineInfo : INotifyPropertyChanged
     public string RdcSecurityText { get; init; } = string.Empty;
     public string LastCommandId { get; init; } = string.Empty;
     public string LastCommandResult { get; init; } = string.Empty;
+    /// <summary>Results of the agent's last commands (protocol 12).</summary>
+    public FleetCommandResult[] RecentCommands { get; init; } = Array.Empty<FleetCommandResult>();
+    /// <summary>Commands queued or running on the agent (protocol 12).</summary>
+    public string[] PendingCommandIds { get; init; } = Array.Empty<string>();
+    /// <summary>The agent is running a command or an AI assistant call (protocol 12).</summary>
+    public bool Busy { get; init; }
+
+    /// <summary>
+    /// Whether the agent reported a result for a command. Several commands can finish between two refreshes, so the
+    /// recent results are checked, not only the last command.
+    /// </summary>
+    public bool HasFinished(string commandId)
+        => LastCommandId.Equals(commandId, StringComparison.OrdinalIgnoreCase)
+           || RecentCommands.Any(r => r.Id.Equals(commandId, StringComparison.OrdinalIgnoreCase));
     private int _cpuPercent;
     private int _memoryPercent;
     public int CpuPercent { get => _cpuPercent; init => _cpuPercent = value; }
@@ -594,6 +608,9 @@ public sealed class MachineInfo : INotifyPropertyChanged
             RdcSecurityText = payload.RdcSecurityText,
             LastCommandId = payload.LastCommandId,
             LastCommandResult = payload.LastCommandResult,
+            RecentCommands = payload.RecentCommands,
+            PendingCommandIds = payload.PendingCommandIds,
+            Busy = payload.Busy,
             CpuPercent = payload.CpuPercent,
             MemoryPercent = payload.MemoryPercent,
             MemoryTotalGb = payload.MemoryTotalGb,

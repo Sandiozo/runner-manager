@@ -1,3 +1,5 @@
+using System.Net.Http;
+
 namespace RunnerManager;
 
 /// <summary>
@@ -20,7 +22,14 @@ public sealed class FleetActions
             await local();
             return;
         }
-        var id = await MachineRelay.SendCommandAsync(machine.MachineKey, target, targetKey, action, runnerName, labels, value);
+        var id = Guid.NewGuid().ToString("N");
+        try { await MachineRelay.SendCommandAsync(machine.MachineKey, target, targetKey, action, runnerName, labels, value, id); }
+        catch (Exception ex) when (ex is OperationCanceledException or HttpRequestException)
+        {
+            // The agent may have queued it before its answer was lost. Sending the same ID again is safe: each ID runs once.
+            log($"{machine.MachineName} did not answer. Sending the request again…");
+            await MachineRelay.SendCommandAsync(machine.MachineKey, target, targetKey, action, runnerName, labels, value, id);
+        }
         var result = await MachineRelay.WaitForCommandAsync(machine.MachineKey, id, timeout);
         log($"{machine.MachineName}: {result}");
     }

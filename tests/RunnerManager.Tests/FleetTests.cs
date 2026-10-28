@@ -214,15 +214,18 @@ internal sealed class TestAgent : IDisposable
 
     public List<MachineCommand> Commands { get; } = new();
 
+    /// <summary>Changes what the agent reports, for example its command results.</summary>
+    public Func<MachineStatusPayload, MachineStatusPayload> Status { get; set; } = s => s;
+
     public TestAgent(string name = "TESTPC", bool start = true, string machineId = "", byte[]? key = null)
     {
         if (key != null) Key = key;
         Server = new AgentServer(
-            () => Task.FromResult(new MachineStatusPayload
+            () => Task.FromResult(Status(new MachineStatusPayload
             {
                 MachineName = name, MachineId = machineId, AgentProtocolVersion = MachineRelay.ProtocolVersion, FleetAgentRunning = true,
                 UpdatedUtc = DateTime.UtcNow
-            }),
+            })),
             command => { lock (Commands) Commands.Add(command); return command.Id; },
             _ => Task.FromResult(new LogPayload()),
             () => Key, $"http://localhost:{Port}/rw/", Port + 1, name, machineId: machineId);
@@ -556,4 +559,86 @@ public class PeerIdentityTests
         }
         finally { Reset(); }
     }
+}
+
+[Collection(FleetSettingsCollection.Name)]
+public class CommandWaitTests
+{
+    private static async Task WithAgentAsync(Func<TestAgent, Task> test)
+    {
+        var previous = MachineRelay.CommandPollInterval;
+        MachineRelay.CommandPollInterval = TimeSpan.FromMilliseconds(100);
+        using var agent = new TestAgent("WAITPC", machineId: "id-wait");
+        try
+        {
+            FleetConfig.Update(c =>
+            {
+                c.ProtectedFleetKey = Convert.ToBase64String(ProtectedData.Protect(agent.Key, null, DataProtectionScope.CurrentUser));
+                c.KnownPeers.Clear();
+                c.KnownPeers.Add(new PeerRecord { Name = "WAITPC", Address = agent.Address, MachineId = "id-wait" });
+            });
+            await test(agent);
+        }
+        finally
+        {
+            MachineRelay.CommandPollInterval = previous;
+            FleetConfig.Update(c =>
+            {
+                c.ProtectedFleetKey = string.Empty;
+                c.KnownPeers.Clear();
+            });
+        }
+    }
+
+    private static FleetCommandResult Done(string id, string result) => new() { Id = id, Result = result, CompletedUtc = DateTime.UtcNow };
+
+    [Fact]
+    public Task ACommandFinishedBeforeAnother_IsStillFound() => WithAgentAsync(async agent =>
+    {
+        agent.Status = s => s with
+        {
+            LastCommandId = "second",
+            LastCommandResult = "Runner stop completed",
+            RecentCommands = new[] { Done("first", "Runner start completed"), Done("second", "Runner stop completed") }
+        };
+        Assert.Equal("Runner start completed", await MachineRelay.WaitForCommandAsync("WAITPC", "first", TimeSpan.FromSeconds(5)));
+    });
+
+    [Fact]
+    public Task ACommandThatIsStillQueued_IsWaitedForPastTheTimeout() => WithAgentAsync(async agent =>
+    {
+        var finishAt = DateTime.UtcNow.AddSeconds(2);
+        agent.Status = s => DateTime.UtcNow < finishAt
+            ? s with { PendingCommandIds = new[] { "slow" }, Busy = true }
+            : s with { RecentCommands = new[] { Done("slow", "Runner created: r1") } };
+        Assert.Equal("Runner created: r1", await MachineRelay.WaitForCommandAsync("WAITPC", "slow", TimeSpan.FromMilliseconds(500)));
+    });
+
+    [Fact]
+    public Task FailuresAreThrown_AndOlderAgentsAreUnderstood() => WithAgentAsync(async agent =>
+    {
+        // Agents before protocol 12 only report their last command.
+        agent.Status = s => s with { LastCommandId = "old", LastCommandResult = "runner Stop failed: access denied" };
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            MachineRelay.WaitForCommandAsync("WAITPC", "old", TimeSpan.FromSeconds(5)));
+        Assert.Contains("access denied", error.Message);
+    });
+
+    [Fact]
+    public Task AnUnknownCommand_TimesOut() => WithAgentAsync(async _ =>
+    {
+        var error = await Assert.ThrowsAsync<TimeoutException>(() =>
+            MachineRelay.WaitForCommandAsync("WAITPC", "never-sent", TimeSpan.FromMilliseconds(500)));
+        Assert.Contains("did not report a result", error.Message);
+    });
+
+    [Fact]
+    public Task Commands_CarryTheIdOfTheIntendedPc_AndCanBeSentAgainWithTheSameId() => WithAgentAsync(async agent =>
+    {
+        var id = await MachineRelay.SendCommandAsync("WAITPC", "runner", "svc", "Stop", commandId: "retry-me");
+        Assert.Equal("retry-me", id);
+        await MachineRelay.SendCommandAsync("WAITPC", "runner", "svc", "Stop", commandId: "retry-me");
+        Assert.All(agent.Commands, c => Assert.Equal("retry-me", c.Id));
+        Assert.Equal(2, agent.Commands.Count);
+    });
 }
