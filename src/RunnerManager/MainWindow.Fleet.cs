@@ -16,11 +16,16 @@ public partial class MainWindow
     private readonly Dictionary<string, IReadOnlyList<WorkflowRunSummary>> _recentRuns = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<long, bool> _runFailureStates = new();
     private readonly HashSet<string> _primedRunRepos = new(StringComparer.OrdinalIgnoreCase);
-    private readonly HashSet<string> _seenAgentEvents = new(StringComparer.Ordinal);
+    /// <summary>Agent events already reported, with their time (events older than <see cref="AgentEventMemory"/> are forgotten).</summary>
+    private readonly Dictionary<string, DateTime> _seenAgentEvents = new(StringComparer.Ordinal);
+    private static readonly TimeSpan AgentEventAlertAge = TimeSpan.FromMinutes(15);
+    private static readonly TimeSpan AgentEventMemory = TimeSpan.FromMinutes(30);
     private bool _agentEventsPrimed;
     private bool _started;
     private DateTime _lastRunsRefresh = DateTime.MinValue;
     private DateTime _lastRunnerReleaseCheck = DateTime.MinValue;
+    private static readonly TimeSpan UpdateGuardInterval = TimeSpan.FromMinutes(1);
+    private DateTime _lastUpdateGuardCheck = DateTime.MinValue;
 
     /// <summary>Starts monitoring. Called when the window loads, or directly when starting minimized to the tray.</summary>
     public async Task StartAsync()
@@ -32,10 +37,13 @@ public partial class MainWindow
         try
         {
             await LegacyInstall.MigrateAsync(AddActivity);
-            await Installer.EnsureLaunchTaskAsync();
+            await Installer.EnsureLaunchTaskAsync(force: App.ElevatedByPrompt);
         }
         catch (Exception ex) { AddActivity($"Could not update the install: {ex.Message}"); }
+        if (UpdateGuard.TakeRollbackNotice() is { } notice) RaiseAlert(notice, warning: true);
+        if (AppSettings.LoadProblem is { } settingsProblem) AddActivity($"Settings: {settingsProblem}");
         await RefreshAsync(forceAuthCheck: true);
+        ApplyRefreshInterval();
         _refreshTimer.Start();
         StartLiveJobs();
         await RunPostSetupStepsAsync();
@@ -67,21 +75,30 @@ public partial class MainWindow
 
     private async Task RefreshFleetExtrasAsync()
     {
-        if (!_githubAuthenticated) return;
         try
         {
-            var release = await AppUpdater.GetLatestReleaseAsync();
-            var latest = release?.Version ?? string.Empty;
+            // Releases are public, so updates are checked whether or not GitHub is connected.
+            var release = (await AppUpdater.CheckForUpdateAsync()).Release;
+            // A failed check keeps the version found before.
+            var latest = release?.Version ?? MachineInfo.LatestAppVersion;
             if (latest != MachineInfo.LatestAppVersion)
             {
                 MachineInfo.LatestAppVersion = latest;
                 foreach (var machine in Machines) machine.Refresh();
             }
-            var showBanner = release != null && AppUpdater.IsNewer(release.Version, AppUpdater.CurrentVersion)
-                && release.Version != _settings.DismissedUpdateVersion;
+            var showBanner = latest.Length > 0 && AppUpdater.IsNewer(latest, AppUpdater.CurrentVersion)
+                && latest != _settings.DismissedUpdateVersion;
             UpdateBanner.Visibility = showBanner ? Visibility.Visible : Visibility.Collapsed;
-            if (showBanner) UpdateBannerText.Text = $"Runner Manager v{release!.Version} is available. Current version: v{AppUpdater.CurrentVersion}.";
+            if (showBanner) UpdateBannerText.Text = $"Runner Manager v{latest} is available. Current version: v{AppUpdater.CurrentVersion}.";
 
+            // Not while this dashboard restarts the agent itself.
+            if (DateTime.UtcNow - _lastUpdateGuardCheck >= UpdateGuardInterval && !IsAgentWorkBusy)
+            {
+                _lastUpdateGuardCheck = DateTime.UtcNow;
+                if (await UpdateGuard.CheckFromDashboardAsync(_isEnrolled) is { } notice) RaiseAlert(notice, warning: true);
+            }
+
+            if (!_githubAuthenticated) return;
             if (DateTime.UtcNow - _lastRunnerReleaseCheck > RunnerReleaseInterval)
             {
                 _lastRunnerReleaseCheck = DateTime.UtcNow;
@@ -124,7 +141,24 @@ public partial class MainWindow
             _primedRunRepos.Add(repository);
             _recentRuns[repository] = runs;
         }
+        PruneRunState(repositories);
         foreach (var runner in Machines.SelectMany(m => m.Runners)) ApplyRecentRuns(runner);
+    }
+
+    /// <summary>
+    /// Forgets repositories no runner uses any more, and runs that dropped out of every recent list, so a dashboard that
+    /// runs for weeks in the tray does not keep growing.
+    /// </summary>
+    private void PruneRunState(IReadOnlyCollection<string> repositories)
+    {
+        var wanted = repositories.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (var stale in _recentRuns.Keys.Where(r => !wanted.Contains(r)).ToList())
+        {
+            _recentRuns.Remove(stale);
+            _primedRunRepos.Remove(stale);
+        }
+        var live = _recentRuns.Values.SelectMany(runs => runs).Select(run => run.Id).ToHashSet();
+        foreach (var id in _runFailureStates.Keys.Where(id => !live.Contains(id)).ToList()) _runFailureStates.Remove(id);
     }
 
     // ================= Live job view =================
@@ -245,12 +279,15 @@ public partial class MainWindow
             foreach (var agentEvent in machine.RecentEvents)
             {
                 var key = $"{machine.MachineKey}|{agentEvent.Utc.Ticks}|{agentEvent.Text}";
-                if (!_seenAgentEvents.Add(key) || !_agentEventsPrimed) continue;
-                if (DateTime.UtcNow - agentEvent.Utc > TimeSpan.FromMinutes(15)) continue;
+                if (!_seenAgentEvents.TryAdd(key, agentEvent.Utc) || !_agentEventsPrimed) continue;
+                // Also keeps an event that was forgotten (older than the memory) from being reported again.
+                if (DateTime.UtcNow - agentEvent.Utc > AgentEventAlertAge) continue;
                 RaiseAlert($"{machine.MachineName}: {agentEvent.Text}", agentEvent.Warning);
             }
         }
         _agentEventsPrimed = true;
+        foreach (var old in _seenAgentEvents.Where(e => DateTime.UtcNow - e.Value > AgentEventMemory).Select(e => e.Key).ToList())
+            _seenAgentEvents.Remove(old);
     }
 
     // ================= Signing =================
@@ -300,7 +337,7 @@ public partial class MainWindow
 
     private void ApplySettings()
     {
-        _refreshTimer.Interval = TimeSpan.FromSeconds(_settings.RefreshSeconds);
+        ApplyRefreshInterval();
         UpdateSummary();
         _tray?.SyncSettings(_settings);
         LastUpdatedText.Text = $"Updated {DateTime.Now:HH:mm:ss}  ·  Refreshes every {_settings.RefreshSeconds}s";
@@ -319,21 +356,27 @@ public partial class MainWindow
     /// <summary>Installs the newest release on this PC, then offers to restart the dashboard with it.</summary>
     private async Task InstallUpdateAsync()
     {
-        var release = await AppUpdater.GetLatestReleaseAsync(force: true);
-        if (release == null || !AppUpdater.IsNewer(release.Version, AppUpdater.CurrentVersion))
+        var check = await AppUpdater.CheckForUpdateAsync(force: true);
+        if (check.Release is not { } release)
+        {
+            DialogWindow.Error(this, "Couldn't check for updates", check.Problem);
+            return;
+        }
+        if (!check.UpdateAvailable)
         {
             DialogWindow.Info(this, "Runner Manager is up to date", $"This PC runs the newest version, v{AppUpdater.CurrentVersion}.");
             return;
         }
-        var installed = await RunOperationAsync($"Install Runner Manager {release.Tag}", log => AppUpdater.InstallReleaseAsync(release, log));
+        if (IsAgentWorkRunning()) return;
+        var restartAgent = false;
+        var installed = await RunOperationAsync($"Install Runner Manager {release.Tag}",
+            async log => restartAgent = await AppUpdater.InstallReleaseAsync(release, log));
         if (!installed) return;
+        if (restartAgent) RestartLocalAgentInBackground();
         UpdateBanner.Visibility = Visibility.Collapsed;
         if (DialogWindow.Show(this, DialogTone.Question, $"Runner Manager {release.Tag} is installed",
                 "Restart Runner Manager now to use the new version?", "Restart now", cancel: "Later") == "Restart now")
-        {
-            Process.Start(new ProcessStartInfo(AppUpdater.InstalledExe) { UseShellExecute = true });
-            ((App)Application.Current).ExitApplication();
-        }
+            ((App)Application.Current).RestartDashboard();
     }
 
     private void DismissUpdateBanner_Click(object sender, RoutedEventArgs e)
@@ -366,10 +409,17 @@ public partial class MainWindow
         if (ItemFrom<MachineInfo>(sender) is not { CanUpdateAgent: true } machine) return;
         if (machine.LocalAgentOutdated)
         {
+            if (_agentOwner != null)
+            {
+                DialogWindow.Info(this, "Another Windows user runs the fleet agent", AgentOwnership.Describe(_agentOwner));
+                return;
+            }
             if (!DialogWindow.Confirm(this, "Update the fleet agent on this PC?",
                     $"The fleet agent is updated to v{AppUpdater.CurrentVersion} and installed to {AppUpdater.InstallDir}. " +
                     "Runners and Remote Desktop Commander keep running.", "Update fleet agent")) return;
-            await RunOperationAsync("Update fleet agent", MachineRelay.UpdateLocalAgentAsync);
+            if (IsAgentWorkRunning()) return;
+            // The agent restarts once its running work is done, so this runs in the background.
+            RunAgentWorkInBackground("Update fleet agent", MachineRelay.UpdateLocalAgentAsync);
             return;
         }
         if (machine.IsLocal)
@@ -459,7 +509,8 @@ public partial class MainWindow
         var busy = machine.Runners.Where(r => r.IsBusy).Select(r => r.TitleText).ToList();
         var warning = busy.Count > 0 ? $"\n\nJobs on these runners are cancelled: {string.Join(", ", busy)}." : string.Empty;
         if (!DialogWindow.Confirm(this, $"Restart {machine.MachineName}?",
-                $"Windows restarts in 60 seconds. Runner services and the fleet agent start again automatically after sign-in.{warning}",
+                $"Windows restarts in 60 seconds. Runner services start again on their own. {machine.MachineName} rejoins the fleet " +
+                $"once the Windows user who runs Runner Manager there signs in.{warning}",
                 "Restart PC", danger: true)) return;
         if (machine.IsLocal)
         {

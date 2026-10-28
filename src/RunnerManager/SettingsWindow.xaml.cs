@@ -479,12 +479,18 @@ public partial class SettingsWindow : Window
         VersionRow.Description = "Checking for updates…";
         try
         {
-            _release = await AppUpdater.GetLatestReleaseAsync(force);
+            var check = await AppUpdater.CheckForUpdateAsync(force);
+            _release = check.Release;
             var current = AppUpdater.CurrentVersion;
             var available = _release != null && AppUpdater.IsNewer(_release.Version, current);
-            var installable = available || _release != null && !AppUpdater.IsRunningInstalledCopy;
+            // Never offer to replace a newer installed copy (for example from a build folder of an older version).
+            var installed = AppUpdater.InstalledVersion;
+            var replacesNewer = _release != null && installed != null && AppUpdater.IsOlder(_release.Version, installed);
+            var installable = !replacesNewer && (available || _release != null && !AppUpdater.IsRunningInstalledCopy);
             VersionRow.Description = _release == null
-                ? $"No release found in {AppUpdater.ReleaseRepository}."
+                ? $"Couldn't check for updates: {check.Problem}"
+                : replacesNewer
+                    ? $"The newest release is v{_release.Version}. v{installed} is installed, which is newer."
                 : available
                     ? $"Version {_release.Version} is available."
                     : AppUpdater.IsRunningInstalledCopy
@@ -492,7 +498,7 @@ public partial class SettingsWindow : Window
                         : $"Running from a build folder. Install v{_release.Version} to run from a fixed location.";
             InstallUpdateButton.Content = available ? $"Install {_release!.Version}" : "Install";
             InstallUpdateButton.Visibility = installable ? Visibility.Visible : Visibility.Collapsed;
-            UpdateDot.Visibility = available ? Visibility.Visible : Visibility.Collapsed;
+            UpdateDot.Visibility = available && !replacesNewer ? Visibility.Visible : Visibility.Collapsed;
         }
         finally { CheckUpdatesButton.IsEnabled = true; }
     }
@@ -501,19 +507,27 @@ public partial class SettingsWindow : Window
     {
         if (_release == null) return;
         var release = _release;
+        if (Owner is MainWindow { IsAgentWorkBusy: true })
+        {
+            DialogWindow.Info(this, "The fleet agent is being updated", "Try again when it is done. Progress is shown in the activity list.");
+            return;
+        }
         var installed = false;
+        var restartAgent = false;
         await _runOperation($"Install Runner Manager {release.Tag}", async log =>
         {
-            await AppUpdater.InstallReleaseAsync(release, log);
+            restartAgent = await AppUpdater.InstallReleaseAsync(release, log);
             installed = true;
         });
         if (!installed) return;
+        if (restartAgent)
+        {
+            if (Owner is MainWindow main) main.RestartLocalAgentInBackground();
+            else await MachineRelay.RestartLocalAgentAsync();
+        }
         if (DialogWindow.Show(this, DialogTone.Question, $"Runner Manager {release.Tag} is installed",
                 "Restart Runner Manager now to use the new version?", "Restart now", cancel: "Later") == "Restart now")
-        {
-            Process.Start(new ProcessStartInfo(AppUpdater.InstalledExe) { UseShellExecute = true });
-            ((App)Application.Current).ExitApplication();
-        }
+            ((App)Application.Current).RestartDashboard();
     }
 
     private void Releases_Click(object sender, RoutedEventArgs e)
@@ -535,8 +549,12 @@ public partial class SettingsWindow : Window
 
     private void Uninstall_Click(object sender, RoutedEventArgs e)
     {
-        var exe = AppUpdater.PreferredExe;
-        Process.Start(new ProcessStartInfo(exe) { UseShellExecute = true, ArgumentList = { "--uninstall" } });
+        // Asked here, so cancelling keeps this dashboard running.
+        if (App.AskUninstall(this) is not { } removeData) return;
+        if (Owner is MainWindow main && !main.ConfirmExitDuringOperation()) return;
+        var start = new ProcessStartInfo(AppUpdater.PreferredExe) { UseShellExecute = true, ArgumentList = { "--uninstall", App.ConfirmedArgument } };
+        if (removeData) start.ArgumentList.Add(App.RemoveDataArgument);
+        Process.Start(start);
         ((App)Application.Current).ExitApplication();
     }
 }

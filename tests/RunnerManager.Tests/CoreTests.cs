@@ -190,8 +190,9 @@ public class MiscTests
     [InlineData("v2.1.0", "2.1.0")]
     [InlineData("2.1", "2.1.0")]
     [InlineData("2.1.0+abc123", "2.1.0")]
-    [InlineData("2.1.0-beta.1", "2.1.0")]
-    public void Normalize_StripsPrefixesAndSuffixes(string input, string expected)
+    [InlineData("2.1.0-beta.1", "2.1.0-beta.1")]
+    [InlineData("v2.1-rc.2+abc", "2.1.0-rc.2")]
+    public void Normalize_StripsPrefixesAndBuildMetadata(string input, string expected)
         => Assert.Equal(expected, AppUpdater.Normalize(input));
 
     [Theory]
@@ -199,8 +200,25 @@ public class MiscTests
     [InlineData("2.0.0", "2.0.0", false)]
     [InlineData("1.9.0", "2.0.0", false)]
     [InlineData("", "2.0.0", false)]
+    [InlineData("2.4.0", "2.4.0-beta", true)]
+    [InlineData("2.4.0-beta", "2.4.0", false)]
+    [InlineData("2.4.0-beta.2", "2.4.0-beta.1", true)]
+    [InlineData("2.4.0-beta.10", "2.4.0-beta.2", true)]
+    [InlineData("2.4.0-rc.1", "2.4.0-beta.9", true)]
+    [InlineData("2.4.0-beta.1", "2.4.0-beta", true)]
+    [InlineData("2.4.0-beta", "2.4.0-1", true)]
+    [InlineData("2.4.0-beta", "2.3.9", true)]
+    [InlineData("2.4.0+abc", "2.4.0", false)]
     public void IsNewer_ComparesSemanticVersions(string candidate, string current, bool expected)
         => Assert.Equal(expected, AppUpdater.IsNewer(candidate, current));
+
+    [Theory]
+    [InlineData("2.3.9", "2.4.0", true)]
+    [InlineData("2.4.0-beta", "2.4.0", true)]
+    [InlineData("2.4.0", "2.4.0", false)]
+    [InlineData("junk", "2.4.0", false)]
+    public void IsOlder_ComparesSemanticVersions(string candidate, string current, bool expected)
+        => Assert.Equal(expected, AppUpdater.IsOlder(candidate, current));
 
     [Fact]
     public void LogTruncate_KeepsTheNewestLinesWithinBudget()

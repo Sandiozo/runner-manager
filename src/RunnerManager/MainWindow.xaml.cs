@@ -41,10 +41,14 @@ public partial class MainWindow : Window
     private bool _refreshQueued;
     private bool _refreshQueuedForceAuth;
     private bool _operationRunning;
+    private string _operationTitle = string.Empty;
     private bool _githubAuthenticated;
     private string _githubLogin = string.Empty;
     private bool _isEnrolled;
     private bool _agentTaskChecked;
+    /// <summary>Another Windows user whose fleet agent runs on this PC, or null.</summary>
+    private string? _agentOwner;
+    private bool _agentOwnerReported;
     private bool _exiting;
     private bool _trayHintShown;
     private bool _suppressNavSelection;
@@ -72,6 +76,12 @@ public partial class MainWindow : Window
         _refreshTimer.Tick += async (_, _) =>
         {
             if (!_refreshing) await RefreshAsync();
+        };
+        // Hidden in the notification area, the dashboard refreshes less often; notifications still come from these refreshes.
+        IsVisibleChanged += async (_, _) =>
+        {
+            ApplyRefreshInterval();
+            if (IsVisible && _started && !_refreshing) await RefreshAsync();
         };
         Loaded += async (_, _) => await StartAsync();
         ThemeManager.Changed += OnThemeChanged;
@@ -116,6 +126,14 @@ public partial class MainWindow : Window
                 ApplyGitHubStatus();
             }
             _isEnrolled = await enrollmentTask;
+            // Another Windows user runs this PC's fleet agent: this dashboard shows the PC but leaves the agent alone.
+            _agentOwner = await AgentOwnership.OtherUserAsync();
+            if (_agentOwner != null)
+            {
+                _isEnrolled = false;
+                if (!_agentOwnerReported) AddActivity(AgentOwnership.Describe(_agentOwner));
+                _agentOwnerReported = true;
+            }
             ApplyEnrollmentStatus();
             await EnsureAgentTaskSettingsAsync();
 
@@ -150,8 +168,12 @@ public partial class MainWindow : Window
             ReportAgentEvents();
             await RefreshFleetExtrasAsync();
             LastUpdatedText.Text = $"Updated {DateTime.Now:HH:mm:ss}  ·  Refreshes every {_settings.RefreshSeconds}s";
-            if (!_operationRunning) SetStatus(_githubAuthenticated ? "Ready" : "GitHub not connected. Showing this PC only.",
-                _githubAuthenticated ? StatusKind.Ok : StatusKind.Warning);
+            if (!_operationRunning)
+            {
+                if (_agentOwner != null) SetStatus($"The fleet agent on this PC runs for {_agentOwner}.", StatusKind.Warning);
+                else SetStatus(_githubAuthenticated ? "Ready" : "GitHub not connected. Showing this PC only.",
+                    _githubAuthenticated ? StatusKind.Ok : StatusKind.Warning);
+            }
         }
         catch (Exception ex)
         {
@@ -178,6 +200,8 @@ public partial class MainWindow : Window
         {
             if (await MachineRelay.RepairAgentTaskSettingsAsync())
                 AddActivity("Updated the fleet agent task to run on battery and without the 3-day time limit.");
+            if (await ScheduledTasks.UpdateAgentTaskIfOutdatedAsync(fromAgent: false))
+                AddActivity("Updated the fleet agent task: it now starts again by itself when it stopped.");
         }
         catch (Exception ex) { AddActivity($"Could not update fleet agent task settings: {ex.Message}"); }
     }
@@ -203,29 +227,83 @@ public partial class MainWindow : Window
     }
 
     private bool _localAgentUpdateTried;
-    private bool _localAgentUpdateScheduled;
 
     /// <summary>When this PC's agent is older than this dashboard, update it once, automatically.</summary>
     private void ScheduleLocalAgentUpdate(MachineInfo? local)
     {
-        if (_localAgentUpdateTried || _localAgentUpdateScheduled
+        if (_localAgentUpdateTried || _agentOwner != null
             || local is not { LocalAgentOutdated: true } || FleetConfig.Current.FleetKey == null) return;
-        _localAgentUpdateScheduled = true;
-        Dispatcher.BeginInvoke(async () =>
+        // This version was just undone because its agent did not work; do not put it back.
+        if (UpdateGuard.WasRolledBack(AppUpdater.CurrentVersion)) return;
+        // Another operation is running: try again on a later refresh.
+        if (_operationRunning || IsAgentWorkBusy) return;
+        _localAgentUpdateTried = true;
+        AddActivity("The fleet agent on this PC is outdated. Updating it.");
+        RunAgentWorkInBackground("Update fleet agent", MachineRelay.UpdateLocalAgentAsync);
+    }
+
+    private Task? _agentWork;
+    private string _agentWorkTitle = string.Empty;
+
+    /// <summary>The fleet agent is being updated or restarted in the background.</summary>
+    public bool IsAgentWorkBusy => _agentWork is { IsCompleted: false };
+
+    /// <summary>Restarts this PC's fleet agent (after an update) without blocking the dashboard.</summary>
+    public void RestartLocalAgentInBackground()
+        => RunAgentWorkInBackground("Restart the fleet agent", async log =>
         {
+            await MachineRelay.RestartLocalAgentAsync();
+            log("The fleet agent runs the new version.");
+        });
+
+    /// <summary>
+    /// Runs fleet agent work that can take long: the agent restarts only once it has finished its jobs and requests. The
+    /// dashboard keeps refreshing and other actions stay available meanwhile; progress goes to the activity list.
+    /// </summary>
+    private void RunAgentWorkInBackground(string title, Func<Action<string>, Task> work)
+    {
+        if (IsAgentWorkBusy)
+        {
+            AddActivity($"{title} skipped: “{_agentWorkTitle}” is still running.");
+            return;
+        }
+        _agentWorkTitle = title;
+        _agentWork = RunAsync();
+
+        async Task RunAsync()
+        {
+            AddActivity($"{title} started. The fleet agent restarts when it is not busy.");
+            var waiting = new DispatcherTimer { Interval = TimeSpan.FromMinutes(2) };
+            waiting.Tick += (_, _) =>
+            {
+                waiting.Interval = TimeSpan.FromMinutes(30);
+                AddActivity($"{title}: waiting for the fleet agent to finish its work.");
+            };
+            waiting.Start();
             try
             {
-                // Another operation is running: try again on a later refresh.
-                if (_operationRunning) return;
-                AddActivity("The fleet agent on this PC is outdated. Updating it.");
-                await RunOperationAsync("Update fleet agent", log =>
-                {
-                    _localAgentUpdateTried = true;
-                    return MachineRelay.UpdateLocalAgentAsync(log);
-                });
+                await work(AddActivity);
+                AddActivity($"{title} completed.");
             }
-            finally { _localAgentUpdateScheduled = false; }
-        }, DispatcherPriority.Background);
+            catch (Exception ex)
+            {
+                RaiseAlert($"{title} failed: {ex.Message}", warning: true);
+            }
+            finally
+            {
+                waiting.Stop();
+                _forceDiscovery = true;
+                await RefreshAsync();
+            }
+        }
+    }
+
+    /// <summary>Tells the user to wait when the fleet agent is busy being updated. Returns true when it is.</summary>
+    private bool IsAgentWorkRunning()
+    {
+        if (!IsAgentWorkBusy) return false;
+        DialogWindow.Info(this, "The fleet agent is being updated", $"“{_agentWorkTitle}” is still running. Try again when it is done. Progress is shown in the activity list.");
+        return true;
     }
 
     private void ApplyLocalRunners(List<RunnerInfo> runners)
@@ -522,7 +600,20 @@ public partial class MainWindow : Window
     private bool WasUserAction(string key)
         => _recentUserActions.TryGetValue(key, out var when) && DateTime.UtcNow - when < TimeSpan.FromMinutes(2);
 
-    private void MarkUserAction(string key) => _recentUserActions[key] = DateTime.UtcNow;
+    private void MarkUserAction(string key)
+    {
+        foreach (var old in _recentUserActions.Where(a => DateTime.UtcNow - a.Value > TimeSpan.FromMinutes(2)).Select(a => a.Key).ToList())
+            _recentUserActions.Remove(old);
+        _recentUserActions[key] = DateTime.UtcNow;
+    }
+
+    private static readonly TimeSpan HiddenRefreshInterval = TimeSpan.FromSeconds(30);
+
+    private void ApplyRefreshInterval()
+    {
+        var interval = TimeSpan.FromSeconds(_settings.RefreshSeconds);
+        _refreshTimer.Interval = IsVisible || interval > HiddenRefreshInterval ? interval : HiddenRefreshInterval;
+    }
 
     private void RaiseAlert(string message, bool warning)
     {
@@ -633,6 +724,7 @@ public partial class MainWindow : Window
             return false;
         }
         _operationRunning = true;
+        _operationTitle = title;
         SetStatus($"{title}…", StatusKind.Busy);
         var succeeded = false;
         try
@@ -757,6 +849,9 @@ public partial class MainWindow : Window
     private async void RunnerRestart_Click(object sender, RoutedEventArgs e)
     {
         if (ItemFrom<MachineRunnerStatus>(sender) is not { } runner) return;
+        if (runner.IsBusy && !DialogWindow.Confirm(this, $"Restart {runner.TitleText}?",
+                "This runner is running a job. Restarting it cancels the job.", "Restart runner", danger: true))
+            return;
         await RunRunnerActionAsync(runner, "Restart", $"Restart {runner.TitleText}",
             _ => RunnerService.ControlServiceAsync(runner.CommandKey, "Restart"));
     }
@@ -834,7 +929,7 @@ public partial class MainWindow : Window
     /// <summary>Takes this PC out of the fleet (the other PCs are told to forget it).</summary>
     public async Task LeaveFleetAsync()
     {
-        if (!InFleet) return;
+        if (!InFleet || IsAgentWorkRunning()) return;
         var others = Machines.Where(m => !m.IsLocal).Select(m => m.MachineName).ToList();
         if (!DialogWindow.Confirm(this, $"Remove {Environment.MachineName} from the fleet?",
                 (others.Count > 0 ? $"{string.Join(", ", others)} will forget this PC. " : string.Empty) +
@@ -859,6 +954,12 @@ public partial class MainWindow : Window
     /// <summary>Joins or starts a fleet (from the sidebar, or right after setup), then installs the agent.</summary>
     private async Task SetUpFleetAsync(FleetStart start)
     {
+        if (await AgentOwnership.OtherUserAsync() is { } owner)
+        {
+            DialogWindow.Info(this, "Another Windows user runs the fleet agent", AgentOwnership.Describe(owner));
+            return;
+        }
+        if (IsAgentWorkRunning()) return;
         var newFleet = false;
         if (start == FleetStart.New && FleetConfig.Current.FleetKey == null)
         {
@@ -996,7 +1097,7 @@ public partial class MainWindow : Window
         _tray = new TrayIcon(_settings);
         _tray.OpenRequested += ShowFromTray;
         _tray.RefreshRequested += async () => await ManualRefreshAsync();
-        _tray.ExitRequested += () => ((App)Application.Current).ExitApplication();
+        _tray.ExitRequested += () => ((App)Application.Current).RequestExit();
         _tray.NotificationsToggled += value => { _settings.Notifications = value; _settings.Save(); };
         _tray.CloseToTrayToggled += value => { _settings.CloseToTray = value; _settings.Save(); };
     }
@@ -1004,10 +1105,23 @@ public partial class MainWindow : Window
     /// <summary>Lets the next close really close instead of hiding to the tray.</summary>
     public void PrepareExit() => _exiting = true;
 
+    /// <summary>While an operation runs, asks whether to exit anyway. True when nothing runs or the user agreed.</summary>
+    public bool ConfirmExitDuringOperation()
+    {
+        var title = _operationRunning ? _operationTitle : IsAgentWorkBusy ? _agentWorkTitle : null;
+        if (title == null) return true;
+        if (!IsVisible) ShowFromTray();
+        return DialogWindow.Confirm(this, "An operation is running",
+            $"“{title}” is still running. Exiting now can leave it half done, for example with the fleet agent stopped. Exit anyway?",
+            "Exit anyway", danger: true);
+    }
+
     public void ShowFromTray()
     {
         Show();
         if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
+        // A screen may have been unplugged while the window was hidden.
+        WindowPlacement.EnsureOnScreen(this);
         Activate();
     }
 
@@ -1022,6 +1136,11 @@ public partial class MainWindow : Window
                 _trayHintShown = true;
                 _tray?.Notify("Runner Manager is still running", "Monitoring continues in the notification area. To exit, right-click the icon.");
             }
+            return;
+        }
+        if (!_exiting && !ConfirmExitDuringOperation())
+        {
+            e.Cancel = true;
             return;
         }
         _refreshTimer.Stop();

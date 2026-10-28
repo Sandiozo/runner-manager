@@ -31,8 +31,15 @@ public static class AppUpdater
     /// <summary>The installed copy when there is one, otherwise the running exe.</summary>
     public static string PreferredExe => File.Exists(InstalledExe) ? InstalledExe : Environment.ProcessPath!;
     private static readonly TimeSpan CheckInterval = TimeSpan.FromMinutes(30);
-    private static ReleaseInfo? _latest;
+    /// <summary>A failed check is tried again soon, so a short outage does not hide updates for half an hour.</summary>
+    private static readonly TimeSpan FailedCheckInterval = TimeSpan.FromMinutes(2);
+    private static ReleaseCheck? _lastCheck;
     private static DateTime _checkedUtc = DateTime.MinValue;
+    private static readonly SemaphoreSlim CheckGate = new(1, 1);
+    // The last answer and its ETag: GitHub answers an unchanged release with 304, which does not count against its limit.
+    private static string? _releaseEtag;
+    private static string? _releaseJson;
+    private static readonly HttpClient Http = CreateHttpClient();
     /// <summary>Held while files in the install folder are replaced, so the agent and the dashboard never swap at once.</summary>
     private const string UpdateMutexName = @"Global\RunnerManagerUpdate";
     private static readonly TimeSpan UpdateLockTimeout = TimeSpan.FromMinutes(2);
@@ -56,59 +63,242 @@ public static class AppUpdater
     public static bool IsRunningInstalledCopy => string.Equals(
         Path.GetFullPath(Environment.ProcessPath ?? string.Empty), Path.GetFullPath(InstalledExe), StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>"v2.1.0", "2.1.0+abc" or "2.1.0-beta" → "2.1.0".</summary>
+    /// <summary>"v2.1.0", "2.1" or "2.1.0+abc" → "2.1.0". A pre-release keeps its label: "2.4.0-beta.1".</summary>
     public static string Normalize(string version)
     {
         var text = version.Trim().TrimStart('v', 'V');
-        var cut = text.IndexOfAny(new[] { '+', '-', ' ' });
+        var cut = text.IndexOfAny(new[] { '+', ' ' });
         if (cut > 0) text = text[..cut];
-        return Version.TryParse(text, out var parsed)
-            ? new Version(parsed.Major, parsed.Minor, Math.Max(parsed.Build, 0)).ToString(3)
-            : text;
+        var dash = text.IndexOf('-');
+        var core = dash > 0 ? text[..dash] : text;
+        var label = dash > 0 ? text[(dash + 1)..] : string.Empty;
+        if (!Version.TryParse(core, out var parsed)) return text;
+        var normalized = new Version(parsed.Major, parsed.Minor, Math.Max(parsed.Build, 0)).ToString(3);
+        return label.Length > 0 ? $"{normalized}-{label}" : normalized;
     }
 
     public static bool IsNewer(string candidate, string current)
-        => Version.TryParse(Normalize(candidate), out var a) && Version.TryParse(Normalize(current), out var b) && a > b;
+        => CompareVersions(candidate, current) is > 0;
 
+    public static bool IsOlder(string candidate, string current)
+        => CompareVersions(candidate, current) is < 0;
+
+    /// <summary>
+    /// Compares two versions like semantic versioning does: 2.4.0-beta &lt; 2.4.0-beta.2 &lt; 2.4.0-rc.1 &lt; 2.4.0.
+    /// Null when either is not a version.
+    /// </summary>
+    internal static int? CompareVersions(string a, string b)
+    {
+        if (!TrySplit(a, out var coreA, out var labelA) || !TrySplit(b, out var coreB, out var labelB)) return null;
+        var core = coreA.CompareTo(coreB);
+        if (core != 0) return core;
+        // A release is newer than its pre-releases.
+        if (labelA.Length == 0 || labelB.Length == 0) return labelB.Length.CompareTo(labelA.Length) switch { > 0 => 1, < 0 => -1, _ => 0 };
+        var partsA = labelA.Split('.');
+        var partsB = labelB.Split('.');
+        for (var i = 0; i < Math.Min(partsA.Length, partsB.Length); i++)
+        {
+            var numericA = long.TryParse(partsA[i], out var numberA);
+            var numericB = long.TryParse(partsB[i], out var numberB);
+            var part = numericA && numericB ? numberA.CompareTo(numberB)
+                : numericA ? -1
+                : numericB ? 1
+                : string.CompareOrdinal(partsA[i], partsB[i]);
+            if (part != 0) return Math.Sign(part);
+        }
+        return partsA.Length.CompareTo(partsB.Length);
+    }
+
+    private static bool TrySplit(string version, out Version core, out string label)
+    {
+        var text = Normalize(version);
+        var dash = text.IndexOf('-');
+        label = dash > 0 ? text[(dash + 1)..] : string.Empty;
+        return Version.TryParse(dash > 0 ? text[..dash] : text, out core!);
+    }
+
+    /// <summary>The version of the installed copy, or null when there is none.</summary>
+    public static string? InstalledVersion
+    {
+        get
+        {
+            try
+            {
+                return File.Exists(InstalledExe) && FileVersionInfo.GetVersionInfo(InstalledExe).ProductVersion is { Length: > 0 } version
+                    ? Normalize(version) : null;
+            }
+            catch { return null; }
+        }
+    }
+
+    /// <summary>
+    /// The newest release. Throws with the reason when it could not be checked, so a failed check is never mistaken for
+    /// "up to date". See <see cref="CheckForUpdateAsync"/>.
+    /// </summary>
     public static async Task<ReleaseInfo?> GetLatestReleaseAsync(bool force = false)
     {
-        if (!force && DateTime.UtcNow - _checkedUtc < CheckInterval) return _latest;
-        var result = await GitHubCli.RunAsync($"api repos/{ReleaseRepository}/releases/latest");
-        _checkedUtc = DateTime.UtcNow;
-        if (result.ExitCode != 0)
-        {
-            _latest = null;
-            return null;
-        }
+        var check = await CheckForUpdateAsync(force);
+        return check.Release ?? throw new InvalidOperationException(check.Problem);
+    }
+
+    /// <summary>
+    /// Reads the newest release from GitHub without signing in (the repository is public), and through the GitHub CLI
+    /// when that fails. A result is kept for 30 minutes, a failure for 2.
+    /// </summary>
+    public static async Task<ReleaseCheck> CheckForUpdateAsync(bool force = false)
+    {
+        await CheckGate.WaitAsync();
         try
         {
-            using var json = JsonDocument.Parse(result.Output);
-            var root = json.RootElement;
+            if (!force && _lastCheck is { } last
+                && DateTime.UtcNow - _checkedUtc < (last.Release != null ? CheckInterval : FailedCheckInterval)) return last;
+            var check = await FetchLatestReleaseAsync();
+            _lastCheck = check;
+            _checkedUtc = DateTime.UtcNow;
+            return check;
+        }
+        finally { CheckGate.Release(); }
+    }
+
+    private static async Task<ReleaseCheck> FetchLatestReleaseAsync()
+    {
+        var (json, problem) = await FetchReleaseJsonAsync();
+        if (json != null) return ParseRelease(json);
+        // The GitHub CLI has a higher limit when it is signed in.
+        var cli = await GitHubCli.RunAsync($"api repos/{ReleaseRepository}/releases/latest");
+        if (cli.ExitCode == 0) return ParseRelease(cli.Output);
+        return new ReleaseCheck(null, problem);
+    }
+
+    private static HttpClient CreateHttpClient()
+    {
+        var http = new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
+        http.DefaultRequestHeaders.UserAgent.ParseAdd($"RunnerManager/{CurrentVersion} (+https://github.com/{ReleaseRepository})");
+        return http;
+    }
+
+    /// <summary>Reads releases/latest anonymously. Returns the JSON, or null with the reason.</summary>
+    private static async Task<(string? Json, string Problem)> FetchReleaseJsonAsync()
+    {
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, $"https://api.github.com/repos/{ReleaseRepository}/releases/latest");
+            request.Headers.Accept.ParseAdd("application/vnd.github+json");
+            request.Headers.Add("X-GitHub-Api-Version", "2022-11-28");
+            if (_releaseEtag != null && _releaseJson != null) request.Headers.TryAddWithoutValidation("If-None-Match", _releaseEtag);
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            using var response = await Http.SendAsync(request, timeout.Token);
+            if (response.StatusCode == System.Net.HttpStatusCode.NotModified && _releaseJson != null) return (_releaseJson, string.Empty);
+            if (response.IsSuccessStatusCode)
+            {
+                var json = await response.Content.ReadAsStringAsync(timeout.Token);
+                _releaseEtag = response.Headers.ETag?.ToString();
+                _releaseJson = json;
+                return (json, string.Empty);
+            }
+            return (null, DescribeFailure((int)response.StatusCode, Header(response, "x-ratelimit-remaining"),
+                Header(response, "x-ratelimit-reset"), response.Headers.RetryAfter?.Delta, DateTimeOffset.UtcNow));
+        }
+        catch (OperationCanceledException) { return (null, "GitHub did not answer in time."); }
+        catch (HttpRequestException ex) { return (null, $"Could not reach GitHub: {ex.GetBaseException().Message}"); }
+    }
+
+    private static string? Header(HttpResponseMessage response, string name)
+        => response.Headers.TryGetValues(name, out var values) ? values.FirstOrDefault() : null;
+
+    /// <summary>Why GitHub refused a release check, from its status code and rate-limit headers.</summary>
+    internal static string DescribeFailure(int status, string? remaining, string? reset, TimeSpan? retryAfter, DateTimeOffset now)
+    {
+        var limited = status == 429 || status == 403 && (remaining == "0" || retryAfter != null);
+        if (limited)
+        {
+            var until = retryAfter is { } delay ? now + delay
+                : long.TryParse(reset, out var seconds) ? DateTimeOffset.FromUnixTimeSeconds(seconds) : (DateTimeOffset?)null;
+            return until is { } when && when > now
+                ? $"GitHub limits checks from this network. Try again after {when.ToLocalTime():HH:mm}."
+                : "GitHub limits checks from this network. Try again later.";
+        }
+        return status == 404
+            ? $"No Runner Manager release found in {ReleaseRepository}."
+            : $"GitHub answered with an error (HTTP {status}).";
+    }
+
+    /// <summary>Reads a release from GitHub's JSON. Fails when it has no <see cref="AssetName"/>.</summary>
+    internal static ReleaseCheck ParseRelease(string json)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            var root = document.RootElement;
             var tag = root.GetProperty("tag_name").GetString() ?? string.Empty;
             foreach (var asset in root.GetProperty("assets").EnumerateArray())
             {
                 if (!string.Equals(asset.GetProperty("name").GetString(), AssetName, StringComparison.OrdinalIgnoreCase)) continue;
                 var digest = asset.TryGetProperty("digest", out var d) ? d.GetString() ?? string.Empty : string.Empty;
-                _latest = new ReleaseInfo
+                return new ReleaseCheck(new ReleaseInfo
                 {
                     Tag = tag,
                     Version = Normalize(tag),
                     HtmlUrl = root.TryGetProperty("html_url", out var url) ? url.GetString() ?? string.Empty : string.Empty,
+                    DownloadUrl = asset.TryGetProperty("browser_download_url", out var download) ? download.GetString() ?? string.Empty : string.Empty,
+                    Size = asset.TryGetProperty("size", out var size) && size.TryGetInt64(out var bytes) ? bytes : 0,
                     Sha256 = digest.StartsWith("sha256:", StringComparison.OrdinalIgnoreCase) ? digest[7..] : string.Empty
-                };
-                return _latest;
+                }, string.Empty);
             }
+            return new ReleaseCheck(null, $"Release {tag} has no {AssetName}.");
         }
-        catch { }
-        _latest = null;
-        return null;
+        catch (Exception ex) when (ex is JsonException or KeyNotFoundException or InvalidOperationException)
+        {
+            return new ReleaseCheck(null, "GitHub's answer could not be read.");
+        }
     }
 
-    /// <summary>Downloads the release, verifies its checksum and swaps it into the install folder.</summary>
-    public static async Task<string> DownloadAndInstallAsync(ReleaseInfo release, Action<string> log)
+    /// <summary>
+    /// Downloads the release's exe. Uses the public download link, and the GitHub CLI when that fails.
+    /// </summary>
+    private static async Task DownloadReleaseAsync(ReleaseInfo release, string staging, string destination)
+    {
+        string problem;
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(10));
+            using var response = await Http.GetAsync(DownloadUrlFor(release), HttpCompletionOption.ResponseHeadersRead, timeout.Token);
+            response.EnsureSuccessStatusCode();
+            await using (var file = File.Create(destination))
+                await response.Content.CopyToAsync(file, timeout.Token);
+            if (release.Size <= 0 || new FileInfo(destination).Length == release.Size) return;
+            problem = "The download was incomplete.";
+        }
+        catch (OperationCanceledException) { problem = "The download did not finish in time."; }
+        catch (Exception ex) when (ex is HttpRequestException or IOException) { problem = $"Could not download the update: {ex.GetBaseException().Message}"; }
+        try { File.Delete(destination); } catch { }
+
+        var download = await GitHubCli.RunAsync(
+            $"release download {release.Tag} -R {ReleaseRepository} -p {AssetName} -D \"{staging}\" --clobber",
+            timeout: TimeSpan.FromMinutes(10));
+        if (download.ExitCode != 0 || !File.Exists(destination))
+            throw new InvalidOperationException($"{problem} Check the network connection and try again.");
+    }
+
+    /// <summary>The asset's download link when it is one of this repository's release downloads, otherwise the standard link.</summary>
+    internal static string DownloadUrlFor(ReleaseInfo release)
+    {
+        var expected = $"https://github.com/{ReleaseRepository}/releases/download/";
+        return release.DownloadUrl.StartsWith(expected, StringComparison.OrdinalIgnoreCase)
+            ? release.DownloadUrl
+            : $"{expected}{Uri.EscapeDataString(release.Tag)}/{AssetName}";
+    }
+
+    /// <summary>
+    /// Downloads the release, verifies its checksum and swaps it into the install folder. Refuses to replace a newer
+    /// installed copy unless <paramref name="allowOlder"/> is set (the user picked that version).
+    /// </summary>
+    public static async Task<string> DownloadAndInstallAsync(ReleaseInfo release, Action<string> log, bool allowOlder = false)
     {
         if (string.IsNullOrEmpty(release.Sha256))
             throw new InvalidOperationException("This release has no checksum, so it was not installed.");
+        if (!allowOlder && InstalledVersion is { } installed && IsOlder(release.Version, installed))
+            throw new InvalidOperationException($"Runner Manager v{installed} is installed, which is newer than {release.Tag}. It was kept.");
 
         // Each process downloads into its own folder, so the agent and the dashboard never share files.
         var staging = Path.Combine(FleetConfig.StateDir, $"update-{Environment.ProcessId}");
@@ -118,12 +308,8 @@ public static class AppUpdater
         try
         {
             log($"Downloading Runner Manager {release.Tag}...");
-            var download = await GitHubCli.RunAsync(
-                $"release download {release.Tag} -R {ReleaseRepository} -p {AssetName} -D \"{staging}\" --clobber",
-                timeout: TimeSpan.FromMinutes(10));
             var downloaded = Path.Combine(staging, AssetName);
-            if (download.ExitCode != 0 || !File.Exists(downloaded))
-                throw new InvalidOperationException(string.IsNullOrWhiteSpace(download.Error) ? "Could not download the update. Check the network connection and try again." : download.Error.Trim());
+            await DownloadReleaseAsync(release, staging, downloaded);
 
             string actual;
             await using (var stream = File.OpenRead(downloaded))
@@ -138,6 +324,7 @@ public static class AppUpdater
             if (!IsNewer(ProbeSupportedSince, release.Version))
                 await EnsureRuntimeAsync(downloaded, staging, log);
 
+            var replacedVersion = InstalledVersion ?? string.Empty;
             await Task.Run(() => WithUpdateLock(() =>
             {
                 Directory.CreateDirectory(InstallDir);
@@ -145,8 +332,10 @@ public static class AppUpdater
                 {
                     try { File.Delete(old); } catch { }
                 }
-                ReplaceFile(downloaded, InstalledExe);
+                ReplaceFile(downloaded, InstalledExe, keepPrevious: true);
             }));
+            // The fleet agent of the new version proves that it works, or the previous exe is put back (see UpdateGuard).
+            UpdateGuard.MarkPending(release.Version, replacedVersion);
             log($"Installed {release.Tag} to {InstallDir}.");
             return InstalledExe;
         }
@@ -200,35 +389,103 @@ public static class AppUpdater
     /// Puts <paramref name="source"/> at <paramref name="destination"/> without a moment where neither exists. The new file
     /// is copied next to the destination first; a running exe can't be overwritten but can be renamed, so the current file
     /// is renamed away, the new one is moved into place, and the current file is renamed back if that fails.
+    /// With <paramref name="keepPrevious"/>, the current file is kept as "{destination}.previous", so the update can be undone.
     /// </summary>
-    private static void ReplaceFile(string source, string destination)
+    private static void ReplaceFile(string source, string destination, bool keepPrevious = false)
     {
         var next = destination + ".new";
-        File.Copy(source, next, overwrite: true);
+        // Antivirus scanners briefly lock new exe files, so moves are retried.
+        Retry(() => File.Copy(source, next, overwrite: true));
         string? previous = null;
         if (File.Exists(destination))
         {
-            previous = Path.Combine(Path.GetDirectoryName(destination)!,
-                $"{Path.GetFileNameWithoutExtension(destination)}.{DateTime.UtcNow.Ticks}.old{Path.GetExtension(destination)}");
-            File.Move(destination, previous);
+            var aside = keepPrevious ? destination + ".previous" : OldPathFor(destination);
+            // The version kept last time may still run (a dashboard that was not restarted): rename it out of the way.
+            if (keepPrevious && File.Exists(aside)) Retry(() => File.Move(aside, OldPathFor(destination)));
+            Retry(() => File.Move(destination, aside));
+            previous = aside;
         }
         try
         {
-            File.Move(next, destination);
+            Retry(() => File.Move(next, destination));
         }
-        catch
+        catch (Exception ex)
         {
-            if (previous != null)
-            {
-                try { File.Move(previous, destination); } catch { }
-            }
+            if (previous != null) PutBack(previous, destination, ex);
             try { File.Delete(next); } catch { }
             throw;
         }
         // Succeeds when the old file is not in use; otherwise the next install removes it.
-        if (previous != null)
+        if (previous != null && !keepPrevious)
         {
             try { File.Delete(previous); } catch { }
+        }
+    }
+
+    /// <summary>
+    /// Puts RunnerManager.exe.previous back as RunnerManager.exe. The current exe (it may be running) is renamed to an
+    /// .old.exe file, which a later install removes.
+    /// </summary>
+    internal static void RestorePrevious()
+    {
+        var previous = InstalledExe + ".previous";
+        if (!File.Exists(previous)) throw new FileNotFoundException("There is no previous version to go back to.", previous);
+        WithUpdateLock(() =>
+        {
+            string? aside = null;
+            if (File.Exists(InstalledExe))
+            {
+                aside = OldPathFor(InstalledExe);
+                Retry(() => File.Move(InstalledExe, aside));
+            }
+            try { Retry(() => File.Move(previous, InstalledExe)); }
+            catch (Exception ex)
+            {
+                if (aside != null) PutBack(aside, InstalledExe, ex);
+                throw;
+            }
+        });
+    }
+
+    private static string OldPathFor(string file) => Path.Combine(Path.GetDirectoryName(file)!,
+        $"{Path.GetFileNameWithoutExtension(file)}.{DateTime.UtcNow.Ticks}.old{Path.GetExtension(file)}");
+
+    /// <summary>
+    /// Moves <paramref name="aside"/> back to <paramref name="destination"/> after a failed swap. When even that fails
+    /// (for example an antivirus scanner holds it), a copy is tried, so the install folder is never left without the file.
+    /// </summary>
+    private static void PutBack(string aside, string destination, Exception cause)
+    {
+        try
+        {
+            Retry(() => File.Move(aside, destination));
+            return;
+        }
+        catch { }
+        try
+        {
+            Retry(() => File.Copy(aside, destination, overwrite: false));
+            return;
+        }
+        catch { }
+        throw new InvalidOperationException(
+            $"{cause.Message} {Path.GetFileName(destination)} could not be put back either. Rename {aside} to {Path.GetFileName(destination)} to repair it.", cause);
+    }
+
+    /// <summary>Runs a file operation, retrying for about three seconds while the file is in use.</summary>
+    private static void Retry(Action action)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                action();
+                return;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException && ex is not FileNotFoundException && attempt < 6)
+            {
+                Thread.Sleep(200 * attempt);
+            }
         }
     }
 
@@ -297,21 +554,19 @@ public static class AppUpdater
 
     /// <summary>
     /// Installs a release on this PC, as "Install update" does: downloads and verifies it, refreshes the Start menu
-    /// shortcut, and switches the fleet agent and the start-up task to the new copy. Returns the installed exe.
+    /// shortcut, and switches the fleet agent's task and the start-up task to the new copy. Returns whether the fleet
+    /// agent must be restarted to run it; the caller does that, because the restart waits until the agent is idle.
     /// </summary>
-    public static async Task<string> InstallReleaseAsync(ReleaseInfo release, Action<string> log)
+    public static async Task<bool> InstallReleaseAsync(ReleaseInfo release, Action<string> log)
     {
         var exe = await DownloadAndInstallAsync(release, log);
         await CreateStartMenuShortcutAsync();
-        if (await MachineRelay.IsAgentInstalledAsync())
-        {
-            log("Switching the fleet agent to the new version...");
-            await MachineRelay.RegisterAgentTaskAsync(exe);
-            await MachineRelay.RestartLocalAgentAsync();
-        }
         if (await ScheduledTasks.ExistsAsync(ScheduledTasks.DashboardTaskName))
             await Installer.RegisterStartupTaskAsync(exe);
-        return exe;
+        if (!await MachineRelay.IsAgentInstalledAsync() || await AgentOwnership.OtherUserAsync() != null) return false;
+        log("Switching the fleet agent to the new version...");
+        await MachineRelay.RegisterAgentTaskAsync(exe);
+        return true;
     }
 
     /// <summary>
@@ -345,12 +600,18 @@ public static class AppUpdater
 
     /// <summary>
     /// Like <see cref="InstallCurrentBuildAsync(Action{string})"/>; setup passes false for <paramref name="createShortcut"/>
-    /// because it creates the shortcuts itself. Copies the build only once per process.
+    /// because it creates the shortcuts itself. Copies the build only once per process. A newer installed copy is kept
+    /// and used instead, unless <paramref name="allowOlder"/> is set (setup, after the user was told).
     /// </summary>
-    internal static async Task<string> InstallCurrentBuildAsync(Action<string> log, bool createShortcut)
+    internal static async Task<string> InstallCurrentBuildAsync(Action<string> log, bool createShortcut, bool allowOlder = false)
     {
         if (IsRunningInstalledCopy) return InstalledExe;
         if (_installedThisBuild && File.Exists(InstalledExe)) return InstalledExe;
+        if (!allowOlder && InstalledVersion is { } installed && IsOlder(CurrentVersion, installed))
+        {
+            log($"Runner Manager v{installed} is installed, which is newer than this copy (v{CurrentVersion}). Using the installed copy.");
+            return InstalledExe;
+        }
         Directory.CreateDirectory(InstallDir);
         foreach (var old in Directory.EnumerateFiles(InstallDir, "*.old.*"))
         {
@@ -365,7 +626,7 @@ public static class AppUpdater
             if (files.Count == 1 && IsDefaultInstallDir(InstallDir))
             {
                 foreach (var stale in Directory.EnumerateFiles(InstallDir)
-                             .Where(f => !Path.GetFileName(f).Equals(AssetName, StringComparison.OrdinalIgnoreCase) && !f.Contains(".old.")))
+                             .Where(f => !Path.GetFileName(f).StartsWith(AssetName, StringComparison.OrdinalIgnoreCase) && !f.Contains(".old.")))
                 {
                     try { File.Delete(stale); }
                     catch { try { File.Move(stale, $"{stale}.{DateTime.UtcNow.Ticks}.old{Path.GetExtension(stale)}"); } catch { } }
@@ -379,8 +640,9 @@ public static class AppUpdater
             {
                 var destination = Path.Combine(InstallDir, relative);
                 Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
-                // Files of a running agent can't be overwritten but can be renamed out of the way.
-                ReplaceFile(source, destination);
+                // Files of a running agent can't be overwritten but can be renamed out of the way. The exe it replaces is
+                // kept, so setup can put it back when a later step fails.
+                ReplaceFile(source, destination, keepPrevious: relative.Equals(AssetName, StringComparison.OrdinalIgnoreCase));
             }
         }));
         _installedThisBuild = true;
@@ -429,5 +691,15 @@ public sealed class ReleaseInfo
     public string Tag { get; init; } = string.Empty;
     public string Version { get; init; } = string.Empty;
     public string HtmlUrl { get; init; } = string.Empty;
+    /// <summary>The exe's public download link (browser_download_url).</summary>
+    public string DownloadUrl { get; init; } = string.Empty;
+    /// <summary>The exe's size in bytes, or 0 when unknown.</summary>
+    public long Size { get; init; }
     public string Sha256 { get; init; } = string.Empty;
+}
+
+/// <summary>The result of an update check: the newest release, or why it could not be checked.</summary>
+public sealed record ReleaseCheck(ReleaseInfo? Release, string Problem)
+{
+    public bool UpdateAvailable => Release != null && AppUpdater.IsNewer(Release.Version, AppUpdater.CurrentVersion);
 }

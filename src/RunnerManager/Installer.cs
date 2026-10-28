@@ -78,8 +78,26 @@ public static class Installer
                        ?? (File.Exists(Path.Combine(AppUpdater.DefaultInstallDir, AppPaths.ExeName)) ? AppUpdater.DefaultInstallDir : null);
         var moving = previous != null && !AppUpdater.SameFolder(previous, AppUpdater.InstallDir);
         CloseRunningDashboards(log, moving ? new[] { AppUpdater.InstallDir, previous! } : new[] { AppUpdater.InstallDir });
-        var exe = await AppUpdater.InstallCurrentBuildAsync(log, createShortcut: false);
+        var replacing = File.Exists(AppUpdater.InstalledExe) && !AppUpdater.IsRunningInstalledCopy;
+        // Setup warns on its first page when it is older than the installed copy, so going ahead is the user's choice.
+        var exe = await AppUpdater.InstallCurrentBuildAsync(log, createShortcut: false, allowOlder: true);
+        try
+        {
+            await FinishInstallAsync(choices, exe, moving ? previous : null, log);
+        }
+        catch (Exception ex)
+        {
+            // A half-done setup is undone, so the installed copy keeps working as before.
+            log($"Setup failed: {ex.Message} Undoing it...");
+            await UndoInstallAsync(replacing, moving ? previous : null, log);
+            throw;
+        }
+        return exe;
+    }
 
+    private static async Task FinishInstallAsync(SetupChoices choices, string exe, string? previous, Action<string> log)
+    {
+        var moving = previous != null;
         log("Adding shortcuts...");
         await CreateShortcutAsync(StartMenuShortcut, exe);
         if (choices.DesktopShortcut) await CreateShortcutAsync(DesktopShortcut, exe);
@@ -88,16 +106,23 @@ public static class Installer
         log("Registering Runner Manager in Settings → Apps...");
         RegisterUninstallEntry(exe);
 
+        await ScheduledTasks.RegisterLaunchTaskAsync(exe);
+        await MigrateSharedTasksAsync(exe);
         if (choices.StartWithWindows) await RegisterStartupTaskAsync(exe);
         else await ScheduledTasks.DeleteTaskAsync(ScheduledTasks.DashboardTaskName);
-        await ScheduledTasks.RegisterLaunchTaskAsync(exe);
         await LegacyInstall.MigrateAsync(log, fromSetup: true);
 
-        // An agent from an earlier install keeps running from the old place; point it at the new copy.
+        // An agent from an earlier install keeps running from the old place; point it at the new copy. Another Windows
+        // user's agent is left alone.
         if (await MachineRelay.IsAgentInstalledAsync())
         {
-            log("Updating the fleet agent...");
-            await MachineRelay.UpdateLocalAgentAsync(log);
+            if (await AgentOwnership.OtherUserAsync() is { } other)
+                log($"The fleet agent on this PC runs for {other}, so it was left alone.");
+            else
+            {
+                log("Updating the fleet agent...");
+                await MachineRelay.UpdateLocalAgentAsync(log);
+            }
         }
 
         if (moving)
@@ -113,7 +138,30 @@ public static class Installer
         settings.Save();
         InstallChecks.MarkDone(LaunchTaskCheck);
         log("Installed.");
-        return exe;
+    }
+
+    /// <summary>
+    /// Puts back the exe that setup replaced (kept as RunnerManager.exe.previous). When setup was moving the install,
+    /// the shortcuts, Settings → Apps entry and launch task point at the old folder again, and the new copy is removed.
+    /// </summary>
+    private static async Task UndoInstallAsync(bool replaced, string? previousFolder, Action<string> log)
+    {
+        try
+        {
+            if (replaced) AppUpdater.RestorePrevious();
+        }
+        catch (Exception ex) { log($"Could not put the previous version back: {ex.Message}"); }
+        if (previousFolder == null) return;
+        var newFolder = AppUpdater.InstallDir;
+        var oldExe = Path.Combine(previousFolder, AppPaths.ExeName);
+        try
+        {
+            AppUpdater.UseInstallDir(previousFolder);
+            await RefreshShortcutsAsync(oldExe);
+            await ScheduledTasks.RegisterLaunchTaskAsync(oldExe);
+            AppUpdater.RunAfterExit(RemoveProgramFilesScript(newFolder), TimeSpan.FromMinutes(5), TimeSpan.FromSeconds(3));
+        }
+        catch (Exception ex) { log($"Could not point Runner Manager back to {previousFolder}: {ex.Message}"); }
     }
 
     public static Task RegisterStartupTaskAsync(string exe) => ScheduledTasks.RegisterLogonTaskAsync(
@@ -123,18 +171,41 @@ public static class Installer
     private const string LaunchTaskCheck = "launch-task";
 
     /// <summary>
-    /// The installed dashboard opens through the launch task, so make sure it exists (older installs lack it), and keep
-    /// the version in Settings → Apps current after updates. The task is checked once per version.
+    /// The installed dashboard opens through the launch task, so make sure this user's task exists, is turned on and starts
+    /// the installed exe, and keep the version in Settings → Apps current after updates. The task is checked once per
+    /// version, or again when <paramref name="force"/> is set (the dashboard had to ask with UAC).
     /// </summary>
-    public static async Task EnsureLaunchTaskAsync()
+    public static async Task EnsureLaunchTaskAsync(bool force = false)
     {
         if (!AppUpdater.IsRunningInstalledCopy) return;
         RefreshUninstallEntryVersion();
-        if (InstallChecks.IsDone(LaunchTaskCheck)) return;
-        var command = ScheduledTasks.CommandOf(await ScheduledTasks.QueryXmlAsync(ScheduledTasks.LaunchTaskName));
-        if (!string.Equals(command, AppUpdater.InstalledExe, StringComparison.OrdinalIgnoreCase))
+        if (!force && InstallChecks.IsDone(LaunchTaskCheck)) return;
+        var xml = await ScheduledTasks.QueryXmlAsync(ScheduledTasks.LaunchTaskName);
+        if (xml.Length == 0 || !Elevation.IsUsableLaunchTask(xml, AppUpdater.InstalledExe))
             await ScheduledTasks.RegisterLaunchTaskAsync(AppUpdater.InstalledExe);
+        await MigrateSharedTasksAsync(AppUpdater.InstalledExe);
         InstallChecks.MarkDone(LaunchTaskCheck);
+    }
+
+    /// <summary>
+    /// 2.3 and earlier named the launch and startup tasks the same for every Windows user, so a second user's setup took
+    /// them over. When they are this user's, they move to this user's own names; another user's are left alone.
+    /// </summary>
+    private static async Task MigrateSharedTasksAsync(string exe)
+    {
+        if (await IsOwnTaskAsync(ScheduledTasks.SharedDashboardTaskName))
+        {
+            await RegisterStartupTaskAsync(exe);
+            await ScheduledTasks.DeleteTaskAsync(ScheduledTasks.SharedDashboardTaskName);
+        }
+        if (await IsOwnTaskAsync(ScheduledTasks.SharedLaunchTaskName))
+            await ScheduledTasks.DeleteTaskAsync(ScheduledTasks.SharedLaunchTaskName);
+    }
+
+    private static async Task<bool> IsOwnTaskAsync(string name)
+    {
+        var principal = ScheduledTasks.PrincipalOf(await ScheduledTasks.QueryXmlAsync(name));
+        return principal.Length > 0 && ScheduledTasks.IsCurrentUser(principal);
     }
 
     /// <summary>Setup writes DisplayVersion, and updates replace the exe without setup, so refresh it when it is outdated.</summary>
@@ -197,16 +268,31 @@ public static class Installer
         if (dashboards.Count == 0) return;
 
         log("Closing Runner Manager...");
+        // Asked first, so a dashboard saves its settings and removes its tray icon; ended only when it has not exited after a few seconds.
+        EventWaitHandle? exit = null;
+        try { if (EventWaitHandle.TryOpenExisting(App.ExitEventName, out var opened)) (exit = opened).Set(); }
+        catch { }
+        var deadline = DateTime.UtcNow + DashboardExitTimeout;
         foreach (var process in dashboards)
         {
-            try { process.Kill(); } catch { }
+            try
+            {
+                var left = deadline - DateTime.UtcNow;
+                if (left <= TimeSpan.Zero || !process.WaitForExit(left)) process.Kill();
+            }
+            catch { }
         }
         foreach (var process in dashboards)
         {
             try { process.WaitForExit(5000); } catch { }
             process.Dispose();
         }
+        // Not left set for a dashboard that starts later (setup starts the new one).
+        try { exit?.Reset(); } catch { }
+        exit?.Dispose();
     }
+
+    private static readonly TimeSpan DashboardExitTimeout = TimeSpan.FromSeconds(5);
 
     private static bool IsAgentCommandLine(string commandLine)
         => commandLine.Split(' ', StringSplitOptions.RemoveEmptyEntries)
@@ -236,27 +322,84 @@ public static class Installer
     /// <summary>
     /// Removes Runner Manager from this PC: leaves the fleet (the other PCs forget it), removes the agent, the start-up
     /// task, shortcuts and the Apps entry, then deletes the program folder (and optionally settings and logs) after exit.
-    /// GitHub runners and Remote Desktop Commander are not touched.
+    /// GitHub runners and Remote Desktop Commander are not touched. Returns a sentence to add to the result, or empty.
     /// </summary>
-    public static async Task UninstallAsync(bool removeData, Action<string> log)
+    public static async Task<string> UninstallAsync(bool removeData, Action<string> log)
     {
         // Read before the Settings → Apps entry that records a chosen folder is deleted below.
         var installDir = AppUpdater.InstallDir;
         CloseRunningDashboards(log);
-        if (FleetConfig.Current.FleetKey != null || await MachineRelay.IsAgentInstalledAsync())
+        // Another Windows user's agent stays: it is their fleet membership, not this user's.
+        if (await AgentOwnership.OtherUserAsync() is { } other)
+            log($"The fleet agent on this PC runs for {other}, so it was left alone.");
+        else if (FleetConfig.Current.FleetKey != null || await MachineRelay.IsAgentInstalledAsync())
             await MachineRelay.LeaveFleetAsync(log);
         log("Removing the scheduled tasks and shortcuts...");
         foreach (var task in new[] { ScheduledTasks.DashboardTaskName, ScheduledTasks.LaunchTaskName, ScheduledTasks.LegacyDashboardTaskName })
             await ScheduledTasks.DeleteTaskAsync(task);
+        foreach (var task in new[] { ScheduledTasks.SharedDashboardTaskName, ScheduledTasks.SharedLaunchTaskName })
+            if (await IsOwnTaskAsync(task)) await ScheduledTasks.DeleteTaskAsync(task);
         TryDelete(StartMenuShortcut);
         TryDelete(DesktopShortcut);
         try { Registry.CurrentUser.DeleteSubKeyTree(UninstallKey, throwOnMissingSubKey: false); } catch { }
 
         // The running exe can't delete its own folder; a helper does it once this process has exited.
         var script = RemoveProgramFilesScript(installDir);
-        if (removeData) script += $"; Remove-Item -LiteralPath '{FleetConfig.StateDir.Replace("'", "''")}' -Recurse -Force -ErrorAction SilentlyContinue";
+        var note = string.Empty;
+        if (removeData)
+        {
+            // Startup scripts that converting a runner to a service turned off exist nowhere else, so they are never deleted.
+            var scripts = KeepDisabledStartupScripts(log);
+            var data = FleetConfig.StateDir.Replace("'", "''");
+            script += scripts.Moved || scripts.Folder == null
+                ? $"; Remove-Item -LiteralPath '{data}' -Recurse -Force -ErrorAction SilentlyContinue"
+                : $"; Get-ChildItem -LiteralPath '{data}' -Force -ErrorAction SilentlyContinue | Where-Object {{ $_.Name -ne '{DisabledStartupFolderName}' }} | " +
+                  "Remove-Item -Recurse -Force -ErrorAction SilentlyContinue";
+            if (scripts.Folder != null)
+                note = $" Startup scripts that Runner Manager had turned off are {(scripts.Moved ? "now" : "kept")} in {scripts.Folder}.";
+        }
         AppUpdater.RunAfterExit(script, TimeSpan.FromSeconds(60), TimeSpan.FromSeconds(1));
         log("Runner Manager was removed.");
+        return note;
+    }
+
+    private const string DisabledStartupFolderName = "disabled-startup";
+
+    /// <summary>
+    /// Moves the startup scripts that Runner Manager turned off (when a console runner became a service) from its data
+    /// folder to Documents\Runner Manager startup scripts. Returns where they are, and whether they were moved; the folder
+    /// is null when there are none.
+    /// </summary>
+    internal static (string? Folder, bool Moved) KeepDisabledStartupScripts(Action<string> log, string? documents = null)
+    {
+        var source = Path.Combine(FleetConfig.StateDir, DisabledStartupFolderName);
+        try
+        {
+            if (!Directory.Exists(source) || !Directory.EnumerateFileSystemEntries(source).Any()) return (null, false);
+        }
+        catch { return (null, false); }
+        try
+        {
+            documents ??= Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+            var target = Path.Combine(documents, "Runner Manager startup scripts");
+            for (var i = 2; Directory.Exists(target) || File.Exists(target); i++)
+                target = Path.Combine(documents, $"Runner Manager startup scripts ({i})");
+            Directory.CreateDirectory(target);
+            // Copied, not moved: Documents may be on another drive.
+            foreach (var file in Directory.EnumerateFiles(source, "*", SearchOption.AllDirectories))
+            {
+                var destination = Path.Combine(target, Path.GetRelativePath(source, file));
+                Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+                File.Copy(file, destination);
+            }
+            log($"Moved the startup scripts that Runner Manager had turned off to {target}.");
+            return (target, true);
+        }
+        catch (Exception ex)
+        {
+            log($"Could not move the startup scripts that Runner Manager had turned off ({ex.Message}). They stay in {source}.");
+            return (source, false);
+        }
     }
 
     /// <summary>
@@ -270,7 +413,7 @@ public static class Installer
         // still hold it for a moment.
         var remove = AppUpdater.IsDefaultInstallDir(folder)
             ? "Remove-Item -LiteralPath $f -Recurse -Force -ErrorAction SilentlyContinue"
-            : "foreach ($p in 'RunnerManager.exe', 'RunnerManager.exe.new', 'RunnerManager.*.old.exe') " +
+            : "foreach ($p in 'RunnerManager.exe', 'RunnerManager.exe.new', 'RunnerManager.exe.previous', 'RunnerManager.*.old.exe') " +
               "{ Get-ChildItem -LiteralPath $f -Filter $p -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue }; " +
               "$left = @(Get-ChildItem -LiteralPath $f -Force -ErrorAction SilentlyContinue); " +
               "if ($left.Count -eq 0) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue } " +
@@ -325,7 +468,10 @@ internal static class InstallChecks
                 var entries = Read();
                 entries[check] = AppUpdater.CurrentVersion;
                 Directory.CreateDirectory(FleetConfig.StateDir);
-                File.WriteAllLines(MarkerPath, entries.Select(e => $"{e.Key}={e.Value}"));
+                // Written to a temporary file first, so an interrupted write never leaves an empty file behind.
+                var temp = $"{MarkerPath}.{Environment.ProcessId}.tmp";
+                File.WriteAllLines(temp, entries.Select(e => $"{e.Key}={e.Value}"));
+                File.Move(temp, MarkerPath, overwrite: true);
             }
             catch { }
         }
