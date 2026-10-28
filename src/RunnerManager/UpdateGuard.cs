@@ -175,6 +175,9 @@ public static class UpdateGuard
 
     // ================= Dashboard =================
 
+    /// <summary>Forgets when the agent was last seen down, after the dashboard restarted it (checks are skipped meanwhile).</summary>
+    public static void ForgetAgentDown() => _agentDownSinceUtc = null;
+
     /// <summary>Checks a pending update from the dashboard (see <see cref="DecideForDashboard"/>). Returns a message to show, if any.</summary>
     public static async Task<string?> CheckFromDashboardAsync(bool agentInstalled)
     {

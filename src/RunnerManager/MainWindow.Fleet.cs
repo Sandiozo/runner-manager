@@ -91,8 +91,9 @@ public partial class MainWindow
             UpdateBanner.Visibility = showBanner ? Visibility.Visible : Visibility.Collapsed;
             if (showBanner) UpdateBannerText.Text = $"Runner Manager v{latest} is available. Current version: v{AppUpdater.CurrentVersion}.";
 
-            // Not while this dashboard restarts the agent itself.
-            if (DateTime.UtcNow - _lastUpdateGuardCheck >= UpdateGuardInterval && !IsAgentWorkBusy)
+            // Not while this dashboard restarts the agent itself; the agent counts as down from the next check after that.
+            if (IsAgentWorkBusy) UpdateGuard.ForgetAgentDown();
+            else if (DateTime.UtcNow - _lastUpdateGuardCheck >= UpdateGuardInterval)
             {
                 _lastUpdateGuardCheck = DateTime.UtcNow;
                 if (await UpdateGuard.CheckFromDashboardAsync(_isEnrolled) is { } notice) RaiseAlert(notice, warning: true);

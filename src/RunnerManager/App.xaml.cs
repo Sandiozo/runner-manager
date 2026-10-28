@@ -225,8 +225,14 @@ public partial class App : Application
            && int.TryParse(arg[AfterArgument.Length..], out var id) && id > 0 ? id : null;
 
     /// <summary>Starts the installed dashboard again (after an update) and exits this one.</summary>
-    public void RestartDashboard()
+    public async void RestartDashboard()
     {
+        // Leaving while this dashboard restarts the fleet agent could leave the agent stopped.
+        if (MainWindow is MainWindow { IsAgentWorkBusy: true } main)
+        {
+            main.AddActivity("Runner Manager restarts once the fleet agent has restarted.");
+            await main.WaitForAgentWorkAsync();
+        }
         var start = new ProcessStartInfo(AppUpdater.InstalledExe) { UseShellExecute = true, WorkingDirectory = AppUpdater.InstallDir };
         start.ArgumentList.Add(AfterArgument + Environment.ProcessId);
         Process.Start(start);

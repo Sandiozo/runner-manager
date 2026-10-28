@@ -289,6 +289,17 @@ public static class AppUpdater
             : $"{expected}{Uri.EscapeDataString(release.Tag)}/{AssetName}";
     }
 
+    /// <summary>Whether the installed exe is exactly the file with this SHA-256.</summary>
+    private static bool InstalledMatches(string sha256)
+    {
+        try
+        {
+            using var stream = File.OpenRead(InstalledExe);
+            return Convert.ToHexString(SHA256.HashData(stream)).Equals(sha256, StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return false; }
+    }
+
     /// <summary>
     /// Downloads the release, verifies its checksum and swaps it into the install folder. Refuses to replace a newer
     /// installed copy unless <paramref name="allowOlder"/> is set (the user picked that version).
@@ -299,6 +310,12 @@ public static class AppUpdater
             throw new InvalidOperationException("This release has no checksum, so it was not installed.");
         if (!allowOlder && InstalledVersion is { } installed && IsOlder(release.Version, installed))
             throw new InvalidOperationException($"Runner Manager v{installed} is installed, which is newer than {release.Tag}. It was kept.");
+        // Installing it again would replace the copy of the previous version that a failed update goes back to.
+        if (InstalledVersion is { } current && CompareVersions(current, release.Version) == 0 && InstalledMatches(release.Sha256))
+        {
+            log($"Runner Manager {release.Tag} is already installed.");
+            return InstalledExe;
+        }
 
         // Each process downloads into its own folder, so the agent and the dashboard never share files.
         var staging = Path.Combine(FleetConfig.StateDir, $"update-{Environment.ProcessId}");

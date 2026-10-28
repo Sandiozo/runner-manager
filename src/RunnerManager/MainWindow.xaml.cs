@@ -248,6 +248,10 @@ public partial class MainWindow : Window
     /// <summary>The fleet agent is being updated or restarted in the background.</summary>
     public bool IsAgentWorkBusy => _agentWork is { IsCompleted: false };
 
+    /// <summary>Completes when background work on the fleet agent has finished (it never throws).</summary>
+    public Task WaitForAgentWorkAsync()
+        => _agentWork is { } work ? work.ContinueWith(_ => { }, TaskScheduler.Default) : Task.CompletedTask;
+
     /// <summary>Restarts this PC's fleet agent (after an update) without blocking the dashboard.</summary>
     public void RestartLocalAgentInBackground()
         => RunAgentWorkInBackground("Restart the fleet agent", async log =>
@@ -1243,7 +1247,7 @@ public partial class MainWindow : Window
         ActivityCount.Text = string.Empty;
     }
 
-    private void AddActivity(string message)
+    public void AddActivity(string message)
     {
         if (!Dispatcher.CheckAccess())
         {
