@@ -402,29 +402,62 @@ public static class RunnerService
         if (deleteFolder) EnsureFilesCanBeDeleted(runner);
         if (string.IsNullOrWhiteSpace(runner.ApiScope))
         {
-            log("The runner repository is unknown, so the runner cannot be removed from GitHub. Removing it from this PC only.");
+            log(UnknownScopeMessage(runner.GitHubUrl));
             await RemoveLocallyAsync(runner, deleteFolder, log);
             return;
         }
         await EnsureAuthenticatedAsync();
 
-        if (runner.ServiceInstalled && runner.IsRunning)
-            await ControlServiceAsync(runner.Name, "Stop");
-        await DetachConsoleRunnerAsync(runner, log);
+        if (runner.AgentId > 0 && !runner.IsRunning)
+        {
+            var lookup = await GitHubCli.LookUpRunnerAsync(runner.ApiScope, runner.AgentId);
+            if (IsInUseElsewhere(runner, lookup.State))
+            {
+                // config remove here would unregister the copy that uses the registration now (after a move, the old
+                // copy keeps the same runner ID).
+                log("GitHub shows this runner online, but it is not running on this PC. Another copy, for example one moved to " +
+                    "another PC, uses the same registration, so it stays registered. Removing this copy from this PC only.");
+                await RemoveLocallyAsync(runner, deleteFolder, log);
+                return;
+            }
+        }
+
+        var wasRunning = runner.ServiceInstalled && runner.IsRunning;
+        var restoreRecovery = HoldAutoRecovery(runner.Name);
         try
         {
-            log("Requesting a removal token…");
-            var token = await GitHubCli.GetRunnerTokenAsync(runner.ApiScope, removal: true);
-            await RunConfigRemoveAsync(runner.InstallPath, token);
+            if (wasRunning) await ControlServiceAsync(runner.Name, "Stop");
+            var startup = await DetachConsoleRunnerAsync(runner, log);
+            try
+            {
+                log("Requesting a removal token…");
+                var token = await GitHubCli.GetRunnerTokenAsync(runner.ApiScope, removal: true);
+                await RunConfigRemoveAsync(runner.InstallPath, token);
+            }
+            catch (Exception ex) when (IsGoneFromGitHub(ex))
+            {
+                // The repository (or the runner registration) was deleted on GitHub, or the account lost access to it,
+                // so there's nothing left to unregister. Clean up the service and files here instead of failing.
+                log($"GitHub reports that the runner's repository or organization does not exist, or that you no longer have access to it " +
+                    $"({FirstLine(ex.Message)}). Removing the runner from this PC only. If it still exists, remove the runner in its settings on GitHub.");
+                await RemoveLocallyAsync(runner, deleteFolder, log, detach: false);
+                return;
+            }
+            catch
+            {
+                // Leave a working runner behind: start it again and put its startup entries back.
+                log("Removing the runner failed. Restoring it…");
+                await startup.RestoreAsync(log);
+                if (runner.IsInteractive) log("The runner's console window was closed. It starts again at the next sign-in, or start it with run.cmd.");
+                if (wasRunning)
+                {
+                    try { await ControlServiceAsync(runner.Name, "Start"); }
+                    catch (Exception startError) { log($"Could not start the runner service again: {startError.Message}"); }
+                }
+                throw;
+            }
         }
-        catch (Exception ex) when (IsGoneFromGitHub(ex.Message))
-        {
-            // The repository (or the runner registration) was deleted on GitHub, so there's nothing left to
-            // unregister. Clean up the service and files here instead of failing.
-            log($"The runner or repository no longer exists on GitHub ({FirstLine(ex.Message)}). Removing the runner from this PC only.");
-            await RemoveLocallyAsync(runner, deleteFolder, log);
-            return;
-        }
+        finally { restoreRecovery(); }
         if (deleteFolder) await Task.Run(() => DeleteRunnerFiles(runner, log));
         ForgetRoot(runner.InstallPath);
         log("Runner removed.");
@@ -578,13 +611,33 @@ public static class RunnerService
         };
     }
 
-    /// <summary>GitHub answers 404 when the repository, organization or runner registration no longer exists.</summary>
+    /// <summary>
+    /// GitHub answers 404 when the repository, organization or runner registration no longer exists, and also for a
+    /// private repository the account lost access to. Only GitHub's own answers count: the app's errors (such as a
+    /// missing config.cmd) and a missing permission must not make a removal skip GitHub.
+    /// </summary>
+    internal static bool IsGoneFromGitHub(Exception error)
+        => error is not (FileNotFoundException or DirectoryNotFoundException or GitHubPermissionException)
+           && IsGoneFromGitHub(error.Message);
+
+    /// <summary>gh ("gh: Not Found (HTTP 404)", "HTTP 404: Not Found (...)") and config.cmd ("Http response code: NotFound") 404 output.</summary>
     internal static bool IsGoneFromGitHub(string message)
-        => message.Contains("404", StringComparison.Ordinal)
-           || message.Contains("Not Found", StringComparison.OrdinalIgnoreCase)
-           || message.Contains("does not exist", StringComparison.OrdinalIgnoreCase)
-           || message.Contains("doesn't exist", StringComparison.OrdinalIgnoreCase)
-           || message.Contains("Could not resolve to a Repository", StringComparison.OrdinalIgnoreCase);
+        => Regex.IsMatch(message, @"\bHTTP 404\b|\(HTTP 404\)|\b404 \(Not Found\)|response code: NotFound\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)
+           || message.Contains("Could not resolve to a Repository", StringComparison.OrdinalIgnoreCase)
+           || Regex.IsMatch(message, @"\brepository (does not|doesn't) exist\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+    /// <summary>What a removal logs when the runner's registration URL is not a github.com repository or organization.</summary>
+    internal static string UnknownScopeMessage(string registrationUrl)
+    {
+        var host = Uri.TryCreate(registrationUrl, UriKind.Absolute, out var uri) ? uri.Host : string.Empty;
+        return host.Length > 0 && !IsGitHubHost(host)
+            ? $"The runner is registered on {host}. Runner Manager only works with github.com, so its registration there is left in place: " +
+              $"remove it in the runner settings on {host}. Removing the runner from this PC only."
+            : "The runner repository is unknown, so the runner cannot be removed from GitHub. Removing it from this PC only.";
+    }
+
+    private static bool IsGitHubHost(string host)
+        => host.Equals("github.com", StringComparison.OrdinalIgnoreCase) || host.Equals("www.github.com", StringComparison.OrdinalIgnoreCase);
 
     private static string FirstLine(string text)
         => text.Split('\n', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault()?.Trim() ?? text;
@@ -609,9 +662,9 @@ public static class RunnerService
     }
 
     /// <summary>Removes a runner from this PC without contacting GitHub: service, console autostart and files.</summary>
-    private static async Task RemoveLocallyAsync(RunnerInfo runner, bool deleteFolder, Action<string> log)
+    private static async Task RemoveLocallyAsync(RunnerInfo runner, bool deleteFolder, Action<string> log, bool detach = true)
     {
-        await DetachConsoleRunnerAsync(runner, log);
+        if (detach) await DetachConsoleRunnerAsync(runner, log);
         if (runner.ServiceInstalled)
         {
             if (runner.IsRunning) await ControlServiceAsync(runner.Name, "Stop");
@@ -1343,7 +1396,8 @@ public static class RunnerService
     public static string RepositoryPath(string url)
     {
         if (string.IsNullOrWhiteSpace(url)) return string.Empty;
-        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) || !uri.Host.Equals("github.com", StringComparison.OrdinalIgnoreCase))
+        // www.github.com is the same site; NormalizeRegistrationUrl turns it into github.com for config.cmd.
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) || !IsGitHubHost(uri.Host))
             return string.Empty;
         // Accept https://github.com/owner/repo, .../repo.git and deeper links like .../repo/tree/main.
         var segments = uri.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries);
@@ -1370,7 +1424,7 @@ public static class RunnerService
     public static string OrganizationName(string url)
     {
         if (string.IsNullOrWhiteSpace(url)) return string.Empty;
-        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) || !uri.Host.Equals("github.com", StringComparison.OrdinalIgnoreCase))
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) || !IsGitHubHost(uri.Host))
             return string.Empty;
         var segments = uri.AbsolutePath.Split('/', StringSplitOptions.RemoveEmptyEntries);
         if (segments.Length == 1) return segments[0];

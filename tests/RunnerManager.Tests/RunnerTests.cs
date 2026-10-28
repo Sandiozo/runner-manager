@@ -212,6 +212,53 @@ public class GitHubSignInTests
     [InlineData("github.com\n  ✓ Logged in to github.com account octo (GH_TOKEN)\n  - Token: github_pat_****", false)]
     public void MissingOrgPermission_IsReadFromAuthStatus(string status, bool lacks)
         => Assert.Equal(lacks, GitHubCli.LacksOrgScope(status));
+
+    [Fact]
+    public void MissingOrgPermission_IsNotMistakenForADeletedOrganization()
+    {
+        Assert.False(RunnerService.IsGoneFromGitHub(new GitHubPermissionException(GitHubCli.OrgScopeMessage)));
+        Assert.Contains("gh auth refresh -h github.com -s admin:org", GitHubCli.OrgScopeMessage);
+    }
+}
+
+public class RunnerRemovalSafetyTests
+{
+    [Theory]
+    [InlineData("gh: Not Found (HTTP 404)", true)]
+    [InlineData("Http response code: NotFound from 'POST https://api.github.com/actions/runner-registration'", true)]
+    [InlineData("Response status code does not indicate success: 404 (Not Found).", true)]
+    [InlineData("config.cmd was not found in the runner folder.", false)]
+    [InlineData("The specified service does not exist as an installed service.", false)]
+    [InlineData("Not found", false)]
+    [InlineData("gh: Resource not accessible by integration (HTTP 403)", false)]
+    public void OnlyGitHubsOwn404_CountsAsGone(string message, bool expected)
+        => Assert.Equal(expected, RunnerService.IsGoneFromGitHub(message));
+
+    [Fact]
+    public void AppErrors_NeverCountAsGone()
+    {
+        Assert.False(RunnerService.IsGoneFromGitHub(new FileNotFoundException("gh: Not Found (HTTP 404)")));
+        Assert.True(RunnerService.IsGoneFromGitHub(new InvalidOperationException("gh: Not Found (HTTP 404)")));
+    }
+
+    [Theory]
+    [InlineData("https://www.github.com/Owner/repo", "repos/Owner/repo")]
+    [InlineData("https://www.github.com/my-org", "orgs/my-org")]
+    [InlineData("https://github.example.com/Owner/repo", "")]
+    public void WwwGitHub_IsGitHub(string url, string scope)
+        => Assert.Equal(scope, RunnerService.ApiScope(url));
+
+    [Fact]
+    public void WwwGitHub_IsRegisteredAsGitHub()
+        => Assert.Equal("https://github.com/Owner/repo", RunnerService.NormalizeRegistrationUrl("https://www.github.com/Owner/repo"));
+
+    [Fact]
+    public void EnterpriseRunners_SayTheirRegistrationStays()
+    {
+        Assert.Contains("github.example.com", RunnerService.UnknownScopeMessage("https://github.example.com/Owner/repo"));
+        Assert.Contains("left in place", RunnerService.UnknownScopeMessage("https://github.example.com/Owner/repo"));
+        Assert.DoesNotContain("left in place", RunnerService.UnknownScopeMessage(""));
+    }
 }
 
 public class StartupScriptTests
