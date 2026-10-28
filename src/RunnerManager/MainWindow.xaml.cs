@@ -849,6 +849,9 @@ public partial class MainWindow : Window
     private async void RunnerRestart_Click(object sender, RoutedEventArgs e)
     {
         if (ItemFrom<MachineRunnerStatus>(sender) is not { } runner) return;
+        if (runner.IsBusy && !DialogWindow.Confirm(this, $"Restart {runner.TitleText}?",
+                "This runner is running a job. Restarting it cancels the job.", "Restart runner", danger: true))
+            return;
         await RunRunnerActionAsync(runner, "Restart", $"Restart {runner.TitleText}",
             _ => RunnerService.ControlServiceAsync(runner.CommandKey, "Restart"));
     }
