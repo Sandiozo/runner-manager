@@ -31,7 +31,8 @@ A Windows dashboard for GitHub Actions self-hosted runners, on one PC or several
 - **Notifications.** Alerts in the notification area when a PC goes offline, a runner stops or a workflow run fails.
 - **Remote Desktop Commander (optional).** Monitor and restart it on each PC. It is shown only where it is set up, and
   needs [Node.js](https://nodejs.org).
-- **Updates.** Installs new releases on every PC from the dashboard.
+- **Updates.** Installs new releases on every PC from the dashboard. If a new version keeps failing to start, the PC
+  goes back to the version it had before.
 
 <table>
   <tr>
@@ -129,12 +130,14 @@ Copy-Item publish/RunnerManager.exe publish/RunnerManagerSetup.exe
 
 Any copy named `RunnerManagerSetup.exe`, or started with `--setup`, opens the setup wizard.
 
-To publish a release, push a version tag; the version comes from the tag. The **Release** workflow runs the tests,
-builds the exe, checks that it starts, and attaches it to a GitHub release.
+To publish a release, add a `## 2.4.2` section for the version to [CHANGELOG.md](CHANGELOG.md), then tag a commit on
+`main` and push the tag; the version comes from the tag. The **Release** workflow runs the tests, builds the exe,
+checks that it starts, and attaches it to a GitHub release with that CHANGELOG section as the notes. Only a version
+higher than the current one is marked Latest, which is the release installed copies update to.
 
 ```powershell
-git tag v2.2.6
-git push origin v2.2.6
+git tag v2.4.2
+git push origin v2.4.2
 ```
 
 ## AI assistants
