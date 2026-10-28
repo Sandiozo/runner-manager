@@ -17,6 +17,11 @@ public sealed record FleetRequest
     public string LogKey { get; init; } = string.Empty;
     /// <summary>The PC sending the request ("leave" uses it to say who is leaving).</summary>
     public string From { get; init; } = string.Empty;
+    /// <summary>
+    /// The machine ID of the PC this is meant for (protocol 12; optional). Agents with another ID refuse it, so a
+    /// PC that shares a name with the intended one can't act on it. Older agents ignore it.
+    /// </summary>
+    public string TargetId { get; init; } = string.Empty;
 }
 
 public sealed record FleetResponse
@@ -29,7 +34,8 @@ public sealed record FleetResponse
     public string CommandId { get; init; } = string.Empty;
 }
 
-public sealed record DiscoveredPeer(string Name, string Address, string Version);
+/// <param name="MachineId">The PC's machine ID; empty from agents before protocol 12.</param>
+public sealed record DiscoveredPeer(string Name, string Address, string Version, string MachineId = "");
 
 /// <summary>Thrown when a PC answers but refuses the request (different pairing code, wrong PC, clocks apart).</summary>
 public sealed class PairingMismatchException(string message, string reason = "") : Exception(message)
@@ -206,9 +212,12 @@ public static class FleetNetwork
                     var root = json.RootElement;
                     var name = root.GetProperty("name").GetString() ?? string.Empty;
                     var port = root.TryGetProperty("port", out var p) ? p.GetInt32() : AgentPort;
+                    var id = root.TryGetProperty("id", out var i) ? i.GetString() ?? string.Empty : string.Empty;
                     if (name.Length == 0) continue;
-                    found[name] = new DiscoveredPeer(name, $"{packet.RemoteEndPoint.Address}:{port}",
-                        root.TryGetProperty("version", out var version) ? version.GetString() ?? string.Empty : string.Empty);
+                    // A PC with several network adapters answers once on each; keep its first answer. Two PCs with
+                    // the same name (but different IDs) are both kept.
+                    found.TryAdd($"{name}|{id}", new DiscoveredPeer(name, JoinHostPort(packet.RemoteEndPoint.Address.ToString(), port),
+                        root.TryGetProperty("version", out var version) ? version.GetString() ?? string.Empty : string.Empty, id));
                 }
                 catch { }
             }
@@ -366,6 +375,7 @@ public sealed class AgentServer : IDisposable
     private readonly int _discoveryPort;
     private readonly string _machineKey;
     private readonly string _displayName;
+    private readonly string _machineId;
     private readonly ReplayGuard _replay = new();
     private readonly byte[] _discoveryBody;
     private readonly CancellationTokenSource _cts = new();
@@ -377,9 +387,10 @@ public sealed class AgentServer : IDisposable
     private bool _retrying;
 
     /// <param name="prefix">HTTP prefix to listen on (tests use a localhost one; the agent listens on all interfaces).</param>
+    /// <param name="machineId">This PC's machine ID; by default the one in fleet.json for the real agent, none for tests.</param>
     public AgentServer(Func<Task<MachineStatusPayload>> status, Func<MachineCommand, string> enqueue, Func<string, Task<LogPayload>> log,
         Func<byte[]?>? pairingKey = null, string? prefix = null, int discoveryPort = FleetNetwork.DiscoveryPort, string? machineKey = null,
-        Func<string, Task<RunnerJobActivity>>? job = null)
+        Func<string, Task<RunnerJobActivity>>? job = null, string? machineId = null)
     {
         _status = status;
         _enqueue = enqueue;
@@ -391,10 +402,12 @@ public sealed class AgentServer : IDisposable
         // Requests are addressed by the sanitized key; discovery announces the real PC name.
         _displayName = machineKey ?? Environment.MachineName;
         _machineKey = MachineRelay.Sanitize(_displayName);
+        _machineId = machineId ?? (prefix == null ? FleetConfig.LocalMachineId : string.Empty);
         // The answer body never changes; only its signature depends on the probe.
         _discoveryBody = JsonSerializer.SerializeToUtf8Bytes(new
         {
             name = _displayName,
+            id = _machineId,
             port = Port,
             protocol = MachineRelay.ProtocolVersion,
             version = AppUpdater.CurrentVersion
@@ -537,6 +550,9 @@ public sealed class AgentServer : IDisposable
             { await Reply(response, 403, "wrong PC"); return; }
             var request = JsonSerializer.Deserialize<FleetRequest>(plain) ?? new FleetRequest();
             if (target == "*" && request.Op != "status") { await Reply(response, 403, "wrong PC"); return; }
+            // Meant for another PC with the same name.
+            if (request.TargetId.Length > 0 && _machineId.Length > 0 && !request.TargetId.Equals(_machineId, StringComparison.OrdinalIgnoreCase))
+            { await Reply(response, 403, "wrong PC"); return; }
             FleetResponse result;
             try
             {

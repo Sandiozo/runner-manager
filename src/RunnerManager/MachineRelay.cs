@@ -8,8 +8,11 @@ namespace RunnerManager;
 
 public static class MachineRelay
 {
-    /// <summary>11: answers "job" requests (live output and processes of a runner's job).</summary>
-    public const int ProtocolVersion = 11;
+    /// <summary>
+    /// 11: answers "job" requests (live output and processes of a runner's job).
+    /// 12: machine IDs, recent command results, busy state, and "rekey" (Change fleet code).
+    /// </summary>
+    public const int ProtocolVersion = 12;
     private const string AgentMutexName = @"Global\RunnerWidgetFleetAgent";
     private static readonly TimeSpan WatchdogInterval = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan DiscoveryInterval = TimeSpan.FromSeconds(30);
@@ -49,12 +52,28 @@ public static class MachineRelay
         var config = FleetConfig.Current;
         if (config.FleetKey == null) return machines;
 
+        // Discovery answers are signed but not tied to the address they come from: anyone on the network can forward
+        // one. So an answer from a new address is only a candidate, used when the PC can't be reached where it was
+        // last; the address changes once an encrypted request there succeeds. This also keeps a PC with several
+        // network adapters at one address.
+        var candidates = new Dictionary<string, List<DiscoveredPeer>>(StringComparer.OrdinalIgnoreCase);
         if (forceDiscovery || DateTime.UtcNow - _lastDiscovery > DiscoveryInterval)
         {
             _lastDiscovery = DateTime.UtcNow;
-            var hints = config.KnownPeers.Select(p => p.Address.Split(':')[0]).Concat(config.ManualAddresses);
+            var hints = config.KnownPeers.Select(p => FleetNetwork.HostOf(p.Address)).Concat(config.ManualAddresses);
+            var localId = FleetConfig.LocalMachineId;
             foreach (var peer in await FleetNetwork.DiscoverAsync(hints, TimeSpan.FromSeconds(1.2)))
-                RememberPeer(peer.Name, peer.Address, peer.Version);
+            {
+                if (peer.MachineId.Length > 0 && peer.MachineId == localId) continue;
+                NoteSighting(peer.Name, peer.MachineId, peer.Address);
+                var key = Sanitize(peer.Name);
+                // Another PC with this PC's name is reported through the sightings.
+                if (key == LocalMachineKey) continue;
+                var known = config.KnownPeers.FirstOrDefault(p => Sanitize(p.Name) == key);
+                if (known != null && SameEndpoint(known.Address, peer.Address)) continue;
+                if (!candidates.TryGetValue(key, out var list)) candidates[key] = list = new List<DiscoveredPeer>();
+                list.Add(peer);
+            }
         }
 
         // Drop any entry for this PC itself (older builds could record it under its sanitized name).
@@ -65,12 +84,18 @@ public static class MachineRelay
         var unnamed = config.ManualAddresses
             .Where(a => !peers.Any(p => SameHost(p.Address, a)) && !IsThisPc(a))
             .ToList();
-        var fetches = peers.Select(p => FetchPeerAsync(p.Name, p.Address, p.LastSeenUtc))
-            .Concat(unnamed.Select(a => FetchPeerAsync(null, a, DateTime.MinValue)));
+        var fetches = peers.Select(p => FetchPeerAsync(p, p.Name, p.Address, candidates.GetValueOrDefault(Sanitize(p.Name))))
+            // PCs found by discovery that aren't known yet are listed once they answer.
+            .Concat(candidates.Where(c => !peers.Any(p => Sanitize(p.Name) == c.Key))
+                .Select(c => FetchPeerAsync(null, c.Value[0].Name, string.Empty, c.Value, listIfUnreachable: false)))
+            .Concat(unnamed.Select(a => FetchPeerAsync(null, null, a, null)));
         var results = await Task.WhenAll(fetches);
-        machines.AddRange(results.Where(m => !m.IsLocal)
+        machines.AddRange(results.OfType<MachineInfo>().Where(m => !m.IsLocal)
             .GroupBy(m => m.MachineKey).Select(g => g.First())
             .OrderBy(m => m.MachineName, StringComparer.OrdinalIgnoreCase));
+        if (DuplicateNameProblem(LocalMachineKey) is { } problem)
+            machines.Add(MachineInfo.Placeholder("DUPLICATE_" + LocalMachineKey, $"{Environment.MachineName} (another PC)",
+                DateTime.UtcNow, OtherAddresses(LocalMachineKey), problem));
         return machines;
     }
 
@@ -128,47 +153,91 @@ public static class MachineRelay
         log($"Fleet agent now runs v{AppUpdater.CurrentVersion} from {exe}.");
     }
 
-    private static async Task<MachineInfo> FetchPeerAsync(string? name, string address, DateTime lastSeenUtc)
+    /// <summary>
+    /// Asks one PC for its status: a known one at its last address and then at addresses discovery found it at,
+    /// a newly discovered one, or one added by address only (<paramref name="name"/> null). Returns null for a
+    /// discovered PC that does not answer when <paramref name="listIfUnreachable"/> is false.
+    /// </summary>
+    internal static async Task<MachineInfo?> FetchPeerAsync(PeerRecord? known, string? name, string address,
+        IReadOnlyList<DiscoveredPeer>? candidates, bool listIfUnreachable = true)
     {
         var key = name == null ? "*" : Sanitize(name);
-        string problem;
-        try
+        var addresses = new List<string>();
+        if (address.Length > 0) addresses.Add(address);
+        if (candidates != null) addresses.AddRange(candidates.Select(c => c.Address).Where(a => !addresses.Any(b => SameEndpoint(a, b))));
+        var problem = string.Empty;
+        foreach (var attempt in addresses)
         {
-            var response = await FleetNetwork.CallAsync(address, key, new FleetRequest { Op = "status" });
-            var payload = response.Status ?? throw new InvalidOperationException("The PC returned no status.");
-            var machineKey = Sanitize(payload.MachineName);
-            lock (LastStatus) LastStatus[machineKey] = payload;
-            RememberPeer(payload.MachineName, FleetNetwork.WithPort(address), payload.AppVersion);
-            return MachineInfo.FromPayload(machineKey, payload, address: address);
+            try
+            {
+                var response = await FleetNetwork.CallAsync(attempt, key, new FleetRequest { Op = "status" });
+                return Accept(response.Status, attempt);
+            }
+            catch (PairingMismatchException ex) when (ex.Reason == "wrong PC" && known is { MachineId.Length: > 0 })
+            {
+                // Maybe the PC was renamed: ask the PC at this address who it is.
+                problem = ex.Message;
+                try
+                {
+                    var response = await FleetNetwork.CallAsync(attempt, "*", new FleetRequest { Op = "status" });
+                    if (response.Status is { } status && status.MachineId.Equals(known.MachineId, StringComparison.OrdinalIgnoreCase))
+                        return Accept(status, attempt);
+                }
+                catch { }
+            }
+            catch (PairingMismatchException ex) { problem = ex.Message; }
+            catch (Exception) { if (problem.Length == 0) problem = $"Not reachable at {FleetNetwork.WithPort(attempt)}"; }
         }
-        catch (PairingMismatchException ex) { problem = ex.Message; }
-        catch (Exception) { problem = $"Not reachable at {FleetNetwork.WithPort(address)}"; }
+        if (problem.Length == 0) problem = $"Not reachable at {FleetNetwork.WithPort(address)}";
 
         if (name == null)
             return MachineInfo.Placeholder("ADDR_" + Sanitize(address), address, DateTime.MinValue, address, problem);
+        if (!listIfUnreachable) return null;
         MachineStatusPayload? last;
         lock (LastStatus) LastStatus.TryGetValue(key, out last);
         return last != null
             ? MachineInfo.FromPayload(key, last, address: address, problem: problem)
-            : MachineInfo.Placeholder(key, name, lastSeenUtc, address, problem);
+            : MachineInfo.Placeholder(key, name, known?.LastSeenUtc ?? DateTime.MinValue, address, problem);
     }
 
-    private static void RememberPeer(string name, string address, string version)
+    /// <summary>A PC answered at <paramref name="address"/>: remember it there, and list it (with a warning if its name is taken twice).</summary>
+    private static MachineInfo Accept(MachineStatusPayload? payload, string address)
+    {
+        if (payload == null) throw new InvalidOperationException("The PC returned no status.");
+        var machineKey = Sanitize(payload.MachineName);
+        lock (LastStatus) LastStatus[machineKey] = payload;
+        NoteSighting(payload.MachineName, payload.MachineId, address);
+        RememberPeer(payload.MachineName, FleetNetwork.WithPort(address), payload.AppVersion, payload.MachineId);
+        return MachineInfo.FromPayload(machineKey, payload, address: address, problem: DuplicateNameProblem(machineKey) ?? string.Empty);
+    }
+
+    internal static void RememberPeer(string name, string address, string version, string machineId = "")
     {
         if (Sanitize(name) == LocalMachineKey) return;
+        var config = FleetConfig.Current;
         // Match on the sanitized key so "DESKTOP-PC" and "DESKTOP_PC" are the same PC, and keep the real name.
-        var existing = FleetConfig.Current.KnownPeers.Where(p => Sanitize(p.Name) == Sanitize(name))
+        var existing = config.KnownPeers.Where(p => Sanitize(p.Name) == Sanitize(name))
             .OrderByDescending(p => p.Name != Sanitize(p.Name)).FirstOrDefault();
         if (existing != null && name == Sanitize(name) && existing.Name != name) name = existing.Name;
+        if (machineId.Length == 0) machineId = existing?.MachineId ?? string.Empty;
+        // The same PC under its old name: it was renamed.
+        var renamed = machineId.Length == 0 ? new List<PeerRecord>()
+            : config.KnownPeers.Where(p => p.MachineId.Equals(machineId, StringComparison.OrdinalIgnoreCase) && Sanitize(p.Name) != Sanitize(name)).ToList();
         // Only write when something meaningful changed, not on every poll.
-        var duplicates = FleetConfig.Current.KnownPeers.Count(p => Sanitize(p.Name) == Sanitize(name)) > 1;
-        if (!duplicates && existing != null && existing.Name == name && existing.Address == address && existing.Version == version
+        var duplicates = config.KnownPeers.Count(p => Sanitize(p.Name) == Sanitize(name)) > 1;
+        if (!duplicates && renamed.Count == 0 && existing != null && existing.Name == name && existing.Address == address
+            && existing.Version == version && existing.MachineId == machineId
             && DateTime.UtcNow - existing.LastSeenUtc < TimeSpan.FromMinutes(10)) return;
         FleetConfig.Update(c =>
         {
-            c.KnownPeers.RemoveAll(p => Sanitize(p.Name) == Sanitize(name));
-            c.KnownPeers.Add(new PeerRecord { Name = name, Address = address, Version = version, LastSeenUtc = DateTime.UtcNow });
+            c.KnownPeers.RemoveAll(p => Sanitize(p.Name) == Sanitize(name) || renamed.Any(r => Sanitize(r.Name) == Sanitize(p.Name)));
+            c.KnownPeers.Add(new PeerRecord { Name = name, Address = address, Version = version, MachineId = machineId, LastSeenUtc = DateTime.UtcNow });
         });
+        foreach (var old in renamed)
+        {
+            lock (LastStatus) LastStatus.Remove(Sanitize(old.Name));
+            AppendAgentLog($"{old.Name} is now called {name}.");
+        }
     }
 
     /// <summary>Remembers a PC learned during pairing so it's contacted right away.</summary>
@@ -180,24 +249,85 @@ public static class MachineRelay
         lock (LastStatus) LastStatus.Remove(Sanitize(name));
     }
 
+    // ----- Two PCs with one name -----
+
+    private sealed record Sighting(string Name, string Address, DateTime SeenUtc);
+
+    // Dashboard side: the machine IDs that answered under each PC name lately.
+    private static readonly Dictionary<string, Dictionary<string, Sighting>> Sightings = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>How long an answer counts. Discovery runs every 30 seconds, so both PCs are seen within this.</summary>
+    private static readonly TimeSpan SightingTime = TimeSpan.FromMinutes(3);
+
+    internal static void NoteSighting(string name, string machineId, string address)
+    {
+        if (machineId.Length == 0 || name.Length == 0) return;
+        lock (Sightings)
+        {
+            var key = Sanitize(name);
+            if (!Sightings.TryGetValue(key, out var ids)) Sightings[key] = ids = new Dictionary<string, Sighting>(StringComparer.OrdinalIgnoreCase);
+            ids[machineId] = new Sighting(name, FleetNetwork.HostOf(address), DateTime.UtcNow);
+        }
+    }
+
+    /// <summary>The PCs (other than this one) that answered under this name within <see cref="SightingTime"/>.</summary>
+    private static List<Sighting> RecentSightings(string machineKey)
+    {
+        var localId = FleetConfig.Current.MachineId;
+        lock (Sightings)
+        {
+            if (!Sightings.TryGetValue(Sanitize(machineKey), out var ids)) return new List<Sighting>();
+            foreach (var old in ids.Where(p => DateTime.UtcNow - p.Value.SeenUtc > SightingTime).Select(p => p.Key).ToList()) ids.Remove(old);
+            return ids.Where(p => localId.Length == 0 || !p.Key.Equals(localId, StringComparison.OrdinalIgnoreCase)).Select(p => p.Value).ToList();
+        }
+    }
+
+    private static string OtherAddresses(string machineKey) => string.Join(", ", RecentSightings(machineKey).Select(s => s.Address).Distinct());
+
+    /// <summary>
+    /// Why a PC name can't be used right now: two PCs answer to it (or to names that differ only in punctuation,
+    /// which Runner Manager treats as the same). Commands to it are refused until one is renamed. Null when the name
+    /// is unique.
+    /// </summary>
+    public static string? DuplicateNameProblem(string machineKey)
+    {
+        var seen = RecentSightings(machineKey);
+        var isThisPc = Sanitize(machineKey) == LocalMachineKey;
+        if (isThisPc ? seen.Count == 0 : seen.Count < 2) return null;
+        var names = seen.Select(s => s.Name).Append(isThisPc ? Environment.MachineName : seen[0].Name)
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        var where = string.Join(" and ", seen.Select(s => s.Address).Distinct());
+        var who = names.Count > 1
+            ? $"{string.Join(" and ", names)} look like the same name to Runner Manager, which ignores punctuation in PC names"
+            : isThisPc ? $"Another PC (at {where}) is also named {names[0]}" : $"Two PCs are named {names[0]} (at {where})";
+        return $"{who}. Rename one of them in Windows Settings → System → About. Until then, commands to {names[0]} are refused.";
+    }
+
+    // ----- Addresses -----
+
     private static bool SameHost(string a, string b)
-        => a.Split(':')[0].Equals(b.Split(':')[0], StringComparison.OrdinalIgnoreCase);
+        => FleetNetwork.HostOf(a).Equals(FleetNetwork.HostOf(b), StringComparison.OrdinalIgnoreCase);
+
+    private static bool SameEndpoint(string a, string b)
+        => FleetNetwork.WithPort(a).Equals(FleetNetwork.WithPort(b), StringComparison.OrdinalIgnoreCase);
 
     private static bool IsThisPc(string address)
     {
-        var host = address.Split(':')[0];
+        var host = FleetNetwork.HostOf(address);
         return host.Equals(Environment.MachineName, StringComparison.OrdinalIgnoreCase)
-               || host is "localhost" or "127.0.0.1"
+               || host is "localhost" or "127.0.0.1" or "::1"
                || FleetNetwork.LocalAddresses().Contains(host);
     }
 
-    private static string AddressOf(string machineKey)
-        => Sanitize(machineKey) == LocalMachineKey
-            // This PC's own agent: AI assistant tools run without administrator rights and hand their work to it.
-            ? $"127.0.0.1:{FleetNetwork.AgentPort}"
-            : FleetConfig.Current.KnownPeers.FirstOrDefault(p => Sanitize(p.Name) == Sanitize(machineKey))?.Address
-              ?? throw new InvalidOperationException($"Could not reach {machineKey}. Check that it is on and on the same network.");
-
+    /// <summary>Where to send requests for a PC, and its machine ID (empty when unknown) so only that PC acts on them.</summary>
+    private static (string Address, string MachineId) Route(string machineKey)
+    {
+        // This PC's own agent: AI assistant tools run without administrator rights and hand their work to it.
+        if (Sanitize(machineKey) == LocalMachineKey) return ($"127.0.0.1:{FleetNetwork.AgentPort}", string.Empty);
+        if (DuplicateNameProblem(machineKey) is { } problem) throw new InvalidOperationException(problem);
+        var peer = FleetConfig.Current.KnownPeers.FirstOrDefault(p => Sanitize(p.Name) == Sanitize(machineKey))
+                   ?? throw new InvalidOperationException($"Could not reach {machineKey}. Check that it is on and on the same network.");
+        return (peer.Address, peer.MachineId);
+    }
     /// <summary>Why commands to a machine would fail, or null when it can be reached.</summary>
     public static string? SigningProblem(MachineInfo machine) => machine.IsLocal ? null : machine.ConnectionProblem.Length > 0 ? machine.ConnectionProblem : null;
 
@@ -215,25 +345,28 @@ public static class MachineRelay
             RunnerLabels = runnerLabels ?? Array.Empty<string>(),
             Value = value
         };
-        var response = await FleetNetwork.CallAsync(AddressOf(machineKey), Sanitize(machineKey),
-            new FleetRequest { Op = "command", Command = command });
+        var (address, machineId) = Route(machineKey);
+        var response = await FleetNetwork.CallAsync(address, Sanitize(machineKey),
+            new FleetRequest { Op = "command", Command = command, TargetId = machineId });
         return string.IsNullOrEmpty(response.CommandId) ? command.Id : response.CommandId;
     }
 
-    /// <summary>Reads the tail of one of another PC's logs directly from its agent.</summary>
     /// <summary>A busy runner's live output and processes from the PC it runs on (agents with protocol 11 or later).</summary>
     public static async Task<RunnerJobActivity> RequestJobActivityAsync(string machineKey, string runnerKey, CancellationToken cancellationToken = default)
     {
-        var response = await FleetNetwork.CallAsync(AddressOf(machineKey), Sanitize(machineKey),
-            new FleetRequest { Op = "job", LogKey = runnerKey }, TimeSpan.FromSeconds(10), cancellationToken);
+        var (address, machineId) = Route(machineKey);
+        var response = await FleetNetwork.CallAsync(address, Sanitize(machineKey),
+            new FleetRequest { Op = "job", LogKey = runnerKey, TargetId = machineId }, TimeSpan.FromSeconds(10), cancellationToken);
         if (!response.Ok) throw new InvalidOperationException(response.Error);
         return response.Job ?? throw new InvalidOperationException("The PC returned no job details.");
     }
 
+    /// <summary>Reads the tail of one of another PC's logs directly from its agent.</summary>
     public static async Task<LogPayload> RequestRemoteLogAsync(string machineKey, string logKey, CancellationToken cancellationToken)
     {
-        var response = await FleetNetwork.CallAsync(AddressOf(machineKey), Sanitize(machineKey),
-            new FleetRequest { Op = "log", LogKey = logKey }, TimeSpan.FromSeconds(45), cancellationToken);
+        var (address, machineId) = Route(machineKey);
+        var response = await FleetNetwork.CallAsync(address, Sanitize(machineKey),
+            new FleetRequest { Op = "log", LogKey = logKey, TargetId = machineId }, TimeSpan.FromSeconds(45), cancellationToken);
         return response.Log ?? throw new InvalidOperationException("The PC returned no log.");
     }
 
@@ -248,7 +381,11 @@ public static class MachineRelay
         {
             await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
             MachineStatusPayload? status;
-            try { status = (await FleetNetwork.CallAsync(AddressOf(machineKey), Sanitize(machineKey), new FleetRequest { Op = "status" })).Status; }
+            try
+            {
+                var (address, machineId) = Route(machineKey);
+                status = (await FleetNetwork.CallAsync(address, Sanitize(machineKey), new FleetRequest { Op = "status", TargetId = machineId })).Status;
+            }
             catch { continue; }
             if (status == null || !status.LastCommandId.Equals(commandId, StringComparison.OrdinalIgnoreCase)) continue;
             if (IsFailedResult(status.LastCommandResult))
@@ -841,6 +978,7 @@ public static class MachineRelay
         return new MachineStatusPayload
         {
             MachineName = Environment.MachineName,
+            MachineId = FleetConfig.LocalMachineId,
             AgentProtocolVersion = ProtocolVersion,
             AppVersion = AppUpdater.CurrentVersion,
             UpdatedUtc = DateTime.UtcNow,
@@ -1051,6 +1189,8 @@ public sealed record LogPayload
 public sealed record MachineStatusPayload
 {
     public string MachineName { get; init; } = string.Empty;
+    /// <summary>The PC's own ID (protocol 12; empty from older agents).</summary>
+    public string MachineId { get; init; } = string.Empty;
     public int AgentProtocolVersion { get; init; }
     public string AppVersion { get; init; } = string.Empty;
     public DateTime UpdatedUtc { get; init; }

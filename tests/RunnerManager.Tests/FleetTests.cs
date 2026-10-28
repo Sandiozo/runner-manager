@@ -212,13 +212,20 @@ internal sealed class TestAgent : IDisposable
     public AgentServer Server { get; }
     public string Address => $"localhost:{Port}";
 
-    public TestAgent(string name = "TESTPC", bool start = true)
+    public List<MachineCommand> Commands { get; } = new();
+
+    public TestAgent(string name = "TESTPC", bool start = true, string machineId = "", byte[]? key = null)
     {
+        if (key != null) Key = key;
         Server = new AgentServer(
-            () => Task.FromResult(new MachineStatusPayload { MachineName = name, AgentProtocolVersion = MachineRelay.ProtocolVersion, FleetAgentRunning = true }),
-            command => command.Id,
+            () => Task.FromResult(new MachineStatusPayload
+            {
+                MachineName = name, MachineId = machineId, AgentProtocolVersion = MachineRelay.ProtocolVersion, FleetAgentRunning = true,
+                UpdatedUtc = DateTime.UtcNow
+            }),
+            command => { lock (Commands) Commands.Add(command); return command.Id; },
             _ => Task.FromResult(new LogPayload()),
-            () => Key, $"http://localhost:{Port}/rw/", Port + 1, name);
+            () => Key, $"http://localhost:{Port}/rw/", Port + 1, name, machineId: machineId);
         if (start) Server.Start();
     }
 
@@ -449,5 +456,104 @@ public class FleetConfigRobustnessTests
             Assert.Contains("after-abandoned", FleetConfig.Current.ManualAddresses);
         }
         finally { Cleanup(); }
+    }
+}
+
+[Collection(FleetSettingsCollection.Name)]
+public class PeerIdentityTests
+{
+    private static void Reset(byte[]? key = null) => FleetConfig.Update(c =>
+    {
+        c.KnownPeers.Clear();
+        c.ProtectedFleetKey = key == null ? string.Empty
+            : Convert.ToBase64String(ProtectedData.Protect(key, null, DataProtectionScope.CurrentUser));
+    });
+
+    [Fact]
+    public async Task Requests_ForAnotherPcWithTheSameName_AreRefused()
+    {
+        using var agent = new TestAgent("TESTPC", machineId: "id-a");
+        var command = new MachineCommand { Id = "c1", Target = "runner", Action = "Stop" };
+        var error = await Assert.ThrowsAsync<PairingMismatchException>(() => FleetNetwork.CallAsync(agent.Address, "TESTPC",
+            new FleetRequest { Op = "command", Command = command, TargetId = "id-b" }, pairingKey: agent.Key));
+        Assert.Equal("wrong PC", error.Reason);
+        Assert.Empty(agent.Commands);
+        await FleetNetwork.CallAsync(agent.Address, "TESTPC", new FleetRequest { Op = "command", Command = command, TargetId = "id-a" }, pairingKey: agent.Key);
+        Assert.Single(agent.Commands);
+    }
+
+    [Fact]
+    public async Task Discovery_ReportsMachineIds_AndKeepsTwoPcsWithOneName()
+    {
+        var key = CommandSigner.NewKey();
+        using var agent = new TestAgent("TESTPC", machineId: "id-a", key: key);
+        var found = await FleetNetwork.DiscoverAsync(new[] { "127.0.0.1" }, TimeSpan.FromSeconds(1), agent.Port + 1, key);
+        Assert.Contains(found, p => p.Name == "TESTPC" && p.MachineId == "id-a");
+    }
+
+    [Fact]
+    public async Task ANewAddressFromDiscovery_IsUsedOnlyAfterAStatusRequestThereSucceeds()
+    {
+        var key = CommandSigner.NewKey();
+        try
+        {
+            Reset(key);
+            using var agent = new TestAgent("MOVEDPC", machineId: "id-moved", key: key);
+            var dead = $"127.0.0.1:{TestPorts.FreeRange(1)}";
+            var known = new PeerRecord { Name = "MOVEDPC", Address = dead, MachineId = "id-moved" };
+            FleetConfig.Update(c => c.KnownPeers.Add(known));
+
+            // A discovery answer forwarded from an address where nobody answers is not saved.
+            var forwarded = new DiscoveredPeer("MOVEDPC", $"127.0.0.1:{TestPorts.FreeRange(1)}", "", "id-moved");
+            var machine = await MachineRelay.FetchPeerAsync(known, known.Name, known.Address, new[] { forwarded });
+            Assert.NotEqual(string.Empty, machine!.ConnectionProblem);
+            Assert.Equal(dead, Assert.Single(FleetConfig.Current.KnownPeers).Address);
+
+            // The real new address answers, so it is saved.
+            var real = new DiscoveredPeer("MOVEDPC", agent.Address, "", "id-moved");
+            machine = await MachineRelay.FetchPeerAsync(known, known.Name, known.Address, new[] { forwarded, real });
+            Assert.Equal(string.Empty, machine!.ConnectionProblem);
+            Assert.Equal(agent.Address, Assert.Single(FleetConfig.Current.KnownPeers).Address);
+        }
+        finally { Reset(); }
+    }
+
+    [Fact]
+    public async Task ARenamedPc_IsRecognizedByItsMachineId()
+    {
+        var key = CommandSigner.NewKey();
+        try
+        {
+            Reset(key);
+            using var agent = new TestAgent("NEWNAME", machineId: "id-renamed", key: key);
+            var known = new PeerRecord { Name = "OLDNAME", Address = agent.Address, MachineId = "id-renamed" };
+            FleetConfig.Update(c => c.KnownPeers.Add(known));
+
+            var machine = await MachineRelay.FetchPeerAsync(known, known.Name, known.Address, null);
+            Assert.Equal("NEWNAME", machine!.MachineName);
+            var peer = Assert.Single(FleetConfig.Current.KnownPeers);
+            Assert.Equal("NEWNAME", peer.Name);
+            Assert.Equal("id-renamed", peer.MachineId);
+        }
+        finally { Reset(); }
+    }
+
+    [Fact]
+    public async Task TwoPcsWithOneName_AreReported_AndCommandsToThemRefused()
+    {
+        try
+        {
+            Reset(CommandSigner.NewKey());
+            MachineRelay.RememberPeer("TWIN-PC", "10.0.0.1:47821", "", "id-1");
+            MachineRelay.NoteSighting("TWIN-PC", "id-1", "10.0.0.1:47821");
+            Assert.Null(MachineRelay.DuplicateNameProblem("TWIN_PC"));
+            MachineRelay.NoteSighting("TWIN_PC", "id-2", "10.0.0.2:47821");
+            var problem = MachineRelay.DuplicateNameProblem("TWIN_PC");
+            Assert.Contains("TWIN-PC and TWIN_PC", problem);
+            var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                MachineRelay.SendCommandAsync("TWIN_PC", "runner", "svc", "Stop"));
+            Assert.Contains("Rename one of them", error.Message);
+        }
+        finally { Reset(); }
     }
 }

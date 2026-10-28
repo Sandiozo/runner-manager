@@ -48,6 +48,24 @@ public sealed class FleetConfig
     public string RunnerFolder { get; set; } = string.Empty;
     /// <summary>What AI assistants may do through Runner Manager (Settings → AI assistants).</summary>
     public AssistantOptions Assistant { get; set; } = new();
+    /// <summary>
+    /// This PC's own random ID, made once. Other PCs use it to recognize this PC after it was renamed, and to tell
+    /// two PCs with the same name apart. Use <see cref="LocalMachineId"/>.
+    /// </summary>
+    public string MachineId { get; set; } = string.Empty;
+
+    /// <summary>This PC's machine ID, created on first use; empty if fleet.json can't be saved.</summary>
+    public static string LocalMachineId
+    {
+        get
+        {
+            var id = Current.MachineId;
+            if (id.Length > 0) return id;
+            try { Update(c => { if (c.MachineId.Length == 0) c.MachineId = Guid.NewGuid().ToString("N"); }); }
+            catch (IOException) { return string.Empty; }
+            return Current.MachineId;
+        }
+    }
 
     public static FleetConfig Current
     {
@@ -219,7 +237,9 @@ public sealed class FleetConfig
         }
     }
 
-    private static readonly Regex ProtectedKeyPattern = new("\"" + nameof(ProtectedFleetKey) + "\"\\s*:\\s*\"([A-Za-z0-9+/=]+)\"");
+    /// <summary>A setting's string value, found in text that is not valid JSON.</summary>
+    private static string? StringValue(string json, string name)
+        => Regex.Match(json, "\"" + name + "\"\\s*:\\s*\"([A-Za-z0-9+/=]+)\"") is { Success: true } match ? match.Groups[1].Value : null;
 
     /// <summary>
     /// What can still be read from a damaged fleet.json: every setting that reads on its own, or at least the pairing
@@ -244,7 +264,8 @@ public sealed class FleetConfig
         catch (JsonException)
         {
             // Not even valid JSON (cut off, for example): the pairing code may still be in it.
-            if (ProtectedKeyPattern.Match(json) is { Success: true } key) config.ProtectedFleetKey = key.Groups[1].Value;
+            config.ProtectedFleetKey = StringValue(json, nameof(ProtectedFleetKey)) ?? string.Empty;
+            config.MachineId = StringValue(json, nameof(MachineId)) ?? string.Empty;
         }
         config.Normalize();
         return config;
@@ -261,6 +282,7 @@ public sealed class FleetConfig
             peer.Name ??= string.Empty;
             peer.Address ??= string.Empty;
             peer.Version ??= string.Empty;
+            peer.MachineId ??= string.Empty;
         }
         KnownPeers.RemoveAll(p => p.Name.Length == 0);
         ManualAddresses ??= new();
@@ -270,6 +292,7 @@ public sealed class FleetConfig
         KnownRunnerRoots ??= new();
         KnownRunnerRoots.RemoveAll(string.IsNullOrWhiteSpace);
         RunnerFolder ??= string.Empty;
+        MachineId ??= string.Empty;
         Assistant ??= new();
         Assistant.ProtectedHttpToken ??= string.Empty;
     }
@@ -382,4 +405,6 @@ public sealed class PeerRecord
     public string Address { get; set; } = string.Empty;
     public string Version { get; set; } = string.Empty;
     public DateTime LastSeenUtc { get; set; }
+    /// <summary>The PC's own ID (see <see cref="FleetConfig.MachineId"/>); empty for PCs with an older agent.</summary>
+    public string MachineId { get; set; } = string.Empty;
 }

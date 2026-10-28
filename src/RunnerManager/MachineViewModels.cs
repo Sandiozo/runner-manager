@@ -236,6 +236,8 @@ public sealed class MachineInfo : INotifyPropertyChanged
 
     public string MachineKey { get; init; } = string.Empty;
     public string MachineName { get; init; } = string.Empty;
+    /// <summary>The PC's own ID; empty for older agents and for PCs that never answered.</summary>
+    public string MachineId { get; init; } = string.Empty;
     public int AgentProtocolVersion { get; init; }
     public string AppVersion { get; init; } = string.Empty;
     public DateTime UpdatedUtc { get => _updatedUtc; init => _updatedUtc = value; }
@@ -572,6 +574,7 @@ public sealed class MachineInfo : INotifyPropertyChanged
         {
             MachineKey = key,
             MachineName = payload.MachineName,
+            MachineId = payload.MachineId,
             AgentProtocolVersion = payload.AgentProtocolVersion,
             AppVersion = payload.AppVersion,
             UpdatedUtc = payload.UpdatedUtc,
