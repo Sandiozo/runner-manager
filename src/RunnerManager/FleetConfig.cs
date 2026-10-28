@@ -49,6 +49,11 @@ public sealed class FleetConfig
     /// <summary>What AI assistants may do through Runner Manager (Settings → AI assistants).</summary>
     public AssistantOptions Assistant { get; set; } = new();
     /// <summary>
+    /// The Remote Desktop Commander version this PC runs. Chosen when it is set up (or set up again), so starting it
+    /// does not run whatever version was published last.
+    /// </summary>
+    public string RdcVersion { get; set; } = string.Empty;
+    /// <summary>
     /// This PC's own random ID, made once. Other PCs use it to recognize this PC after it was renamed, and to tell
     /// two PCs with the same name apart. Use <see cref="LocalMachineId"/>.
     /// </summary>
@@ -294,6 +299,7 @@ public sealed class FleetConfig
         KnownRunnerRoots.RemoveAll(string.IsNullOrWhiteSpace);
         RunnerFolder ??= string.Empty;
         MachineId ??= string.Empty;
+        RdcVersion ??= string.Empty;
         Assistant ??= new();
         Assistant.ProtectedHttpToken ??= string.Empty;
     }
