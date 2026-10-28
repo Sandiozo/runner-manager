@@ -642,3 +642,89 @@ public class CommandWaitTests
         Assert.Equal(2, agent.Commands.Count);
     });
 }
+
+[Collection(FleetSettingsCollection.Name)]
+public class RunnerMoveTests
+{
+    /// <summary>Runs a move between two test agents that answer each command with <paramref name="answer"/>.</summary>
+    private static async Task<(List<MachineCommand> Source, List<MachineCommand> Target, Exception? Error)> MoveAsync(
+        Func<MachineCommand, string> answer)
+    {
+        var key = CommandSigner.NewKey();
+        var previous = MachineRelay.CommandPollInterval;
+        MachineRelay.CommandPollInterval = TimeSpan.FromMilliseconds(100);
+        using var source = new TestAgent("SOURCEPC", machineId: "id-source", key: key);
+        using var target = new TestAgent("TARGETPC", machineId: "id-target", key: key);
+        foreach (var agent in new[] { source, target })
+            agent.Status = s =>
+            {
+                lock (agent.Commands)
+                    return s with
+                    {
+                        RecentCommands = agent.Commands.Select(c => new FleetCommandResult { Id = c.Id, Result = answer(c) }).ToArray()
+                    };
+            };
+        try
+        {
+            FleetConfig.Update(c =>
+            {
+                c.ProtectedFleetKey = Convert.ToBase64String(ProtectedData.Protect(key, null, DataProtectionScope.CurrentUser));
+                c.KnownPeers.Clear();
+                c.KnownPeers.Add(new PeerRecord { Name = "SOURCEPC", Address = source.Address, MachineId = "id-source" });
+                c.KnownPeers.Add(new PeerRecord { Name = "TARGETPC", Address = target.Address, MachineId = "id-target" });
+            });
+            var runner = new MachineRunnerStatus
+            {
+                ServiceName = "actions.runner.owner-repo.r1", AgentName = "r1", Scope = "repos/owner/repo", CustomLabels = new[] { "gpu" },
+                ServiceInstalled = true
+            };
+            Exception? error = null;
+            try
+            {
+                await new FleetActions(viaLocalAgent: true).MoveRunnerAsync(new MachineInfo { MachineKey = "SOURCEPC", MachineName = "SOURCEPC" }, runner,
+                    new MachineInfo { MachineKey = "TARGETPC", MachineName = "TARGETPC" }, deleteOldFiles: false, null, _ => { });
+            }
+            catch (Exception ex) { error = ex; }
+            return (source.Commands, target.Commands, error);
+        }
+        finally
+        {
+            MachineRelay.CommandPollInterval = previous;
+            FleetConfig.Update(c =>
+            {
+                c.ProtectedFleetKey = string.Empty;
+                c.KnownPeers.Clear();
+            });
+        }
+    }
+
+    private static string Steps(IEnumerable<MachineCommand> commands) => string.Join(" ", commands.Select(c => $"{c.Action}:{c.Value}"));
+
+    [Fact]
+    public async Task AMove_DisablesTheOldCopy_KeepsTheLabels_AndRetiresIt()
+    {
+        var (source, target, error) = await MoveAsync(c => $"Runner {c.Action} completed");
+        Assert.Null(error);
+        Assert.Equal("Stop:disable Retire:keep", Steps(source));
+        var create = Assert.Single(target);
+        Assert.Equal("Create", create.Action);
+        Assert.Equal(new[] { "gpu" }, create.RunnerLabels);
+    }
+
+    [Fact]
+    public async Task WhenTheTargetReportsAFailure_TheOldCopyIsEnabledAndStartedAgain()
+    {
+        var (source, _, error) = await MoveAsync(c => c.Action == "Create" ? "runner Create failed: no token" : $"Runner {c.Action} completed");
+        Assert.IsType<InvalidOperationException>(error);
+        Assert.Equal("Stop:disable Start:enable", Steps(source));
+    }
+
+    [Fact]
+    public async Task WhenRetiringFails_TheErrorSaysToDeleteTheOldCopyByHand()
+    {
+        var (source, _, error) = await MoveAsync(c => c.Action == "Retire" ? "runner Retire failed: in use" : $"Runner {c.Action} completed");
+        Assert.Contains("now runs on TARGETPC", error!.Message);
+        Assert.Contains("Don't unregister it from GitHub", error.Message);
+        Assert.Equal("Stop:disable Retire:keep", Steps(source));
+    }
+}

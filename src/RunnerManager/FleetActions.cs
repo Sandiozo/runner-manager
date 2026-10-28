@@ -62,16 +62,19 @@ public sealed class FleetActions
             TimeSpan.FromMinutes(2));
 
     public async Task RemoveRunnerAsync(MachineInfo machine, MachineRunnerStatus runner, bool deleteFiles, Action<string> log)
-    {
-        await RunOnMachineAsync(machine, "runner", runner.CommandKey, "Remove", log,
-            () => RunnerService.RemoveRunnerAsync(runner.CommandKey, deleteFiles, log),
+        => await RunOnMachineAsync(machine, "runner", runner.CommandKey, "Remove", log,
+            async () =>
+            {
+                await RunnerService.RemoveRunnerAsync(runner.CommandKey, deleteFiles, log);
+                // Only here: a runner on another PC is cleared by its agent, and the same service name may exist on this PC.
+                FleetConfig.SetManuallyStopped(runner.CommandKey, false);
+            },
             TimeSpan.FromMinutes(3), value: deleteFiles ? "delete" : "keep");
-        FleetConfig.SetManuallyStopped(runner.CommandKey, false);
-    }
 
     /// <summary>
-    /// Moves a runner: stops it, registers it on the target PC with the same name and labels (replacing the old
-    /// registration), then removes the old copy. If registering fails, the old copy is started again.
+    /// Moves a runner: stops and disables it, registers it on the target PC with the same name and labels (replacing
+    /// the old registration), then removes the old copy. If the target reports that registering failed, the old copy
+    /// is enabled and started again.
     /// </summary>
     public async Task MoveRunnerAsync(MachineInfo source, MachineRunnerStatus runner, MachineInfo target, bool deleteOldFiles,
         string[]? knownLabels, Action<string> log)
@@ -79,15 +82,20 @@ public sealed class FleetActions
         var url = RegistrationUrl(runner.Scope);
         if (string.IsNullOrEmpty(url)) throw new InvalidOperationException("The runner's repository or organization is unknown.");
 
-        var labels = knownLabels is { Length: > 0 } ? knownLabels
-            : (await GitHubCli.GetRunnerStateAsync(runner.Scope, runner.AgentId))?.Labels ?? Array.Empty<string>();
+        var labels = await LabelsToKeepAsync(runner, knownLabels);
         log(labels.Length > 0 ? $"Keeping labels: {string.Join(", ", labels)}" : "No custom labels to keep.");
 
-        // 1. Stop the old copy so it cannot pick up a job during the move (and so auto-recovery leaves it alone).
+        // 1. Stop the old copy so it cannot pick up a job during the move (and so auto-recovery leaves it alone), and
+        //    disable its service so it doesn't start again at the next restart. Agents before protocol 12 only stop it.
         log($"Stopping the runner on {source.MachineName}…");
         await RunOnMachineAsync(source, "runner", runner.CommandKey, "Stop", log,
-            () => { FleetConfig.SetManuallyStopped(runner.CommandKey, true); return RunnerService.ControlServiceAsync(runner.CommandKey, "Stop"); },
-            TimeSpan.FromMinutes(2));
+            async () =>
+            {
+                FleetConfig.SetManuallyStopped(runner.CommandKey, true);
+                await RunnerService.ControlServiceAsync(runner.CommandKey, "Stop");
+                await SetServiceEnabledAsync(runner.CommandKey, false);
+            },
+            TimeSpan.FromMinutes(2), value: "disable");
 
         // 2. Register it on the target, replacing the old registration.
         try
@@ -104,6 +112,14 @@ public sealed class FleetActions
                 }, log),
                 TimeSpan.FromMinutes(10), runnerName: runner.AgentName, labels: labels, value: "replace");
         }
+        catch (Exception ex) when (!RunsHere(target) && ex is TimeoutException or OperationCanceledException)
+        {
+            // No answer: the target may still finish registering with --replace, which takes the registration from the
+            // old copy. Starting the old copy now could leave neither of them working.
+            log($"{target.MachineName} did not report whether the runner was registered. The runner on {source.MachineName} stays stopped. " +
+                $"If {runner.TitleText} appears on {target.MachineName}, remove the old copy from {source.MachineName}; otherwise move it again.");
+            throw;
+        }
         catch
         {
             if (!runner.IsInteractive)
@@ -112,8 +128,13 @@ public sealed class FleetActions
                 try
                 {
                     await RunOnMachineAsync(source, "runner", runner.CommandKey, "Start", log,
-                        () => { FleetConfig.SetManuallyStopped(runner.CommandKey, false); return RunnerService.ControlServiceAsync(runner.CommandKey, "Start"); },
-                        TimeSpan.FromMinutes(2));
+                        async () =>
+                        {
+                            FleetConfig.SetManuallyStopped(runner.CommandKey, false);
+                            await SetServiceEnabledAsync(runner.CommandKey, true);
+                            await RunnerService.ControlServiceAsync(runner.CommandKey, "Start");
+                        },
+                        TimeSpan.FromMinutes(2), value: "enable");
                 }
                 catch (Exception restartError) { log($"Could not start the runner again: {restartError.Message}"); }
             }
@@ -122,10 +143,56 @@ public sealed class FleetActions
 
         // 3. Remove the old copy (its registration now belongs to the target).
         log($"Removing the old copy from {source.MachineName}…");
-        await RunOnMachineAsync(source, "runner", runner.CommandKey, "Retire", log,
-            () => RunnerService.RetireMovedRunnerAsync(runner.CommandKey, deleteOldFiles, log),
-            TimeSpan.FromMinutes(3), value: deleteOldFiles ? "delete" : "keep");
-        FleetConfig.SetManuallyStopped(runner.CommandKey, false);
+        try
+        {
+            await RunOnMachineAsync(source, "runner", runner.CommandKey, "Retire", log,
+                async () =>
+                {
+                    await RunnerService.RetireMovedRunnerAsync(runner.CommandKey, deleteOldFiles, log);
+                    FleetConfig.SetManuallyStopped(runner.CommandKey, false);
+                },
+                TimeSpan.FromMinutes(3), value: deleteOldFiles ? "delete" : "keep");
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException($"{runner.TitleText} now runs on {target.MachineName}, but the old copy on {source.MachineName} " +
+                $"could not be removed: {ex.Message} It stays stopped and its service disabled. {RetireByHand(source.MachineName, target.MachineName)}", ex);
+        }
         log($"{runner.TitleText} now runs on {target.MachineName}.");
+    }
+
+    private bool RunsHere(MachineInfo machine) => machine.IsLocal && !_viaLocalAgent;
+
+    /// <summary>What to tell the user when the old copy of a moved runner is still there.</summary>
+    internal static string RetireByHand(string source, string target)
+        => $"Delete its Windows service and folder on {source} by hand. Don't unregister it from GitHub: the registration now belongs to {target}.";
+
+    /// <summary>
+    /// The labels to register a moved runner with. They are read from GitHub when not known; when GitHub can't be read
+    /// the move stops, because without its custom labels the runner would not get the jobs that need them.
+    /// </summary>
+    private static async Task<string[]> LabelsToKeepAsync(MachineRunnerStatus runner, string[]? knownLabels)
+    {
+        if (knownLabels is { Length: > 0 }) return knownLabels;
+        if (runner.CustomLabels.Length > 0) return runner.CustomLabels;
+        // Without a runner ID there is no registration on GitHub to read labels from.
+        if (runner.AgentId <= 0) return Array.Empty<string>();
+        var lookup = await GitHubCli.LookUpRunnerAsync(runner.Scope, runner.AgentId);
+        if (lookup.State != null) return lookup.State.Labels;
+        if (lookup.NotFound) return Array.Empty<string>();
+        throw new InvalidOperationException("Could not read the runner's labels from GitHub, so it was not moved. Try again.");
+    }
+
+    /// <summary>
+    /// Disables a runner's Windows service (so it can't start, also not at the next restart), or sets it back to
+    /// start automatically. Runners without a service are left as they are.
+    /// </summary>
+    internal static async Task SetServiceEnabledAsync(string key, bool enabled)
+    {
+        if (!key.StartsWith("actions.runner.", StringComparison.OrdinalIgnoreCase)) return;
+        var (code, output) = await ScheduledTasks.RunAsync("sc.exe",
+            $"config \"{key.Replace("\"", "")}\" start= {(enabled ? "auto" : "disabled")}", ScheduledTasks.ShortTimeout);
+        if (code != 0)
+            throw new InvalidOperationException($"Could not {(enabled ? "enable" : "disable")} the Windows service {key}: {output.Trim()}");
     }
 }

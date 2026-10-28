@@ -650,7 +650,8 @@ public sealed class AgentServer : IDisposable
     public void Dispose()
     {
         _cts.Cancel();
-        try { _http?.Stop(); } catch { }
+        // Close also releases the URL, so a new listener on the same port can start right away.
+        try { _http?.Close(); } catch { }
         try { _udp?.Dispose(); } catch { }
     }
 }

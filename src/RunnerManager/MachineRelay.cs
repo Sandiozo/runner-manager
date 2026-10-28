@@ -661,12 +661,24 @@ public static class MachineRelay
                     }, message => AppendAgentLog($"Create runner: {message}"));
                     return $"Runner created: {command.RunnerName}";
                 case "Retire":
-                    await RunnerService.RetireMovedRunnerAsync(command.TargetKey, command.Value == "delete", message => AppendAgentLog($"Retire runner: {message}"));
+                    try
+                    {
+                        await RunnerService.RetireMovedRunnerAsync(command.TargetKey, command.Value == "delete", message => AppendAgentLog($"Retire runner: {message}"));
+                    }
+                    catch (Exception ex)
+                    {
+                        AppendAgentLog($"Retire runner: {ex.Message} {FleetActions.RetireByHand(Environment.MachineName, "the PC it moved to")}");
+                        throw;
+                    }
+                    FleetConfig.SetManuallyStopped(command.TargetKey, false);
                     return "Runner removed from the old PC";
                 case "Start" or "Stop" or "Restart":
+                    // A move disables the old copy's service while it runs, and enables it again if the move failed.
+                    if (command.Value == "enable") await FleetActions.SetServiceEnabledAsync(command.TargetKey, true);
                     await RunnerService.ControlServiceAsync(command.TargetKey, command.Action);
                     FleetConfig.SetManuallyStopped(command.TargetKey, command.Action == "Stop");
                     if (command.Action == "Stop") WantRunning.Remove(command.TargetKey);
+                    if (command.Value == "disable") await FleetActions.SetServiceEnabledAsync(command.TargetKey, false);
                     return $"Runner {command.Action.ToLowerInvariant()} completed";
                 default:
                     throw new InvalidOperationException($"Unsupported runner action: {command.Action}");
