@@ -31,8 +31,15 @@ public static class AppUpdater
     /// <summary>The installed copy when there is one, otherwise the running exe.</summary>
     public static string PreferredExe => File.Exists(InstalledExe) ? InstalledExe : Environment.ProcessPath!;
     private static readonly TimeSpan CheckInterval = TimeSpan.FromMinutes(30);
-    private static ReleaseInfo? _latest;
+    /// <summary>A failed check is tried again soon, so a short outage does not hide updates for half an hour.</summary>
+    private static readonly TimeSpan FailedCheckInterval = TimeSpan.FromMinutes(2);
+    private static ReleaseCheck? _lastCheck;
     private static DateTime _checkedUtc = DateTime.MinValue;
+    private static readonly SemaphoreSlim CheckGate = new(1, 1);
+    // The last answer and its ETag: GitHub answers an unchanged release with 304, which does not count against its limit.
+    private static string? _releaseEtag;
+    private static string? _releaseJson;
+    private static readonly HttpClient Http = CreateHttpClient();
     /// <summary>Held while files in the install folder are replaced, so the agent and the dashboard never swap at once.</summary>
     private const string UpdateMutexName = @"Global\RunnerManagerUpdate";
     private static readonly TimeSpan UpdateLockTimeout = TimeSpan.FromMinutes(2);
@@ -70,38 +77,162 @@ public static class AppUpdater
     public static bool IsNewer(string candidate, string current)
         => Version.TryParse(Normalize(candidate), out var a) && Version.TryParse(Normalize(current), out var b) && a > b;
 
+    /// <summary>
+    /// The newest release. Throws with the reason when it could not be checked, so a failed check is never mistaken for
+    /// "up to date". See <see cref="CheckForUpdateAsync"/>.
+    /// </summary>
     public static async Task<ReleaseInfo?> GetLatestReleaseAsync(bool force = false)
     {
-        if (!force && DateTime.UtcNow - _checkedUtc < CheckInterval) return _latest;
-        var result = await GitHubCli.RunAsync($"api repos/{ReleaseRepository}/releases/latest");
-        _checkedUtc = DateTime.UtcNow;
-        if (result.ExitCode != 0)
-        {
-            _latest = null;
-            return null;
-        }
+        var check = await CheckForUpdateAsync(force);
+        return check.Release ?? throw new InvalidOperationException(check.Problem);
+    }
+
+    /// <summary>
+    /// Reads the newest release from GitHub without signing in (the repository is public), and through the GitHub CLI
+    /// when that fails. A result is kept for 30 minutes, a failure for 2.
+    /// </summary>
+    public static async Task<ReleaseCheck> CheckForUpdateAsync(bool force = false)
+    {
+        await CheckGate.WaitAsync();
         try
         {
-            using var json = JsonDocument.Parse(result.Output);
-            var root = json.RootElement;
+            if (!force && _lastCheck is { } last
+                && DateTime.UtcNow - _checkedUtc < (last.Release != null ? CheckInterval : FailedCheckInterval)) return last;
+            var check = await FetchLatestReleaseAsync();
+            _lastCheck = check;
+            _checkedUtc = DateTime.UtcNow;
+            return check;
+        }
+        finally { CheckGate.Release(); }
+    }
+
+    private static async Task<ReleaseCheck> FetchLatestReleaseAsync()
+    {
+        var (json, problem) = await FetchReleaseJsonAsync();
+        if (json != null) return ParseRelease(json);
+        // The GitHub CLI has a higher limit when it is signed in.
+        var cli = await GitHubCli.RunAsync($"api repos/{ReleaseRepository}/releases/latest");
+        if (cli.ExitCode == 0) return ParseRelease(cli.Output);
+        return new ReleaseCheck(null, problem);
+    }
+
+    private static HttpClient CreateHttpClient()
+    {
+        var http = new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
+        http.DefaultRequestHeaders.UserAgent.ParseAdd($"RunnerManager/{CurrentVersion} (+https://github.com/{ReleaseRepository})");
+        return http;
+    }
+
+    /// <summary>Reads releases/latest anonymously. Returns the JSON, or null with the reason.</summary>
+    private static async Task<(string? Json, string Problem)> FetchReleaseJsonAsync()
+    {
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, $"https://api.github.com/repos/{ReleaseRepository}/releases/latest");
+            request.Headers.Accept.ParseAdd("application/vnd.github+json");
+            request.Headers.Add("X-GitHub-Api-Version", "2022-11-28");
+            if (_releaseEtag != null && _releaseJson != null) request.Headers.TryAddWithoutValidation("If-None-Match", _releaseEtag);
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            using var response = await Http.SendAsync(request, timeout.Token);
+            if (response.StatusCode == System.Net.HttpStatusCode.NotModified && _releaseJson != null) return (_releaseJson, string.Empty);
+            if (response.IsSuccessStatusCode)
+            {
+                var json = await response.Content.ReadAsStringAsync(timeout.Token);
+                _releaseEtag = response.Headers.ETag?.ToString();
+                _releaseJson = json;
+                return (json, string.Empty);
+            }
+            return (null, DescribeFailure((int)response.StatusCode, Header(response, "x-ratelimit-remaining"),
+                Header(response, "x-ratelimit-reset"), response.Headers.RetryAfter?.Delta, DateTimeOffset.UtcNow));
+        }
+        catch (OperationCanceledException) { return (null, "GitHub did not answer in time."); }
+        catch (HttpRequestException ex) { return (null, $"Could not reach GitHub: {ex.GetBaseException().Message}"); }
+    }
+
+    private static string? Header(HttpResponseMessage response, string name)
+        => response.Headers.TryGetValues(name, out var values) ? values.FirstOrDefault() : null;
+
+    /// <summary>Why GitHub refused a release check, from its status code and rate-limit headers.</summary>
+    internal static string DescribeFailure(int status, string? remaining, string? reset, TimeSpan? retryAfter, DateTimeOffset now)
+    {
+        var limited = status == 429 || status == 403 && (remaining == "0" || retryAfter != null);
+        if (limited)
+        {
+            var until = retryAfter is { } delay ? now + delay
+                : long.TryParse(reset, out var seconds) ? DateTimeOffset.FromUnixTimeSeconds(seconds) : (DateTimeOffset?)null;
+            return until is { } when && when > now
+                ? $"GitHub limits checks from this network. Try again after {when.ToLocalTime():HH:mm}."
+                : "GitHub limits checks from this network. Try again later.";
+        }
+        return status == 404
+            ? $"No Runner Manager release found in {ReleaseRepository}."
+            : $"GitHub answered with an error (HTTP {status}).";
+    }
+
+    /// <summary>Reads a release from GitHub's JSON. Fails when it has no <see cref="AssetName"/>.</summary>
+    internal static ReleaseCheck ParseRelease(string json)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            var root = document.RootElement;
             var tag = root.GetProperty("tag_name").GetString() ?? string.Empty;
             foreach (var asset in root.GetProperty("assets").EnumerateArray())
             {
                 if (!string.Equals(asset.GetProperty("name").GetString(), AssetName, StringComparison.OrdinalIgnoreCase)) continue;
                 var digest = asset.TryGetProperty("digest", out var d) ? d.GetString() ?? string.Empty : string.Empty;
-                _latest = new ReleaseInfo
+                return new ReleaseCheck(new ReleaseInfo
                 {
                     Tag = tag,
                     Version = Normalize(tag),
                     HtmlUrl = root.TryGetProperty("html_url", out var url) ? url.GetString() ?? string.Empty : string.Empty,
+                    DownloadUrl = asset.TryGetProperty("browser_download_url", out var download) ? download.GetString() ?? string.Empty : string.Empty,
+                    Size = asset.TryGetProperty("size", out var size) && size.TryGetInt64(out var bytes) ? bytes : 0,
                     Sha256 = digest.StartsWith("sha256:", StringComparison.OrdinalIgnoreCase) ? digest[7..] : string.Empty
-                };
-                return _latest;
+                }, string.Empty);
             }
+            return new ReleaseCheck(null, $"Release {tag} has no {AssetName}.");
         }
-        catch { }
-        _latest = null;
-        return null;
+        catch (Exception ex) when (ex is JsonException or KeyNotFoundException or InvalidOperationException)
+        {
+            return new ReleaseCheck(null, "GitHub's answer could not be read.");
+        }
+    }
+
+    /// <summary>
+    /// Downloads the release's exe. Uses the public download link, and the GitHub CLI when that fails.
+    /// </summary>
+    private static async Task DownloadReleaseAsync(ReleaseInfo release, string staging, string destination)
+    {
+        string problem;
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(10));
+            using var response = await Http.GetAsync(DownloadUrlFor(release), HttpCompletionOption.ResponseHeadersRead, timeout.Token);
+            response.EnsureSuccessStatusCode();
+            await using (var file = File.Create(destination))
+                await response.Content.CopyToAsync(file, timeout.Token);
+            if (release.Size <= 0 || new FileInfo(destination).Length == release.Size) return;
+            problem = "The download was incomplete.";
+        }
+        catch (OperationCanceledException) { problem = "The download did not finish in time."; }
+        catch (Exception ex) when (ex is HttpRequestException or IOException) { problem = $"Could not download the update: {ex.GetBaseException().Message}"; }
+        try { File.Delete(destination); } catch { }
+
+        var download = await GitHubCli.RunAsync(
+            $"release download {release.Tag} -R {ReleaseRepository} -p {AssetName} -D \"{staging}\" --clobber",
+            timeout: TimeSpan.FromMinutes(10));
+        if (download.ExitCode != 0 || !File.Exists(destination))
+            throw new InvalidOperationException($"{problem} Check the network connection and try again.");
+    }
+
+    /// <summary>The asset's download link when it is one of this repository's release downloads, otherwise the standard link.</summary>
+    internal static string DownloadUrlFor(ReleaseInfo release)
+    {
+        var expected = $"https://github.com/{ReleaseRepository}/releases/download/";
+        return release.DownloadUrl.StartsWith(expected, StringComparison.OrdinalIgnoreCase)
+            ? release.DownloadUrl
+            : $"{expected}{Uri.EscapeDataString(release.Tag)}/{AssetName}";
     }
 
     /// <summary>Downloads the release, verifies its checksum and swaps it into the install folder.</summary>
@@ -118,12 +249,8 @@ public static class AppUpdater
         try
         {
             log($"Downloading Runner Manager {release.Tag}...");
-            var download = await GitHubCli.RunAsync(
-                $"release download {release.Tag} -R {ReleaseRepository} -p {AssetName} -D \"{staging}\" --clobber",
-                timeout: TimeSpan.FromMinutes(10));
             var downloaded = Path.Combine(staging, AssetName);
-            if (download.ExitCode != 0 || !File.Exists(downloaded))
-                throw new InvalidOperationException(string.IsNullOrWhiteSpace(download.Error) ? "Could not download the update. Check the network connection and try again." : download.Error.Trim());
+            await DownloadReleaseAsync(release, staging, downloaded);
 
             string actual;
             await using (var stream = File.OpenRead(downloaded))
@@ -429,5 +556,15 @@ public sealed class ReleaseInfo
     public string Tag { get; init; } = string.Empty;
     public string Version { get; init; } = string.Empty;
     public string HtmlUrl { get; init; } = string.Empty;
+    /// <summary>The exe's public download link (browser_download_url).</summary>
+    public string DownloadUrl { get; init; } = string.Empty;
+    /// <summary>The exe's size in bytes, or 0 when unknown.</summary>
+    public long Size { get; init; }
     public string Sha256 { get; init; } = string.Empty;
+}
+
+/// <summary>The result of an update check: the newest release, or why it could not be checked.</summary>
+public sealed record ReleaseCheck(ReleaseInfo? Release, string Problem)
+{
+    public bool UpdateAvailable => Release != null && AppUpdater.IsNewer(Release.Version, AppUpdater.CurrentVersion);
 }

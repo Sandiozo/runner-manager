@@ -479,12 +479,13 @@ public partial class SettingsWindow : Window
         VersionRow.Description = "Checking for updates…";
         try
         {
-            _release = await AppUpdater.GetLatestReleaseAsync(force);
+            var check = await AppUpdater.CheckForUpdateAsync(force);
+            _release = check.Release;
             var current = AppUpdater.CurrentVersion;
             var available = _release != null && AppUpdater.IsNewer(_release.Version, current);
             var installable = available || _release != null && !AppUpdater.IsRunningInstalledCopy;
             VersionRow.Description = _release == null
-                ? $"No release found in {AppUpdater.ReleaseRepository}."
+                ? $"Couldn't check for updates: {check.Problem}"
                 : available
                     ? $"Version {_release.Version} is available."
                     : AppUpdater.IsRunningInstalledCopy

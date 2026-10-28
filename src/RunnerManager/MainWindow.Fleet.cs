@@ -67,21 +67,23 @@ public partial class MainWindow
 
     private async Task RefreshFleetExtrasAsync()
     {
-        if (!_githubAuthenticated) return;
         try
         {
-            var release = await AppUpdater.GetLatestReleaseAsync();
-            var latest = release?.Version ?? string.Empty;
+            // Releases are public, so updates are checked whether or not GitHub is connected.
+            var release = (await AppUpdater.CheckForUpdateAsync()).Release;
+            // A failed check keeps the version found before.
+            var latest = release?.Version ?? MachineInfo.LatestAppVersion;
             if (latest != MachineInfo.LatestAppVersion)
             {
                 MachineInfo.LatestAppVersion = latest;
                 foreach (var machine in Machines) machine.Refresh();
             }
-            var showBanner = release != null && AppUpdater.IsNewer(release.Version, AppUpdater.CurrentVersion)
-                && release.Version != _settings.DismissedUpdateVersion;
+            var showBanner = latest.Length > 0 && AppUpdater.IsNewer(latest, AppUpdater.CurrentVersion)
+                && latest != _settings.DismissedUpdateVersion;
             UpdateBanner.Visibility = showBanner ? Visibility.Visible : Visibility.Collapsed;
-            if (showBanner) UpdateBannerText.Text = $"Runner Manager v{release!.Version} is available. Current version: v{AppUpdater.CurrentVersion}.";
+            if (showBanner) UpdateBannerText.Text = $"Runner Manager v{latest} is available. Current version: v{AppUpdater.CurrentVersion}.";
 
+            if (!_githubAuthenticated) return;
             if (DateTime.UtcNow - _lastRunnerReleaseCheck > RunnerReleaseInterval)
             {
                 _lastRunnerReleaseCheck = DateTime.UtcNow;
@@ -319,8 +321,13 @@ public partial class MainWindow
     /// <summary>Installs the newest release on this PC, then offers to restart the dashboard with it.</summary>
     private async Task InstallUpdateAsync()
     {
-        var release = await AppUpdater.GetLatestReleaseAsync(force: true);
-        if (release == null || !AppUpdater.IsNewer(release.Version, AppUpdater.CurrentVersion))
+        var check = await AppUpdater.CheckForUpdateAsync(force: true);
+        if (check.Release is not { } release)
+        {
+            DialogWindow.Error(this, "Couldn't check for updates", check.Problem);
+            return;
+        }
+        if (!check.UpdateAvailable)
         {
             DialogWindow.Info(this, "Runner Manager is up to date", $"This PC runs the newest version, v{AppUpdater.CurrentVersion}.");
             return;
