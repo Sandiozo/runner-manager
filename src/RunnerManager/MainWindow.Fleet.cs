@@ -16,7 +16,10 @@ public partial class MainWindow
     private readonly Dictionary<string, IReadOnlyList<WorkflowRunSummary>> _recentRuns = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<long, bool> _runFailureStates = new();
     private readonly HashSet<string> _primedRunRepos = new(StringComparer.OrdinalIgnoreCase);
-    private readonly HashSet<string> _seenAgentEvents = new(StringComparer.Ordinal);
+    /// <summary>Agent events already reported, with their time (events older than <see cref="AgentEventMemory"/> are forgotten).</summary>
+    private readonly Dictionary<string, DateTime> _seenAgentEvents = new(StringComparer.Ordinal);
+    private static readonly TimeSpan AgentEventAlertAge = TimeSpan.FromMinutes(15);
+    private static readonly TimeSpan AgentEventMemory = TimeSpan.FromMinutes(30);
     private bool _agentEventsPrimed;
     private bool _started;
     private DateTime _lastRunsRefresh = DateTime.MinValue;
@@ -40,6 +43,7 @@ public partial class MainWindow
         if (UpdateGuard.TakeRollbackNotice() is { } notice) RaiseAlert(notice, warning: true);
         if (AppSettings.LoadProblem is { } settingsProblem) AddActivity($"Settings: {settingsProblem}");
         await RefreshAsync(forceAuthCheck: true);
+        ApplyRefreshInterval();
         _refreshTimer.Start();
         StartLiveJobs();
         await RunPostSetupStepsAsync();
@@ -136,7 +140,24 @@ public partial class MainWindow
             _primedRunRepos.Add(repository);
             _recentRuns[repository] = runs;
         }
+        PruneRunState(repositories);
         foreach (var runner in Machines.SelectMany(m => m.Runners)) ApplyRecentRuns(runner);
+    }
+
+    /// <summary>
+    /// Forgets repositories no runner uses any more, and runs that dropped out of every recent list, so a dashboard that
+    /// runs for weeks in the tray does not keep growing.
+    /// </summary>
+    private void PruneRunState(IReadOnlyCollection<string> repositories)
+    {
+        var wanted = repositories.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (var stale in _recentRuns.Keys.Where(r => !wanted.Contains(r)).ToList())
+        {
+            _recentRuns.Remove(stale);
+            _primedRunRepos.Remove(stale);
+        }
+        var live = _recentRuns.Values.SelectMany(runs => runs).Select(run => run.Id).ToHashSet();
+        foreach (var id in _runFailureStates.Keys.Where(id => !live.Contains(id)).ToList()) _runFailureStates.Remove(id);
     }
 
     // ================= Live job view =================
@@ -257,12 +278,15 @@ public partial class MainWindow
             foreach (var agentEvent in machine.RecentEvents)
             {
                 var key = $"{machine.MachineKey}|{agentEvent.Utc.Ticks}|{agentEvent.Text}";
-                if (!_seenAgentEvents.Add(key) || !_agentEventsPrimed) continue;
-                if (DateTime.UtcNow - agentEvent.Utc > TimeSpan.FromMinutes(15)) continue;
+                if (!_seenAgentEvents.TryAdd(key, agentEvent.Utc) || !_agentEventsPrimed) continue;
+                // Also keeps an event that was forgotten (older than the memory) from being reported again.
+                if (DateTime.UtcNow - agentEvent.Utc > AgentEventAlertAge) continue;
                 RaiseAlert($"{machine.MachineName}: {agentEvent.Text}", agentEvent.Warning);
             }
         }
         _agentEventsPrimed = true;
+        foreach (var old in _seenAgentEvents.Where(e => DateTime.UtcNow - e.Value > AgentEventMemory).Select(e => e.Key).ToList())
+            _seenAgentEvents.Remove(old);
     }
 
     // ================= Signing =================
@@ -312,7 +336,7 @@ public partial class MainWindow
 
     private void ApplySettings()
     {
-        _refreshTimer.Interval = TimeSpan.FromSeconds(_settings.RefreshSeconds);
+        ApplyRefreshInterval();
         UpdateSummary();
         _tray?.SyncSettings(_settings);
         LastUpdatedText.Text = $"Updated {DateTime.Now:HH:mm:ss}  ·  Refreshes every {_settings.RefreshSeconds}s";

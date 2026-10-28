@@ -77,6 +77,12 @@ public partial class MainWindow : Window
         {
             if (!_refreshing) await RefreshAsync();
         };
+        // Hidden in the notification area, the dashboard refreshes less often; notifications still come from these refreshes.
+        IsVisibleChanged += async (_, _) =>
+        {
+            ApplyRefreshInterval();
+            if (IsVisible && _started && !_refreshing) await RefreshAsync();
+        };
         Loaded += async (_, _) => await StartAsync();
         ThemeManager.Changed += OnThemeChanged;
         Closing += OnClosing;
@@ -542,7 +548,20 @@ public partial class MainWindow : Window
     private bool WasUserAction(string key)
         => _recentUserActions.TryGetValue(key, out var when) && DateTime.UtcNow - when < TimeSpan.FromMinutes(2);
 
-    private void MarkUserAction(string key) => _recentUserActions[key] = DateTime.UtcNow;
+    private void MarkUserAction(string key)
+    {
+        foreach (var old in _recentUserActions.Where(a => DateTime.UtcNow - a.Value > TimeSpan.FromMinutes(2)).Select(a => a.Key).ToList())
+            _recentUserActions.Remove(old);
+        _recentUserActions[key] = DateTime.UtcNow;
+    }
+
+    private static readonly TimeSpan HiddenRefreshInterval = TimeSpan.FromSeconds(30);
+
+    private void ApplyRefreshInterval()
+    {
+        var interval = TimeSpan.FromSeconds(_settings.RefreshSeconds);
+        _refreshTimer.Interval = IsVisible || interval > HiddenRefreshInterval ? interval : HiddenRefreshInterval;
+    }
 
     private void RaiseAlert(string message, bool warning)
     {
