@@ -204,6 +204,16 @@ public class ConfigInputTests
     }
 }
 
+public class GitHubSignInTests
+{
+    [Theory]
+    [InlineData("github.com\n  ✓ Logged in to github.com account octo (keyring)\n  - Token scopes: 'gist', 'read:org', 'repo', 'workflow'", true)]
+    [InlineData("github.com\n  ✓ Logged in to github.com account octo (keyring)\n  - Token scopes: 'admin:org', 'gist', 'repo'", false)]
+    [InlineData("github.com\n  ✓ Logged in to github.com account octo (GH_TOKEN)\n  - Token: github_pat_****", false)]
+    public void MissingOrgPermission_IsReadFromAuthStatus(string status, bool lacks)
+        => Assert.Equal(lacks, GitHubCli.LacksOrgScope(status));
+}
+
 public class StartupScriptTests
 {
     [Theory]

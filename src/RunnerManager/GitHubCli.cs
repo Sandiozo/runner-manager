@@ -20,20 +20,81 @@ public static class GitHubCli
         }
     }
 
+    /// <summary>Environment variables that make gh use a token instead of the stored sign-in.</summary>
+    private static readonly string[] TokenVariables = { "GH_TOKEN", "GITHUB_TOKEN" };
+    /// <summary>Set by <see cref="IsAuthenticatedAsync"/>: use GH_TOKEN or GITHUB_TOKEN, because there is no stored sign-in.</summary>
+    private static volatile bool _useEnvironmentToken;
+
+    /// <summary>
+    /// Whether gh can use a github.com sign-in, checked the way the app's own gh calls then run. The stored sign-in
+    /// (made with "Connect GitHub") is used when it works: GH_TOKEN or GITHUB_TOKEN would otherwise override it, often
+    /// with a token made for something else. They are used only when there is no working stored sign-in.
+    /// </summary>
     public static async Task<bool> IsAuthenticatedAsync()
     {
-        var result = await RunAsync("auth status --hostname github.com");
-        return result.ExitCode == 0;
+        var stored = await RunAsync("auth status --hostname github.com", environmentToken: false);
+        if (stored.ExitCode == 0 || EnvironmentTokenName() == null)
+        {
+            _useEnvironmentToken = false;
+            return stored.ExitCode == 0;
+        }
+        var token = await RunAsync("auth status --hostname github.com", environmentToken: true);
+        _useEnvironmentToken = token.ExitCode == 0;
+        return token.ExitCode == 0;
     }
 
+    /// <summary>GH_TOKEN or GITHUB_TOKEN when one is set, otherwise null.</summary>
+    public static string? EnvironmentTokenName()
+        => TokenVariables.FirstOrDefault(name => !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(name)));
+
     public static void LaunchLogin()
+        => LaunchInConsole("auth login --web --hostname github.com --git-protocol https");
+
+    /// <summary>Opens gh to add the admin:org permission that organization runners need to the stored sign-in.</summary>
+    public static void LaunchOrgPermissionRefresh()
+        => LaunchInConsole($"auth refresh --hostname github.com --scopes {OrgScope}");
+
+    /// <summary>
+    /// Runs gh in a console window the user can answer. GH_HOST and the token variables are cleared for it, since
+    /// gh login refuses to run while a token variable is set, and the app only works with github.com.
+    /// </summary>
+    private static void LaunchInConsole(string arguments)
     {
-        using var process = Process.Start(new ProcessStartInfo
+        var startInfo = new ProcessStartInfo
         {
             FileName = "cmd.exe",
-            Arguments = $"/k \"\"{ExecutablePath}\" auth login --web --hostname github.com --git-protocol https\"",
-            UseShellExecute = true
-        });
+            Arguments = $"/k \"\"{ExecutablePath}\" {arguments}\"",
+            UseShellExecute = false
+        };
+        PrepareEnvironment(startInfo, environmentToken: false);
+        using var process = Process.Start(startInfo);
+    }
+
+    /// <summary>
+    /// The app only supports github.com, so GH_HOST (which sends gh api calls to another host) is always cleared. The
+    /// token variables are cleared unless <see cref="IsAuthenticatedAsync"/> found them to be the only working sign-in.
+    /// </summary>
+    private static void PrepareEnvironment(ProcessStartInfo startInfo, bool environmentToken)
+    {
+        startInfo.Environment.Remove("GH_HOST");
+        if (environmentToken) return;
+        foreach (var name in TokenVariables) startInfo.Environment.Remove(name);
+    }
+
+    private const string OrgScope = "admin:org";
+
+    internal const string OrgScopeMessage = "Organization runners need the admin:org permission, which your GitHub sign-in does not have. " +
+        "Run gh auth refresh -h github.com -s admin:org in a terminal, then try again. You also need to be an owner of the organization.";
+
+    /// <summary>
+    /// True when gh auth status lists the token's scopes and admin:org is not among them. Fine-grained tokens and
+    /// GitHub App tokens have no scope list, so they are not reported as missing it.
+    /// </summary>
+    internal static bool LacksOrgScope(string authStatus)
+    {
+        var line = authStatus.Replace("\r\n", "\n").Split('\n')
+            .FirstOrDefault(l => l.Contains("Token scopes:", StringComparison.OrdinalIgnoreCase));
+        return line != null && !line.Contains(OrgScope, StringComparison.OrdinalIgnoreCase);
     }
 
     public static async Task DisconnectAsync()
@@ -54,6 +115,14 @@ public static class GitHubCli
             ? $"{scope}/actions/runners/remove-token"
             : $"{scope}/actions/runners/registration-token";
         var result = await RunAsync($"api --method POST {endpoint} --jq .token");
+        // A classic token without admin:org gets 403 or 404 from the organization endpoints. A 404 would otherwise look
+        // like a deleted organization, so this is checked first.
+        if (result.ExitCode != 0 && scope.StartsWith("orgs/", StringComparison.OrdinalIgnoreCase)
+            && (IsNotFound(result.Error) || result.Error.Contains("(HTTP 403)", StringComparison.Ordinal)))
+        {
+            var status = await RunAsync("auth status --hostname github.com");
+            if (LacksOrgScope(status.Output + "\n" + status.Error)) throw new GitHubPermissionException(OrgScopeMessage);
+        }
         if (result.ExitCode != 0 || string.IsNullOrWhiteSpace(result.Output))
             throw new InvalidOperationException(result.Error.Trim().Length > 0
                 ? result.Error.Trim()
@@ -174,13 +243,17 @@ public static class GitHubCli
         finally { PollGate.Release(); }
     }
 
-    public static async Task<CommandResult> RunAsync(string arguments, string? standardInput = null, TimeSpan? timeout = null)
+    public static Task<CommandResult> RunAsync(string arguments, string? standardInput = null, TimeSpan? timeout = null)
+        => RunAsync(arguments, _useEnvironmentToken, standardInput, timeout);
+
+    private static async Task<CommandResult> RunAsync(string arguments, bool environmentToken, string? standardInput = null, TimeSpan? timeout = null)
     {
         CommandResult? result;
         try
         {
-            result = await ProcessRunner.RunAsync(
-                new ProcessStartInfo { FileName = ExecutablePath, Arguments = arguments }, timeout ?? DefaultTimeout, standardInput);
+            var startInfo = new ProcessStartInfo { FileName = ExecutablePath, Arguments = arguments };
+            PrepareEnvironment(startInfo, environmentToken);
+            result = await ProcessRunner.RunAsync(startInfo, timeout ?? DefaultTimeout, standardInput);
         }
         catch (Win32Exception)
         {
@@ -242,6 +315,9 @@ internal static class ProcessRunner
 }
 
 public sealed record CommandResult(int ExitCode, string Output, string Error);
+
+/// <summary>GitHub refused a request because the sign-in lacks a permission (not because something is gone).</summary>
+public sealed class GitHubPermissionException(string message) : InvalidOperationException(message);
 
 public sealed record ConditionalResult(int StatusCode, string ETag, string Body)
 {
