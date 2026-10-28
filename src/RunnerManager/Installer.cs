@@ -78,9 +78,26 @@ public static class Installer
                        ?? (File.Exists(Path.Combine(AppUpdater.DefaultInstallDir, AppPaths.ExeName)) ? AppUpdater.DefaultInstallDir : null);
         var moving = previous != null && !AppUpdater.SameFolder(previous, AppUpdater.InstallDir);
         CloseRunningDashboards(log, moving ? new[] { AppUpdater.InstallDir, previous! } : new[] { AppUpdater.InstallDir });
+        var replacing = File.Exists(AppUpdater.InstalledExe) && !AppUpdater.IsRunningInstalledCopy;
         // Setup warns on its first page when it is older than the installed copy, so going ahead is the user's choice.
         var exe = await AppUpdater.InstallCurrentBuildAsync(log, createShortcut: false, allowOlder: true);
+        try
+        {
+            await FinishInstallAsync(choices, exe, moving ? previous : null, log);
+        }
+        catch (Exception ex)
+        {
+            // A half-done setup is undone, so the installed copy keeps working as before.
+            log($"Setup failed: {ex.Message} Undoing it...");
+            await UndoInstallAsync(replacing, moving ? previous : null, log);
+            throw;
+        }
+        return exe;
+    }
 
+    private static async Task FinishInstallAsync(SetupChoices choices, string exe, string? previous, Action<string> log)
+    {
+        var moving = previous != null;
         log("Adding shortcuts...");
         await CreateShortcutAsync(StartMenuShortcut, exe);
         if (choices.DesktopShortcut) await CreateShortcutAsync(DesktopShortcut, exe);
@@ -121,7 +138,30 @@ public static class Installer
         settings.Save();
         InstallChecks.MarkDone(LaunchTaskCheck);
         log("Installed.");
-        return exe;
+    }
+
+    /// <summary>
+    /// Puts back the exe that setup replaced (kept as RunnerManager.exe.previous). When setup was moving the install,
+    /// the shortcuts, Settings → Apps entry and launch task point at the old folder again, and the new copy is removed.
+    /// </summary>
+    private static async Task UndoInstallAsync(bool replaced, string? previousFolder, Action<string> log)
+    {
+        try
+        {
+            if (replaced) AppUpdater.RestorePrevious();
+        }
+        catch (Exception ex) { log($"Could not put the previous version back: {ex.Message}"); }
+        if (previousFolder == null) return;
+        var newFolder = AppUpdater.InstallDir;
+        var oldExe = Path.Combine(previousFolder, AppPaths.ExeName);
+        try
+        {
+            AppUpdater.UseInstallDir(previousFolder);
+            await RefreshShortcutsAsync(oldExe);
+            await ScheduledTasks.RegisterLaunchTaskAsync(oldExe);
+            AppUpdater.RunAfterExit(RemoveProgramFilesScript(newFolder), TimeSpan.FromMinutes(5), TimeSpan.FromSeconds(3));
+        }
+        catch (Exception ex) { log($"Could not point Runner Manager back to {previousFolder}: {ex.Message}"); }
     }
 
     public static Task RegisterStartupTaskAsync(string exe) => ScheduledTasks.RegisterLogonTaskAsync(

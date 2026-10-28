@@ -642,8 +642,9 @@ public static class AppUpdater
             {
                 var destination = Path.Combine(InstallDir, relative);
                 Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
-                // Files of a running agent can't be overwritten but can be renamed out of the way.
-                ReplaceFile(source, destination);
+                // Files of a running agent can't be overwritten but can be renamed out of the way. The exe it replaces is
+                // kept, so setup can put it back when a later step fails.
+                ReplaceFile(source, destination, keepPrevious: relative.Equals(AssetName, StringComparison.OrdinalIgnoreCase));
             }
         }));
         _installedThisBuild = true;
