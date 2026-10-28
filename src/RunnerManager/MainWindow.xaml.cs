@@ -1063,6 +1063,8 @@ public partial class MainWindow : Window
     {
         Show();
         if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
+        // A screen may have been unplugged while the window was hidden.
+        WindowPlacement.EnsureOnScreen(this);
         Activate();
     }
 

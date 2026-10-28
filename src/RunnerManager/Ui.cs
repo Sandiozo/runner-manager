@@ -85,9 +85,18 @@ public static class ThemeManager
 {
     public static bool IsLight { get; private set; }
     public static event Action? Changed;
+    private static AppTheme _mode;
+    private static bool _followingSystem;
 
     public static void Apply(AppTheme mode)
     {
+        _mode = mode;
+        // "System" follows Windows when the user switches between light and dark while Runner Manager runs.
+        if (!_followingSystem && Application.Current != null)
+        {
+            _followingSystem = true;
+            SystemEvents.UserPreferenceChanged += OnUserPreferenceChanged;
+        }
         var light = mode == AppTheme.Light || (mode == AppTheme.System && SystemUsesLightTheme());
         IsLight = light;
         Palette.Use(light);
@@ -102,6 +111,17 @@ public static class ThemeManager
         Changed?.Invoke();
     }
 
+    private static void OnUserPreferenceChanged(object? sender, UserPreferenceChangedEventArgs e)
+    {
+        // The light/dark switch arrives as a General (ImmersiveColorSet) change.
+        if (_mode != AppTheme.System || e.Category is not (UserPreferenceCategory.General or UserPreferenceCategory.Color or UserPreferenceCategory.VisualStyle))
+            return;
+        Application.Current?.Dispatcher.BeginInvoke(() =>
+        {
+            if (_mode == AppTheme.System && SystemUsesLightTheme() != IsLight) Apply(AppTheme.System);
+        });
+    }
+
     public static bool SystemUsesLightTheme()
     {
         try
@@ -110,6 +130,47 @@ public static class ThemeManager
             return key?.GetValue("AppsUseLightTheme") is int value && value == 1;
         }
         catch { return false; }
+    }
+}
+
+/// <summary>Keeps windows reachable when the screen they were on is gone.</summary>
+public static class WindowPlacement
+{
+    [StructLayout(LayoutKind.Sequential)]
+    private struct Rect { public int Left, Top, Right, Bottom; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct Point { public int X, Y; }
+
+    [DllImport("user32.dll")]
+    private static extern bool GetWindowRect(IntPtr hwnd, out Rect rect);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr MonitorFromPoint(Point point, uint flags);
+
+    private const uint MonitorDefaultToNull = 0;
+
+    /// <summary>
+    /// Moves a window whose title bar is on no screen (for example after a monitor was unplugged while it was hidden in
+    /// the notification area) to the middle of the main screen.
+    /// </summary>
+    public static void EnsureOnScreen(Window window)
+    {
+        try
+        {
+            if (window.WindowState != WindowState.Normal) return;
+            var hwnd = new WindowInteropHelper(window).Handle;
+            if (hwnd == IntPtr.Zero || !GetWindowRect(hwnd, out var rect)) return;
+            // A point in the title bar, which is what the user needs to reach to move the window.
+            var titleBar = new Point { X = rect.Left + (rect.Right - rect.Left) / 2, Y = rect.Top + 12 };
+            if (MonitorFromPoint(titleBar, MonitorDefaultToNull) != IntPtr.Zero) return;
+            var area = SystemParameters.WorkArea;
+            var width = Math.Min(window.ActualWidth > 0 ? window.ActualWidth : window.Width, area.Width);
+            var height = Math.Min(window.ActualHeight > 0 ? window.ActualHeight : window.Height, area.Height);
+            window.Left = area.Left + (area.Width - width) / 2;
+            window.Top = area.Top + (area.Height - height) / 2;
+        }
+        catch { }
     }
 }
 

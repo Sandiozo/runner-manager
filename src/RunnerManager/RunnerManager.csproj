@@ -8,6 +8,9 @@
     <!-- WinForms is only used for the notification-area (tray) icon. -->
     <UseWindowsForms>true</UseWindowsForms>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <!-- Per-monitor DPI awareness is set in app.manifest, because WPF starts the app; the WinForms analyzer's
+         alternative (Application.SetHighDpiMode) only applies to WinForms apps. -->
+    <NoWarn>$(NoWarn);WFO0003</NoWarn>
     <ApplicationIcon>assets\RunnerManager.ico</ApplicationIcon>
     <AssemblyName>RunnerManager</AssemblyName>
     <RootNamespace>RunnerManager</RootNamespace>
