@@ -334,3 +334,120 @@ public class AgentHardeningTests
         finally { AgentServer.ListenRetryInterval = previous; }
     }
 }
+
+[Collection(FleetSettingsCollection.Name)]
+public class FleetConfigRobustnessTests
+{
+    private static readonly string ConfigPath = Path.Combine(FleetConfig.StateDir, "fleet.json");
+
+    private static void WriteRaw(string json)
+    {
+        Directory.CreateDirectory(FleetConfig.StateDir);
+        WithRetry(() =>
+        {
+            File.WriteAllText(ConfigPath, json);
+            File.SetLastWriteTimeUtc(ConfigPath, DateTime.UtcNow.AddDays(-1).AddTicks(Random.Shared.Next()));
+        });
+    }
+
+    private static void Cleanup()
+    {
+        WithRetry(() => File.Delete(ConfigPath));
+        foreach (var file in Directory.GetFiles(FleetConfig.StateDir, "fleet.json.damaged-*")) WithRetry(() => File.Delete(file));
+    }
+
+    private static void WithRetry(Action action)
+    {
+        for (var attempt = 0; ; attempt++)
+        {
+            try
+            {
+                action();
+                return;
+            }
+            catch (IOException) when (attempt < 20) { Thread.Sleep(100); }
+        }
+    }
+
+    private static string Protect(byte[] key) => Convert.ToBase64String(ProtectedData.Protect(key, null, DataProtectionScope.CurrentUser));
+
+    [Fact]
+    public void NullsInAHandEditedFile_BecomeDefaults()
+    {
+        try
+        {
+            WriteRaw("{\"Assistant\":null,\"KnownPeers\":[null,{\"Name\":\"PC2\",\"Address\":null}],\"ManualAddresses\":null}");
+            var config = FleetConfig.Current;
+            Assert.NotNull(config.Assistant);
+            Assert.False(config.Assistant.Enabled);
+            Assert.Equal("", Assert.Single(config.KnownPeers).Address);
+            Assert.Empty(config.ManualAddresses);
+            FleetConfig.Update(c => c.Assistant.AskBeforeChanges = false);
+        }
+        finally { Cleanup(); }
+    }
+
+    [Fact]
+    public void AValueOfTheWrongType_KeepsThePairingCodeAndTheOtherSettings()
+    {
+        var key = CommandSigner.NewKey();
+        try
+        {
+            WriteRaw($"{{\"ProtectedFleetKey\":\"{Protect(key)}\",\"Watchdog\":\"yes\",\"ManualAddresses\":[\"pc-a\"]}}");
+            var config = FleetConfig.Current;
+            Assert.Equal(key, config.FleetKey);
+            Assert.Contains("pc-a", config.ManualAddresses);
+            Assert.True(config.Watchdog);
+            Assert.Single(Directory.GetFiles(FleetConfig.StateDir, "fleet.json.damaged-*"));
+        }
+        finally { Cleanup(); }
+    }
+
+    [Fact]
+    public void ACutOffFile_StillKeepsThePairingCode()
+    {
+        var key = CommandSigner.NewKey();
+        try
+        {
+            WriteRaw($"{{\"ProtectedFleetKey\":\"{Protect(key)}\",\"KnownPeers\":[{{\"Name\":\"PC");
+            Assert.Equal(key, FleetConfig.Current.FleetKey);
+        }
+        finally { Cleanup(); }
+    }
+
+    [Fact]
+    public async Task Updates_WaitForAnotherProcessHoldingTheLock_AndSurviveOneThatDied()
+    {
+        try
+        {
+            FleetConfig.Update(c => c.ManualAddresses.Clear());
+            using var other = Mutex.OpenExisting(FleetConfig.FileLockName);
+            var held = new TaskCompletionSource();
+            var release = new TaskCompletionSource();
+            // Mutexes belong to a thread, so a thread of its own stands in for the other process.
+            var holder = new Thread(() =>
+            {
+                other.WaitOne();
+                held.SetResult();
+                release.Task.Wait();
+                other.ReleaseMutex();
+            });
+            holder.Start();
+            await held.Task;
+            var update = Task.Run(() => FleetConfig.Update(c => c.ManualAddresses.Add("after-lock")));
+            await Task.Delay(300);
+            Assert.False(update.IsCompleted);
+            release.SetResult();
+            await update.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Contains("after-lock", FleetConfig.Current.ManualAddresses);
+
+            // A holder that ends without releasing the lock.
+            var died = new Thread(() => other.WaitOne());
+            died.Start();
+            died.Join();
+            await Task.Run(() => FleetConfig.Update(c => c.ManualAddresses.Add("after-abandoned"))).WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Contains("after-abandoned", FleetConfig.Current.ManualAddresses);
+        }
+        finally { Cleanup(); }
+    }
+}
