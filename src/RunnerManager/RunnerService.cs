@@ -319,6 +319,7 @@ public static class RunnerService
         catch
         {
             // Leave the folder as it was, so trying again with the same folder works.
+            await UndoFailedRegistrationAsync(setup, scope, log);
             await Task.Run(() => RemoveFailedInstall(setup.InstallPath, createdFolder));
             throw;
         }
@@ -1140,6 +1141,46 @@ public static class RunnerService
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return 1; }
     }
+
+    /// <summary>
+    /// After a failed install: config.cmd may have registered the runner, or created its Windows service, before it
+    /// failed. The registration is removed, unless it replaced the registration of a runner being moved here (the old
+    /// copy needs it), and a service that points into the folder is deleted.
+    /// </summary>
+    private static async Task UndoFailedRegistrationAsync(RunnerSetup setup, string scope, Action<string> log)
+    {
+        if (File.Exists(Path.Combine(setup.InstallPath, ".runner")) && File.Exists(Path.Combine(setup.InstallPath, "config.cmd")))
+        {
+            if (setup.ReplaceExisting)
+                log("The runner registration is left in place, because it replaced the registration of the runner being moved.");
+            else
+            {
+                try
+                {
+                    log("Removing the registration the failed install made…");
+                    await RunConfigRemoveAsync(setup.InstallPath, await GitHubCli.GetRunnerTokenAsync(scope, removal: true));
+                }
+                catch (Exception ex)
+                {
+                    log($"Could not remove the registration ({FirstLine(ex.Message)}). Remove the runner {setup.RunnerName} in the runner settings on GitHub.");
+                }
+            }
+        }
+        List<RunnerServiceRecord> services;
+        try { services = await Task.Run(ReadRunnerServices); }
+        catch { return; }
+        foreach (var service in services.Where(s => SameFolder(s.Root, setup.InstallPath)))
+        {
+            log($"Removing the Windows service {service.Name} the failed install created…");
+            try { await ControlServiceAsync(service.Name, "Stop"); } catch { }
+            var (code, output) = await ScheduledTasks.RunAsync("sc.exe", $"delete \"{service.Name}\"", ScheduledTasks.ShortTimeout);
+            if (code != 0) log($"Could not remove the Windows service {service.Name}: {output.Trim()}");
+        }
+    }
+
+    private static bool SameFolder(string a, string b)
+        => !string.IsNullOrWhiteSpace(a) && !string.IsNullOrWhiteSpace(b)
+           && Path.GetFullPath(a).TrimEnd('\\').Equals(Path.GetFullPath(b).TrimEnd('\\'), StringComparison.OrdinalIgnoreCase);
 
     /// <summary>After a failed install: deletes the folder if this install created it, or empties it if it was empty before.</summary>
     private static void RemoveFailedInstall(string path, bool createdFolder)
