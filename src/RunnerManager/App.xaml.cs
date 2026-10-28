@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Windows;
 using System.Windows.Threading;
 
@@ -18,12 +19,16 @@ public partial class App : Application
     /// current user refuses elevated dashboards (their objects are owned by the Administrators group, not the user).
     /// </summary>
     private const string ActivateEventName = @"Local\RunnerManagerDashboard.Activate";
+    /// <summary>Set by setup and uninstall to ask the dashboard to exit, before they end it.</summary>
+    internal const string ExitEventName = @"Local\RunnerManagerDashboard.Exit";
     /// <summary>How long a new dashboard waits for one that is exiting (for example after "Restart now").</summary>
     private static readonly TimeSpan PreviousDashboardExitTimeout = TimeSpan.FromSeconds(10);
     private Mutex? _dashboardMutex;
     private bool _ownsDashboardMutex;
     private EventWaitHandle? _activateEvent;
     private RegisteredWaitHandle? _activateWait;
+    private EventWaitHandle? _exitEvent;
+    private RegisteredWaitHandle? _exitWait;
 
     /// <summary>
     /// This copy got administrator rights from a UAC prompt, not from the launch task: the task may be missing, turned off
@@ -142,7 +147,7 @@ public partial class App : Application
         {
             ShutdownMode = ShutdownMode.OnExplicitShutdown;
             ThemeManager.Apply(AppSettings.Load().Theme);
-            await UninstallAsync(quiet: e.Args.Any(a => a.Equals("--quiet", StringComparison.OrdinalIgnoreCase)));
+            await UninstallAsync(e.Args);
             Shutdown();
             return;
         }
@@ -158,6 +163,14 @@ public partial class App : Application
             return;
         }
 
+        var settings = AppSettings.Load();
+        ThemeManager.Apply(settings.Theme);
+        ShutdownMode = ShutdownMode.OnExplicitShutdown;
+        var minimized = e.Args.Any(a => a.Equals("--minimized", StringComparison.OrdinalIgnoreCase));
+
+        // "Restart now": the dashboard that started this one is exiting. Wait for it, so it is not asked to come to the front.
+        if (AfterProcessId(e.Args) is { } previous) await WaitForExitAsync(previous, PreviousDashboardExitTimeout);
+
         // One dashboard per user: a second launch brings the running one to the front instead.
         _dashboardMutex = new Mutex(initiallyOwned: false, DashboardMutexName);
         _ownsDashboardMutex = TryOwnDashboardMutex();
@@ -168,26 +181,26 @@ public partial class App : Application
                 Shutdown();
                 return;
             }
-            // Nobody answered: the other dashboard is exiting (for example after "Restart now"). Wait for it, then take over.
+            // Nobody answered: the other dashboard is exiting. Wait for it, then take over.
             // This stays on the UI thread, because a mutex belongs to the thread that acquired it.
-            var deadline = DateTime.UtcNow + PreviousDashboardExitTimeout;
-            while (!_ownsDashboardMutex && DateTime.UtcNow < deadline)
-            {
-                await Task.Delay(250);
-                _ownsDashboardMutex = TryOwnDashboardMutex();
-            }
+            _ownsDashboardMutex = await WaitForDashboardMutexAsync(PreviousDashboardExitTimeout);
             // Still running: it may have started listening meanwhile. Never open a second dashboard if it answers.
             if (!_ownsDashboardMutex && await SignalRunningDashboardAsync())
             {
                 Shutdown();
                 return;
             }
+            // It holds the lock but does not answer (it hangs). Never open a second dashboard beside it.
+            if (!_ownsDashboardMutex) _ownsDashboardMutex = !minimized && await OfferToCloseHungDashboardAsync();
+            if (!_ownsDashboardMutex)
+            {
+                MachineRelay.AppendAgentLog("Another dashboard is running but does not respond. This one was not opened.");
+                Shutdown();
+                return;
+            }
         }
 
-        var settings = AppSettings.Load();
-        ThemeManager.Apply(settings.Theme);
         DispatcherUnhandledException += OnUiUnhandledException;
-        ShutdownMode = ShutdownMode.OnExplicitShutdown;
 
         var window = new MainWindow();
         MainWindow = window;
@@ -198,10 +211,100 @@ public partial class App : Application
         }
         window.Closed += (_, _) => ExitApplication();
         ListenForActivation(window);
-        if (e.Args.Any(a => a.Equals("--minimized", StringComparison.OrdinalIgnoreCase)))
+        if (minimized)
             await window.StartAsync();
         else
             window.Show();
+    }
+
+    /// <summary>Passed by "Restart now" with the id of the dashboard that exits, so the new one waits for it.</summary>
+    internal const string AfterArgument = "--after=";
+
+    internal static int? AfterProcessId(string[] args)
+        => args.LastOrDefault(a => a.StartsWith(AfterArgument, StringComparison.OrdinalIgnoreCase)) is { } arg
+           && int.TryParse(arg[AfterArgument.Length..], out var id) && id > 0 ? id : null;
+
+    /// <summary>Starts the installed dashboard again (after an update) and exits this one.</summary>
+    public void RestartDashboard()
+    {
+        var start = new ProcessStartInfo(AppUpdater.InstalledExe) { UseShellExecute = true, WorkingDirectory = AppUpdater.InstallDir };
+        start.ArgumentList.Add(AfterArgument + Environment.ProcessId);
+        Process.Start(start);
+        ExitApplication();
+    }
+
+    private static async Task WaitForExitAsync(int processId, TimeSpan timeout)
+    {
+        try
+        {
+            using var process = Process.GetProcessById(processId);
+            using var wait = new CancellationTokenSource(timeout);
+            await process.WaitForExitAsync(wait.Token);
+        }
+        catch { }
+    }
+
+    private async Task<bool> WaitForDashboardMutexAsync(TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            await Task.Delay(250);
+            if (TryOwnDashboardMutex()) return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// A dashboard that holds the single-instance lock but does not answer: offers to end it, then takes over. Returns
+    /// whether this copy now owns the lock.
+    /// </summary>
+    private async Task<bool> OfferToCloseHungDashboardAsync()
+    {
+        const string close = "End it and open";
+        if (DialogWindow.Show(null, DialogTone.Warning, "Runner Manager does not respond",
+                "Runner Manager is already running, but it does not respond. End it and open a new window?", close, topmost: true) != close)
+            return false;
+        foreach (var process in OtherDashboardsInThisSession())
+        {
+            using (process)
+            {
+                try
+                {
+                    process.Kill();
+                    process.WaitForExit(5000);
+                }
+                catch { }
+            }
+        }
+        return await WaitForDashboardMutexAsync(TimeSpan.FromSeconds(5));
+    }
+
+    /// <summary>Other Runner Manager processes in this Windows session that are dashboards (not the agent or an AI tool).</summary>
+    private static List<Process> OtherDashboardsInThisSession()
+    {
+        var session = Process.GetCurrentProcess().SessionId;
+        var found = new List<Process>();
+        try
+        {
+            using var searcher = new System.Management.ManagementObjectSearcher(
+                $"SELECT ProcessId, SessionId, CommandLine FROM Win32_Process WHERE Name = '{AppPaths.ExeName}' OR Name = '{AppPaths.LegacyExeName}'");
+            foreach (System.Management.ManagementObject item in searcher.Get())
+            {
+                using (item)
+                {
+                    var id = Convert.ToInt32(item["ProcessId"]);
+                    // Split loosely: only whole flags are compared, so a path with spaces does no harm.
+                    var arguments = (item["CommandLine"]?.ToString() ?? string.Empty).Split(' ', StringSplitOptions.RemoveEmptyEntries)
+                        .Select(a => a.Trim('"').ToLowerInvariant()).ToArray();
+                    if (id == Environment.ProcessId || Convert.ToInt32(item["SessionId"]) != session) continue;
+                    if (arguments.Any(a => a is "--agent" or "--setup" or "--uninstall" or "--install-agent" or AssistantHost.McpArgument or AssistantHost.CliArgument)) continue;
+                    try { found.Add(Process.GetProcessById(id)); } catch (ArgumentException) { }
+                }
+            }
+        }
+        catch (Exception ex) { MachineRelay.AppendAgentLog($"Could not list running dashboards: {ex.Message}"); }
+        return found;
     }
 
     /// <summary>
@@ -228,30 +331,50 @@ public partial class App : Application
             MachineRelay.AppendAgentLog("The launch task started Runner Manager without administrator rights. Asked with UAC instead.");
     }
 
-    private static async Task UninstallAsync(bool quiet)
+    /// <summary>Passed by Settings after the user confirmed there, so the uninstaller does not ask again.</summary>
+    internal const string ConfirmedArgument = "--confirmed";
+    internal const string RemoveDataArgument = "--remove-data";
+
+    /// <summary>Asks whether to uninstall. Null when cancelled, otherwise whether to delete settings and logs too.</summary>
+    internal static bool? AskUninstall(Window? owner)
     {
+        const string remove = "Uninstall";
+        const string removeAll = "Uninstall and delete settings";
+        var choice = DialogWindow.Show(owner, DialogTone.Danger, "Uninstall Runner Manager?",
+            "This removes Runner Manager, the fleet agent, shortcuts and startup task, and removes this PC from the fleet. " +
+            "GitHub runners and Remote Desktop Commander keep running.",
+            remove, removeAll);
+        return choice == null ? null : choice == removeAll;
+    }
+
+    private static async Task UninstallAsync(string[] args)
+    {
+        var quiet = args.Contains("--quiet", StringComparer.OrdinalIgnoreCase);
         bool removeData;
         if (quiet) removeData = false;
-        else
-        {
-            const string remove = "Uninstall";
-            const string removeAll = "Uninstall and delete settings";
-            var choice = DialogWindow.Show(null, DialogTone.Danger, "Uninstall Runner Manager?",
-                "This removes Runner Manager, the fleet agent, shortcuts and startup task, and removes this PC from the fleet. " +
-                "GitHub runners and Remote Desktop Commander keep running.",
-                remove, removeAll);
-            if (choice == null) return;
-            removeData = choice == removeAll;
-        }
+        else if (args.Contains(ConfirmedArgument, StringComparer.OrdinalIgnoreCase))
+            removeData = args.Contains(RemoveDataArgument, StringComparer.OrdinalIgnoreCase);
+        else if (AskUninstall(null) is { } choice) removeData = choice;
+        else return;
         try
         {
-            await Installer.UninstallAsync(removeData, message => MachineRelay.AppendAgentLog($"Uninstall: {message}"));
-            if (!quiet) DialogWindow.Info(null, "Runner Manager is uninstalled", "Your runners continue to run as Windows services.");
+            var note = await Installer.UninstallAsync(removeData, message => MachineRelay.AppendAgentLog($"Uninstall: {message}"));
+            if (!quiet) DialogWindow.Info(null, "Runner Manager is uninstalled", $"Your runners continue to run as Windows services.{note}");
         }
         catch (Exception ex)
         {
             if (!quiet) DialogWindow.Error(null, "Could not uninstall Runner Manager", ex.Message);
         }
+    }
+
+    /// <summary>
+    /// Exit from the tray: asks first while an operation runs, because stopping halfway (for example between stopping and
+    /// starting the fleet agent) can leave things stopped.
+    /// </summary>
+    public void RequestExit()
+    {
+        if (MainWindow is MainWindow window && !window.ConfirmExitDuringOperation()) return;
+        ExitApplication();
     }
 
     /// <summary>Exits the dashboard even when it is set to keep running in the tray.</summary>
@@ -262,6 +385,10 @@ public partial class App : Application
         _activateWait = null;
         _activateEvent?.Dispose();
         _activateEvent = null;
+        _exitWait?.Unregister(null);
+        _exitWait = null;
+        _exitEvent?.Dispose();
+        _exitEvent = null;
         if (MainWindow is MainWindow window) window.PrepareExit();
         if (_ownsDashboardMutex)
         {
@@ -303,6 +430,14 @@ public partial class App : Application
                 (_, _) => Dispatcher.BeginInvoke(window.ShowFromTray), null, Timeout.Infinite, executeOnlyOnce: false);
         }
         catch (Exception ex) { MachineRelay.AppendAgentLog($"Could not listen for activation: {ex.Message}"); }
+        // Setup replaces the exe, and uninstall removes it: they ask the dashboard to exit before they would end it.
+        try
+        {
+            _exitEvent = new EventWaitHandle(false, EventResetMode.AutoReset, ExitEventName);
+            _exitWait = ThreadPool.RegisterWaitForSingleObject(_exitEvent,
+                (_, _) => Dispatcher.BeginInvoke(ExitApplication), null, Timeout.Infinite, executeOnlyOnce: true);
+        }
+        catch (Exception ex) { MachineRelay.AppendAgentLog($"Could not listen for exit requests: {ex.Message}"); }
     }
 
     /// <summary>Asks the running dashboard to come to the front. Returns false when no dashboard is listening.</summary>

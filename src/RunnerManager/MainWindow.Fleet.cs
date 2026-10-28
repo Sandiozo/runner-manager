@@ -346,10 +346,7 @@ public partial class MainWindow
         UpdateBanner.Visibility = Visibility.Collapsed;
         if (DialogWindow.Show(this, DialogTone.Question, $"Runner Manager {release.Tag} is installed",
                 "Restart Runner Manager now to use the new version?", "Restart now", cancel: "Later") == "Restart now")
-        {
-            Process.Start(new ProcessStartInfo(AppUpdater.InstalledExe) { UseShellExecute = true });
-            ((App)Application.Current).ExitApplication();
-        }
+            ((App)Application.Current).RestartDashboard();
     }
 
     private void DismissUpdateBanner_Click(object sender, RoutedEventArgs e)

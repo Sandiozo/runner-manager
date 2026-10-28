@@ -84,5 +84,44 @@ public class InstallFolderTests
         var custom = Installer.RemoveProgramFilesScript(@"D:\Apps\RunnerManager");
         Assert.DoesNotContain("-Recurse", custom);
         Assert.Contains("'RunnerManager.exe'", custom);
+        Assert.Contains("'RunnerManager.exe.previous'", custom);
+    }
+
+    [Fact]
+    public void AfterArgument_IsReadFromTheArguments()
+    {
+        Assert.Equal(1234, App.AfterProcessId(new[] { "--minimized", App.AfterArgument + "1234" }));
+        Assert.Null(App.AfterProcessId(new[] { App.AfterArgument + "x" }));
+        Assert.Null(App.AfterProcessId(Array.Empty<string>()));
+    }
+}
+
+[Collection(FleetSettingsCollection.Name)]
+public class UninstallDataTests
+{
+    [Fact]
+    public void RemovingData_KeepsTheTurnedOffStartupScripts()
+    {
+        var source = Path.Combine(FleetConfig.StateDir, "disabled-startup");
+        var documents = Path.Combine(Path.GetTempPath(), $"rm-documents-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(source);
+        Directory.CreateDirectory(documents);
+        try
+        {
+            Assert.Null(Installer.KeepDisabledStartupScripts(_ => { }, documents).Folder);
+            File.WriteAllText(Path.Combine(source, "start-runner.cmd"), "run.cmd");
+            Directory.CreateDirectory(Path.Combine(documents, "Runner Manager startup scripts"));
+
+            var (folder, moved) = Installer.KeepDisabledStartupScripts(_ => { }, documents);
+
+            Assert.True(moved);
+            Assert.Equal(Path.Combine(documents, "Runner Manager startup scripts (2)"), folder);
+            Assert.Equal("run.cmd", File.ReadAllText(Path.Combine(folder!, "start-runner.cmd")));
+        }
+        finally
+        {
+            Directory.Delete(source, recursive: true);
+            Directory.Delete(documents, recursive: true);
+        }
     }
 }

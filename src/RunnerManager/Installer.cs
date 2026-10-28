@@ -228,16 +228,31 @@ public static class Installer
         if (dashboards.Count == 0) return;
 
         log("Closing Runner Manager...");
+        // Asked first, so a dashboard saves its settings and removes its tray icon; ended only when it has not exited after a few seconds.
+        EventWaitHandle? exit = null;
+        try { if (EventWaitHandle.TryOpenExisting(App.ExitEventName, out var opened)) (exit = opened).Set(); }
+        catch { }
+        var deadline = DateTime.UtcNow + DashboardExitTimeout;
         foreach (var process in dashboards)
         {
-            try { process.Kill(); } catch { }
+            try
+            {
+                var left = deadline - DateTime.UtcNow;
+                if (left <= TimeSpan.Zero || !process.WaitForExit(left)) process.Kill();
+            }
+            catch { }
         }
         foreach (var process in dashboards)
         {
             try { process.WaitForExit(5000); } catch { }
             process.Dispose();
         }
+        // Not left set for a dashboard that starts later (setup starts the new one).
+        try { exit?.Reset(); } catch { }
+        exit?.Dispose();
     }
+
+    private static readonly TimeSpan DashboardExitTimeout = TimeSpan.FromSeconds(5);
 
     private static bool IsAgentCommandLine(string commandLine)
         => commandLine.Split(' ', StringSplitOptions.RemoveEmptyEntries)
@@ -267,9 +282,9 @@ public static class Installer
     /// <summary>
     /// Removes Runner Manager from this PC: leaves the fleet (the other PCs forget it), removes the agent, the start-up
     /// task, shortcuts and the Apps entry, then deletes the program folder (and optionally settings and logs) after exit.
-    /// GitHub runners and Remote Desktop Commander are not touched.
+    /// GitHub runners and Remote Desktop Commander are not touched. Returns a sentence to add to the result, or empty.
     /// </summary>
-    public static async Task UninstallAsync(bool removeData, Action<string> log)
+    public static async Task<string> UninstallAsync(bool removeData, Action<string> log)
     {
         // Read before the Settings → Apps entry that records a chosen folder is deleted below.
         var installDir = AppUpdater.InstallDir;
@@ -290,9 +305,61 @@ public static class Installer
 
         // The running exe can't delete its own folder; a helper does it once this process has exited.
         var script = RemoveProgramFilesScript(installDir);
-        if (removeData) script += $"; Remove-Item -LiteralPath '{FleetConfig.StateDir.Replace("'", "''")}' -Recurse -Force -ErrorAction SilentlyContinue";
+        var note = string.Empty;
+        if (removeData)
+        {
+            // Startup scripts that converting a runner to a service turned off exist nowhere else, so they are never deleted.
+            var scripts = KeepDisabledStartupScripts(log);
+            var data = FleetConfig.StateDir.Replace("'", "''");
+            script += scripts.Moved || scripts.Folder == null
+                ? $"; Remove-Item -LiteralPath '{data}' -Recurse -Force -ErrorAction SilentlyContinue"
+                : $"; Get-ChildItem -LiteralPath '{data}' -Force -ErrorAction SilentlyContinue | Where-Object {{ $_.Name -ne '{DisabledStartupFolderName}' }} | " +
+                  "Remove-Item -Recurse -Force -ErrorAction SilentlyContinue";
+            if (scripts.Folder != null)
+                note = $" Startup scripts that Runner Manager had turned off are {(scripts.Moved ? "now" : "kept")} in {scripts.Folder}.";
+        }
         AppUpdater.RunAfterExit(script, TimeSpan.FromSeconds(60), TimeSpan.FromSeconds(1));
         log("Runner Manager was removed.");
+        return note;
+    }
+
+    private const string DisabledStartupFolderName = "disabled-startup";
+
+    /// <summary>
+    /// Moves the startup scripts that Runner Manager turned off (when a console runner became a service) from its data
+    /// folder to Documents\Runner Manager startup scripts. Returns where they are, and whether they were moved; the folder
+    /// is null when there are none.
+    /// </summary>
+    internal static (string? Folder, bool Moved) KeepDisabledStartupScripts(Action<string> log, string? documents = null)
+    {
+        var source = Path.Combine(FleetConfig.StateDir, DisabledStartupFolderName);
+        try
+        {
+            if (!Directory.Exists(source) || !Directory.EnumerateFileSystemEntries(source).Any()) return (null, false);
+        }
+        catch { return (null, false); }
+        try
+        {
+            documents ??= Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+            var target = Path.Combine(documents, "Runner Manager startup scripts");
+            for (var i = 2; Directory.Exists(target) || File.Exists(target); i++)
+                target = Path.Combine(documents, $"Runner Manager startup scripts ({i})");
+            Directory.CreateDirectory(target);
+            // Copied, not moved: Documents may be on another drive.
+            foreach (var file in Directory.EnumerateFiles(source, "*", SearchOption.AllDirectories))
+            {
+                var destination = Path.Combine(target, Path.GetRelativePath(source, file));
+                Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+                File.Copy(file, destination);
+            }
+            log($"Moved the startup scripts that Runner Manager had turned off to {target}.");
+            return (target, true);
+        }
+        catch (Exception ex)
+        {
+            log($"Could not move the startup scripts that Runner Manager had turned off ({ex.Message}). They stay in {source}.");
+            return (source, false);
+        }
     }
 
     /// <summary>
@@ -361,7 +428,10 @@ internal static class InstallChecks
                 var entries = Read();
                 entries[check] = AppUpdater.CurrentVersion;
                 Directory.CreateDirectory(FleetConfig.StateDir);
-                File.WriteAllLines(MarkerPath, entries.Select(e => $"{e.Key}={e.Value}"));
+                // Written to a temporary file first, so an interrupted write never leaves an empty file behind.
+                var temp = $"{MarkerPath}.{Environment.ProcessId}.tmp";
+                File.WriteAllLines(temp, entries.Select(e => $"{e.Key}={e.Value}"));
+                File.Move(temp, MarkerPath, overwrite: true);
             }
             catch { }
         }

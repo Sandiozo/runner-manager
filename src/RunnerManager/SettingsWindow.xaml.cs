@@ -516,10 +516,7 @@ public partial class SettingsWindow : Window
         if (!installed) return;
         if (DialogWindow.Show(this, DialogTone.Question, $"Runner Manager {release.Tag} is installed",
                 "Restart Runner Manager now to use the new version?", "Restart now", cancel: "Later") == "Restart now")
-        {
-            Process.Start(new ProcessStartInfo(AppUpdater.InstalledExe) { UseShellExecute = true });
-            ((App)Application.Current).ExitApplication();
-        }
+            ((App)Application.Current).RestartDashboard();
     }
 
     private void Releases_Click(object sender, RoutedEventArgs e)
@@ -541,8 +538,12 @@ public partial class SettingsWindow : Window
 
     private void Uninstall_Click(object sender, RoutedEventArgs e)
     {
-        var exe = AppUpdater.PreferredExe;
-        Process.Start(new ProcessStartInfo(exe) { UseShellExecute = true, ArgumentList = { "--uninstall" } });
+        // Asked here, so cancelling keeps this dashboard running.
+        if (App.AskUninstall(this) is not { } removeData) return;
+        if (Owner is MainWindow main && !main.ConfirmExitDuringOperation()) return;
+        var start = new ProcessStartInfo(AppUpdater.PreferredExe) { UseShellExecute = true, ArgumentList = { "--uninstall", App.ConfirmedArgument } };
+        if (removeData) start.ArgumentList.Add(App.RemoveDataArgument);
+        Process.Start(start);
         ((App)Application.Current).ExitApplication();
     }
 }

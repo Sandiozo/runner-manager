@@ -41,6 +41,7 @@ public partial class MainWindow : Window
     private bool _refreshQueued;
     private bool _refreshQueuedForceAuth;
     private bool _operationRunning;
+    private string _operationTitle = string.Empty;
     private bool _githubAuthenticated;
     private string _githubLogin = string.Empty;
     private bool _isEnrolled;
@@ -652,6 +653,7 @@ public partial class MainWindow : Window
             return false;
         }
         _operationRunning = true;
+        _operationTitle = title;
         SetStatus($"{title}…", StatusKind.Busy);
         var succeeded = false;
         try
@@ -1020,13 +1022,23 @@ public partial class MainWindow : Window
         _tray = new TrayIcon(_settings);
         _tray.OpenRequested += ShowFromTray;
         _tray.RefreshRequested += async () => await ManualRefreshAsync();
-        _tray.ExitRequested += () => ((App)Application.Current).ExitApplication();
+        _tray.ExitRequested += () => ((App)Application.Current).RequestExit();
         _tray.NotificationsToggled += value => { _settings.Notifications = value; _settings.Save(); };
         _tray.CloseToTrayToggled += value => { _settings.CloseToTray = value; _settings.Save(); };
     }
 
     /// <summary>Lets the next close really close instead of hiding to the tray.</summary>
     public void PrepareExit() => _exiting = true;
+
+    /// <summary>While an operation runs, asks whether to exit anyway. True when nothing runs or the user agreed.</summary>
+    public bool ConfirmExitDuringOperation()
+    {
+        if (!_operationRunning) return true;
+        if (!IsVisible) ShowFromTray();
+        return DialogWindow.Confirm(this, "An operation is running",
+            $"“{_operationTitle}” is still running. Exiting now can leave it half done, for example with the fleet agent stopped. Exit anyway?",
+            "Exit anyway", danger: true);
+    }
 
     public void ShowFromTray()
     {
@@ -1046,6 +1058,11 @@ public partial class MainWindow : Window
                 _trayHintShown = true;
                 _tray?.Notify("Runner Manager is still running", "Monitoring continues in the notification area. To exit, right-click the icon.");
             }
+            return;
+        }
+        if (!_exiting && !ConfirmExitDuringOperation())
+        {
+            e.Cancel = true;
             return;
         }
         _refreshTimer.Stop();
