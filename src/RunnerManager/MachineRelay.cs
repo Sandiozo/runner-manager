@@ -342,7 +342,8 @@ public static class MachineRelay
     /// The command's ID. Pass the same ID again to retry a send whose answer was lost: the agent runs each ID once.
     /// </param>
     public static async Task<string> SendCommandAsync(string machineKey, string target, string targetKey, string action,
-        string runnerName = "", string[]? runnerLabels = null, string value = "", string? commandId = null)
+        string runnerName = "", string[]? runnerLabels = null, string value = "", string? commandId = null,
+        RunnerRegistrationOptions? options = null)
     {
         var command = new MachineCommand
         {
@@ -353,6 +354,7 @@ public static class MachineRelay
             Action = action,
             RunnerName = runnerName,
             RunnerLabels = runnerLabels ?? Array.Empty<string>(),
+            RegistrationOptions = options,
             Value = value
         };
         var (address, machineId) = Route(machineKey);
@@ -659,7 +661,8 @@ public static class MachineRelay
                         RunnerName = command.RunnerName,
                         InstallPath = RunnerService.SuggestInstallPath(url),
                         Labels = command.RunnerLabels,
-                        ReplaceExisting = command.Value == "replace"
+                        ReplaceExisting = command.Value == "replace",
+                        Options = command.RegistrationOptions ?? RunnerRegistrationOptions.None
                     }, message => AppendAgentLog($"Create runner: {message}"));
                     return $"Runner created: {command.RunnerName}";
                 case "Retire":
@@ -677,7 +680,9 @@ public static class MachineRelay
                 case "Start" or "Stop" or "Restart":
                     // A move disables the old copy's service while it runs, and enables it again if the move failed.
                     if (command.Value == "enable") await FleetActions.SetServiceEnabledAsync(command.TargetKey, true);
-                    await RunnerService.ControlServiceAsync(command.TargetKey, command.Action);
+                    // A move stops the old copy only when it is idle, checked right before stopping.
+                    if (command.Value == "disable") await RunnerService.StopIfIdleAsync(command.TargetKey);
+                    else await RunnerService.ControlServiceAsync(command.TargetKey, command.Action);
                     FleetConfig.SetManuallyStopped(command.TargetKey, command.Action == "Stop");
                     if (command.Action == "Stop") WantRunning.Remove(command.TargetKey);
                     if (command.Value == "disable") await FleetActions.SetServiceEnabledAsync(command.TargetKey, false);
@@ -1222,6 +1227,7 @@ public static class MachineRelay
                 AgentName = r.AgentName,
                 AgentId = r.AgentId,
                 CustomLabels = r.CustomLabels,
+                RegistrationOptions = r.RegistrationOptions,
                 IsRunning = r.IsRunning,
                 ActivityText = r.ActivityText,
                 ServiceInstalled = r.ServiceInstalled,
@@ -1490,5 +1496,7 @@ public sealed record MachineCommand
     public string Action { get; init; } = string.Empty;
     public string RunnerName { get; init; } = string.Empty;
     public string[] RunnerLabels { get; init; } = Array.Empty<string>();
+    /// <summary>For Create: registration settings to keep (runner group, ephemeral, …). Older agents ignore it.</summary>
+    public RunnerRegistrationOptions? RegistrationOptions { get; init; }
     public string Value { get; init; } = string.Empty;
 }

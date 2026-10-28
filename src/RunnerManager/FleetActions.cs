@@ -15,7 +15,8 @@ public sealed class FleetActions
 
     /// <summary>Runs an action on this PC directly, or sends it to a fleet agent and waits for its result.</summary>
     public async Task RunOnMachineAsync(MachineInfo machine, string target, string targetKey, string action, Action<string> log,
-        Func<Task> local, TimeSpan timeout, string runnerName = "", string[]? labels = null, string value = "")
+        Func<Task> local, TimeSpan timeout, string runnerName = "", string[]? labels = null, string value = "",
+        RunnerRegistrationOptions? options = null)
     {
         if (machine.IsLocal && !_viaLocalAgent)
         {
@@ -23,12 +24,12 @@ public sealed class FleetActions
             return;
         }
         var id = Guid.NewGuid().ToString("N");
-        try { await MachineRelay.SendCommandAsync(machine.MachineKey, target, targetKey, action, runnerName, labels, value, id); }
+        try { await MachineRelay.SendCommandAsync(machine.MachineKey, target, targetKey, action, runnerName, labels, value, id, options); }
         catch (Exception ex) when (ex is OperationCanceledException or HttpRequestException)
         {
             // The agent may have queued it before its answer was lost. Sending the same ID again is safe: each ID runs once.
             log($"{machine.MachineName} did not answer. Sending the request again…");
-            await MachineRelay.SendCommandAsync(machine.MachineKey, target, targetKey, action, runnerName, labels, value, id);
+            await MachineRelay.SendCommandAsync(machine.MachineKey, target, targetKey, action, runnerName, labels, value, id, options);
         }
         var result = await MachineRelay.WaitForCommandAsync(machine.MachineKey, id, timeout);
         log($"{machine.MachineName}: {result}");
@@ -84,6 +85,7 @@ public sealed class FleetActions
 
         var labels = await LabelsToKeepAsync(runner, knownLabels);
         log(labels.Length > 0 ? $"Keeping labels: {string.Join(", ", labels)}" : "No custom labels to keep.");
+        var options = runner.RegistrationOptions ?? RunnerRegistrationOptions.None;
 
         // 1. Stop the old copy so it cannot pick up a job during the move (and so auto-recovery leaves it alone), and
         //    disable its service so it doesn't start again at the next restart. Agents before protocol 12 only stop it.
@@ -92,7 +94,12 @@ public sealed class FleetActions
             async () =>
             {
                 FleetConfig.SetManuallyStopped(runner.CommandKey, true);
-                await RunnerService.ControlServiceAsync(runner.CommandKey, "Stop");
+                try { await RunnerService.StopIfIdleAsync(runner.CommandKey); }
+                catch
+                {
+                    FleetConfig.SetManuallyStopped(runner.CommandKey, false);
+                    throw;
+                }
                 await SetServiceEnabledAsync(runner.CommandKey, false);
             },
             TimeSpan.FromMinutes(2), value: "disable");
@@ -108,9 +115,10 @@ public sealed class FleetActions
                     RunnerName = runner.AgentName,
                     InstallPath = RunnerService.SuggestInstallPath(url),
                     Labels = labels,
-                    ReplaceExisting = true
+                    ReplaceExisting = true,
+                    Options = options
                 }, log),
-                TimeSpan.FromMinutes(10), runnerName: runner.AgentName, labels: labels, value: "replace");
+                TimeSpan.FromMinutes(10), runnerName: runner.AgentName, labels: labels, value: "replace", options: options);
         }
         catch (Exception ex) when (!RunsHere(target) && ex is TimeoutException or OperationCanceledException)
         {

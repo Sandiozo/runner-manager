@@ -839,3 +839,21 @@ public class RemoteDesktopProcessTests
         Assert.False(Matches("powershell.exe", "powershell -File C:\\Temp\\rdc-launch.ps1"));
     }
 }
+
+public class MoveSettingsTests
+{
+    [Fact]
+    public void RegistrationSettings_TravelWithTheCreateCommand_AndOlderCommandsHaveNone()
+    {
+        var command = new MachineCommand
+        {
+            Action = "Create",
+            RegistrationOptions = new RunnerRegistrationOptions("Builders", Ephemeral: true, DisableUpdate: true, NoDefaultLabels: true)
+        };
+        var copy = JsonSerializer.Deserialize<MachineCommand>(JsonSerializer.SerializeToUtf8Bytes(command))!;
+        Assert.Equal(command.RegistrationOptions, copy.RegistrationOptions);
+
+        var old = JsonSerializer.Deserialize<MachineCommand>("""{"Action":"Create","RunnerName":"build"}""")!;
+        Assert.Null(old.RegistrationOptions);
+    }
+}

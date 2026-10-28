@@ -35,6 +35,8 @@ public sealed class MachineRunnerStatus : INotifyPropertyChanged
     public long AgentId { get; init; }
     /// <summary>Labels besides self-hosted, Windows and X64 (empty from older agents, or when GitHub could not be read).</summary>
     public string[] CustomLabels { get; init; } = Array.Empty<string>();
+    /// <summary>Runner group, ephemeral and the other registration settings, kept when the runner moves (null from older agents).</summary>
+    public RunnerRegistrationOptions? RegistrationOptions { get; init; }
     public bool IsRunning { get; init; }
     public string ActivityText { get; init; } = string.Empty;
     public bool ServiceInstalled { get; init; }
@@ -110,7 +112,7 @@ public sealed class MachineRunnerStatus : INotifyPropertyChanged
     [JsonIgnore] public Visibility ManuallyStoppedVisibility => ManuallyStopped && !IsRunning ? Visibility.Visible : Visibility.Collapsed;
     [JsonIgnore] public string ExpandGlyph => IsExpanded ? "" : "";
     [JsonIgnore] public string LabelsText => LocalRunner is { CustomLabels.Length: > 0 } local
-        ? string.Join("  ·  ", local.CustomLabels) : "self-hosted, Windows, X64";
+        ? string.Join("  ·  ", local.CustomLabels) : $"self-hosted, Windows, {(IsLocalMachine ? RunnerService.ArchitectureLabel : "X64")}";
     [JsonIgnore] public bool HasCurrentJob => !string.IsNullOrWhiteSpace(LocalRunner?.CurrentJobUrl);
     // Runners on this PC use the dashboard's own readings, so the details are complete even before the agent is updated.
     [JsonIgnore] private long? EffectiveWorkFolderBytes => LocalRunner?.WorkFolderBytes ?? WorkFolderBytes;
@@ -313,6 +315,7 @@ public sealed class MachineInfo : INotifyPropertyChanged
                 AgentName = r.AgentName,
                 AgentId = r.AgentId,
                 CustomLabels = r.CustomLabels,
+                RegistrationOptions = r.RegistrationOptions,
                 IsRunning = r.IsRunning,
                 ActivityText = r.ActivityText,
                 ServiceInstalled = r.ServiceInstalled,

@@ -252,7 +252,7 @@ public partial class MainWindow : Window
     public void RestartLocalAgentInBackground()
         => RunAgentWorkInBackground("Restart the fleet agent", async log =>
         {
-            await MachineRelay.RestartLocalAgentAsync();
+            await MachineRelay.RestartLocalAgentAsync(log: log);
             log("The fleet agent runs the new version.");
         });
 
@@ -337,7 +337,7 @@ public partial class MainWindow : Window
             var pending = string.Empty;
             if (_pendingRdcCommands.TryGetValue(machine.MachineKey, out var command))
             {
-                if (machine.LastCommandId.Equals(command.CommandId, StringComparison.OrdinalIgnoreCase)
+                if (machine.HasFinished(command.CommandId)
                     || DateTime.UtcNow - command.QueuedUtc > PendingCommandTimeout)
                     _pendingRdcCommands.Remove(machine.MachineKey);
                 else
@@ -462,7 +462,7 @@ public partial class MainWindow : Window
                 || (pending.Action == "Start" && runner.IsRunning)
                 || (pending.Action == "Stop" && !runner.IsRunning)
                 || (pending.Action is "Restart" or "Edit" or "CleanWork" or "Remove" or "Convert" && !string.IsNullOrEmpty(pending.CommandId)
-                    && machine.LastCommandId.Equals(pending.CommandId, StringComparison.OrdinalIgnoreCase));
+                    && machine.HasFinished(pending.CommandId));
             if (done) _pendingRunnerCommands.Remove(key);
             runner.SetPending(done ? string.Empty : pending.Action);
         }
