@@ -271,7 +271,7 @@ public static class Installer
         // still hold it for a moment.
         var remove = AppUpdater.IsDefaultInstallDir(folder)
             ? "Remove-Item -LiteralPath $f -Recurse -Force -ErrorAction SilentlyContinue"
-            : "foreach ($p in 'RunnerManager.exe', 'RunnerManager.exe.new', 'RunnerManager.*.old.exe') " +
+            : "foreach ($p in 'RunnerManager.exe', 'RunnerManager.exe.new', 'RunnerManager.exe.previous', 'RunnerManager.*.old.exe') " +
               "{ Get-ChildItem -LiteralPath $f -Filter $p -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue }; " +
               "$left = @(Get-ChildItem -LiteralPath $f -Force -ErrorAction SilentlyContinue); " +
               "if ($left.Count -eq 0) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue } " +

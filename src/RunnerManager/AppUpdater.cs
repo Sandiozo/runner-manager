@@ -324,6 +324,7 @@ public static class AppUpdater
             if (!IsNewer(ProbeSupportedSince, release.Version))
                 await EnsureRuntimeAsync(downloaded, staging, log);
 
+            var replacedVersion = InstalledVersion ?? string.Empty;
             await Task.Run(() => WithUpdateLock(() =>
             {
                 Directory.CreateDirectory(InstallDir);
@@ -331,8 +332,10 @@ public static class AppUpdater
                 {
                     try { File.Delete(old); } catch { }
                 }
-                ReplaceFile(downloaded, InstalledExe);
+                ReplaceFile(downloaded, InstalledExe, keepPrevious: true);
             }));
+            // The fleet agent of the new version proves that it works, or the previous exe is put back (see UpdateGuard).
+            UpdateGuard.MarkPending(release.Version, replacedVersion);
             log($"Installed {release.Tag} to {InstallDir}.");
             return InstalledExe;
         }
@@ -386,35 +389,103 @@ public static class AppUpdater
     /// Puts <paramref name="source"/> at <paramref name="destination"/> without a moment where neither exists. The new file
     /// is copied next to the destination first; a running exe can't be overwritten but can be renamed, so the current file
     /// is renamed away, the new one is moved into place, and the current file is renamed back if that fails.
+    /// With <paramref name="keepPrevious"/>, the current file is kept as "{destination}.previous", so the update can be undone.
     /// </summary>
-    private static void ReplaceFile(string source, string destination)
+    private static void ReplaceFile(string source, string destination, bool keepPrevious = false)
     {
         var next = destination + ".new";
-        File.Copy(source, next, overwrite: true);
+        // Antivirus scanners briefly lock new exe files, so moves are retried.
+        Retry(() => File.Copy(source, next, overwrite: true));
         string? previous = null;
         if (File.Exists(destination))
         {
-            previous = Path.Combine(Path.GetDirectoryName(destination)!,
-                $"{Path.GetFileNameWithoutExtension(destination)}.{DateTime.UtcNow.Ticks}.old{Path.GetExtension(destination)}");
-            File.Move(destination, previous);
+            var aside = keepPrevious ? destination + ".previous" : OldPathFor(destination);
+            // The version kept last time may still run (a dashboard that was not restarted): rename it out of the way.
+            if (keepPrevious && File.Exists(aside)) Retry(() => File.Move(aside, OldPathFor(destination)));
+            Retry(() => File.Move(destination, aside));
+            previous = aside;
         }
         try
         {
-            File.Move(next, destination);
+            Retry(() => File.Move(next, destination));
         }
-        catch
+        catch (Exception ex)
         {
-            if (previous != null)
-            {
-                try { File.Move(previous, destination); } catch { }
-            }
+            if (previous != null) PutBack(previous, destination, ex);
             try { File.Delete(next); } catch { }
             throw;
         }
         // Succeeds when the old file is not in use; otherwise the next install removes it.
-        if (previous != null)
+        if (previous != null && !keepPrevious)
         {
             try { File.Delete(previous); } catch { }
+        }
+    }
+
+    /// <summary>
+    /// Puts RunnerManager.exe.previous back as RunnerManager.exe. The current exe (it may be running) is renamed to an
+    /// .old.exe file, which a later install removes.
+    /// </summary>
+    internal static void RestorePrevious()
+    {
+        var previous = InstalledExe + ".previous";
+        if (!File.Exists(previous)) throw new FileNotFoundException("There is no previous version to go back to.", previous);
+        WithUpdateLock(() =>
+        {
+            string? aside = null;
+            if (File.Exists(InstalledExe))
+            {
+                aside = OldPathFor(InstalledExe);
+                Retry(() => File.Move(InstalledExe, aside));
+            }
+            try { Retry(() => File.Move(previous, InstalledExe)); }
+            catch (Exception ex)
+            {
+                if (aside != null) PutBack(aside, InstalledExe, ex);
+                throw;
+            }
+        });
+    }
+
+    private static string OldPathFor(string file) => Path.Combine(Path.GetDirectoryName(file)!,
+        $"{Path.GetFileNameWithoutExtension(file)}.{DateTime.UtcNow.Ticks}.old{Path.GetExtension(file)}");
+
+    /// <summary>
+    /// Moves <paramref name="aside"/> back to <paramref name="destination"/> after a failed swap. When even that fails
+    /// (for example an antivirus scanner holds it), a copy is tried, so the install folder is never left without the file.
+    /// </summary>
+    private static void PutBack(string aside, string destination, Exception cause)
+    {
+        try
+        {
+            Retry(() => File.Move(aside, destination));
+            return;
+        }
+        catch { }
+        try
+        {
+            Retry(() => File.Copy(aside, destination, overwrite: false));
+            return;
+        }
+        catch { }
+        throw new InvalidOperationException(
+            $"{cause.Message} {Path.GetFileName(destination)} could not be put back either. Rename {aside} to {Path.GetFileName(destination)} to repair it.", cause);
+    }
+
+    /// <summary>Runs a file operation, retrying for about three seconds while the file is in use.</summary>
+    private static void Retry(Action action)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                action();
+                return;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException && ex is not FileNotFoundException && attempt < 6)
+            {
+                Thread.Sleep(200 * attempt);
+            }
         }
     }
 
@@ -557,7 +628,7 @@ public static class AppUpdater
             if (files.Count == 1 && IsDefaultInstallDir(InstallDir))
             {
                 foreach (var stale in Directory.EnumerateFiles(InstallDir)
-                             .Where(f => !Path.GetFileName(f).Equals(AssetName, StringComparison.OrdinalIgnoreCase) && !f.Contains(".old.")))
+                             .Where(f => !Path.GetFileName(f).StartsWith(AssetName, StringComparison.OrdinalIgnoreCase) && !f.Contains(".old.")))
                 {
                     try { File.Delete(stale); }
                     catch { try { File.Move(stale, $"{stale}.{DateTime.UtcNow.Ticks}.old{Path.GetExtension(stale)}"); } catch { } }

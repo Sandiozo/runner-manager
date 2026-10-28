@@ -83,6 +83,15 @@ public partial class App : Application
                 MachineRelay.AppendAgentLog($"Unhandled agent error: {args.Exception}");
                 args.Handled = true;
             };
+            // An update that keeps crashing is undone here; the task then starts the previous version again. A second
+            // agent exits right away (only one may run), so it is not counted.
+            var another = await MachineRelay.IsAgentRunningAsync();
+            if (!another && !UpdateGuard.OnAgentStarting())
+            {
+                AppUpdater.ScheduleAgentTaskRestart(ScheduledTasks.AgentTaskName);
+                Shutdown(1);
+                return;
+            }
             try { await MachineRelay.RunAgentAsync(CancellationToken.None); }
             catch (Exception ex)
             {
@@ -91,6 +100,7 @@ public partial class App : Application
                 Shutdown(1);
                 return;
             }
+            if (!another) UpdateGuard.OnAgentExiting();
             Shutdown();
             return;
         }

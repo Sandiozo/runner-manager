@@ -21,6 +21,8 @@ public partial class MainWindow
     private bool _started;
     private DateTime _lastRunsRefresh = DateTime.MinValue;
     private DateTime _lastRunnerReleaseCheck = DateTime.MinValue;
+    private static readonly TimeSpan UpdateGuardInterval = TimeSpan.FromMinutes(1);
+    private DateTime _lastUpdateGuardCheck = DateTime.MinValue;
 
     /// <summary>Starts monitoring. Called when the window loads, or directly when starting minimized to the tray.</summary>
     public async Task StartAsync()
@@ -35,6 +37,7 @@ public partial class MainWindow
             await Installer.EnsureLaunchTaskAsync();
         }
         catch (Exception ex) { AddActivity($"Could not update the install: {ex.Message}"); }
+        if (UpdateGuard.TakeRollbackNotice() is { } notice) RaiseAlert(notice, warning: true);
         await RefreshAsync(forceAuthCheck: true);
         _refreshTimer.Start();
         StartLiveJobs();
@@ -82,6 +85,12 @@ public partial class MainWindow
                 && latest != _settings.DismissedUpdateVersion;
             UpdateBanner.Visibility = showBanner ? Visibility.Visible : Visibility.Collapsed;
             if (showBanner) UpdateBannerText.Text = $"Runner Manager v{latest} is available. Current version: v{AppUpdater.CurrentVersion}.";
+
+            if (DateTime.UtcNow - _lastUpdateGuardCheck >= UpdateGuardInterval)
+            {
+                _lastUpdateGuardCheck = DateTime.UtcNow;
+                if (await UpdateGuard.CheckFromDashboardAsync(_isEnrolled) is { } notice) RaiseAlert(notice, warning: true);
+            }
 
             if (!_githubAuthenticated) return;
             if (DateTime.UtcNow - _lastRunnerReleaseCheck > RunnerReleaseInterval)

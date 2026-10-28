@@ -210,6 +210,8 @@ public partial class MainWindow : Window
     {
         if (_localAgentUpdateTried || _localAgentUpdateScheduled
             || local is not { LocalAgentOutdated: true } || FleetConfig.Current.FleetKey == null) return;
+        // This version was just undone because its agent did not work; do not put it back.
+        if (UpdateGuard.WasRolledBack(AppUpdater.CurrentVersion)) return;
         _localAgentUpdateScheduled = true;
         Dispatcher.BeginInvoke(async () =>
         {
