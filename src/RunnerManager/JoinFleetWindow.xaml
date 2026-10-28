@@ -77,7 +77,7 @@
                                             <TextBlock Text="&#xE7F8;" Style="{StaticResource Icon}" Margin="0,0,12,0" Foreground="{DynamicResource TextMutedBrush}"/>
                                             <StackPanel>
                                                 <TextBlock Text="{Binding Name}" FontWeight="SemiBold" Foreground="{DynamicResource TextBrush}"/>
-                                                <TextBlock Text="{Binding Address}" Style="{StaticResource Caption}" FontSize="11"/>
+                                                <TextBlock Text="{Binding Detail}" Style="{StaticResource Caption}" FontSize="11"/>
                                             </StackPanel>
                                         </DockPanel>
                                     </Button>

@@ -4,6 +4,7 @@ using System.Net;
 using System.Net.Http;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 
@@ -11,12 +12,24 @@ namespace RunnerManager;
 
 public sealed record FleetRequest
 {
-    /// <summary>"status", "command", "log", "leave", or "job" (protocol 11: a runner's live output and processes).</summary>
+    /// <summary>
+    /// "status", "command", "log", "leave", "job" (protocol 11: a runner's live output and processes), or "rekey"
+    /// (protocol 12: a new pairing code from Change fleet code).
+    /// </summary>
     public string Op { get; init; } = "status";
     public MachineCommand? Command { get; init; }
     public string LogKey { get; init; } = string.Empty;
     /// <summary>The PC sending the request ("leave" uses it to say who is leaving).</summary>
     public string From { get; init; } = string.Empty;
+    /// <summary>
+    /// The machine ID of the PC this is meant for (protocol 12; optional). Agents with another ID refuse it, so a
+    /// PC that shares a name with the intended one can't act on it. Older agents ignore it.
+    /// </summary>
+    public string TargetId { get; init; } = string.Empty;
+    /// <summary>"rekey": the sender's ECDH public key for this change (base64 SubjectPublicKeyInfo).</summary>
+    public string RekeyPublicKey { get; init; } = string.Empty;
+    /// <summary>"rekey", second step: the new pairing code, sealed with the key from the exchange (base64).</summary>
+    public string NewKey { get; init; } = string.Empty;
 }
 
 public sealed record FleetResponse
@@ -27,12 +40,56 @@ public sealed record FleetResponse
     public LogPayload? Log { get; init; }
     public RunnerJobActivity? Job { get; init; }
     public string CommandId { get; init; } = string.Empty;
+    /// <summary>"rekey", first step: the agent's ECDH public key.</summary>
+    public string RekeyPublicKey { get; init; } = string.Empty;
+    /// <summary>"rekey", second step: the fingerprint of the code the agent received, to confirm it.</summary>
+    public string KeyId { get; init; } = string.Empty;
 }
 
-public sealed record DiscoveredPeer(string Name, string Address, string Version);
+/// <summary>Where an agent finds its pairing code, and the new one from "Change fleet code" until it is first used.</summary>
+public interface IAgentKeys
+{
+    byte[]? Current { get; }
+    byte[]? Pending { get; }
+    void SetPending(byte[] key);
+    /// <summary>A request came with the pending code: it becomes the pairing code, and the old one stops working.</summary>
+    void UsePending(byte[] key);
+}
 
-/// <summary>Thrown when a PC answers but can't read our messages (different pairing code).</summary>
-public sealed class PairingMismatchException(string message) : Exception(message);
+/// <summary>The agent's codes in fleet.json, so this PC's dashboard follows when the agent switches.</summary>
+internal sealed class ConfigAgentKeys : IAgentKeys
+{
+    public byte[]? Current => FleetConfig.Current.FleetKey;
+    public byte[]? Pending => FleetConfig.Current.PendingFleetKey;
+    public void SetPending(byte[] key) => FleetConfig.SetPendingFleetKey(key);
+    public void UsePending(byte[] key) => FleetConfig.UsePendingFleetKey(key);
+}
+
+/// <summary>Codes kept in memory, for an agent given its code as a function (tests).</summary>
+internal sealed class MemoryAgentKeys(Func<byte[]?> current) : IAgentKeys
+{
+    private byte[]? _current;
+    private byte[]? _pending;
+    public byte[]? Current => _current ?? current();
+    public byte[]? Pending => _pending;
+    public void SetPending(byte[] key) => _pending = key;
+
+    public void UsePending(byte[] key)
+    {
+        _current = key;
+        _pending = null;
+    }
+}
+
+/// <param name="MachineId">The PC's machine ID; empty from agents before protocol 12.</param>
+public sealed record DiscoveredPeer(string Name, string Address, string Version, string MachineId = "");
+
+/// <summary>Thrown when a PC answers but refuses the request (different pairing code, wrong PC, clocks apart).</summary>
+public sealed class PairingMismatchException(string message, string reason = "") : Exception(message)
+{
+    /// <summary>The agent's short reason, for example "denied" or "wrong PC"; empty when it gave none.</summary>
+    public string Reason { get; } = reason;
+}
 
 /// <summary>
 /// Direct PC-to-PC fleet transport. Each PC's agent listens on TCP 47821 (encrypted requests) and UDP 47822
@@ -49,6 +106,12 @@ public static class FleetNetwork
     private static readonly JsonSerializerOptions Json = new() { PropertyNameCaseInsensitive = true };
     private static readonly TimeSpan HostLookupTimeout = TimeSpan.FromSeconds(1.5);
     private const int MaxRefusalLength = 200;
+    /// <summary>
+    /// The largest answer read from an agent. Logs and job output are cut to about 30 KB by the agent, and a status
+    /// with many runners is well under 1 MB, so this only stops a broken or hostile answer from filling memory.
+    /// </summary>
+    internal const int MaxResponseBytes = 8 * 1024 * 1024;
+    private const int MaxErrorBodyBytes = 4 * 1024;
 
     /// <summary>The keys derived from one pairing code (HKDF runs once per code, not once per request).</summary>
     internal sealed record DerivedKeys(byte[] Transport, byte[] Discovery);
@@ -83,14 +146,22 @@ public static class FleetNetwork
         message.Headers.Add("X-RW-To", targetMachineKey);
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         cts.CancelAfter(timeout ?? TimeSpan.FromSeconds(6));
-        using var response = await Http.SendAsync(message, cts.Token);
-        var bytes = await response.Content.ReadAsByteArrayAsync(cts.Token);
-        if (response.StatusCode == HttpStatusCode.Forbidden)
-            throw new PairingMismatchException(RefusalMessage(bytes));
-        if (response.StatusCode == HttpStatusCode.ServiceUnavailable)
-            throw new PairingMismatchException("The fleet agent on that PC has no pairing code.");
+        using var response = await Http.SendAsync(message, HttpCompletionOption.ResponseHeadersRead, cts.Token);
         if (!response.IsSuccessStatusCode)
-            throw new InvalidOperationException($"The fleet agent returned HTTP {(int)response.StatusCode}: {Encoding.UTF8.GetString(bytes)}");
+        {
+            var error = await ReadLimitedAsync(await response.Content.ReadAsStreamAsync(cts.Token), MaxErrorBodyBytes, truncate: true, cts.Token);
+            var reason = Encoding.UTF8.GetString(error!).Trim();
+            if (response.StatusCode == HttpStatusCode.Forbidden)
+                throw new PairingMismatchException(RefusalMessage(reason), reason);
+            if (response.StatusCode == HttpStatusCode.ServiceUnavailable)
+                throw new PairingMismatchException("The fleet agent on that PC has no pairing code.", reason);
+            if (reason.Length > MaxRefusalLength) reason = reason[..MaxRefusalLength];
+            throw new InvalidOperationException($"The fleet agent returned HTTP {(int)response.StatusCode}: {reason}");
+        }
+        if (response.Content.Headers.ContentLength > MaxResponseBytes)
+            throw new InvalidDataException("The fleet agent's answer is too large.");
+        var bytes = await ReadLimitedAsync(await response.Content.ReadAsStreamAsync(cts.Token), MaxResponseBytes, truncate: false, cts.Token)
+                    ?? throw new InvalidDataException("The fleet agent's answer is too large.");
         var plain = FleetCrypto.Open(transportKey, bytes, FleetCrypto.ResponseContext(FleetCrypto.NonceOf(body)))
             ?? throw new PairingMismatchException("Could not verify the response with this PC's pairing code.");
         var result = JsonSerializer.Deserialize<FleetResponse>(plain, Json) ?? throw new InvalidOperationException("The fleet agent returned an empty response.");
@@ -102,13 +173,55 @@ public static class FleetNetwork
     /// Explains a 403 answer. Agents send a short reason ("denied" when the pairing code does not match, or for
     /// example a clock or PC name problem); anything else is shown as the reason.
     /// </summary>
-    private static string RefusalMessage(byte[] body)
+    internal static string RefusalMessage(string reason)
     {
-        var reason = Encoding.UTF8.GetString(body).Trim();
         if (reason.Length == 0 || reason.Equals("denied", StringComparison.OrdinalIgnoreCase))
             return "The pairing code does not match. Use the same pairing code on every PC.";
+        if (reason.Contains("clock", StringComparison.OrdinalIgnoreCase))
+            return ClockMessage(reason);
         if (reason.Length > MaxRefusalLength) reason = reason[..MaxRefusalLength];
         return $"The other PC refused the request: {reason}";
+    }
+
+    /// <summary>The time a newer agent reports with a clock refusal, as Unix milliseconds.</summary>
+    private static readonly System.Text.RegularExpressions.Regex AgentTimePattern = new(@"\(time there: (\d+)\)");
+
+    private static string ClockMessage(string reason)
+    {
+        const string fix = "Set both to the correct time (Windows Settings → Time & language → Date & time → Sync now).";
+        var match = AgentTimePattern.Match(reason);
+        if (!match.Success || !long.TryParse(match.Groups[1].Value, out var agentTime))
+            return $"The clocks on this PC and the other PC differ by more than {(int)FleetCrypto.MaxClockSkew.TotalMinutes} minutes. {fix}";
+        var apart = TimeSpan.FromMilliseconds(Math.Abs(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - agentTime));
+        var text = apart.TotalHours >= 2 ? $"{Math.Round(apart.TotalHours)} hours"
+            : apart.TotalMinutes >= 2 ? $"{Math.Round(apart.TotalMinutes)} minutes"
+            : $"{Math.Max(1, Math.Round(apart.TotalSeconds))} seconds";
+        return $"The clocks on this PC and the other PC differ by {text}. {fix}";
+    }
+
+    /// <summary>
+    /// Reads at most <paramref name="limit"/> bytes. Returns null when there is more, or with
+    /// <paramref name="truncate"/> the first <paramref name="limit"/> bytes.
+    /// </summary>
+    internal static async Task<byte[]?> ReadLimitedAsync(Stream input, int limit, bool truncate, CancellationToken cancellationToken)
+    {
+        await using (input)
+        {
+            using var buffer = new MemoryStream();
+            var chunk = new byte[16 * 1024];
+            int read;
+            while ((read = await input.ReadAsync(chunk, cancellationToken)) > 0)
+            {
+                if (buffer.Length + read > limit)
+                {
+                    if (!truncate) return null;
+                    buffer.Write(chunk, 0, (int)(limit - buffer.Length));
+                    break;
+                }
+                buffer.Write(chunk, 0, read);
+            }
+            return buffer.ToArray();
+        }
     }
 
     /// <summary>Finds fleet agents on the local network (broadcast) and at known or manually added addresses.</summary>
@@ -146,9 +259,12 @@ public static class FleetNetwork
                     var root = json.RootElement;
                     var name = root.GetProperty("name").GetString() ?? string.Empty;
                     var port = root.TryGetProperty("port", out var p) ? p.GetInt32() : AgentPort;
+                    var id = root.TryGetProperty("id", out var i) ? i.GetString() ?? string.Empty : string.Empty;
                     if (name.Length == 0) continue;
-                    found[name] = new DiscoveredPeer(name, $"{packet.RemoteEndPoint.Address}:{port}",
-                        root.TryGetProperty("version", out var version) ? version.GetString() ?? string.Empty : string.Empty);
+                    // A PC with several network adapters answers once on each; keep its first answer. Two PCs with
+                    // the same name (but different IDs) are both kept.
+                    found.TryAdd($"{name}|{id}", new DiscoveredPeer(name, JoinHostPort(packet.RemoteEndPoint.Address.ToString(), port),
+                        root.TryGetProperty("version", out var version) ? version.GetString() ?? string.Empty : string.Empty, id));
                 }
                 catch { }
             }
@@ -182,7 +298,7 @@ public static class FleetNetwork
     /// </summary>
     internal static async Task<IPAddress[]> ResolveIPv4Async(IEnumerable<string> hosts)
     {
-        var lookups = hosts.Select(h => h.Split(':')[0].Trim())
+        var lookups = hosts.Select(HostOf)
             .Where(h => h.Length > 0)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .Select(async name =>
@@ -218,7 +334,40 @@ public static class FleetNetwork
     }
 
     public static string WithPort(string address)
-        => address.Contains(':') ? address : $"{address}:{AgentPort}";
+    {
+        var (host, port) = SplitHostPort(address);
+        return JoinHostPort(host, port ?? AgentPort);
+    }
+
+    /// <summary>
+    /// Splits "host", "host:port", "1.2.3.4:port", "[v6]:port", "[v6]" or a bare IPv6 address. The port is null when
+    /// none was given.
+    /// </summary>
+    public static (string Host, int? Port) SplitHostPort(string address)
+    {
+        var text = address.Trim();
+        if (text.StartsWith('['))
+        {
+            var end = text.IndexOf(']');
+            if (end > 0)
+            {
+                var host = text[1..end];
+                var rest = text[(end + 1)..];
+                return (host, rest.StartsWith(':') && int.TryParse(rest[1..], out var v6Port) ? v6Port : null);
+            }
+        }
+        var colon = text.LastIndexOf(':');
+        // More than one colon without brackets is an IPv6 address without a port.
+        if (colon < 0 || text.IndexOf(':') != colon) return (text, null);
+        return int.TryParse(text[(colon + 1)..], out var port) ? (text[..colon], port) : (text[..colon], null);
+    }
+
+    /// <summary>"host:port", with IPv6 addresses in brackets.</summary>
+    public static string JoinHostPort(string host, int port)
+        => host.Contains(':') ? $"[{host}]:{port}" : $"{host}:{port}";
+
+    /// <summary>The host part of an address, without the port or IPv6 brackets.</summary>
+    public static string HostOf(string address) => SplitHostPort(address).Host;
 
     // ================= Firewall =================
 
@@ -268,62 +417,143 @@ public sealed class AgentServer : IDisposable
     private readonly Func<MachineCommand, string> _enqueue;
     private readonly Func<string, Task<LogPayload>> _log;
     private readonly Func<string, Task<RunnerJobActivity>>? _job;
-    private readonly Func<byte[]?> _pairingKey;
+    private readonly IAgentKeys _keys;
     private readonly string _prefix;
     private readonly int _discoveryPort;
     private readonly string _machineKey;
     private readonly string _displayName;
+    private readonly string _machineId;
     private readonly ReplayGuard _replay = new();
     private readonly byte[] _discoveryBody;
     private readonly CancellationTokenSource _cts = new();
+    // Requests that are not authenticated yet; each may buffer up to MaxRequestBytes.
+    private readonly SemaphoreSlim _unauthenticated = new(MaxUnauthenticatedRequests);
+    private readonly object _listenGate = new();
     private HttpListener? _http;
     private UdpClient? _udp;
+    private bool _retrying;
+    // The first step of a rekey, by the sender's public key; each is kept for RekeyOfferTime.
+    private readonly Dictionary<string, (ECDiffieHellman Key, DateTime CreatedUtc)> _rekeyOffers = new(StringComparer.Ordinal);
+    private static readonly TimeSpan RekeyOfferTime = TimeSpan.FromMinutes(2);
 
     /// <param name="prefix">HTTP prefix to listen on (tests use a localhost one; the agent listens on all interfaces).</param>
+    /// <param name="machineId">This PC's machine ID; by default the one in fleet.json for the real agent, none for tests.</param>
+    /// <param name="keys">Where the pairing codes are kept; by default fleet.json, or memory when <paramref name="pairingKey"/> is given.</param>
     public AgentServer(Func<Task<MachineStatusPayload>> status, Func<MachineCommand, string> enqueue, Func<string, Task<LogPayload>> log,
         Func<byte[]?>? pairingKey = null, string? prefix = null, int discoveryPort = FleetNetwork.DiscoveryPort, string? machineKey = null,
-        Func<string, Task<RunnerJobActivity>>? job = null)
+        Func<string, Task<RunnerJobActivity>>? job = null, string? machineId = null, IAgentKeys? keys = null)
     {
         _status = status;
         _enqueue = enqueue;
         _log = log;
         _job = job;
-        _pairingKey = pairingKey ?? (() => FleetConfig.Current.FleetKey);
+        _keys = keys ?? (pairingKey != null ? new MemoryAgentKeys(pairingKey) : new ConfigAgentKeys());
         _prefix = prefix ?? $"http://+:{FleetNetwork.AgentPort}/rw/";
         _discoveryPort = discoveryPort;
         // Requests are addressed by the sanitized key; discovery announces the real PC name.
         _displayName = machineKey ?? Environment.MachineName;
         _machineKey = MachineRelay.Sanitize(_displayName);
+        _machineId = machineId ?? (prefix == null ? FleetConfig.LocalMachineId : string.Empty);
         // The answer body never changes; only its signature depends on the probe.
         _discoveryBody = JsonSerializer.SerializeToUtf8Bytes(new
         {
             name = _displayName,
-            port = new Uri(_prefix.Replace("+", "localhost")).Port,
+            id = _machineId,
+            port = Port,
             protocol = MachineRelay.ProtocolVersion,
             version = AppUpdater.CurrentVersion
         });
     }
 
     private const int MaxRequestBytes = 1024 * 1024;
+    private const int MaxUnauthenticatedRequests = 16;
+    private static readonly TimeSpan BodyTimeout = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan SlotWait = TimeSpan.FromSeconds(2);
+    /// <summary>How often a listener that could not start is tried again.</summary>
+    internal static TimeSpan ListenRetryInterval { get; set; } = TimeSpan.FromSeconds(30);
 
+    private int Port => new Uri(_prefix.Replace("+", "localhost")).Port;
+
+    /// <summary>Whether both listeners are running.</summary>
+    public bool IsListening => _http != null && _udp != null;
+
+    /// <summary>
+    /// Starts both listeners. One that can't start (its port is taken, for example) is logged once and tried again
+    /// every <see cref="ListenRetryInterval"/>; the first such error is also thrown.
+    /// </summary>
     public void Start()
     {
-        _http = new HttpListener();
-        _http.Prefixes.Add(_prefix);
-        _http.Start();
-        _ = Task.Run(AcceptLoopAsync);
+        var httpError = TryStartHttp();
+        var udpError = TryStartUdp();
+        var retry = $"Trying again every {(int)ListenRetryInterval.TotalSeconds} seconds.";
+        if (httpError != null) MachineRelay.AppendAgentLog($"Could not listen on TCP port {Port}: {httpError.Message} {retry}");
+        if (udpError != null) MachineRelay.AppendAgentLog($"Could not listen for discovery on UDP port {_discoveryPort}: {udpError.Message} {retry}");
+        if (httpError == null && udpError == null) return;
+        lock (_listenGate)
+        {
+            if (!_retrying) _ = Task.Run(RetryListenersAsync);
+            _retrying = true;
+        }
+        throw httpError ?? udpError!;
+    }
 
-        _udp = new UdpClient(new IPEndPoint(IPAddress.Any, _discoveryPort)) { EnableBroadcast = true };
-        FleetNetwork.IgnoreConnectionResets(_udp);
+    private Exception? TryStartHttp()
+    {
+        var http = new HttpListener();
+        try
+        {
+            http.Prefixes.Add(_prefix);
+            http.Start();
+        }
+        catch (Exception ex)
+        {
+            try { http.Close(); } catch { }
+            return ex;
+        }
+        // A client that sends its request slowly holds a request slot; http.sys ends it sooner with these.
+        try
+        {
+            http.TimeoutManager.EntityBody = BodyTimeout;
+            http.TimeoutManager.HeaderWait = BodyTimeout;
+        }
+        catch { }
+        _http = http;
+        _ = Task.Run(AcceptLoopAsync);
+        return null;
+    }
+
+    private Exception? TryStartUdp()
+    {
+        try
+        {
+            var udp = new UdpClient(new IPEndPoint(IPAddress.Any, _discoveryPort)) { EnableBroadcast = true };
+            FleetNetwork.IgnoreConnectionResets(udp);
+            _udp = udp;
+        }
+        catch (Exception ex) { return ex; }
         _ = Task.Run(DiscoveryLoopAsync);
+        return null;
+    }
+
+    private async Task RetryListenersAsync()
+    {
+        while (!_cts.IsCancellationRequested && !IsListening)
+        {
+            try { await Task.Delay(ListenRetryInterval, _cts.Token); }
+            catch (OperationCanceledException) { return; }
+            // Failures were logged once already; only the recovery is.
+            if (_http == null && TryStartHttp() == null) MachineRelay.AppendAgentLog($"Listening on TCP port {Port} now.");
+            if (_udp == null && TryStartUdp() == null) MachineRelay.AppendAgentLog($"Listening for discovery on UDP port {_discoveryPort} now.");
+        }
+        lock (_listenGate) _retrying = false;
     }
 
     private async Task AcceptLoopAsync()
     {
-        while (!_cts.IsCancellationRequested && _http is { IsListening: true })
+        while (!_cts.IsCancellationRequested && _http is { IsListening: true } http)
         {
             HttpListenerContext context;
-            try { context = await _http.GetContextAsync(); }
+            try { context = await http.GetContextAsync(); }
             catch { if (_cts.IsCancellationRequested) return; await Task.Delay(500); continue; }
             _ = Task.Run(() => HandleAsync(context));
         }
@@ -332,30 +562,62 @@ public sealed class AgentServer : IDisposable
     private async Task HandleAsync(HttpListenerContext context)
     {
         var response = context.Response;
+        var holdsSlot = false;
         try
         {
-            var pairingKey = _pairingKey();
+            var pairingKey = _keys.Current;
             if (pairingKey == null) { await Reply(response, 503, "not paired"); return; }
             // Only requests with a known, limited length (no chunked bodies).
             if (context.Request.HttpMethod != "POST" || context.Request.ContentLength64 is < 0 or > MaxRequestBytes
                 || context.Request.Headers["Transfer-Encoding"] != null)
             { await Reply(response, 400, "bad request"); return; }
             if (!long.TryParse(context.Request.Headers["X-RW-Time"], out var time) || !FleetCrypto.IsFresh(time))
-            { await Reply(response, 403, "stale or missing timestamp; check the PC clocks"); return; }
+            {
+                await Reply(response, 403, $"the PC clocks differ by more than {(int)FleetCrypto.MaxClockSkew.TotalMinutes} minutes; set both to the correct time {TimeHere()}");
+                return;
+            }
+            // The agent restarted after this was sent, and no longer knows whether it saw it before.
+            if (_replay.IsFromBeforeStart(time))
+            {
+                await Reply(response, 403, "the request is older than the fleet agent, which has restarted since; try again, and check that both PCs show the correct time");
+                return;
+            }
 
-            var body = await ReadBodyAsync(context.Request.InputStream, MaxRequestBytes, _cts.Token);
+            if (!await _unauthenticated.WaitAsync(SlotWait, _cts.Token)) { await Reply(response, 429, "busy"); return; }
+            holdsSlot = true;
+            var body = await FleetNetwork.ReadLimitedAsync(context.Request.InputStream, MaxRequestBytes, truncate: false, _cts.Token)
+                .WaitAsync(BodyTimeout, _cts.Token);
             if (body == null) { await Reply(response, 400, "bad request"); return; }
             var transportKey = FleetNetwork.KeysFor(pairingKey).Transport;
             var target = context.Request.Headers["X-RW-To"] ?? string.Empty;
-            var me = _machineKey;
-            // "*" is only accepted for status requests (used to identify a PC added by address).
-            if (!target.Equals(me, StringComparison.OrdinalIgnoreCase) && target != "*")
-            { await Reply(response, 403, "wrong PC"); return; }
-            var plain = FleetCrypto.Open(transportKey, body, FleetCrypto.RequestContext(target, time));
+            var requestContext = FleetCrypto.RequestContext(target, time);
+            // Authenticate before saying anything about the target, so strangers can't use the answer to guess PC names.
+            var plain = FleetCrypto.Open(transportKey, body, requestContext);
+            var pending = plain == null ? _keys.Pending : null;
+            if (pending != null)
+            {
+                // Sent with the new code from Change fleet code: from now on, only that code works.
+                plain = FleetCrypto.Open(FleetNetwork.KeysFor(pending).Transport, body, requestContext);
+                if (plain != null) transportKey = FleetNetwork.KeysFor(pending).Transport;
+                else pending = null;
+            }
             if (plain == null || !_replay.TryUse(FleetCrypto.NonceOf(body))) { await Reply(response, 403, "denied"); return; }
+            _unauthenticated.Release();
+            holdsSlot = false;
+            if (pending != null)
+            {
+                _keys.UsePending(pending);
+                MachineRelay.AppendAgentLog("Switched to the new pairing code. The old one no longer works.");
+            }
 
+            // "*" is only accepted for status requests (used to identify a PC added by address).
+            if (!target.Equals(_machineKey, StringComparison.OrdinalIgnoreCase) && target != "*")
+            { await Reply(response, 403, "wrong PC"); return; }
             var request = JsonSerializer.Deserialize<FleetRequest>(plain) ?? new FleetRequest();
             if (target == "*" && request.Op != "status") { await Reply(response, 403, "wrong PC"); return; }
+            // Meant for another PC with the same name.
+            if (request.TargetId.Length > 0 && _machineId.Length > 0 && !request.TargetId.Equals(_machineId, StringComparison.OrdinalIgnoreCase))
+            { await Reply(response, 403, "wrong PC"); return; }
             FleetResponse result;
             try
             {
@@ -366,6 +628,7 @@ public sealed class AgentServer : IDisposable
                     "log" => new FleetResponse { Ok = true, Log = await _log(request.LogKey) },
                     "job" when _job != null => new FleetResponse { Ok = true, Job = await _job(request.LogKey) },
                     "leave" when request.From.Length > 0 => Leave(request.From),
+                    "rekey" => Rekey(request),
                     _ => new FleetResponse { Ok = false, Error = $"Unknown request: {request.Op}" }
                 };
             }
@@ -380,23 +643,73 @@ public sealed class AgentServer : IDisposable
         }
         catch (Exception ex)
         {
-            MachineRelay.AppendAgentLog($"Request failed: {ex.Message}");
+            LogFailure(ex);
             try { response.Abort(); } catch { }
+        }
+        finally
+        {
+            if (holdsSlot) _unauthenticated.Release();
         }
     }
 
-    /// <summary>Reads at most <paramref name="limit"/> bytes; returns null when the body is longer.</summary>
-    private static async Task<byte[]?> ReadBodyAsync(Stream input, int limit, CancellationToken cancellationToken)
+    /// <summary>This PC's clock, so the other PC can say how far apart the clocks are.</summary>
+    private static string TimeHere() => $"(time there: {DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()})";
+
+    private static readonly object FailureLogGate = new();
+    private static DateTime _lastFailureLogUtc = DateTime.MinValue;
+    private static int _unloggedFailures;
+
+    /// <summary>Logs failed requests at most once a minute, so a flood of broken requests can't fill the log.</summary>
+    private static void LogFailure(Exception ex)
     {
-        using var buffer = new MemoryStream();
-        var chunk = new byte[16 * 1024];
-        int read;
-        while ((read = await input.ReadAsync(chunk, cancellationToken)) > 0)
+        lock (FailureLogGate)
         {
-            if (buffer.Length + read > limit) return null;
-            buffer.Write(chunk, 0, read);
+            if (DateTime.UtcNow - _lastFailureLogUtc < TimeSpan.FromMinutes(1))
+            {
+                _unloggedFailures++;
+                return;
+            }
+            var more = _unloggedFailures > 0 ? $" ({_unloggedFailures} more since the last one was logged)" : string.Empty;
+            _lastFailureLogUtc = DateTime.UtcNow;
+            _unloggedFailures = 0;
+            MachineRelay.AppendAgentLog($"Request failed: {ex.Message}{more}");
         }
-        return buffer.ToArray();
+    }
+
+    /// <summary>
+    /// "Change fleet code" on another PC. First step: answer with a key of our own for a key exchange. Second step:
+    /// the new code arrives sealed with the exchanged key, so even someone who has the old code can't read it off the
+    /// network. It is kept as pending, and used from the first request that comes with it.
+    /// </summary>
+    private FleetResponse Rekey(FleetRequest request)
+    {
+        if (request.RekeyPublicKey.Length == 0) return new FleetResponse { Ok = false, Error = "No key exchange." };
+        lock (_rekeyOffers)
+        {
+            foreach (var old in _rekeyOffers.Where(o => DateTime.UtcNow - o.Value.CreatedUtc > RekeyOfferTime).ToList())
+            {
+                old.Value.Key.Dispose();
+                _rekeyOffers.Remove(old.Key);
+            }
+            if (request.NewKey.Length == 0)
+            {
+                if (_rekeyOffers.Count >= 8) return new FleetResponse { Ok = false, Error = "Too many fleet code changes at once. Try again in a few minutes." };
+                var ecdh = ECDiffieHellman.Create(ECCurve.NamedCurves.nistP256);
+                _rekeyOffers[request.RekeyPublicKey] = (ecdh, DateTime.UtcNow);
+                return new FleetResponse { Ok = true, RekeyPublicKey = Convert.ToBase64String(ecdh.PublicKey.ExportSubjectPublicKeyInfo()) };
+            }
+            if (!_rekeyOffers.Remove(request.RekeyPublicKey, out var offer))
+                return new FleetResponse { Ok = false, Error = "The new fleet code came too late. Try again." };
+            using (offer.Key)
+            {
+                var shared = FleetCrypto.EcdhSecret(offer.Key, Convert.FromBase64String(request.RekeyPublicKey));
+                var newKey = FleetCrypto.Open(FleetCrypto.RekeyKey(shared), Convert.FromBase64String(request.NewKey), FleetCrypto.RekeyContext);
+                if (newKey is not { Length: 32 }) return new FleetResponse { Ok = false, Error = "Could not read the new fleet code." };
+                _keys.SetPending(newKey);
+                MachineRelay.AppendAgentLog($"Received a new pairing code{(request.From.Length > 0 ? $" from {request.From}" : "")}. It is used from the first request that comes with it.");
+                return new FleetResponse { Ok = true, KeyId = CommandSigner.KeyId(newKey) };
+            }
+        }
     }
 
     /// <summary>Another PC left the fleet: forget it here so dashboards stop listing it.</summary>
@@ -417,20 +730,27 @@ public sealed class AgentServer : IDisposable
 
     private async Task DiscoveryLoopAsync()
     {
-        while (!_cts.IsCancellationRequested && _udp != null)
+        while (!_cts.IsCancellationRequested && _udp is { } udp)
         {
             try
             {
-                var packet = await _udp.ReceiveAsync(_cts.Token);
-                var pairingKey = _pairingKey();
+                var packet = await udp.ReceiveAsync(_cts.Token);
+                var pairingKey = _keys.Current;
                 if (pairingKey == null) continue;
                 var discoveryKey = FleetNetwork.KeysFor(pairingKey).Discovery;
                 var nonce = FleetCrypto.VerifyProbe(discoveryKey, packet.Buffer);
+                // A PC that already uses the new code from Change fleet code.
+                if (nonce == null && _keys.Pending is { } pending)
+                {
+                    discoveryKey = FleetNetwork.KeysFor(pending).Discovery;
+                    nonce = FleetCrypto.VerifyProbe(discoveryKey, packet.Buffer);
+                }
                 if (nonce == null) continue;
                 var answer = FleetCrypto.Answer(discoveryKey, nonce, _discoveryBody);
-                await _udp.SendAsync(answer, answer.Length, packet.RemoteEndPoint);
+                await udp.SendAsync(answer, answer.Length, packet.RemoteEndPoint);
             }
             catch (OperationCanceledException) { return; }
+            catch (ObjectDisposedException) { return; }
             catch { await Task.Delay(200); }
         }
     }
@@ -438,7 +758,13 @@ public sealed class AgentServer : IDisposable
     public void Dispose()
     {
         _cts.Cancel();
-        try { _http?.Stop(); } catch { }
+        lock (_rekeyOffers)
+        {
+            foreach (var offer in _rekeyOffers.Values) offer.Key.Dispose();
+            _rekeyOffers.Clear();
+        }
+        // Close also releases the URL, so a new listener on the same port can start right away.
+        try { _http?.Close(); } catch { }
         try { _udp?.Dispose(); } catch { }
     }
 }

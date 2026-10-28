@@ -60,8 +60,13 @@ public static class FleetCrypto
     /// <summary>A response is bound to the request it answers.</summary>
     public static string ResponseContext(string requestNonce) => $"rw-response\n{requestNonce}";
 
+    /// <summary>Whether a request's time is within <see cref="MaxClockSkew"/> of this PC's clock (any value is safe to pass).</summary>
     public static bool IsFresh(long unixMilliseconds)
-        => Math.Abs((DateTimeOffset.UtcNow - DateTimeOffset.FromUnixTimeMilliseconds(unixMilliseconds)).Ticks) <= MaxClockSkew.Ticks;
+    {
+        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var skew = (long)MaxClockSkew.TotalMilliseconds;
+        return unixMilliseconds >= now - skew && unixMilliseconds <= now + skew;
+    }
 
     // ----- Discovery: authenticated (not secret) UDP probes and answers -----
 
@@ -102,6 +107,22 @@ public static class FleetCrypto
         return CryptographicOperations.FixedTimeEquals(expected, packet.AsSpan(4, 32)) ? Encoding.UTF8.GetString(body) : null;
     }
 
+    // ----- Rekey: a new pairing code sent to a PC, under the old code and a fresh key exchange -----
+
+    /// <summary>The ECDH secret between our key and the other side's public key (SubjectPublicKeyInfo).</summary>
+    internal static byte[] EcdhSecret(ECDiffieHellman mine, byte[] otherPublicKey)
+    {
+        using var other = ECDiffieHellman.Create();
+        other.ImportSubjectPublicKeyInfo(otherPublicKey, out _);
+        return mine.DeriveKeyFromHash(other.PublicKey, HashAlgorithmName.SHA256);
+    }
+
+    /// <summary>The key a new pairing code is sealed with, so that someone who has the old code can't read it off the network.</summary>
+    internal static byte[] RekeyKey(byte[] sharedSecret)
+        => HKDF.DeriveKey(HashAlgorithmName.SHA256, sharedSecret, 32, info: Encoding.ASCII.GetBytes("rw-rekey"));
+
+    internal const string RekeyContext = "rw-rekey";
+
     internal static byte[] Concat(params byte[][] parts)
     {
         var result = new byte[parts.Sum(p => p.Length)];
@@ -115,11 +136,24 @@ public static class FleetCrypto
     }
 }
 
-/// <summary>Remembers recently seen request nonces so a captured request can't be sent again.</summary>
+/// <summary>
+/// Remembers recently seen request nonces so a captured request can't be sent again. The nonces are only kept in
+/// memory, so requests sent before the guard was created (before the agent started) are refused as well.
+/// </summary>
 public sealed class ReplayGuard
 {
+    /// <summary>Room for clocks that are slightly apart, for requests sent just before the agent started.</summary>
+    public static readonly TimeSpan StartAllowance = TimeSpan.FromSeconds(10);
     private readonly Dictionary<string, DateTime> _seen = new(StringComparer.Ordinal);
     private readonly object _gate = new();
+    private readonly long _startedUnixMilliseconds = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+    /// <summary>
+    /// Whether a request is older than this guard. Such a request could have been captured before a restart, when
+    /// its nonce was remembered by a guard that is gone now.
+    /// </summary>
+    public bool IsFromBeforeStart(long unixMilliseconds)
+        => unixMilliseconds < _startedUnixMilliseconds - (long)StartAllowance.TotalMilliseconds;
 
     public bool TryUse(string nonce)
     {
