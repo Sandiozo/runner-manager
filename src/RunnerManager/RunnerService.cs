@@ -689,6 +689,7 @@ public static class RunnerService
     {
         var runner = await FindRunnerAsync(key) ?? throw new InvalidOperationException("The runner was not found on this PC.");
         EnsureNotBusy(runner);
+        if (runner.IsRunning) EnsureNotBusyNow(runner);
         await RemoveRunnerAsync(runner, deleteFolder, log);
     }
 
