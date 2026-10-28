@@ -10,6 +10,7 @@ using System.ServiceProcess;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Windows.Media;
+using Microsoft.Win32;
 
 namespace RunnerManager;
 
@@ -639,18 +640,233 @@ public static class RunnerService
     }
 
     /// <summary>
-    /// For runners started from a console: stops the console (and any restart loop around it) and moves startup
-    /// scripts that launch it into %LOCALAPPDATA%\RunnerManager\disabled-startup, so it doesn't run twice.
+    /// For runners started from a console: stops the console (and any restart loop around it) and disables what starts
+    /// it at sign-in, so it doesn't run twice: startup scripts and shortcuts are moved into
+    /// %LOCALAPPDATA%\RunnerManager\disabled-startup, scheduled tasks are disabled, and Run registry values are moved
+    /// aside (saved in that folder). Returns the changes, so a failed operation can put them back.
     /// </summary>
-    private static async Task DetachConsoleRunnerAsync(RunnerInfo runner, Action<string> log)
+    private static async Task<StartupChanges> DetachConsoleRunnerAsync(RunnerInfo runner, Action<string> log)
     {
         if (runner.IsInteractive)
         {
             log("Closing the runner console window…");
             await Task.Run(() => StopConsoleRunner(runner.InstallPath));
         }
-        foreach (var moved in DisableStartupScripts(runner.InstallPath))
-            log($"Disabled the startup entry {Path.GetFileName(moved)}. It was moved to {Path.GetDirectoryName(moved)}.");
+        var changes = new StartupChanges();
+        var others = await Task.Run(() => OtherRunnerRoots(runner.InstallPath));
+        await Task.Run(() => DisableStartupFiles(runner.InstallPath, others, changes, log));
+        await DisableScheduledTasksAsync(runner.InstallPath, others, changes, log);
+        await Task.Run(() => DisableRunValues(runner.InstallPath, others, changes, log));
+        return changes;
+    }
+
+    /// <summary>Startup entries that were disabled for a runner, and how to enable them again.</summary>
+    private sealed class StartupChanges
+    {
+        public List<(string Original, string Moved)> Files { get; } = new();
+        public List<string> Tasks { get; } = new();
+        public List<(RegistryKey Hive, string Key, string Name, object Value, RegistryValueKind Kind, string SavedTo)> RunValues { get; } = new();
+
+        public async Task RestoreAsync(Action<string> log)
+        {
+            foreach (var (original, moved) in Files)
+            {
+                try
+                {
+                    File.Move(moved, original);
+                    log($"Restored the startup entry {Path.GetFileName(original)}.");
+                }
+                catch (Exception ex) { log($"Could not restore the startup entry {original} from {moved}: {ex.Message}"); }
+            }
+            foreach (var task in Tasks)
+            {
+                var (code, output) = await ScheduledTasks.RunAsync("schtasks.exe", $"/Change /TN \"{task}\" /ENABLE", ScheduledTasks.ShortTimeout);
+                log(code == 0 ? $"Enabled the scheduled task {task} again." : $"Could not enable the scheduled task {task} again: {output.Trim()}");
+            }
+            foreach (var value in RunValues)
+            {
+                try
+                {
+                    using var key = value.Hive.CreateSubKey(value.Key, writable: true);
+                    key.SetValue(value.Name, value.Value, value.Kind);
+                    TryDelete(value.SavedTo);
+                    log($"Restored the startup entry {value.Name} in {value.Hive.Name}\\{value.Key}.");
+                }
+                catch (Exception ex) { log($"Could not restore the startup entry {value.Name} (saved in {value.SavedTo}): {ex.Message}"); }
+            }
+        }
+    }
+
+    private static string DisabledStartupFolder => Path.Combine(FleetConfig.StateDir, "disabled-startup");
+
+    /// <summary>Folders of the other runners on this PC, so a startup entry that launches several runners can be told apart.</summary>
+    private static List<string> OtherRunnerRoots(string root)
+    {
+        var roots = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        try { foreach (var service in ReadRunnerServices()) roots.Add(service.Root); } catch { }
+        foreach (var folder in new[] { RunnersRoot, DefaultRoot }.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            try
+            {
+                foreach (var dir in Directory.GetDirectories(folder))
+                    if (File.Exists(Path.Combine(dir, ".runner"))) roots.Add(dir);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        }
+        foreach (var known in FleetConfig.Current.KnownRunnerRoots) roots.Add(known);
+        roots.RemoveWhere(r => string.IsNullOrWhiteSpace(r) || r.TrimEnd('\\').Equals(root.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase));
+        return roots.ToList();
+    }
+
+    internal enum StartupMatch { None, ThisRunner, SharedWithOtherRunners }
+
+    /// <summary>
+    /// Whether a startup entry launches the runner in this folder, and whether it launches other runners too. The longest
+    /// folders are matched first, so D:\Runners\b inside D:\Runners does not count as D:\Runners, and the other way round.
+    /// </summary>
+    internal static StartupMatch MatchStartupEntry(string content, string root, IEnumerable<string> otherRoots)
+    {
+        var self = root.TrimEnd('\\', '/');
+        if (self.Length == 0) return StartupMatch.None;
+        var text = content;
+        bool matchesSelf = false, matchesOther = false;
+        foreach (var folder in otherRoots.Select(r => r.TrimEnd('\\', '/')).Where(r => r.Length > 0).Append(self)
+                     .Distinct(StringComparer.OrdinalIgnoreCase).OrderByDescending(r => r.Length))
+        {
+            var pattern = new Regex(Regex.Escape(folder) + @"(?=[\\/""'\s\0]|$)", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            if (!pattern.IsMatch(text)) continue;
+            if (folder.Equals(self, StringComparison.OrdinalIgnoreCase)) matchesSelf = true;
+            else matchesOther = true;
+            text = pattern.Replace(text, "\u0001");
+        }
+        return !matchesSelf ? StartupMatch.None : matchesOther ? StartupMatch.SharedWithOtherRunners : StartupMatch.ThisRunner;
+    }
+
+    /// <summary>Startup-folder scripts and shortcuts that launch the runner in this folder, moved aside (reversible).</summary>
+    private static void DisableStartupFiles(string root, List<string> others, StartupChanges changes, Action<string> log)
+    {
+        var folders = new[]
+        {
+            Environment.GetFolderPath(Environment.SpecialFolder.Startup),
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonStartup)
+        };
+        var target = DisabledStartupFolder;
+        foreach (var folder in folders.Where(Directory.Exists))
+        {
+            foreach (var file in Directory.EnumerateFiles(folder))
+            {
+                var extension = Path.GetExtension(file).ToLowerInvariant();
+                if (extension is not (".cmd" or ".bat" or ".ps1" or ".vbs" or ".lnk")) continue;
+                string content;
+                try { content = ReadStartupText(File.ReadAllBytes(file), extension == ".lnk"); }
+                catch { continue; }
+                var match = MatchStartupEntry(content, root, others);
+                if (match == StartupMatch.None) continue;
+                if (match == StartupMatch.SharedWithOtherRunners)
+                {
+                    log($"The startup entry {file} also starts other runners, so it was left in place. Remove this runner from it by hand.");
+                    continue;
+                }
+                try
+                {
+                    Directory.CreateDirectory(target);
+                    var destination = Path.Combine(target, Path.GetFileName(file));
+                    if (File.Exists(destination)) destination = Path.Combine(target, $"{Path.GetFileNameWithoutExtension(file)}-{DateTime.Now:yyyyMMddHHmmss}{extension}");
+                    File.Move(file, destination);
+                    changes.Files.Add((file, destination));
+                    log($"Disabled the startup entry {Path.GetFileName(file)}. It was moved to {target}.");
+                }
+                catch (Exception ex) { log($"Could not disable the startup entry {file}: {ex.Message}"); }
+            }
+        }
+    }
+
+    /// <summary>Lists scheduled tasks outside \Microsoft\ that are enabled: one line per task, its path and its actions.</summary>
+    private const string ListTasksScript =
+        "Get-ScheduledTask | Where-Object { $_.TaskPath -notlike '\\Microsoft\\*' -and $_.State -ne 'Disabled' } | ForEach-Object { " +
+        "$a = ($_.Actions | ForEach-Object { \"$($_.Execute) $($_.Arguments) $($_.WorkingDirectory)\" }) -join ' '; " +
+        "\"$($_.TaskPath)$($_.TaskName)`t$a\" }";
+
+    /// <summary>Task names and their action text from <see cref="ListTasksScript"/> output.</summary>
+    internal static List<(string Name, string Actions)> ParseTaskList(string output)
+        => output.Replace("\r\n", "\n").Split('\n')
+            .Select(line => line.Split('\t', 2))
+            .Where(parts => parts.Length == 2 && parts[0].StartsWith('\\'))
+            .Select(parts => (parts[0].Trim(), parts[1].Trim()))
+            .ToList();
+
+    /// <summary>Scheduled tasks whose actions run the runner in this folder are disabled (and enabled again on undo).</summary>
+    private static async Task DisableScheduledTasksAsync(string root, List<string> others, StartupChanges changes, Action<string> log)
+    {
+        var script = Convert.ToBase64String(System.Text.Encoding.Unicode.GetBytes(ListTasksScript));
+        var (code, output) = await ScheduledTasks.RunAsync("powershell.exe",
+            $"-NoLogo -NoProfile -NonInteractive -EncodedCommand {script}", ScheduledTasks.ShortTimeout);
+        if (code != 0)
+        {
+            log("Could not check scheduled tasks for ones that start this runner.");
+            return;
+        }
+        foreach (var (name, actions) in ParseTaskList(output))
+        {
+            var match = MatchStartupEntry(actions, root, others);
+            if (match == StartupMatch.None || name.Contains('"')) continue;
+            if (match == StartupMatch.SharedWithOtherRunners)
+            {
+                log($"The scheduled task {name} also starts other runners, so it was left enabled. Remove this runner from it by hand.");
+                continue;
+            }
+            var (changeCode, changeOutput) = await ScheduledTasks.RunAsync("schtasks.exe", $"/Change /TN \"{name}\" /DISABLE", ScheduledTasks.ShortTimeout);
+            if (changeCode == 0)
+            {
+                changes.Tasks.Add(name);
+                log($"Disabled the scheduled task {name}, which started this runner.");
+            }
+            else log($"Could not disable the scheduled task {name}, which starts this runner: {changeOutput.Trim()}");
+        }
+    }
+
+    private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
+    private const string RunKey32 = @"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Run";
+
+    /// <summary>
+    /// Run registry values that start the runner in this folder are deleted after saving them in a file in the
+    /// disabled-startup folder, so they can be put back.
+    /// </summary>
+    private static void DisableRunValues(string root, List<string> others, StartupChanges changes, Action<string> log)
+    {
+        foreach (var (hive, path) in new[] { (Registry.CurrentUser, RunKey), (Registry.LocalMachine, RunKey), (Registry.LocalMachine, RunKey32) })
+        {
+            try
+            {
+                // Opened for writing only when something matches: without administrator rights HKLM is read-only.
+                using var key = hive.OpenSubKey(path);
+                if (key == null) continue;
+                foreach (var name in key.GetValueNames())
+                {
+                    if (key.GetValue(name, null, RegistryValueOptions.DoNotExpandEnvironmentNames) is not { } value) continue;
+                    var match = MatchStartupEntry(value.ToString() ?? string.Empty, root, others);
+                    if (match == StartupMatch.None) continue;
+                    var where = $"{hive.Name}\\{path}";
+                    if (match == StartupMatch.SharedWithOtherRunners)
+                    {
+                        log($"The startup entry {name} in {where} also starts other runners, so it was left in place. Remove this runner from it by hand.");
+                        continue;
+                    }
+                    var kind = key.GetValueKind(name);
+                    Directory.CreateDirectory(DisabledStartupFolder);
+                    var saved = Path.Combine(DisabledStartupFolder, $"run-{string.Concat(name.Select(c => Path.GetInvalidFileNameChars().Contains(c) ? '-' : c))}-{DateTime.Now:yyyyMMddHHmmss}.json");
+                    File.WriteAllText(saved, JsonSerializer.Serialize(new { key = where, name, value = value.ToString(), kind = kind.ToString() },
+                        new JsonSerializerOptions { WriteIndented = true }));
+                    using (var writable = hive.OpenSubKey(path, writable: true)) writable?.DeleteValue(name);
+                    changes.RunValues.Add((hive, path, name, value, kind, saved));
+                    log($"Disabled the startup entry {name} in {where}. Its command was saved to {saved}.");
+                }
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+            {
+                log($"Could not check {hive.Name}\\{path} for entries that start this runner: {ex.Message}");
+            }
+        }
     }
 
     private static void StopConsoleRunner(string root)
@@ -686,49 +902,19 @@ public static class RunnerService
         }
     }
 
-    /// <summary>Startup-folder scripts and shortcuts that launch the runner in this folder, moved aside (reversible).</summary>
-    private static List<string> DisableStartupScripts(string root)
-    {
-        var moved = new List<string>();
-        var folders = new[]
-        {
-            Environment.GetFolderPath(Environment.SpecialFolder.Startup),
-            Environment.GetFolderPath(Environment.SpecialFolder.CommonStartup)
-        };
-        var target = Path.Combine(FleetConfig.StateDir, "disabled-startup");
-        foreach (var folder in folders.Where(Directory.Exists))
-        {
-            foreach (var file in Directory.EnumerateFiles(folder))
-            {
-                var extension = Path.GetExtension(file).ToLowerInvariant();
-                if (extension is not (".cmd" or ".bat" or ".ps1" or ".vbs" or ".lnk")) continue;
-                string content;
-                try { content = ReadStartupText(File.ReadAllBytes(file), extension == ".lnk"); }
-                catch { continue; }
-                if (!ReferencesFolder(content, root)) continue;
-                try
-                {
-                    Directory.CreateDirectory(target);
-                    var destination = Path.Combine(target, Path.GetFileName(file));
-                    if (File.Exists(destination)) destination = Path.Combine(target, $"{Path.GetFileNameWithoutExtension(file)}-{DateTime.Now:yyyyMMddHHmmss}{extension}");
-                    File.Move(file, destination);
-                    moved.Add(destination);
-                }
-                catch { }
-            }
-        }
-        return moved;
-    }
-
     private static readonly System.Text.Encoding StrictUtf8 = new System.Text.UTF8Encoding(false, throwOnInvalidBytes: true);
 
     /// <summary>
     /// Text to search for the runner folder. Shortcuts store paths as UTF-16 and as ANSI, so both decodings are
-    /// searched. Scripts are read as UTF-8 when they are valid UTF-8, and as Latin-1 otherwise (any byte decodes).
+    /// searched; UTF-16 strings can start at an odd offset, so it is decoded from both. Scripts are read as UTF-8 when
+    /// they are valid UTF-8, and as Latin-1 otherwise (any byte decodes).
     /// </summary>
     internal static string ReadStartupText(byte[] bytes, bool shortcut)
     {
-        if (shortcut) return System.Text.Encoding.Unicode.GetString(bytes) + System.Text.Encoding.Latin1.GetString(bytes);
+        if (shortcut)
+            return System.Text.Encoding.Unicode.GetString(bytes) + "\0"
+                   + (bytes.Length > 1 ? System.Text.Encoding.Unicode.GetString(bytes, 1, bytes.Length - 1) : string.Empty) + "\0"
+                   + System.Text.Encoding.Latin1.GetString(bytes);
         try { return StrictUtf8.GetString(bytes); }
         catch (System.Text.DecoderFallbackException) { return System.Text.Encoding.Latin1.GetString(bytes); }
     }

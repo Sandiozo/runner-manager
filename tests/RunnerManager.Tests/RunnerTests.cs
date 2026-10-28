@@ -225,6 +225,55 @@ public class StartupScriptTests
         Assert.True(RunnerService.ReferencesFolder(RunnerService.ReadStartupText(ansi, shortcut: true), @"C:\GitHub-Runners\foo"));
     }
 
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    public void ShortcutArguments_AreFoundAtAnyOffset(int padding)
+    {
+        // Like "GitHub runner livonia-unity.lnk": conhost.exe is the target, and the runner folder is only in the
+        // UTF-16 arguments, which can start at an odd byte offset in the file.
+        var arguments = System.Text.Encoding.Unicode.GetBytes(
+            "--headless cmd.exe /d /c \"C:\\GitHub-Runners\\project-Livonia\\run-in-session.cmd\"");
+        var bytes = new byte[] { 0x4C, 0, 0, 0, 0x01, 0x14, 0x02 }.Concat(new byte[padding]).Concat(arguments).Concat(new byte[4]).ToArray();
+        var text = RunnerService.ReadStartupText(bytes, shortcut: true);
+        Assert.Equal(RunnerService.StartupMatch.ThisRunner,
+            RunnerService.MatchStartupEntry(text, @"C:\GitHub-Runners\project-Livonia", new[] { @"C:\GitHub-Runners\other" }));
+    }
+
+    [Fact]
+    public void StartupEntries_ForSeveralRunners_AreLeftInPlace()
+    {
+        const string script = "start \"\" /d \"C:\\GitHub-Runners\\a\" run.cmd\r\nstart \"\" /d \"C:\\GitHub-Runners\\b\" run.cmd\r\n";
+        Assert.Equal(RunnerService.StartupMatch.SharedWithOtherRunners,
+            RunnerService.MatchStartupEntry(script, @"C:\GitHub-Runners\a", new[] { @"C:\GitHub-Runners\b" }));
+        Assert.Equal(RunnerService.StartupMatch.None,
+            RunnerService.MatchStartupEntry(script, @"C:\GitHub-Runners\c", new[] { @"C:\GitHub-Runners\a", @"C:\GitHub-Runners\b" }));
+    }
+
+    [Fact]
+    public void StartupEntries_OfNestedRunners_BelongOnlyToThatRunner()
+    {
+        // D:\Git-Runners is itself a runner folder and also holds D:\Git-Runners\Study-Tool.
+        const string studyTool = "cd /d D:\\Git-Runners\\Study-Tool\r\nrun.cmd\r\n";
+        Assert.Equal(RunnerService.StartupMatch.None,
+            RunnerService.MatchStartupEntry(studyTool, @"D:\Git-Runners", new[] { @"D:\Git-Runners\Study-Tool" }));
+        Assert.Equal(RunnerService.StartupMatch.ThisRunner,
+            RunnerService.MatchStartupEntry(studyTool, @"D:\Git-Runners\Study-Tool", new[] { @"D:\Git-Runners" }));
+        Assert.Equal(RunnerService.StartupMatch.ThisRunner,
+            RunnerService.MatchStartupEntry("D:\\Git-Runners\\run.cmd", @"D:\Git-Runners", new[] { @"D:\Git-Runners\Study-Tool" }));
+    }
+
+    [Fact]
+    public void ScheduledTaskList_IsParsed()
+    {
+        var tasks = RunnerService.ParseTaskList(
+            "\\Runner livonia\tcmd.exe /c run.cmd C:\\GitHub-Runners\\project-Livonia\r\n\\Folder\\Other\tnotepad.exe  \r\nnoise\r\n");
+        Assert.Equal(2, tasks.Count);
+        Assert.Equal(@"\Runner livonia", tasks[0].Name);
+        Assert.Equal(RunnerService.StartupMatch.ThisRunner,
+            RunnerService.MatchStartupEntry(tasks[0].Actions, @"C:\GitHub-Runners\project-Livonia", Array.Empty<string>()));
+    }
+
     [Fact]
     public void Scripts_FallBackToLatin1WhenNotUtf8()
     {

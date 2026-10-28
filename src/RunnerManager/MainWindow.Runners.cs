@@ -28,7 +28,8 @@ public partial class MainWindow
     {
         if (ItemFrom<MachineRunnerStatus>(sender) is not { CanConvert: true } runner) return;
         if (!DialogWindow.Confirm(this, $"Run {runner.TitleText} as a Windows service?",
-                "The console window closes, and its startup entry is moved to %LOCALAPPDATA%\\RunnerManager\\disabled-startup so it does not start twice. " +
+                "The console window closes, and what starts it at sign-in is turned off so it does not start twice: startup entries are moved to " +
+                "%LOCALAPPDATA%\\RunnerManager\\disabled-startup, and scheduled tasks that start it are disabled. " +
                 "The runner is registered again as a Windows service with the same name and labels. It then starts with Windows, before sign-in.",
                 "Run as service")) return;
         await RunRunnerActionAsync(runner, "Convert", $"Convert {runner.TitleText}",
