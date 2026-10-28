@@ -363,6 +363,36 @@ public static class MachineRelay
         return string.IsNullOrEmpty(response.CommandId) ? command.Id : response.CommandId;
     }
 
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, (string[] Labels, DateTime ReadUtc)> LabelCache = new();
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> LabelReads = new();
+    private static readonly TimeSpan LabelCacheTime = TimeSpan.FromMinutes(10);
+
+    /// <summary>
+    /// A runner's custom labels for the agent's status, which is built every few seconds without asking GitHub. They are
+    /// read from GitHub in the background, at most every 10 minutes per runner; until then the last known ones are sent.
+    /// </summary>
+    private static string[] CachedCustomLabels(RunnerInfo runner)
+    {
+        if (runner.AgentId <= 0 || string.IsNullOrWhiteSpace(runner.ApiScope)) return Array.Empty<string>();
+        var key = $"{runner.ApiScope}/{runner.AgentId}";
+        LabelCache.TryGetValue(key, out var cached);
+        if (DateTime.UtcNow - cached.ReadUtc >= LabelCacheTime && LabelReads.TryAdd(key, 0))
+        {
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    if (await GitHubCli.GetRunnerStateAsync(runner.ApiScope, runner.AgentId) is { } state)
+                        LabelCache[key] = (state.Labels, DateTime.UtcNow);
+                    else LabelCache[key] = (cached.Labels ?? Array.Empty<string>(), DateTime.UtcNow - LabelCacheTime + TimeSpan.FromMinutes(1));
+                }
+                catch { }
+                finally { LabelReads.TryRemove(key, out _); }
+            });
+        }
+        return cached.Labels ?? Array.Empty<string>();
+    }
+
     /// <summary>A busy runner's live output and processes from the PC it runs on (agents with protocol 11 or later).</summary>
     public static async Task<RunnerJobActivity> RequestJobActivityAsync(string machineKey, string runnerKey, CancellationToken cancellationToken = default)
     {
@@ -1230,7 +1260,7 @@ public static class MachineRelay
                 Scope = r.ApiScope,
                 AgentName = r.AgentName,
                 AgentId = r.AgentId,
-                CustomLabels = r.CustomLabels,
+                CustomLabels = r.CustomLabels.Length > 0 ? r.CustomLabels : CachedCustomLabels(r),
                 RegistrationOptions = r.RegistrationOptions,
                 IsRunning = r.IsRunning,
                 ActivityText = r.ActivityText,

@@ -3,6 +3,12 @@
 Runner Manager updates itself from [Releases](https://github.com/Sandiozo/runner-manager/releases): open
 **Settings → Updates**, or click **Update** on a PC's card.
 
+## 2.4.1
+
+- AI assistants see each runner's custom labels, such as `unity`, also for runners on this PC. In 2.4.0 the fleet agent
+  left them out.
+- Clicking a link's text in a runner row no longer shows an error.
+
 ## 2.4.0
 
 This release fixes the problems found in an audit of the whole app. Pairing a new PC needs Runner Manager 2.4 on both

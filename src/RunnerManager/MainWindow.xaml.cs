@@ -826,7 +826,10 @@ public partial class MainWindow : Window
         {
             // Buttons, links and the live job panel (so its output can be read and selected) do not toggle the row.
             if (current is ButtonBase || current is TextBlock { Tag: string { Length: > 0 } } || current is FrameworkElement { Name: "LiveJobPanel" }) return;
-            current = VisualTreeHelper.GetParent(current);
+            // Text pieces such as a Run (a Hyperlink's text) are not visuals; their parent is in the logical tree.
+            current = current is Visual or System.Windows.Media.Media3D.Visual3D
+                ? VisualTreeHelper.GetParent(current)
+                : LogicalTreeHelper.GetParent(current);
         }
         if (ItemFrom<MachineRunnerStatus>(sender) is not { } runner) return;
         runner.IsExpanded = !runner.IsExpanded;
