@@ -3,6 +3,17 @@
 Runner Manager updates itself from [Releases](https://github.com/Sandiozo/runner-manager/releases): open
 **Settings → Updates**, or click **Update** on a PC's card.
 
+## 2.5.0
+
+- **Start with Windows** in a runner's ⋯ menu: turn it off and the runner stays stopped after a restart until you
+  start it. For a runner that runs in a console window, the option is **Start when you sign in**, and turning it off
+  moves its startup entries aside, so turning it on again puts them back. The runner's details show how it starts.
+  It works for runners on other PCs once they run 2.5.
+- The setting is kept when a runner is renamed, repaired, converted to a Windows service or moved to another PC.
+- A console runner that is not running is shown as a stopped console runner, with **Run as Windows service…**, instead
+  of as a runner without a service.
+- AI assistants see how each runner starts after a restart.
+
 ## 2.4.1
 
 - AI assistants see each runner's custom labels, such as `unity`, also for runners on this PC. In 2.4.0 the fleet agent

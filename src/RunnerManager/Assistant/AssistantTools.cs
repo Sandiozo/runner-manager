@@ -584,6 +584,9 @@ public static class AssistantTools
             target = TargetOf(runner),
             state = StateOf(runner),
             console = runner.IsInteractive,
+            // "windows", "signin" or "signin-shared" (a console runner opened at sign-in), "off", "disabled", "none"; null from older agents.
+            starts_after_restart = runner.StartsAt.Length > 0 ? runner.StartsAt
+                : machine.IsLocal || machine.AgentProtocolVersion >= 13 ? "none" : null,
             labels = labels ?? DefaultLabels,
             labels_note = labels == null ? $"{machine.MachineName} runs an older Runner Manager, so custom labels are unknown." : null,
             runner_version = runner.RunnerVersion
@@ -598,7 +601,9 @@ public static class AssistantTools
         => runner.IsOrgRunner ? $"the organization {runner.Scope[5..]}" : runner.RepositoryPath.Length > 0 ? runner.RepositoryPath : "an unknown repository";
 
     private static string StateOf(MachineRunnerStatus runner)
-        => !runner.ServiceInstalled && !runner.IsInteractive ? "no service" : runner.IsBusy ? "busy" : runner.IsRunning ? "idle" : "stopped";
+        => !runner.ServiceInstalled && !runner.IsInteractive
+            ? runner.StartsAt is RunnerStart.SignIn or RunnerStart.SignInShared or RunnerStart.Off ? "console, not running" : "no service"
+            : runner.IsBusy ? "busy" : runner.IsRunning ? "idle" : "stopped";
 
     /// <summary>Text from GitHub or a job, cut to a size an assistant can take in.</summary>
     private static string Bounded(string? text, int max)

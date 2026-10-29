@@ -465,7 +465,7 @@ public partial class MainWindow : Window
             var done = DateTime.UtcNow - pending.QueuedUtc > PendingCommandTimeout
                 || (pending.Action == "Start" && runner.IsRunning)
                 || (pending.Action == "Stop" && !runner.IsRunning)
-                || (pending.Action is "Restart" or "Edit" or "CleanWork" or "Remove" or "Convert" && !string.IsNullOrEmpty(pending.CommandId)
+                || (pending.Action is "Restart" or "Edit" or "CleanWork" or "Remove" or "Convert" or "Startup" && !string.IsNullOrEmpty(pending.CommandId)
                     && machine.HasFinished(pending.CommandId));
             if (done) _pendingRunnerCommands.Remove(key);
             runner.SetPending(done ? string.Empty : pending.Action);

@@ -17,7 +17,7 @@ A Windows dashboard for GitHub Actions self-hosted runners, on one PC or several
 
 - **Runners.** Add repository or organization runners, then start, stop, restart, edit, move and remove them. Runner
   Manager downloads the official runner, verifies its SHA-256 checksum and installs it as a Windows service, in a
-  runner folder you choose for each PC.
+  runner folder you choose for each PC. Choose for each runner whether it starts with Windows.
 - **Live jobs.** A busy runner shows its job and every step with its state and duration, the latest output of the
   running step, and the processes the job runs with their CPU and memory. This works for runners on every PC; steps
   are shown for repository runners.

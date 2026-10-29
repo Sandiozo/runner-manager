@@ -572,6 +572,14 @@ public partial class MainWindow
             log => RunnerService.CleanWorkFolderAsync(runner.CommandKey, log));
     }
 
+    private async void RunnerStartup_Click(object sender, RoutedEventArgs e)
+    {
+        if (ItemFrom<MachineRunnerStatus>(sender) is not { CanChangeStartup: true } runner) return;
+        var start = !runner.StartsAutomatically;
+        await RunRunnerActionAsync(runner, "Startup", $"{(start ? "Turn on" : "Turn off")} automatic start for {runner.TitleText}",
+            log => RunnerService.SetStartAutomaticallyAsync(runner.CommandKey, start, log), value: start ? "on" : "off");
+    }
+
     private async void RerunFailed_Click(object sender, RoutedEventArgs e)
     {
         e.Handled = true;

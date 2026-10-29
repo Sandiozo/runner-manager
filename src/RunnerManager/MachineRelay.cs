@@ -14,7 +14,7 @@ public static class MachineRelay
     /// 11: answers "job" requests (live output and processes of a runner's job).
     /// 12: machine IDs, recent command results, busy state, and "rekey" (Change fleet code).
     /// </summary>
-    public const int ProtocolVersion = 12;
+    public const int ProtocolVersion = 13;
     private const string AgentMutexName = @"Global\RunnerWidgetFleetAgent";
     private static readonly TimeSpan WatchdogInterval = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan DiscoveryInterval = TimeSpan.FromSeconds(30);
@@ -716,6 +716,9 @@ public static class MachineRelay
                     // The move failed: this copy keeps the runner.
                     await FleetActions.StartAfterFailedMoveAsync(command.TargetKey);
                     return "Runner start completed";
+                case "Startup":
+                    await RunnerService.SetStartAutomaticallyAsync(command.TargetKey, command.Value == "on", message => AppendAgentLog($"Runner startup: {message}"));
+                    return command.Value == "on" ? "The runner starts automatically after a restart" : "The runner no longer starts automatically after a restart";
                 case "Start" or "Stop" or "Restart":
                     await RunnerService.ControlServiceAsync(command.TargetKey, command.Action);
                     FleetConfig.SetManuallyStopped(command.TargetKey, command.Action == "Stop");
@@ -1265,6 +1268,8 @@ public static class MachineRelay
                 IsRunning = r.IsRunning,
                 ActivityText = r.ActivityText,
                 ServiceInstalled = r.ServiceInstalled,
+                MovedAway = r.MovedAway,
+                StartsAt = r.StartsAt,
                 RunnerVersion = r.RunnerVersion,
                 WorkFolderBytes = r.WorkFolderBytes,
                 ManuallyStopped = config.ManuallyStopped.Contains(r.Name, StringComparer.OrdinalIgnoreCase)

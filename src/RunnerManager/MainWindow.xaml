@@ -480,6 +480,8 @@
                                                                                     <MenuItem Header="Restart" Tag="&#xE72C;" Click="RunnerRestart_Click" IsEnabled="{Binding CanControl}"/>
                                                                                     <MenuItem Header="Repair Windows service…" Tag="&#xE90F;" Click="RunnerRepair_Click" Visibility="{Binding RepairVisibility}"/>
                                                                                     <MenuItem Header="Run as Windows service…" Tag="&#xE90F;" Click="RunnerConvert_Click" Visibility="{Binding ConvertVisibility}" IsEnabled="{Binding CanConvert}"/>
+                                                                                    <MenuItem Header="{Binding StartupHeader}" IsChecked="{Binding StartsAutomatically, Mode=OneWay}"
+                                                                                              IsEnabled="{Binding CanChangeStartup}" ToolTip="{Binding StartupTip}" Click="RunnerStartup_Click"/>
                                                                                     <MenuItem Header="Move to another PC…" Tag="&#xE8AB;" Click="RunnerMove_Click" IsEnabled="{Binding CanMove}"/>
                                                                                     <MenuItem Header="Clean work folder…" Tag="&#xE74D;" Click="RunnerCleanWork_Click" IsEnabled="{Binding CanCleanWork}"/>
                                                                                     <Separator/>
@@ -613,6 +615,10 @@
                                                                             <DockPanel Style="{StaticResource KeyRow}">
                                                                                 <TextBlock Text="Windows service" Style="{StaticResource KeyText}"/>
                                                                                 <TextBlock Text="{Binding ServiceText}" Style="{StaticResource ValueText}" Foreground="{DynamicResource TextMutedBrush}"/>
+                                                                            </DockPanel>
+                                                                            <DockPanel Style="{StaticResource KeyRow}">
+                                                                                <TextBlock Text="Starts" Style="{StaticResource KeyText}"/>
+                                                                                <TextBlock Text="{Binding StartsAtText}" Style="{StaticResource ValueText}" Foreground="{DynamicResource TextMutedBrush}"/>
                                                                             </DockPanel>
                                                                             <DockPanel Style="{StaticResource KeyRow}" Visibility="{Binding ManuallyStoppedVisibility}">
                                                                                 <TextBlock Text="Auto-recovery" Style="{StaticResource KeyText}"/>

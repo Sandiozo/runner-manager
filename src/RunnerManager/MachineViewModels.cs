@@ -40,6 +40,10 @@ public sealed class MachineRunnerStatus : INotifyPropertyChanged
     public bool IsRunning { get; init; }
     public string ActivityText { get; init; } = string.Empty;
     public bool ServiceInstalled { get; init; }
+    /// <summary>The old copy of a runner that was moved to another PC (false from agents before protocol 13).</summary>
+    public bool MovedAway { get; init; }
+    /// <summary>What starts the runner after a restart (a <see cref="RunnerStart"/> value; empty from agents before protocol 13).</summary>
+    public string StartsAt { get; init; } = RunnerStart.Unknown;
     public string RunnerVersion { get; init; } = string.Empty;
     public long? WorkFolderBytes { get; init; }
     public bool ManuallyStopped { get; init; }
@@ -52,8 +56,33 @@ public sealed class MachineRunnerStatus : INotifyPropertyChanged
     [JsonIgnore] public bool CanRemove => SupportsLifecycle && string.IsNullOrEmpty(_pendingAction) && !IsBusy
         && !string.IsNullOrEmpty(CommandKey);
     [JsonIgnore] public bool CanMove => CanRemove && !string.IsNullOrWhiteSpace(Scope) && (ServiceInstalled || IsInteractive);
-    [JsonIgnore] public bool CanConvert => IsInteractive && SupportsLifecycle && string.IsNullOrEmpty(_pendingAction) && !IsBusy;
-    [JsonIgnore] public Visibility ConvertVisibility => IsInteractive ? Visibility.Visible : Visibility.Collapsed;
+    /// <summary>A console runner that is not running now, but a startup entry opens it at sign-in (or did, until it was turned off).</summary>
+    [JsonIgnore] private bool IsStoppedConsole => !IsInteractive && !ServiceInstalled
+        && StartsAt is RunnerStart.SignIn or RunnerStart.SignInShared or RunnerStart.Off;
+    [JsonIgnore] public bool CanConvert => (IsInteractive || IsStoppedConsole) && SupportsLifecycle && string.IsNullOrEmpty(_pendingAction) && !IsBusy;
+    [JsonIgnore] public Visibility ConvertVisibility => IsInteractive || IsStoppedConsole ? Visibility.Visible : Visibility.Collapsed;
+    /// <summary>Start with Windows (services) or at sign-in (console runners) can be turned on and off from protocol 13.</summary>
+    [JsonIgnore] public bool CanChangeStartup => (IsLocalMachine || (MachineOnline && AgentProtocolVersion >= 13))
+        && string.IsNullOrEmpty(_pendingAction) && !string.IsNullOrEmpty(CommandKey) && !MovedAway
+        && (ServiceInstalled ? StartsAt is RunnerStart.WithWindows or RunnerStart.Off or RunnerStart.Disabled
+            : StartsAt is RunnerStart.SignIn or RunnerStart.Off);
+    [JsonIgnore] public bool StartsAutomatically => StartsAt is RunnerStart.WithWindows or RunnerStart.SignIn or RunnerStart.SignInShared;
+    [JsonIgnore] public string StartupHeader => ServiceInstalled ? "Start with Windows" : "Start when you sign in";
+    [JsonIgnore] public string StartupTip => ServiceInstalled
+        ? "When this is off, the runner stays stopped after a restart until you start it. Turning it off does not stop it now."
+        : StartsAt == RunnerStart.SignInShared
+            ? "A startup entry that also starts other runners opens this runner. Remove it from that entry by hand to change this."
+        : "When this is off, the runner's startup entries are moved aside, so it does not open when you sign in. Turning it off does not close it now.";
+    [JsonIgnore]
+    public string StartsAtText => StartsAt switch
+    {
+        RunnerStart.WithWindows => "With Windows",
+        RunnerStart.SignIn => "When you sign in",
+        RunnerStart.SignInShared => "When you sign in, from a startup entry that also starts other runners",
+        RunnerStart.Off => ServiceInstalled ? "Not automatically. Start it from Runner Manager." : "Not automatically. Its startup entries are turned off.",
+        RunnerStart.Disabled => "Never. Its Windows service is disabled.",
+        _ => !IsLocalMachine && AgentProtocolVersion < 13 ? "Update the fleet agent to see this" : "Nothing starts it automatically"
+    };
     [JsonIgnore] public Visibility PowerVisibility => IsInteractive ? Visibility.Collapsed : Visibility.Visible;
     [JsonIgnore] public Visibility ConsoleNoteVisibility => IsExpanded && IsInteractive ? Visibility.Visible : Visibility.Collapsed;
     [JsonIgnore] public bool IsOrgRunner => Scope.StartsWith("orgs/", StringComparison.OrdinalIgnoreCase);
@@ -72,7 +101,9 @@ public sealed class MachineRunnerStatus : INotifyPropertyChanged
         "Remove" => "Removing…",
         "Move" => "Moving…",
         "Convert" => "Converting…",
+        "Startup" => "Updating…",
         _ => IsInteractive ? (IsBusy ? "Busy · console" : "Console")
+            : IsStoppedConsole ? "Console · stopped"
             : !ServiceInstalled ? "No service" : IsBusy ? "Busy" : IsRunning ? "Idle" : "Stopped"
     };
     [JsonIgnore]
@@ -84,6 +115,9 @@ public sealed class MachineRunnerStatus : INotifyPropertyChanged
     [JsonIgnore] public Brush StatusTint => Palette.Tint(StatusBrush);
     [JsonIgnore] public string StatusTip => IsInteractive
         ? "Runs in a console window, not as a Windows service. It goes offline when the window closes or you sign out. Use “Run as service” to change this."
+        : IsStoppedConsole && StartsAt == RunnerStart.Off
+            ? "Runs in a console window, which is set not to open when you sign in. Turn on “Start when you sign in” and sign in again, or use “Run as Windows service”."
+        : IsStoppedConsole ? "Runs in a console window that opens when you sign in. It is not running now."
         : !ServiceInstalled ? "This runner is configured but has no Windows service. Use “Repair Windows service” to install one."
         : IsBusy ? "Running a job."
         : IsRunning ? "Online and waiting for jobs."
@@ -94,7 +128,7 @@ public sealed class MachineRunnerStatus : INotifyPropertyChanged
     [JsonIgnore] public bool CanCleanWork => (IsLocalMachine || AgentProtocolVersion >= 9) && CanControl && !IsBusy;
     [JsonIgnore] public bool CanViewLog => IsLocalMachine || (MachineOnline && AgentProtocolVersion >= 9);
     [JsonIgnore] public string ServiceText => ServiceInstalled ? ServiceName
-        : IsInteractive ? "None. Runs in a console window that closes when you sign out." : "Not installed";
+        : IsInteractive || IsStoppedConsole ? "None. Runs in a console window that closes when you sign out." : "Not installed";
     [JsonIgnore] public string TitleText => string.IsNullOrWhiteSpace(AgentName) ? DisplayName : AgentName;
     [JsonIgnore] public string RepositoryText => IsOrgRunner ? $"{OrgName}  ·  organization runner"
         : string.IsNullOrWhiteSpace(RepositoryPath) ? "Repository unknown" : RepositoryPath;
@@ -105,7 +139,7 @@ public sealed class MachineRunnerStatus : INotifyPropertyChanged
     [JsonIgnore] public string ActionsUrl => string.IsNullOrWhiteSpace(RepositoryPath) ? string.Empty : $"{RepositoryUrl}/actions";
     [JsonIgnore] public Visibility RepoOnlyVisibility => string.IsNullOrWhiteSpace(RepositoryPath) ? Visibility.Collapsed : Visibility.Visible;
     [JsonIgnore] public Visibility LocalVisibility => IsLocalMachine ? Visibility.Visible : Visibility.Collapsed;
-    [JsonIgnore] public Visibility RepairVisibility => IsLocalMachine && !ServiceInstalled && !IsInteractive ? Visibility.Visible : Visibility.Collapsed;
+    [JsonIgnore] public Visibility RepairVisibility => IsLocalMachine && !ServiceInstalled && !IsInteractive && !IsStoppedConsole ? Visibility.Visible : Visibility.Collapsed;
     [JsonIgnore] public Visibility RowVisibility => _matchesFilter ? Visibility.Visible : Visibility.Collapsed;
     [JsonIgnore] public Visibility DetailsVisibility => IsExpanded ? Visibility.Visible : Visibility.Collapsed;
     [JsonIgnore] public Visibility LocalDetailsVisibility => IsExpanded && LocalRunner != null ? Visibility.Visible : Visibility.Collapsed;
@@ -319,6 +353,8 @@ public sealed class MachineInfo : INotifyPropertyChanged
                 IsRunning = r.IsRunning,
                 ActivityText = r.ActivityText,
                 ServiceInstalled = r.ServiceInstalled,
+                MovedAway = r.MovedAway,
+                StartsAt = r.StartsAt,
                 RunnerVersion = r.RunnerVersion,
                 WorkFolderBytes = r.WorkFolderBytes,
                 MachineKey = MachineKey,
@@ -332,7 +368,7 @@ public sealed class MachineInfo : INotifyPropertyChanged
         var merged = (MachineInfo)MemberwiseClone();
         merged.PropertyChanged = null;
         merged.Runners = Runners.Concat(extra).OrderBy(r => r.TitleText, StringComparer.OrdinalIgnoreCase).ToArray();
-        merged.Fingerprint = Fingerprint + "|local:" + string.Join(';', extra.Select(r => $"{r.CommandKey}/{r.IsRunning}/{r.ActivityText}/{r.IsInteractive}"));
+        merged.Fingerprint = Fingerprint + "|local:" + string.Join(';', extra.Select(r => $"{r.CommandKey}/{r.IsRunning}/{r.ActivityText}/{r.IsInteractive}/{r.ServiceInstalled}/{r.StartsAt}"));
         return merged;
     }
     public string PendingAction => _rdcPendingAction;

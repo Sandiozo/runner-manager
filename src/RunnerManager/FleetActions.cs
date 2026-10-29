@@ -182,16 +182,18 @@ public sealed class FleetActions
     internal static async Task StopForMoveAsync(string key)
     {
         var wasStopped = FleetConfig.Current.ManuallyStopped.Contains(key, StringComparer.OrdinalIgnoreCase);
+        // Also when an earlier move left it disabled: the marker remembers that it started manually before.
+        var manualStart = (await RunnerService.FindRunnerAsync(key))?.RegistrationOptions.ManualStart == true;
         FleetConfig.SetManuallyStopped(key, true);
         try
         {
             await RunnerService.StopIfIdleAsync(key);
             await SetServiceEnabledAsync(key, false);
-            await RunnerService.MarkMovedAwayAsync(key, true);
+            await RunnerService.MarkMovedAwayAsync(key, true, manualStart);
         }
         catch
         {
-            try { await SetServiceEnabledAsync(key, true); } catch { }
+            try { await SetServiceEnabledAsync(key, true, manualStart); } catch { }
             FleetConfig.SetManuallyStopped(key, wasStopped);
             throw;
         }
@@ -200,22 +202,22 @@ public sealed class FleetActions
     /// <summary>Undoes <see cref="StopForMoveAsync"/> after a move failed, and starts the runner again.</summary>
     internal static async Task StartAfterFailedMoveAsync(string key)
     {
-        await RunnerService.MarkMovedAwayAsync(key, false);
+        var manualStart = (await RunnerService.FindRunnerAsync(key))?.ManualStartBeforeMove == true;
         FleetConfig.SetManuallyStopped(key, false);
-        await SetServiceEnabledAsync(key, true);
+        await SetServiceEnabledAsync(key, true, manualStart);
+        // Removed after the service is enabled, so a retry still knows how it started.
+        await RunnerService.MarkMovedAwayAsync(key, false);
         await RunnerService.ControlServiceAsync(key, "Start");
     }
 
     /// <summary>
     /// Disables a runner's Windows service (so it can't start, also not at the next restart), or sets it back to
-    /// start automatically. Runners without a service are left as they are.
+    /// start with Windows, or manually when it was set not to. Runners without a service are left as they are.
     /// </summary>
-    internal static async Task SetServiceEnabledAsync(string key, bool enabled)
+    internal static async Task SetServiceEnabledAsync(string key, bool enabled, bool manualStart = false)
     {
         if (!key.StartsWith("actions.runner.", StringComparison.OrdinalIgnoreCase)) return;
-        var (code, output) = await ScheduledTasks.RunAsync("sc.exe",
-            $"config \"{key.Replace("\"", "")}\" start= {(enabled ? "auto" : "disabled")}", ScheduledTasks.ShortTimeout);
-        if (code != 0)
-            throw new InvalidOperationException($"Could not {(enabled ? "enable" : "disable")} the Windows service {key}: {output.Trim()}");
+        await RunnerService.SetServiceStartModeAsync(key,
+            !enabled ? ServiceStart.Disabled : manualStart ? ServiceStart.Manual : ServiceStart.Automatic);
     }
 }

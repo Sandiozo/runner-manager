@@ -14,7 +14,7 @@ using Microsoft.Win32;
 
 namespace RunnerManager;
 
-public static class RunnerService
+public static partial class RunnerService
 {
     public const string DefaultRoot = @"C:\GitHub-Runners";
 
@@ -58,8 +58,11 @@ public static class RunnerService
         foreach (var root in FleetConfig.Current.KnownRunnerRoots)
             if (File.Exists(Path.Combine(root, ".runner"))) roots.Add(LongPath(root));
 
+        // What starts console runners at sign-in, read once for all of them.
+        var startup = roots.Any(root => !services.Any(s => s.Root.Equals(root, StringComparison.OrdinalIgnoreCase)))
+            ? await ReadStartupEntriesAsync() ?? new List<string>() : new List<string>();
         var runners = await Task.WhenAll(roots.OrderBy(x => x)
-            .Select(root => BuildRunnerInfoAsync(root, services, processes, queryGitHub)));
+            .Select(root => BuildRunnerInfoAsync(root, services, processes, queryGitHub, startup, roots)));
         return runners.ToList();
     });
 
@@ -94,7 +97,8 @@ public static class RunnerService
     }
 
     private static async Task<RunnerInfo> BuildRunnerInfoAsync(
-        string root, List<RunnerServiceRecord> services, List<ProcessInfo> processes, bool queryGitHub)
+        string root, List<RunnerServiceRecord> services, List<ProcessInfo> processes, bool queryGitHub,
+        List<string> startupEntries, IEnumerable<string> allRoots)
     {
         var config = ReadRunnerConfig(root);
         var service = services.FirstOrDefault(s => s.Root.Equals(root, StringComparison.OrdinalIgnoreCase));
@@ -131,6 +135,7 @@ public static class RunnerService
             IsInteractive = interactive,
             ConsoleRestarting = restarting,
             MovedAway = File.Exists(Path.Combine(root, MovedAwayMarker)),
+            ManualStartBeforeMove = WasManualStartBeforeMove(root),
             LastActivityText = GetLatestRunnerActivity(root),
             InstallPath = root,
             GitHubUrl = config.GitHubUrl,
@@ -147,6 +152,7 @@ public static class RunnerService
             DisableUpdate = config.DisableUpdate,
             NoDefaultLabels = remote is { HasDefaultLabels: false },
             ServiceInstalled = serviceInstalled,
+            StartsAt = serviceInstalled ? ServiceStartsAt(service!.StartMode) : ConsoleStartsAt(root, startupEntries, allRoots),
             IsRunning = running,
             StatusBrush = interactive ? Palette.Warning : running ? Palette.Success : serviceInstalled ? Palette.Danger : Palette.Warning,
             GitHubText = remote == null
@@ -192,7 +198,7 @@ public static class RunnerService
     {
         var result = new List<RunnerServiceRecord>();
         using var searcher = new ManagementObjectSearcher(
-            "SELECT Name, DisplayName, State, PathName, ProcessId FROM Win32_Service WHERE Name LIKE 'actions.runner.%'");
+            "SELECT Name, DisplayName, State, StartMode, PathName, ProcessId FROM Win32_Service WHERE Name LIKE 'actions.runner.%'");
         foreach (ManagementObject service in searcher.Get())
         {
             var pathName = service["PathName"]?.ToString() ?? string.Empty;
@@ -201,6 +207,7 @@ public static class RunnerService
                 Name = service["Name"]?.ToString() ?? string.Empty,
                 DisplayName = service["DisplayName"]?.ToString() ?? string.Empty,
                 State = service["State"]?.ToString() ?? "Unknown",
+                StartMode = service["StartMode"]?.ToString() ?? string.Empty,
                 Root = ResolveRunnerRoot(pathName),
                 ProcessId = ConvertToUInt(service["ProcessId"])
             });
@@ -559,13 +566,26 @@ public static class RunnerService
     /// <summary>
     /// Marks a runner as moving away (its registration goes to another PC), or clears the mark when the move failed.
     /// </summary>
-    public static async Task MarkMovedAwayAsync(string key, bool movedAway)
+    /// <param name="manualStart">The runner was set not to start with Windows, which a failed move puts back.</param>
+    public static async Task MarkMovedAwayAsync(string key, bool movedAway, bool manualStart = false)
     {
         var runner = await FindRunnerAsync(key);
         if (runner == null || string.IsNullOrEmpty(runner.InstallPath)) return;
         var marker = Path.Combine(runner.InstallPath, MovedAwayMarker);
-        if (movedAway) await File.WriteAllTextAsync(marker, $"Moved to another PC on {DateTime.UtcNow:O}. Its registration belongs to that PC now.");
+        if (movedAway)
+            await File.WriteAllTextAsync(marker, $"Moved to another PC on {DateTime.UtcNow:O}. Its registration belongs to that PC now."
+                                                 + (manualStart ? $"{Environment.NewLine}{ManualStartNote}" : string.Empty));
         else TryDelete(marker);
+    }
+
+    private const string ManualStartNote = "start=manual";
+
+    /// <summary>Whether the old copy of a moved runner was set not to start with Windows before the move.</summary>
+    private static bool WasManualStartBeforeMove(string root)
+    {
+        var marker = Path.Combine(root, MovedAwayMarker);
+        try { return File.Exists(marker) && File.ReadAllLines(marker).Any(l => l.Trim() == ManualStartNote); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return false; }
     }
 
     /// <summary>
@@ -744,7 +764,10 @@ public static class RunnerService
         var runner = await FindRunnerAsync(key) ?? throw new InvalidOperationException("The runner was not found on this PC.");
         if (runner.ServiceInstalled) throw new InvalidOperationException("This runner already runs as a Windows service.");
         EnsureNotBusy(runner);
+        // A runner set not to start keeps that as a service (RegistrationOptions.ManualStart); its turned-off startup
+        // entries would start the console again, so they are not put back later.
         await RepairRunnerAsync(runner, log);
+        ForgetStartupOff(runner.InstallPath);
     }
 
     /// <summary>
@@ -769,27 +792,44 @@ public static class RunnerService
     }
 
     /// <summary>Startup entries that were disabled for a runner, and how to enable them again.</summary>
-    private sealed class StartupChanges
+    internal sealed class StartupChanges
     {
         public List<(string Original, string Moved)> Files { get; } = new();
         public List<string> Tasks { get; } = new();
         public List<(RegistryKey Hive, string Key, string Name, object Value, RegistryValueKind Kind, string SavedTo)> RunValues { get; } = new();
 
-        public async Task RestoreAsync(Action<string> log)
+        public bool IsEmpty => Files.Count == 0 && Tasks.Count == 0 && RunValues.Count == 0;
+
+        /// <summary>Puts the entries back. Returns the ones that could not be restored (each is logged); empty when all were.</summary>
+        public async Task<StartupChanges> RestoreAsync(Action<string> log)
         {
+            var failed = new StartupChanges();
             foreach (var (original, moved) in Files)
             {
+                // The entry is already back (created again by hand): the runner starts, so it counts as restored.
+                if (File.Exists(original))
+                {
+                    log(File.Exists(moved)
+                        ? $"The startup entry {Path.GetFileName(original)} already exists again. The turned-off copy stays in {Path.GetDirectoryName(moved)}."
+                        : $"The startup entry {Path.GetFileName(original)} is already back.");
+                    continue;
+                }
                 try
                 {
                     File.Move(moved, original);
                     log($"Restored the startup entry {Path.GetFileName(original)}.");
                 }
-                catch (Exception ex) { log($"Could not restore the startup entry {original} from {moved}: {ex.Message}"); }
+                catch (Exception ex)
+                {
+                    log($"Could not restore the startup entry {original} from {moved}: {ex.Message}");
+                    failed.Files.Add((original, moved));
+                }
             }
             foreach (var task in Tasks)
             {
                 var (code, output) = await ScheduledTasks.RunAsync("schtasks.exe", $"/Change /TN \"{task}\" /ENABLE", ScheduledTasks.ShortTimeout);
                 log(code == 0 ? $"Enabled the scheduled task {task} again." : $"Could not enable the scheduled task {task} again: {output.Trim()}");
+                if (code != 0) failed.Tasks.Add(task);
             }
             foreach (var value in RunValues)
             {
@@ -800,8 +840,20 @@ public static class RunnerService
                     TryDelete(value.SavedTo);
                     log($"Restored the startup entry {value.Name} in {value.Hive.Name}\\{value.Key}.");
                 }
-                catch (Exception ex) { log($"Could not restore the startup entry {value.Name} (saved in {value.SavedTo}): {ex.Message}"); }
+                catch (Exception ex)
+                {
+                    log($"Could not restore the startup entry {value.Name} (saved in {value.SavedTo}): {ex.Message}");
+                    failed.RunValues.Add(value);
+                }
             }
+            return failed;
+        }
+
+        public void Add(StartupChanges other)
+        {
+            Files.AddRange(other.Files);
+            Tasks.AddRange(other.Tasks);
+            RunValues.AddRange(other.RunValues);
         }
     }
 
@@ -858,14 +910,14 @@ public static class RunnerService
     }
 
     /// <summary>Startup-folder scripts and shortcuts that launch the runner in this folder, moved aside (reversible).</summary>
-    private static void DisableStartupFiles(string root, List<string> others, StartupChanges changes, Action<string> log)
+    private static void DisableStartupFiles(string root, List<string> others, StartupChanges changes, Action<string> log, string? into = null)
     {
         var folders = new[]
         {
             Environment.GetFolderPath(Environment.SpecialFolder.Startup),
             Environment.GetFolderPath(Environment.SpecialFolder.CommonStartup)
         };
-        var target = DisabledStartupFolder;
+        var target = into ?? DisabledStartupFolder;
         foreach (var folder in folders.Where(Directory.Exists))
         {
             foreach (var file in Directory.EnumerateFiles(folder))
@@ -947,8 +999,9 @@ public static class RunnerService
     /// Run registry values that start the runner in this folder are deleted after saving them in a file in the
     /// disabled-startup folder, so they can be put back.
     /// </summary>
-    private static void DisableRunValues(string root, List<string> others, StartupChanges changes, Action<string> log)
+    private static void DisableRunValues(string root, List<string> others, StartupChanges changes, Action<string> log, string? into = null)
     {
+        var target = into ?? DisabledStartupFolder;
         foreach (var (hive, path) in new[] { (Registry.CurrentUser, RunKey), (Registry.LocalMachine, RunKey), (Registry.LocalMachine, RunKey32) })
         {
             try
@@ -968,8 +1021,8 @@ public static class RunnerService
                         continue;
                     }
                     var kind = key.GetValueKind(name);
-                    Directory.CreateDirectory(DisabledStartupFolder);
-                    var saved = Path.Combine(DisabledStartupFolder, $"run-{string.Concat(name.Select(c => Path.GetInvalidFileNameChars().Contains(c) ? '-' : c))}-{DateTime.Now:yyyyMMddHHmmss}.json");
+                    Directory.CreateDirectory(target);
+                    var saved = Path.Combine(target, $"run-{string.Concat(name.Select(c => Path.GetInvalidFileNameChars().Contains(c) ? '-' : c))}-{DateTime.Now:yyyyMMddHHmmss}.json");
                     File.WriteAllText(saved, JsonSerializer.Serialize(new { key = where, name, value = value.ToString(), kind = kind.ToString() },
                         new JsonSerializerOptions { WriteIndented = true }));
                     using (var writable = hive.OpenSubKey(path, writable: true)) writable?.DeleteValue(name);
@@ -1068,6 +1121,7 @@ public static class RunnerService
 
     private static void ForgetRoot(string root)
     {
+        ForgetStartupOff(root);
         if (FleetConfig.Current.KnownRunnerRoots.Contains(root, StringComparer.OrdinalIgnoreCase))
             FleetConfig.Update(c => c.KnownRunnerRoots.RemoveAll(r => r.Equals(root, StringComparison.OrdinalIgnoreCase)));
     }
@@ -1342,6 +1396,17 @@ public static class RunnerService
         var result = await RunConfigAsync(root, arguments);
         if (result.ExitCode != 0)
             throw new InvalidOperationException(CleanConfigError(result.Error, result.Output));
+        // config.cmd sets the service to start with Windows; a runner that was set not to keeps that.
+        // Only a setting: failing here must not undo a registration that worked.
+        if (runAsService && options?.ManualStart == true)
+        {
+            try
+            {
+                if (ReadRunnerServices().FirstOrDefault(s => s.Root.Equals(root, StringComparison.OrdinalIgnoreCase)) is { } service)
+                    await SetServiceStartModeAsync(service.Name, ServiceStart.Manual);
+            }
+            catch (Exception ex) { MachineRelay.AppendAgentLog($"The runner in {root} was set not to start with Windows, but that could not be kept: {ex.Message}"); }
+        }
     }
 
     /// <summary>
@@ -1783,7 +1848,7 @@ public sealed class RunnerConfig
 /// (edit, repair, convert, move).
 /// </summary>
 public sealed record RunnerRegistrationOptions(string RunnerGroup = "", bool Ephemeral = false, bool DisableUpdate = false,
-    bool NoDefaultLabels = false)
+    bool NoDefaultLabels = false, bool ManualStart = false)
 {
     public static readonly RunnerRegistrationOptions None = new();
 }
@@ -1793,6 +1858,8 @@ public sealed class RunnerServiceRecord
     public string Name { get; init; } = string.Empty;
     public string DisplayName { get; init; } = string.Empty;
     public string State { get; init; } = string.Empty;
+    /// <summary>"Auto", "Manual" or "Disabled" (Win32_Service.StartMode).</summary>
+    public string StartMode { get; init; } = string.Empty;
     public string Root { get; init; } = string.Empty;
     public uint ProcessId { get; init; }
 }
@@ -1827,8 +1894,14 @@ public sealed class RunnerInfo : INotifyPropertyChanged
     /// <summary>Registered with --no-default-labels: GitHub lists no "self-hosted" label. Only known when GitHub was read.</summary>
     public bool NoDefaultLabels { get; init; }
     /// <summary>The settings to pass to config.cmd when this runner is registered again, on this PC or another one.</summary>
-    public RunnerRegistrationOptions RegistrationOptions => new(RunnerGroup, Ephemeral, DisableUpdate, NoDefaultLabels);
+    public RunnerRegistrationOptions RegistrationOptions
+        => new(RunnerGroup, Ephemeral, DisableUpdate, NoDefaultLabels,
+            ManualStart: StartsAt == RunnerStart.Off || (StartsAt == RunnerStart.Disabled && ManualStartBeforeMove));
+    /// <summary>The old copy of a moved runner (disabled) was set not to start with Windows before the move.</summary>
+    public bool ManualStartBeforeMove { get; init; }
     public bool ServiceInstalled { get; init; }
+    /// <summary>What starts the runner after a restart (a <see cref="RunnerStart"/> value).</summary>
+    public string StartsAt { get; init; } = RunnerStart.Unknown;
     /// <summary>
     /// Running from a console window (run.cmd) rather than as a Windows service. Also true for a few minutes after the
     /// console's listener stopped (see <see cref="ConsoleRestarting"/>).
