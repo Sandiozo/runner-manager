@@ -60,6 +60,7 @@ public static partial class RunnerService
 
         // What starts console runners at sign-in, read once for all of them.
         var startup = roots.Any(root => !services.Any(s => s.Root.Equals(root, StringComparison.OrdinalIgnoreCase)))
+                      || processes.Any(p => p.SessionId != 0 && p.Name.Equals("Runner.Listener.exe", StringComparison.OrdinalIgnoreCase))
             ? await ReadStartupEntriesAsync() ?? new List<string>() : new List<string>();
         var runners = await Task.WhenAll(roots.OrderBy(x => x)
             .Select(root => BuildRunnerInfoAsync(root, services, processes, queryGitHub, startup, roots)));
@@ -103,13 +104,18 @@ public static partial class RunnerService
         var config = ReadRunnerConfig(root);
         var service = services.FirstOrDefault(s => s.Root.Equals(root, StringComparison.OrdinalIgnoreCase));
         var serviceInstalled = service != null;
-        var consoleListener = serviceInstalled ? null : processes.FirstOrDefault(p =>
+        var serviceRunning = service?.State.Equals("Running", StringComparison.OrdinalIgnoreCase) == true;
+        // A runner can have a Windows service and still run from a console window in the user's session instead (a
+        // runner moved to the session for a GPU or desktop app). Its stopped service must not be started then: that
+        // would run the runner twice.
+        var consoleListener = serviceRunning ? null : processes.FirstOrDefault(p =>
             p.Name.Equals("Runner.Listener.exe", StringComparison.OrdinalIgnoreCase)
+            && (!serviceInstalled || p.SessionId != 0)
             && RootFromExecutable(p.ExecutablePath).Equals(root, StringComparison.OrdinalIgnoreCase));
-        var restarting = !serviceInstalled && IsConsoleRestarting(root, consoleListener != null, DateTime.UtcNow);
+        var restarting = !serviceRunning && IsConsoleRestarting(root, consoleListener != null, DateTime.UtcNow);
         var interactive = consoleListener != null || restarting;
-        var running = service?.State.Equals("Running", StringComparison.OrdinalIgnoreCase) == true || consoleListener != null;
-        var busy = running && HasDescendantWorker(service?.ProcessId ?? consoleListener!.ProcessId, processes);
+        var running = serviceRunning || consoleListener != null;
+        var busy = running && HasDescendantWorker(consoleListener?.ProcessId ?? service?.ProcessId ?? 0, processes);
         var repoPath = RepositoryPath(config.GitHubUrl);
         var scope = ApiScope(config.GitHubUrl);
         RemoteRunnerState? remote = null;
@@ -130,7 +136,7 @@ public static partial class RunnerService
         {
             Name = service?.Name ?? string.Empty,
             DisplayName = label,
-            StatusText = serviceInstalled ? service!.State : restarting ? "Console window (restarting)" : interactive ? "Console window" : "No service",
+            StatusText = restarting ? "Console window (restarting)" : interactive ? "Console window" : serviceInstalled ? service!.State : "No service",
             ActivityText = running ? (busy ? "Busy" : "Idle") : restarting ? "Restarting" : "Offline",
             IsInteractive = interactive,
             ConsoleRestarting = restarting,
@@ -152,7 +158,7 @@ public static partial class RunnerService
             DisableUpdate = config.DisableUpdate,
             NoDefaultLabels = remote is { HasDefaultLabels: false },
             ServiceInstalled = serviceInstalled,
-            StartsAt = serviceInstalled ? ServiceStartsAt(service!.StartMode) : ConsoleStartsAt(root, startupEntries, allRoots),
+            StartsAt = serviceInstalled && !interactive ? ServiceStartsAt(service!.StartMode) : ConsoleStartsAt(root, startupEntries, allRoots),
             IsRunning = running,
             StatusBrush = interactive ? Palette.Warning : running ? Palette.Success : serviceInstalled ? Palette.Danger : Palette.Warning,
             GitHubText = remote == null
@@ -219,7 +225,7 @@ public static partial class RunnerService
     {
         var result = new List<ProcessInfo>();
         using var searcher = new ManagementObjectSearcher(
-            "SELECT ProcessId, ParentProcessId, Name, ExecutablePath FROM Win32_Process WHERE Name LIKE 'Runner%'");
+            "SELECT ProcessId, ParentProcessId, Name, ExecutablePath, SessionId FROM Win32_Process WHERE Name LIKE 'Runner%'");
         foreach (ManagementObject process in searcher.Get())
         {
             result.Add(new ProcessInfo
@@ -227,7 +233,8 @@ public static partial class RunnerService
                 ProcessId = ConvertToUInt(process["ProcessId"]),
                 ParentProcessId = ConvertToUInt(process["ParentProcessId"]),
                 Name = process["Name"]?.ToString() ?? string.Empty,
-                ExecutablePath = process["ExecutablePath"]?.ToString() ?? string.Empty
+                ExecutablePath = process["ExecutablePath"]?.ToString() ?? string.Empty,
+                SessionId = ConvertToUInt(process["SessionId"])
             });
         }
         return result;
@@ -468,7 +475,7 @@ public static partial class RunnerService
             return;
         }
 
-        var wasRunning = runner.ServiceInstalled && runner.IsRunning;
+        var wasRunning = runner.ServiceInstalled && runner.IsRunning && !runner.IsInteractive;
         var restoreRecovery = HoldAutoRecovery(runner.Name);
         try
         {
@@ -662,6 +669,8 @@ public static partial class RunnerService
         EnsureNotBusy(runner);
         EnsureNotBusyNow(runner);
         await ControlServiceAsync(runner.CommandKey, "Stop");
+        // A runner with a service that runs from a console window instead: stopping the service doesn't stop it.
+        if (runner.ServiceInstalled && runner.IsInteractive) await Task.Run(() => StopConsoleRunner(runner.InstallPath));
     }
 
     /// <summary>
@@ -1947,4 +1956,6 @@ public sealed class ProcessInfo
     public string CommandLine { get; init; } = string.Empty;
     public string CreationDate { get; init; } = string.Empty;
     public string ExecutablePath { get; init; } = string.Empty;
+    /// <summary>0 for services; a signed-in user's session for programs they started.</summary>
+    public uint SessionId { get; init; }
 }

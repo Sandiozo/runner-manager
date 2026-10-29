@@ -13,6 +13,12 @@ Runner Manager updates itself from [Releases](https://github.com/Sandiozo/runner
 - A console runner that is not running is shown as a stopped console runner, with **Run as Windows service…**, instead
   of as a runner without a service.
 - AI assistants see how each runner starts after a restart.
+- A runner that has a Windows service but runs from a console window in your session instead is shown as a console
+  runner. Before, it showed as stopped with a Start button, and starting its service, by hand or through
+  auto-recovery, ran the runner twice. Auto-recovery now leaves its service alone, and moving it closes the console.
+- The **Run as service** button of a console runner has the normal size and style, and the buttons in a runner's row
+  no longer grow when a job line is shown. The note explains that a console runner can use your desktop, which builds
+  that open windows, such as Unity, need, and converting asks whether its jobs need one.
 
 ## 2.4.1
 

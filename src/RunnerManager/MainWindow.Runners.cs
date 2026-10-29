@@ -31,7 +31,8 @@ public partial class MainWindow
         if (!DialogWindow.Confirm(this, $"Run {runner.TitleText} as a Windows service?",
                 "The console window closes, and what starts it at sign-in is turned off so it does not start twice: startup entries are moved to " +
                 "%LOCALAPPDATA%\\RunnerManager\\disabled-startup, and scheduled tasks that start it are disabled. " +
-                "The runner is registered again as a Windows service with the same name and labels. It then starts with Windows, before sign-in.",
+                "The runner is registered again as a Windows service with the same name and labels. It then starts with Windows, before sign-in.\n\n" +
+                "A service has no desktop: jobs that open windows, such as Unity builds or game tests, may fail or hang there.",
                 "Run as service")) return;
         await RunRunnerActionAsync(runner, "Convert", $"Convert {runner.TitleText}",
             log => RunnerService.ConvertToServiceAsync(runner.CommandKey, log));

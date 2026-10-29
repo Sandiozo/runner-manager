@@ -458,21 +458,21 @@
                                                                             </StackPanel>
                                                                         </Border>
                                                                         <Button Grid.Column="3" Click="RunnerPower_Click" IsEnabled="{Binding CanControl}" Padding="10,4" MinWidth="76"
-                                                                                Visibility="{Binding PowerVisibility}">
+                                                                                VerticalAlignment="Center" Visibility="{Binding PowerVisibility}">
                                                                             <StackPanel Orientation="Horizontal">
                                                                                 <TextBlock Text="{Binding PowerGlyph}" Style="{StaticResource Icon}" FontSize="10" Margin="0,0,6,0"/>
                                                                                 <TextBlock Text="{Binding PowerButtonText}" FontSize="12"/>
                                                                             </StackPanel>
                                                                         </Button>
-                                                                        <Button Grid.Column="3" Click="RunnerConvert_Click" IsEnabled="{Binding CanConvert}" Padding="10,4"
-                                                                                Visibility="{Binding ConvertVisibility}" Style="{StaticResource PrimaryButton}"
+                                                                        <Button Grid.Column="3" Click="RunnerConvert_Click" IsEnabled="{Binding CanConvert}" Padding="10,4" MinWidth="76"
+                                                                                VerticalAlignment="Center" Visibility="{Binding ConvertVisibility}"
                                                                                 ToolTip="Run this runner as a Windows service instead of in a console window">
                                                                             <StackPanel Orientation="Horizontal">
-                                                                                <TextBlock Text="&#xE90F;" Style="{StaticResource Icon}" FontSize="10" Margin="0,0,6,0" Foreground="{DynamicResource OnAccentBrush}"/>
-                                                                                <TextBlock Text="Run as service" FontSize="12" Foreground="{DynamicResource OnAccentBrush}"/>
+                                                                                <TextBlock Text="&#xE90F;" Style="{StaticResource Icon}" FontSize="10" Margin="0,0,6,0"/>
+                                                                                <TextBlock Text="Run as service" FontSize="12"/>
                                                                             </StackPanel>
                                                                         </Button>
-                                                                        <Button Grid.Column="4" Style="{StaticResource IconButton}" Content="&#xE712;" Margin="4,0,0,0"
+                                                                        <Button Grid.Column="4" Style="{StaticResource IconButton}" Content="&#xE712;" Margin="4,0,0,0" VerticalAlignment="Center"
                                                                                 Click="OpenButtonMenu_Click" ToolTip="More actions">
                                                                             <Button.ContextMenu>
                                                                                 <ContextMenu>
@@ -499,10 +499,10 @@
 
                                                                         <!-- Expanded details -->
                                                                         <StackPanel Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="4" Margin="0,10,0,4" Visibility="{Binding DetailsVisibility}">
-                                                                            <Border Background="{DynamicResource BadgeWarnBgBrush}" BorderBrush="{DynamicResource BadgeWarnBorderBrush}" BorderThickness="1"
+                                                                            <Border Background="{DynamicResource BadgeInfoBgBrush}" BorderBrush="{DynamicResource BadgeInfoBorderBrush}" BorderThickness="1"
                                                                                     CornerRadius="6" Padding="10,7" Margin="0,0,0,8" Visibility="{Binding ConsoleNoteVisibility}">
                                                                                 <TextBlock TextWrapping="Wrap" FontSize="12" Foreground="{DynamicResource TextMutedBrush}"
-                                                                                           Text="This runner runs in a console window that a script in your Startup folder opens when you sign in. Closing the window or signing out takes the runner offline. “Run as service” makes it a Windows service. It then has no window, starts with Windows before sign-in, and Runner Manager can start, stop and restart it."/>
+                                                                                           Text="This runner runs in a console window in your session, opened when you sign in. Its jobs can use your desktop, which builds that open windows, such as Unity, need. It is offline while you are signed out. A Windows service runs without sign-in but has no desktop; “Run as service” changes it, if its jobs don't need one."/>
                                                                             </Border>
                                                                             <!-- Live job: steps from GitHub, output and processes from the runner's PC -->
                                                                             <Border x:Name="LiveJobPanel" Visibility="{Binding LiveJobVisibility}" Background="{DynamicResource Bg2Brush}"

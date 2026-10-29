@@ -131,6 +131,19 @@ public class StartupTests
         Assert.True(shared.StartsAutomatically);
         Assert.False(shared.CanChangeStartup);
 
+        // A runner with a Windows service that runs from a console window in the session instead (livonia-core).
+        var inSession = new MachineRunnerStatus
+        {
+            ServiceName = "actions.runner.o-r.core", ServiceInstalled = true, IsInteractive = true, IsRunning = true,
+            ActivityText = "Idle", StartsAt = RunnerStart.SignIn, IsLocalMachine = true
+        };
+        Assert.Equal("Console", inSession.StatusText);
+        Assert.False(inSession.CanControl);   // no Start or Restart of the service: that would run it twice
+        Assert.Equal(System.Windows.Visibility.Collapsed, inSession.PowerVisibility);
+        Assert.Equal(System.Windows.Visibility.Collapsed, inSession.ConvertVisibility);
+        Assert.Equal("Start when you sign in", inSession.StartupHeader);
+        Assert.True(inSession.CanChangeStartup);
+
         var unknown = new MachineRunnerStatus { InstallPath = @"C:\r", IsLocalMachine = true };
         Assert.Equal("No service", unknown.StatusText);
         Assert.False(unknown.CanChangeStartup);

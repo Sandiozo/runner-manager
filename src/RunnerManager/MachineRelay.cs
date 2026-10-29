@@ -790,6 +790,13 @@ public static class MachineRelay
         var acted = false;
         foreach (var runner in local.Runners.Where(r => r.ServiceInstalled))
         {
+            // It runs from a console window: when that closes (sign-out), starting the service would run it twice
+            // at the next sign-in.
+            if (runner.IsInteractive)
+            {
+                WantRunning.Remove(runner.Name);
+                continue;
+            }
             if (runner.IsRunning)
             {
                 WantRunning.Add(runner.Name);

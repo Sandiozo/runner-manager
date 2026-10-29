@@ -59,16 +59,18 @@ public sealed class MachineRunnerStatus : INotifyPropertyChanged
     /// <summary>A console runner that is not running now, but a startup entry opens it at sign-in (or did, until it was turned off).</summary>
     [JsonIgnore] private bool IsStoppedConsole => !IsInteractive && !ServiceInstalled
         && StartsAt is RunnerStart.SignIn or RunnerStart.SignInShared or RunnerStart.Off;
-    [JsonIgnore] public bool CanConvert => (IsInteractive || IsStoppedConsole) && SupportsLifecycle && string.IsNullOrEmpty(_pendingAction) && !IsBusy;
-    [JsonIgnore] public Visibility ConvertVisibility => IsInteractive || IsStoppedConsole ? Visibility.Visible : Visibility.Collapsed;
+    [JsonIgnore] public bool CanConvert => (IsInteractive || IsStoppedConsole) && !ServiceInstalled && SupportsLifecycle && string.IsNullOrEmpty(_pendingAction) && !IsBusy;
+    [JsonIgnore] public Visibility ConvertVisibility => (IsInteractive || IsStoppedConsole) && !ServiceInstalled ? Visibility.Visible : Visibility.Collapsed;
     /// <summary>Start with Windows (services) or at sign-in (console runners) can be turned on and off from protocol 13.</summary>
+    /// <summary>Started by a console window's startup entries rather than by its Windows service.</summary>
+    [JsonIgnore] private bool StartsFromConsole => !ServiceInstalled || IsInteractive;
     [JsonIgnore] public bool CanChangeStartup => (IsLocalMachine || (MachineOnline && AgentProtocolVersion >= 13))
         && string.IsNullOrEmpty(_pendingAction) && !string.IsNullOrEmpty(CommandKey) && !MovedAway
-        && (ServiceInstalled ? StartsAt is RunnerStart.WithWindows or RunnerStart.Off or RunnerStart.Disabled
-            : StartsAt is RunnerStart.SignIn or RunnerStart.Off);
+        && (StartsFromConsole ? StartsAt is RunnerStart.SignIn or RunnerStart.Off
+            : StartsAt is RunnerStart.WithWindows or RunnerStart.Off or RunnerStart.Disabled);
     [JsonIgnore] public bool StartsAutomatically => StartsAt is RunnerStart.WithWindows or RunnerStart.SignIn or RunnerStart.SignInShared;
-    [JsonIgnore] public string StartupHeader => ServiceInstalled ? "Start with Windows" : "Start when you sign in";
-    [JsonIgnore] public string StartupTip => ServiceInstalled
+    [JsonIgnore] public string StartupHeader => StartsFromConsole ? "Start when you sign in" : "Start with Windows";
+    [JsonIgnore] public string StartupTip => !StartsFromConsole
         ? "When this is off, the runner stays stopped after a restart until you start it. Turning it off does not stop it now."
         : StartsAt == RunnerStart.SignInShared
             ? "A startup entry that also starts other runners opens this runner. Remove it from that entry by hand to change this."
@@ -79,7 +81,7 @@ public sealed class MachineRunnerStatus : INotifyPropertyChanged
         RunnerStart.WithWindows => "With Windows",
         RunnerStart.SignIn => "When you sign in",
         RunnerStart.SignInShared => "When you sign in, from a startup entry that also starts other runners",
-        RunnerStart.Off => ServiceInstalled ? "Not automatically. Start it from Runner Manager." : "Not automatically. Its startup entries are turned off.",
+        RunnerStart.Off => StartsFromConsole ? "Not automatically. Its startup entries are turned off." : "Not automatically. Start it from Runner Manager.",
         RunnerStart.Disabled => "Never. Its Windows service is disabled.",
         _ => !IsLocalMachine && AgentProtocolVersion < 13 ? "Update the fleet agent to see this" : "Nothing starts it automatically"
     };
@@ -113,8 +115,10 @@ public sealed class MachineRunnerStatus : INotifyPropertyChanged
         : IsRunning ? Palette.Success
         : Palette.Danger;
     [JsonIgnore] public Brush StatusTint => Palette.Tint(StatusBrush);
-    [JsonIgnore] public string StatusTip => IsInteractive
-        ? "Runs in a console window, not as a Windows service. It goes offline when the window closes or you sign out. Use “Run as service” to change this."
+    [JsonIgnore] public string StatusTip => IsInteractive && ServiceInstalled
+        ? "Runs in a console window in your session. Its Windows service is not used; starting it would run the runner twice."
+        : IsInteractive
+        ? "Runs in a console window in your session, so its jobs can use your desktop. It goes offline when the window closes or you sign out."
         : IsStoppedConsole && StartsAt == RunnerStart.Off
             ? "Runs in a console window, which is set not to open when you sign in. Turn on “Start when you sign in” and sign in again, or use “Run as Windows service”."
         : IsStoppedConsole ? "Runs in a console window that opens when you sign in. It is not running now."
@@ -122,12 +126,14 @@ public sealed class MachineRunnerStatus : INotifyPropertyChanged
         : IsBusy ? "Running a job."
         : IsRunning ? "Online and waiting for jobs."
         : "The Windows service is stopped. GitHub does not send it jobs.";
-    [JsonIgnore] public bool CanControl => ServiceInstalled && !string.IsNullOrWhiteSpace(ServiceName)
+    // Not while it runs from a console window: starting or restarting its service would run it twice.
+    [JsonIgnore] public bool CanControl => ServiceInstalled && !IsInteractive && !string.IsNullOrWhiteSpace(ServiceName)
         && string.IsNullOrEmpty(_pendingAction) && (IsLocalMachine || MachineOnline);
     [JsonIgnore] public bool CanEdit => (IsLocalMachine || AgentProtocolVersion >= 2) && CanControl && !IsBusy;
     [JsonIgnore] public bool CanCleanWork => (IsLocalMachine || AgentProtocolVersion >= 9) && CanControl && !IsBusy;
     [JsonIgnore] public bool CanViewLog => IsLocalMachine || (MachineOnline && AgentProtocolVersion >= 9);
-    [JsonIgnore] public string ServiceText => ServiceInstalled ? ServiceName
+    [JsonIgnore] public string ServiceText => ServiceInstalled && IsInteractive ? $"{ServiceName} (not used: the runner runs in a console window)"
+        : ServiceInstalled ? ServiceName
         : IsInteractive || IsStoppedConsole ? "None. Runs in a console window that closes when you sign out." : "Not installed";
     [JsonIgnore] public string TitleText => string.IsNullOrWhiteSpace(AgentName) ? DisplayName : AgentName;
     [JsonIgnore] public string RepositoryText => IsOrgRunner ? $"{OrgName}  ·  organization runner"
