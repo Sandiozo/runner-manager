@@ -1953,8 +1953,6 @@ public sealed class ProcessInfo
     public uint ProcessId { get; init; }
     public uint ParentProcessId { get; init; }
     public string Name { get; init; } = string.Empty;
-    public string CommandLine { get; init; } = string.Empty;
-    public string CreationDate { get; init; } = string.Empty;
     public string ExecutablePath { get; init; } = string.Empty;
     /// <summary>0 for services; a signed-in user's session for programs they started.</summary>
     public uint SessionId { get; init; }

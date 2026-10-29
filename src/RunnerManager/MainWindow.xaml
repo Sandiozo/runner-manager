@@ -27,7 +27,7 @@
         </Style>
         <Style x:Key="ValueText" TargetType="TextBlock" BasedOn="{StaticResource {x:Type TextBlock}}">
             <Setter Property="FontSize" Value="12"/>
-            <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
+            <Setter Property="TextWrapping" Value="Wrap"/>
         </Style>
         <Style x:Key="KeyRow" TargetType="DockPanel">
             <Setter Property="Margin" Value="0,2"/>
@@ -298,18 +298,6 @@
                         </StackPanel>
                     </DockPanel>
                 </Border>
-                <Border x:Name="TileRdcCard" Style="{StaticResource Tile}">
-                    <DockPanel>
-                        <Border Width="28" Height="28" CornerRadius="7" Background="{DynamicResource Bg3Brush}" VerticalAlignment="Center">
-                            <TextBlock Text="&#xE8AF;" Style="{StaticResource Icon}" FontSize="12" Foreground="{DynamicResource TextMutedBrush}"/>
-                        </Border>
-                        <TextBlock x:Name="TileRdc" Text="–" FontSize="17" FontWeight="SemiBold" Margin="10,0,10,0" VerticalAlignment="Center"/>
-                        <StackPanel VerticalAlignment="Center">
-                            <TextBlock Text="RDC online" ToolTip="Remote Desktop Commander" Style="{StaticResource Caption}" FontSize="11" TextTrimming="CharacterEllipsis"/>
-                            <TextBlock x:Name="TileRdcSub" Style="{StaticResource Caption}" FontSize="11" TextTrimming="CharacterEllipsis"/>
-                        </StackPanel>
-                    </DockPanel>
-                </Border>
             </UniformGrid>
 
             <!-- Machine cards -->
@@ -326,17 +314,21 @@
                                             <RowDefinition Height="Auto"/>
                                         </Grid.RowDefinitions>
 
-                                        <!-- Machine header -->
-                                        <Grid Margin="12,9,12,9">
+                                        <!-- Machine header: click it to collapse or expand the card -->
+                                        <Grid Margin="12,9,12,9" Background="Transparent" Cursor="Hand" MouseLeftButtonUp="MachineHeader_Click"
+                                              ToolTip="Click to show or hide this PC's runners">
                                             <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="Auto"/>
                                                 <ColumnDefinition Width="Auto"/>
                                                 <ColumnDefinition Width="*"/>
                                                 <ColumnDefinition Width="Auto"/>
                                             </Grid.ColumnDefinitions>
-                                            <Border Width="30" Height="30" CornerRadius="8" Background="{DynamicResource Bg3Brush}" Margin="0,0,11,0">
+                                            <TextBlock Text="{Binding CollapseGlyph}" Style="{StaticResource Icon}" FontSize="9"
+                                                       Foreground="{DynamicResource TextFaintBrush}" Margin="2,0,10,0"/>
+                                            <Border Grid.Column="1" Width="30" Height="30" CornerRadius="8" Background="{DynamicResource Bg3Brush}" Margin="0,0,11,0">
                                                 <TextBlock Text="{Binding MachineGlyph}" Style="{StaticResource Icon}" FontSize="14"/>
                                             </Border>
-                                            <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                                            <StackPanel Grid.Column="2" VerticalAlignment="Center">
                                                 <StackPanel Orientation="Horizontal">
                                                     <TextBlock Text="{Binding MachineName}" FontSize="14" FontWeight="SemiBold"/>
                                                     <Border Style="{StaticResource Badge}" Background="{DynamicResource BadgeInfoBgBrush}" BorderBrush="{DynamicResource BadgeInfoBorderBrush}" Visibility="{Binding ThisPcVisibility}">
@@ -356,7 +348,7 @@
                                                     <Run Text="{Binding AgentText, Mode=OneWay}"/><Run Text="  ·  " Foreground="{DynamicResource TextFaintBrush}"/><Run Text="{Binding SyncText, Mode=OneWay}"/><Run Text="  ·  " Foreground="{DynamicResource TextFaintBrush}"/><Run Text="{Binding VersionText, Mode=OneWay}"/>
                                                 </TextBlock>
                                             </StackPanel>
-                                            <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+                                            <StackPanel Grid.Column="3" Orientation="Horizontal" VerticalAlignment="Center">
                                                 <Border Style="{StaticResource Pill}" Background="{Binding StatusTint}">
                                                     <StackPanel Orientation="Horizontal">
                                                         <Ellipse Width="7" Height="7" Fill="{Binding StatusBrush}" Margin="0,0,7,0"/>
@@ -370,8 +362,6 @@
                                                                       IsEnabled="{Binding SupportsFleetTools}" Click="MachineWatchdog_Click"/>
                                                             <Separator/>
                                                             <MenuItem Header="View fleet agent log" Tag="&#xE9F9;" IsEnabled="{Binding SupportsFleetTools}" Click="MachineAgentLog_Click"/>
-                                                            <MenuItem Header="View Remote Desktop Commander log" Tag="&#xE8AF;" IsEnabled="{Binding SupportsFleetTools}" Visibility="{Binding RdcControlsVisibility}" Click="MachineRdcLog_Click"/>
-                                                            <MenuItem Header="Set up Remote Desktop Commander…" Tag="&#xE8AF;" IsEnabled="{Binding CanSetupRdc}" Visibility="{Binding RdcSetupMenuVisibility}" Click="MachineRdcSetup_Click"/>
                                                             <MenuItem Header="Update Runner Manager" Tag="&#xE896;" IsEnabled="{Binding CanUpdateAgent}" Click="MachineUpdate_Click"/>
                                                             <Separator/>
                                                             <MenuItem Header="Restart PC…" Tag="&#xE7E8;" Style="{StaticResource DangerMenuItem}" IsEnabled="{Binding SupportsFleetTools}" Click="MachineReboot_Click"/>
@@ -384,7 +374,7 @@
                                         </Grid>
 
                                         <!-- Health strip -->
-                                        <WrapPanel Grid.Row="1" Margin="53,0,12,8" Visibility="{Binding HealthVisibility}">
+                                        <WrapPanel Grid.Row="1" Margin="73,0,12,8" Visibility="{Binding HealthVisibility}">
                                             <WrapPanel.Resources>
                                                 <Style TargetType="Border" BasedOn="{StaticResource Chip}"/>
                                             </WrapPanel.Resources>
@@ -399,23 +389,23 @@
                                                 </StackPanel>
                                             </Border>
                                             <Border Visibility="{Binding WatchdogVisibility}"
-                                                    ToolTip="Auto-recovery restarts runners and Remote Desktop Commander when they stop unexpectedly. Turn it on or off in the ⋯ menu.">
+                                                    ToolTip="Auto-recovery restarts runners when they stop unexpectedly. Turn it on or off in the ⋯ menu.">
                                                 <StackPanel Orientation="Horizontal">
                                                     <TextBlock Text="&#xE83D;" Style="{StaticResource Icon}" FontSize="10" Foreground="{Binding WatchdogBrush}" Margin="0,0,5,0"/>
                                                     <TextBlock Text="{Binding WatchdogText}" Foreground="{Binding WatchdogBrush}" FontSize="11"/>
                                                 </StackPanel>
                                             </Border>
+                                            <Border Visibility="{Binding LastResultVisibility}" MaxWidth="460"
+                                                    ToolTip="{Binding LastResultText}">
+                                                <StackPanel Orientation="Horizontal">
+                                                    <TextBlock Text="&#xE81C;" Style="{StaticResource Icon}" FontSize="10" Foreground="{DynamicResource TextFaintBrush}" Margin="0,0,5,0"/>
+                                                    <TextBlock Text="{Binding LastResultText}" Foreground="{DynamicResource TextMutedBrush}" FontSize="11" TextTrimming="CharacterEllipsis"/>
+                                                </StackPanel>
+                                            </Border>
                                         </WrapPanel>
 
-                                        <!-- Body: runners | RDC -->
-                                        <Border Grid.Row="2" BorderBrush="{DynamicResource BorderSubtleBrush}" BorderThickness="0,1,0,0">
-                                            <Grid>
-                                                <Grid.ColumnDefinitions>
-                                                    <ColumnDefinition Width="*"/>
-                                                    <ColumnDefinition Width="Auto"/>
-                                                </Grid.ColumnDefinitions>
-
-                                                <!-- Runners -->
+                                        <!-- Body: runners -->
+                                        <Border Grid.Row="2" BorderBrush="{DynamicResource BorderSubtleBrush}" BorderThickness="0,1,0,0" Visibility="{Binding BodyVisibility}">
                                                 <StackPanel Margin="6,8,6,8">
                                                     <DockPanel Margin="8,0,8,4">
                                                         <TextBlock Text="RUNNERS" Style="{StaticResource SectionLabel}" VerticalAlignment="Center"/>
@@ -497,8 +487,14 @@
                                                                             </Button.ContextMenu>
                                                                         </Button>
 
-                                                                        <!-- Expanded details -->
-                                                                        <StackPanel Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="4" Margin="0,10,0,4" Visibility="{Binding DetailsVisibility}">
+                                                                        <!-- Expanded details: the job and recent runs on the left, the runner's facts on the right.
+                                                                             The job's output is in the bottom panel, next to Activity. -->
+                                                                        <Grid Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="4" Margin="0,10,0,4" Visibility="{Binding DetailsVisibility}">
+                                                                            <Grid.ColumnDefinitions>
+                                                                                <ColumnDefinition Width="*"/>
+                                                                                <ColumnDefinition Width="Auto"/>
+                                                                            </Grid.ColumnDefinitions>
+                                                                            <StackPanel Margin="0,0,14,0">
                                                                             <Border Background="{DynamicResource BadgeInfoBgBrush}" BorderBrush="{DynamicResource BadgeInfoBorderBrush}" BorderThickness="1"
                                                                                     CornerRadius="6" Padding="10,7" Margin="0,0,0,8" Visibility="{Binding ConsoleNoteVisibility}">
                                                                                 <TextBlock TextWrapping="Wrap" FontSize="12" Foreground="{DynamicResource TextMutedBrush}"
@@ -593,20 +589,57 @@
                                                                                     <TextBlock Text="{Binding LiveJob.ActivityNote}" Visibility="{Binding LiveJob.ActivityNoteVisibility}" Style="{StaticResource Caption}"
                                                                                                FontSize="12" TextWrapping="Wrap" Margin="0,10,0,0"/>
 
-                                                                                    <!-- Output of the running step -->
-                                                                                    <StackPanel Visibility="{Binding LiveJob.OutputVisibility}" Margin="0,12,0,0">
-                                                                                        <DockPanel Margin="0,0,0,4">
-                                                                                            <Button DockPanel.Dock="Right" Content="Open full output" Style="{StaticResource GhostButton}" Padding="6,1" FontSize="11"
-                                                                                                    Click="RunnerLiveOutput_Click"/>
-                                                                                            <TextBlock Text="OUTPUT" Style="{StaticResource SectionLabel}" VerticalAlignment="Center"/>
-                                                                                        </DockPanel>
-                                                                                        <Border Background="{DynamicResource Bg0Brush}" CornerRadius="6" Padding="10,8" ClipToBounds="True">
-                                                                                            <TextBlock Text="{Binding LiveJob.Output}" FontFamily="{StaticResource MonoFont}" FontSize="11"
-                                                                                                       Foreground="{DynamicResource TextMutedBrush}" TextWrapping="NoWrap"/>
-                                                                                        </Border>
-                                                                                    </StackPanel>
                                                                                 </StackPanel>
                                                                             </Border>
+                                                                            <TextBlock Text="No job is running, and there are no recent runs to show." Style="{StaticResource Caption}"
+                                                                                       FontSize="12" Margin="0,2,0,0" Visibility="{Binding NoJobsVisibility}"/>
+                                                                            <!-- Recent workflow runs -->
+                                                                            <StackPanel Visibility="{Binding RecentRunsVisibility}" Margin="0,0,0,0">
+                                                                                <TextBlock Text="RECENT RUNS" Style="{StaticResource SectionLabel}" Margin="0,0,0,4"/>
+                                                                                <ItemsControl ItemsSource="{Binding RecentRuns}">
+                                                                                    <ItemsControl.ItemTemplate>
+                                                                                        <DataTemplate DataType="{x:Type local:WorkflowRunSummary}">
+                                                                                            <Border Style="{StaticResource RunRow}" Tag="{Binding HtmlUrl}" MouseLeftButtonUp="Link_Click" ToolTip="{Binding Title}">
+                                                                                                <DockPanel>
+                                                                                                    <!-- Colors come from the theme resources, so they follow theme changes. -->
+                                                                                                    <TextBlock Text="{Binding Glyph}" FontSize="11" Margin="0,0,10,0">
+                                                                                                        <TextBlock.Style>
+                                                                                                            <Style TargetType="TextBlock" BasedOn="{StaticResource Icon}">
+                                                                                                                <Setter Property="Foreground" Value="{DynamicResource TextFaintBrush}"/>
+                                                                                                                <Style.Triggers>
+                                                                                                                    <DataTrigger Binding="{Binding Conclusion}" Value="success">
+                                                                                                                        <Setter Property="Foreground" Value="{DynamicResource SuccessBrush}"/>
+                                                                                                                    </DataTrigger>
+                                                                                                                    <DataTrigger Binding="{Binding IsFailure}" Value="True">
+                                                                                                                        <Setter Property="Foreground" Value="{DynamicResource DangerBrush}"/>
+                                                                                                                    </DataTrigger>
+                                                                                                                    <DataTrigger Binding="{Binding IsCompleted}" Value="False">
+                                                                                                                        <Setter Property="Foreground" Value="{DynamicResource WarningBrush}"/>
+                                                                                                                    </DataTrigger>
+                                                                                                                </Style.Triggers>
+                                                                                                            </Style>
+                                                                                                        </TextBlock.Style>
+                                                                                                    </TextBlock>
+                                                                                                    <Button DockPanel.Dock="Right" Style="{StaticResource GhostButton}" Padding="6,2" FontSize="11"
+                                                                                                            Visibility="{Binding RerunVisibility}" Click="RerunFailed_Click" ToolTip="Re-run failed jobs">
+                                                                                                        <StackPanel Orientation="Horizontal">
+                                                                                                            <TextBlock Text="&#xE72C;" Style="{StaticResource Icon}" FontSize="10" Margin="0,0,5,0"/>
+                                                                                                            <TextBlock Text="Re-run"/>
+                                                                                                        </StackPanel>
+                                                                                                    </Button>
+                                                                                                    <TextBlock DockPanel.Dock="Right" Text="{Binding DetailText}" Style="{StaticResource Caption}" FontSize="11" Margin="12,0,6,0" VerticalAlignment="Center"/>
+                                                                                                    <TextBlock Text="{Binding TitleText}" FontSize="12" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
+                                                                                                </DockPanel>
+                                                                                            </Border>
+                                                                                        </DataTemplate>
+                                                                                    </ItemsControl.ItemTemplate>
+                                                                                </ItemsControl>
+                                                                            </StackPanel>
+                                                                            </StackPanel>
+
+                                                                            <!-- The runner's facts -->
+                                                                            <Border Grid.Column="1" Width="340" BorderBrush="{DynamicResource BorderSubtleBrush}" BorderThickness="1,0,0,0" Padding="14,0,0,0">
+                                                                            <StackPanel>
                                                                             <DockPanel Style="{StaticResource KeyRow}">
                                                                                 <TextBlock Text="Repository" Style="{StaticResource KeyText}"/>
                                                                                 <TextBlock Text="{Binding RepositoryText}" Style="{StaticResource Hyperlink}" FontSize="12" HorizontalAlignment="Left"
@@ -672,49 +705,9 @@
                                                                                     <TextBlock Text="{Binding LocalRunner.InstallPath}" Style="{StaticResource ValueText}" Foreground="{DynamicResource TextMutedBrush}"/>
                                                                                 </DockPanel>
                                                                             </StackPanel>
-                                                                            <!-- Recent workflow runs -->
-                                                                            <StackPanel Visibility="{Binding RecentRunsVisibility}" Margin="0,10,0,0">
-                                                                                <TextBlock Text="RECENT RUNS" Style="{StaticResource SectionLabel}" Margin="0,0,0,4"/>
-                                                                                <ItemsControl ItemsSource="{Binding RecentRuns}">
-                                                                                    <ItemsControl.ItemTemplate>
-                                                                                        <DataTemplate DataType="{x:Type local:WorkflowRunSummary}">
-                                                                                            <Border Style="{StaticResource RunRow}" Tag="{Binding HtmlUrl}" MouseLeftButtonUp="Link_Click" ToolTip="{Binding Title}">
-                                                                                                <DockPanel>
-                                                                                                    <!-- Colors come from the theme resources, so they follow theme changes. -->
-                                                                                                    <TextBlock Text="{Binding Glyph}" FontSize="11" Margin="0,0,10,0">
-                                                                                                        <TextBlock.Style>
-                                                                                                            <Style TargetType="TextBlock" BasedOn="{StaticResource Icon}">
-                                                                                                                <Setter Property="Foreground" Value="{DynamicResource TextFaintBrush}"/>
-                                                                                                                <Style.Triggers>
-                                                                                                                    <DataTrigger Binding="{Binding Conclusion}" Value="success">
-                                                                                                                        <Setter Property="Foreground" Value="{DynamicResource SuccessBrush}"/>
-                                                                                                                    </DataTrigger>
-                                                                                                                    <DataTrigger Binding="{Binding IsFailure}" Value="True">
-                                                                                                                        <Setter Property="Foreground" Value="{DynamicResource DangerBrush}"/>
-                                                                                                                    </DataTrigger>
-                                                                                                                    <DataTrigger Binding="{Binding IsCompleted}" Value="False">
-                                                                                                                        <Setter Property="Foreground" Value="{DynamicResource WarningBrush}"/>
-                                                                                                                    </DataTrigger>
-                                                                                                                </Style.Triggers>
-                                                                                                            </Style>
-                                                                                                        </TextBlock.Style>
-                                                                                                    </TextBlock>
-                                                                                                    <Button DockPanel.Dock="Right" Style="{StaticResource GhostButton}" Padding="6,2" FontSize="11"
-                                                                                                            Visibility="{Binding RerunVisibility}" Click="RerunFailed_Click" ToolTip="Re-run failed jobs">
-                                                                                                        <StackPanel Orientation="Horizontal">
-                                                                                                            <TextBlock Text="&#xE72C;" Style="{StaticResource Icon}" FontSize="10" Margin="0,0,5,0"/>
-                                                                                                            <TextBlock Text="Re-run"/>
-                                                                                                        </StackPanel>
-                                                                                                    </Button>
-                                                                                                    <TextBlock DockPanel.Dock="Right" Text="{Binding DetailText}" Style="{StaticResource Caption}" FontSize="11" Margin="12,0,6,0" VerticalAlignment="Center"/>
-                                                                                                    <TextBlock Text="{Binding TitleText}" FontSize="12" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
-                                                                                                </DockPanel>
-                                                                                            </Border>
-                                                                                        </DataTemplate>
-                                                                                    </ItemsControl.ItemTemplate>
-                                                                                </ItemsControl>
                                                                             </StackPanel>
-                                                                        </StackPanel>
+                                                                            </Border>
+                                                                        </Grid>
                                                                     </Grid>
                                                                 </Border>
                                                             </DataTemplate>
@@ -722,74 +715,6 @@
                                                     </ItemsControl>
                                                 </StackPanel>
 
-                                                <!-- Remote Desktop Commander -->
-                                                <Border Grid.Column="1" Width="290" BorderBrush="{DynamicResource BorderSubtleBrush}" BorderThickness="1,0,0,0" Padding="14,9,14,11"
-                                                        Visibility="{Binding RdcPanelVisibility}">
-                                                    <StackPanel>
-                                                        <DockPanel Margin="0,0,0,10">
-                                                            <TextBlock Text="REMOTE DESKTOP COMMANDER" Style="{StaticResource SectionLabel}" VerticalAlignment="Center"/>
-                                                            <Border Style="{StaticResource Pill}" Background="{Binding RdcStatusTint}" HorizontalAlignment="Right" Padding="7,2,9,2">
-                                                                <StackPanel Orientation="Horizontal">
-                                                                    <Ellipse Width="6" Height="6" Fill="{Binding RdcStatusBrush}" Margin="0,0,6,0"/>
-                                                                    <TextBlock Text="{Binding RdcPillText}" Foreground="{Binding RdcStatusBrush}" FontSize="11" FontWeight="SemiBold"/>
-                                                                </StackPanel>
-                                                            </Border>
-                                                        </DockPanel>
-                                                        <StackPanel Visibility="{Binding RdcControlsVisibility}">
-                                                            <DockPanel Style="{StaticResource KeyRow}">
-                                                                <TextBlock Text="Connection" Style="{StaticResource KeyText}" Width="96"/>
-                                                                <TextBlock Text="{Binding RdcConnectionValue}" Style="{StaticResource ValueText}" Foreground="{Binding RdcStatusBrush}" ToolTip="{Binding RdcConnectionText}"/>
-                                                            </DockPanel>
-                                                            <DockPanel Style="{StaticResource KeyRow}">
-                                                                <TextBlock Text="Last used" Style="{StaticResource KeyText}" Width="96"/>
-                                                                <TextBlock Text="{Binding RdcActivityValue}" Style="{StaticResource ValueText}" Foreground="{Binding RdcActivityBrush}"/>
-                                                            </DockPanel>
-                                                            <DockPanel Style="{StaticResource KeyRow}">
-                                                                <TextBlock Text="Uptime" Style="{StaticResource KeyText}" Width="96"/>
-                                                                <TextBlock Style="{StaticResource ValueText}" ToolTip="{Binding RdcPidTip}">
-                                                                    <Run Text="{Binding RdcUptimeValue, Mode=OneWay}"/><Run Text="  ·  " Foreground="{DynamicResource TextFaintBrush}"/><Run Text="{Binding RdcProcessesValue, Mode=OneWay}"/><Run Text=" processes" Foreground="{DynamicResource TextMutedBrush}"/>
-                                                                </TextBlock>
-                                                            </DockPanel>
-                                                            <DockPanel Style="{StaticResource KeyRow}">
-                                                                <TextBlock Text="Security" Style="{StaticResource KeyText}" Width="96"/>
-                                                                <TextBlock Text="{Binding RdcSecurityValue}" Style="{StaticResource ValueText}" Foreground="{Binding RdcSecurityBrush}"/>
-                                                            </DockPanel>
-                                                            <Grid Margin="0,8,0,0">
-                                                                <Grid.ColumnDefinitions>
-                                                                    <ColumnDefinition/>
-                                                                    <ColumnDefinition Width="8"/>
-                                                                    <ColumnDefinition/>
-                                                                </Grid.ColumnDefinitions>
-                                                                <Button Click="MachineRdcPower_Click" IsEnabled="{Binding CanControl}">
-                                                                    <StackPanel Orientation="Horizontal">
-                                                                        <TextBlock Text="{Binding RdcPowerGlyph}" Style="{StaticResource Icon}" FontSize="10" Margin="0,0,7,0"/>
-                                                                        <TextBlock Text="{Binding RdcPowerButtonText}"/>
-                                                                    </StackPanel>
-                                                                </Button>
-                                                                <Button Grid.Column="2" Click="MachineRdcRestart_Click" IsEnabled="{Binding CanControl}">
-                                                                    <StackPanel Orientation="Horizontal">
-                                                                        <TextBlock Text="&#xE72C;" Style="{StaticResource Icon}" FontSize="11" Margin="0,0,7,0"/>
-                                                                        <TextBlock Text="Restart"/>
-                                                                    </StackPanel>
-                                                                </Button>
-                                                            </Grid>
-                                                        </StackPanel>
-                                                        <StackPanel Visibility="{Binding RdcSetupMenuVisibility}">
-                                                            <TextBlock Style="{StaticResource Caption}" TextWrapping="Wrap"
-                                                                       Text="Setting up Remote Desktop Commander. Sign in using the console window on that PC. This panel updates when it connects."/>
-                                                        </StackPanel>
-                                                        <Border Background="{DynamicResource Bg0Brush}" CornerRadius="6" Padding="10,7" Margin="0,12,0,0"
-                                                                Visibility="{Binding LastResultVisibility}">
-                                                            <DockPanel>
-                                                                <TextBlock Text="&#xE81C;" Style="{StaticResource Icon}" FontSize="11" Foreground="{DynamicResource TextFaintBrush}"
-                                                                           VerticalAlignment="Top" Margin="0,2,8,0"/>
-                                                                <TextBlock Text="{Binding LastResultText}" Style="{StaticResource Caption}" FontSize="11" TextWrapping="Wrap"
-                                                                           ToolTip="Last result reported by the fleet agent on this PC"/>
-                                                            </DockPanel>
-                                                        </Border>
-                                                    </StackPanel>
-                                                </Border>
-                                            </Grid>
                                         </Border>
                                     </Grid>
                                 </Border>
@@ -814,19 +739,37 @@
                 </Grid.RowDefinitions>
                 <DockPanel Margin="20,0,16,2">
                     <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                        <Button Style="{StaticResource GhostButton}" Padding="4,4" Click="ToggleActivity_Click" ToolTip="Show or hide activity">
+                        <Button Style="{StaticResource GhostButton}" Padding="4,4" Click="ToggleActivity_Click" ToolTip="Show or hide this panel">
                             <StackPanel Orientation="Horizontal">
                                 <TextBlock x:Name="ActivityChevron" Text="&#xE70D;" Style="{StaticResource Icon}" FontSize="9" Margin="0,0,8,0"/>
-                                <TextBlock Text="Activity" FontWeight="SemiBold" Foreground="{DynamicResource TextBrush}"/>
+                                <TextBlock x:Name="ActivityTitle" Text="Activity" FontWeight="SemiBold" Foreground="{DynamicResource TextBrush}"/>
                                 <TextBlock x:Name="ActivityCount" Style="{StaticResource Caption}" Margin="8,0,0,0"/>
                             </StackPanel>
                         </Button>
+                        <!-- Shown while a runner that is running a job is open: its live output, next to Activity -->
+                        <Border x:Name="BottomTabs" Style="{StaticResource SegmentHost}" Margin="2,0,0,0" VerticalAlignment="Center" Visibility="Collapsed">
+                            <StackPanel x:Name="BottomTabsPanel" Orientation="Horizontal">
+                                <RadioButton x:Name="ActivityTab" Style="{StaticResource Segment}" GroupName="BottomTab" Padding="10,3" Checked="BottomTab_Checked">
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock Text="Activity" FontSize="12"/>
+                                        <TextBlock x:Name="ActivityTabCount" Style="{StaticResource Caption}" Margin="6,0,0,0"/>
+                                    </StackPanel>
+                                </RadioButton>
+                            </StackPanel>
+                        </Border>
                     </StackPanel>
                     <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
-                        <Button Style="{StaticResource IconButton}" Content="&#xE8C8;" Click="CopyActivity_Click" ToolTip="Copy activity" Width="28" Height="28" FontSize="12"/>
-                        <Button Style="{StaticResource IconButton}" Content="&#xE894;" Click="ClearActivity_Click" ToolTip="Clear activity" Width="28" Height="28" FontSize="12"/>
+                        <Button x:Name="OpenOutputButton" Content="Open full output" Style="{StaticResource GhostButton}" Padding="6,1" FontSize="11"
+                                Margin="0,0,4,0" VerticalAlignment="Center" Visibility="Collapsed" Click="BottomOpenOutput_Click"/>
+                        <Button x:Name="CopyBottomButton" Style="{StaticResource IconButton}" Content="&#xE8C8;" Click="CopyActivity_Click" ToolTip="Copy activity" Width="28" Height="28" FontSize="12"/>
+                        <Button x:Name="ClearActivityButton" Style="{StaticResource IconButton}" Content="&#xE894;" Click="ClearActivity_Click" ToolTip="Clear activity" Width="28" Height="28" FontSize="12"/>
                     </StackPanel>
                 </DockPanel>
+                <TextBox x:Name="OutputBox" Grid.Row="1" Visibility="Collapsed" IsReadOnly="True" IsReadOnlyCaretVisible="False"
+                         FontFamily="{StaticResource MonoFont}" FontSize="11" TextWrapping="NoWrap" AcceptsReturn="True"
+                         HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto"
+                         Background="{DynamicResource Bg0Brush}" Foreground="{DynamicResource TextMutedBrush}" BorderThickness="0"
+                         Padding="8,6" Margin="16,0,16,6" SelectionChanged="OutputBox_SelectionChanged"/>
                 <ListBox x:Name="ActivityList" Grid.Row="1" ItemsSource="{Binding ActivityLog}" ItemContainerStyle="{StaticResource PlainItem}"
                          Background="Transparent" BorderThickness="0" Margin="16,0,16,6"
                          ScrollViewer.HorizontalScrollBarVisibility="Disabled" VirtualizingPanel.IsVirtualizing="True">

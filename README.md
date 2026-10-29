@@ -18,25 +18,23 @@ A Windows dashboard for GitHub Actions self-hosted runners, on one PC or several
 - **Runners.** Add repository or organization runners, then start, stop, restart, edit, move and remove them. Runner
   Manager downloads the official runner, verifies its SHA-256 checksum and installs it as a Windows service, in a
   runner folder you choose for each PC. Choose for each runner whether it starts with Windows.
-- **Live jobs.** A busy runner shows its job and every step with its state and duration, the latest output of the
-  running step, and the processes the job runs with their CPU and memory. This works for runners on every PC; steps
+- **Live jobs.** A busy runner shows its job and every step with its state and duration, and the processes the job
+  runs with their CPU and memory. Its latest output opens in a tab next to Activity, where you can select and copy it. This works for runners on every PC; steps
   are shown for repository runners.
 - **Status at a glance.** Each runner shows its state, recent workflow runs, version and work folder size. Each PC
-  shows CPU, memory, disk space, uptime and pending restarts.
+  shows CPU, memory, disk space, uptime and pending restarts. Click a PC's name to collapse its card.
 - **Several PCs.** PCs connect directly over the local network, encrypted. Control the runners on every PC from any
   of them. A single PC works without any fleet setup.
 - **AI assistants.** Claude, Codex, Copilot, Cursor, Gemini and other AI tools that support MCP can list your runners,
   check jobs and create a runner for a new project. Changes ask for your approval first.
 - **Auto-recovery.** The fleet agent restarts runners that stop unexpectedly.
 - **Notifications.** Alerts in the notification area when a PC goes offline, a runner stops or a workflow run fails.
-- **Remote Desktop Commander (optional).** Monitor and restart it on each PC. It is shown only where it is set up, and
-  needs [Node.js](https://nodejs.org).
 - **Updates.** Installs new releases on every PC from the dashboard. If a new version keeps failing to start, the PC
   goes back to the version it had before.
 
 <table>
   <tr>
-    <td width="60%"><img src="docs/images/live-job.png" alt="Live job view: steps, processes and output of a running job"></td>
+    <td width="60%"><img src="docs/images/live-job.png" alt="Live job view: steps and processes of a running job, with its output next to Activity"></td>
     <td width="40%"><img src="docs/images/setup.png" alt="Setup wizard"></td>
   </tr>
   <tr>
@@ -67,7 +65,7 @@ Runner Manager is for the PCs you already have.
 1. Download a setup from [Releases](https://github.com/Sandiozo/runner-manager/releases) and run it:
    - **RunnerManagerSetup-standalone.exe** includes .NET. Choose this one if you are not sure.
    - **RunnerManagerSetup.exe** is smaller and needs the [.NET 10 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/10.0).
-2. Choose **This PC only** or **Several PCs**, and whether you use Remote Desktop Commander.
+2. Choose **This PC only** or **Several PCs**.
 
 Windows may show "Windows protected your PC", because the setup is not code-signed. Click **More info → Run anyway**.
 You can check the file against the SHA-256 checksum in the release notes.
@@ -108,7 +106,7 @@ Both PCs need Runner Manager 2.4 or later to pair. To lock a PC out of the fleet
 | Ports | TCP 47821 and UDP 47822. TCP 47823 and UDP 47824 during pairing only. Firewall rules allow the local subnet and Tailscale (`100.64.0.0/10`). |
 | Other networks | Install [Tailscale](https://tailscale.com) on both PCs, then use **Settings → Fleet → Add a PC by address**. |
 
-Auto-recovery restarts a runner or Remote Desktop Commander that stops unexpectedly, up to three times an hour. It does
+Auto-recovery restarts a runner that stops unexpectedly, up to three times an hour. It does
 not restart anything you stop from Runner Manager. Turn it on or off for each PC in the PC's ⋯ menu.
 
 ## Build from source

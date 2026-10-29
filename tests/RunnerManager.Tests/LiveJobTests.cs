@@ -60,7 +60,8 @@ public class LiveJobTests
         Assert.Equal(new[] { "4s", "", "2m 0s", "" }, view.Steps.Select(s => s.DurationText));
         Assert.Equal("dotnet", view.Processes.Single().Name);
         Assert.Equal("42%", view.Processes.Single().CpuText);
-        Assert.StartsWith("line 7\n", view.Output);
+        // The bottom panel shows all the lines the PC sent (up to 40).
+        Assert.StartsWith("line 1\n", view.Output);
         Assert.EndsWith("line 20", view.Output);
     }
 

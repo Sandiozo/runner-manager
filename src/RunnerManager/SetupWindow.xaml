@@ -33,8 +33,7 @@
             <StackPanel x:Name="StepDots" DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Top" Margin="0,8,0,0">
                 <Border x:Name="Dot1" Style="{StaticResource StepDot}"/>
                 <Border x:Name="Dot2" Style="{StaticResource StepDot}"/>
-                <Border x:Name="Dot3" Style="{StaticResource StepDot}"/>
-                <Border x:Name="Dot4" Style="{StaticResource StepDot}" Margin="0"/>
+                <Border x:Name="Dot3" Style="{StaticResource StepDot}" Margin="0"/>
             </StackPanel>
             <StackPanel Orientation="Horizontal">
                 <Image Source="assets/RunnerManager.png" Width="34" Height="34" RenderOptions.BitmapScalingMode="HighQuality"/>
@@ -108,32 +107,7 @@
                 </StackPanel>
             </StackPanel>
 
-            <!-- 3. Remote Desktop Commander -->
-            <StackPanel x:Name="PageRdc" Visibility="Collapsed">
-                <TextBlock Text="Do you use Remote Desktop Commander?" FontSize="20" FontWeight="SemiBold"/>
-                <TextBlock Style="{StaticResource OptionText}" FontSize="12.5" Margin="0,6,0,16"
-                           Text="Remote Desktop Commander lets AI assistants operate this PC remotely. This step is optional. If you use it, Runner Manager monitors it and restarts it when it disconnects."/>
-                <RadioButton x:Name="RdcNoneOption" Style="{StaticResource OptionCard}" GroupName="Rdc" IsChecked="True">
-                    <StackPanel>
-                        <TextBlock Text="No, I do not use it" Style="{StaticResource OptionTitle}"/>
-                        <TextBlock Text="It is hidden in Runner Manager. You can set it up later in Settings." Style="{StaticResource OptionText}"/>
-                    </StackPanel>
-                </RadioButton>
-                <RadioButton x:Name="RdcExistingOption" Style="{StaticResource OptionCard}" GroupName="Rdc">
-                    <StackPanel>
-                        <TextBlock Text="Yes, it is already set up" Style="{StaticResource OptionTitle}"/>
-                        <TextBlock x:Name="RdcExistingText" Text="Runner Manager monitors it and keeps it connected." Style="{StaticResource OptionText}"/>
-                    </StackPanel>
-                </RadioButton>
-                <RadioButton x:Name="RdcSetupOption" Style="{StaticResource OptionCard}" GroupName="Rdc">
-                    <StackPanel>
-                        <TextBlock Text="Yes, set it up now" Style="{StaticResource OptionTitle}"/>
-                        <TextBlock Text="After installation, a console window opens for sign-in. Requires Node.js." Style="{StaticResource OptionText}"/>
-                    </StackPanel>
-                </RadioButton>
-            </StackPanel>
-
-            <!-- 4. Install / done -->
+            <!-- 3. Install / done -->
             <StackPanel x:Name="PageInstall" Visibility="Collapsed">
                 <Border x:Name="DoneBadge" Width="52" Height="52" CornerRadius="26" HorizontalAlignment="Left" Background="{DynamicResource SelectedBrush}">
                     <TextBlock x:Name="DoneGlyph" Text="&#xE896;" Style="{StaticResource Icon}" FontSize="22" Foreground="{DynamicResource AccentBrush}"/>

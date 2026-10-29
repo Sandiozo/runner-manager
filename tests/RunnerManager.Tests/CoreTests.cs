@@ -40,22 +40,21 @@ public class CommandRelayTests
 {
     [Theory]
     [InlineData("runner Stop failed: Access is denied.", true)]
-    [InlineData("rdc Restart failed: timeout", true)]
     [InlineData("agent Update failed: no release", true)]
     [InlineData("Runner edit completed: build-failed-tests", false)]
     [InlineData("Runner created: failed", false)]
-    [InlineData("Remote Desktop Commander start completed. Relay not connected.", false)]
+    [InlineData("rdc Restart failed: timeout", false)]
     public void FailedResults_AreRecognizedByTheAgentFormat(string result, bool expected)
         => Assert.Equal(expected, MachineRelay.IsFailedResult(result));
 
     [Fact]
     public void Fingerprint_IgnoresHeartbeatAndLoadButSeesStateChanges()
     {
-        var p1 = new MachineStatusPayload { MachineName = "PC", UpdatedUtc = DateTime.UtcNow, CpuPercent = 5, MemoryPercent = 40, RdcConnectionChangedUtc = DateTime.UtcNow };
-        var p2 = p1 with { UpdatedUtc = DateTime.UtcNow.AddMinutes(1), CpuPercent = 90, MemoryPercent = 80, RdcConnectionChangedUtc = DateTime.UtcNow.AddMinutes(1) };
+        var p1 = new MachineStatusPayload { MachineName = "PC", UpdatedUtc = DateTime.UtcNow, CpuPercent = 5, MemoryPercent = 40 };
+        var p2 = p1 with { UpdatedUtc = DateTime.UtcNow.AddMinutes(1), CpuPercent = 90, MemoryPercent = 80 };
         Assert.Equal(p1.Fingerprint(), p2.Fingerprint());
-        Assert.NotEqual(p1.Fingerprint(), (p1 with { RdcRunning = true }).Fingerprint());
         Assert.NotEqual(p1.Fingerprint(), (p1 with { RebootPending = true }).Fingerprint());
+        Assert.NotEqual(p1.Fingerprint(), (p1 with { WatchdogEnabled = true }).Fingerprint());
     }
 }
 
@@ -621,5 +620,43 @@ internal static class TestPorts
             return true;
         }
         catch (SocketException) { return false; }
+    }
+}
+
+public class MachineCardTests
+{
+    [Fact]
+    public void CollapsingAPc_HidesItsHealthAndRunners_AndAppliesToItsNextStatus()
+    {
+        var saved = MachineInfo.CollapsedPcs;
+        MachineInfo.CollapsedPcs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            var payload = new MachineStatusPayload { MachineName = "PC-A", AgentProtocolVersion = 13, Disks = new[] { new DiskStatus { Name = "C:" } } };
+            var machine = MachineInfo.FromPayload("a", payload);
+            Assert.Equal(System.Windows.Visibility.Visible, machine.BodyVisibility);
+            Assert.Equal(System.Windows.Visibility.Visible, machine.HealthVisibility);
+
+            Assert.True(machine.ToggleCollapsed());
+            Assert.Equal(System.Windows.Visibility.Collapsed, machine.BodyVisibility);
+            Assert.Equal(System.Windows.Visibility.Collapsed, machine.HealthVisibility);
+            // The card is rebuilt from each new status; it stays collapsed.
+            Assert.True(MachineInfo.FromPayload("a", payload with { MachineName = "pc-a" }).IsCollapsed);
+
+            Assert.False(machine.ToggleCollapsed());
+            Assert.Equal(System.Windows.Visibility.Visible, machine.BodyVisibility);
+        }
+        finally { MachineInfo.CollapsedPcs = saved; }
+    }
+
+    [Fact]
+    public void PendingPcAction_ShowsInTheStatusPill()
+    {
+        var machine = MachineInfo.FromPayload("a", new MachineStatusPayload { MachineName = "PC-A" });
+        machine.SetPending("Reboot");
+        Assert.Equal("Restarting PC…", machine.StatusText);
+        machine.SetPending("Update");
+        Assert.Equal("Updating…", machine.StatusText);
+        Assert.False(machine.CanUpdateAgent);
     }
 }

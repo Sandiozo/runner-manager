@@ -207,7 +207,6 @@ public partial class App : Application
         foreach (var arg in e.Args)
         {
             if (arg.StartsWith("--fleet=", StringComparison.OrdinalIgnoreCase)) window.PostSetupFleet = arg[8..].ToLowerInvariant();
-            if (arg.Equals("--rdc=setup", StringComparison.OrdinalIgnoreCase)) window.PostSetupRdc = true;
         }
         window.Closed += (_, _) => ExitApplication();
         ListenForActivation(window);
@@ -348,7 +347,7 @@ public partial class App : Application
         const string removeAll = "Uninstall and delete settings";
         var choice = DialogWindow.Show(owner, DialogTone.Danger, "Uninstall Runner Manager?",
             "This removes Runner Manager, the fleet agent, shortcuts and startup task, and removes this PC from the fleet. " +
-            "GitHub runners and Remote Desktop Commander keep running.",
+            "GitHub runners keep running.",
             remove, removeAll);
         return choice == null ? null : choice == removeAll;
     }

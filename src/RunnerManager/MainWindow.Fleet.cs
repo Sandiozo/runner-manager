@@ -49,9 +49,8 @@ public partial class MainWindow
         await RunPostSetupStepsAsync();
     }
 
-    /// <summary>Follow-up steps chosen in the setup wizard (passed as --fleet=new|join and --rdc=setup).</summary>
+    /// <summary>Follow-up step chosen in the setup wizard (passed as --fleet=new|join).</summary>
     public string PostSetupFleet { get; set; } = string.Empty;
-    public bool PostSetupRdc { get; set; }
 
     private async Task RunPostSetupStepsAsync()
     {
@@ -59,16 +58,6 @@ public partial class MainWindow
         PostSetupFleet = string.Empty;
         if (fleet == "new" && !InFleet) await SetUpFleetAsync(FleetStart.New);
         else if (fleet == "join" && !InFleet) await SetUpFleetAsync(FleetStart.Join);
-
-        if (PostSetupRdc && !RemoteDesktopManager.IsConfigured())
-        {
-            PostSetupRdc = false;
-            await RunOperationAsync("Set up Remote Desktop Commander", async log =>
-            {
-                await RemoteDesktopManager.SetupAsync();
-                log("Setup console opened. Sign in there. Runner Manager detects the connection automatically.");
-            });
-        }
     }
 
     // ================= Periodic extras =================
@@ -199,6 +188,7 @@ public partial class MainWindow
             await Task.WhenAll(busy.Select(b => RefreshLiveJobAsync(b.Machine, b.Runner)));
             // Cards may have been rebuilt meanwhile; the state is kept by runner key.
             foreach (var runner in Machines.SelectMany(m => m.Runners)) ApplyLiveJob(runner);
+            UpdateOutputTabs();
         }
         catch (Exception ex) { AddActivity($"Could not update the job view: {ex.Message}"); }
         finally { _liveJobsRefreshing = false; }
@@ -258,9 +248,8 @@ public partial class MainWindow
                 runner.IsExpanded ? state.ActivityNote : string.Empty, DateTime.UtcNow)
             : null;
 
-    private void RunnerLiveOutput_Click(object sender, RoutedEventArgs e)
+    private void OpenLiveOutput(MachineRunnerStatus runner)
     {
-        if (ItemFrom<MachineRunnerStatus>(sender) is not { } runner) return;
         var machine = Machines.FirstOrDefault(m => m.MachineKey == runner.MachineKey);
         var folder = runner.LocalRunner == null ? null : Path.Combine(runner.LocalRunner.InstallPath, "_diag", "pages");
         ShowLog(machine, $"job:{runner.CommandKey}", runner.TitleText, folder);
@@ -319,22 +308,9 @@ public partial class MainWindow
         window.Show();
     }
 
-    /// <summary>
-    /// Hides what doesn't apply: the machines tile with only one PC, and everything Remote Desktop Commander until it's
-    /// set up on at least one PC.
-    /// </summary>
+    /// <summary>Hides the machines tile with only one PC.</summary>
     private void ApplyOptionalSections(List<MachineInfo> machines)
-    {
-        var showRdc = machines.Any(m => m.RdcConfigured);
-        if (showRdc != MachineInfo.ShowRdc)
-        {
-            MachineInfo.ShowRdc = showRdc;
-            foreach (var machine in Machines) machine.Refresh();
-        }
-        TileRdcCard.Visibility = showRdc ? Visibility.Visible : Visibility.Collapsed;
-        TileMachinesCard.Visibility = machines.Count > 1 ? Visibility.Visible : Visibility.Collapsed;
-        AppSubtitle.Text = showRdc ? "Self-hosted runners & RDC" : "Self-hosted GitHub runners";
-    }
+        => TileMachinesCard.Visibility = machines.Count > 1 ? Visibility.Visible : Visibility.Collapsed;
 
     private void ApplySettings()
     {
@@ -417,7 +393,7 @@ public partial class MainWindow
             }
             if (!DialogWindow.Confirm(this, "Update the fleet agent on this PC?",
                     $"The fleet agent is updated to v{AppUpdater.CurrentVersion} and installed to {AppUpdater.InstallDir}. " +
-                    "Runners and Remote Desktop Commander keep running.", "Update fleet agent")) return;
+                    "Runners keep running.", "Update fleet agent")) return;
             if (IsAgentWorkRunning()) return;
             // The agent restarts once its running work is done, so this runs in the background.
             RunAgentWorkInBackground("Update fleet agent", MachineRelay.UpdateLocalAgentAsync);
@@ -429,7 +405,7 @@ public partial class MainWindow
             return;
         }
         if (!DialogWindow.Confirm(this, $"Update {machine.MachineName}?",
-                $"The fleet agent on {machine.MachineName} downloads, verifies and installs Runner Manager v{MachineInfo.LatestAppVersion}, then restarts. Runners and Remote Desktop Commander keep running.",
+                $"The fleet agent on {machine.MachineName} downloads, verifies and installs Runner Manager v{MachineInfo.LatestAppVersion}, then restarts. Runners keep running.",
                 "Update")) return;
         await QueueMachineCommandAsync(machine, "agent", "Update", string.Empty, "Update",
             $"{machine.MachineName}: update to v{MachineInfo.LatestAppVersion} queued.");
@@ -452,8 +428,6 @@ public partial class MainWindow
 
     private void MachineAgentLog_Click(object sender, RoutedEventArgs e) => ShowLog(ItemFrom<MachineInfo>(sender), "agent", null, FleetConfig.StateDir);
 
-    private void MachineRdcLog_Click(object sender, RoutedEventArgs e) => ShowLog(ItemFrom<MachineInfo>(sender), "rdc", null, FleetConfig.StateDir);
-
     private void RunnerViewLog_Click(object sender, RoutedEventArgs e)
     {
         if (ItemFrom<MachineRunnerStatus>(sender) is not { } runner) return;
@@ -468,7 +442,6 @@ public partial class MainWindow
         var what = logKey switch
         {
             "agent" => "fleet agent log",
-            "rdc" => "Remote Desktop Commander log",
             _ when logKey.StartsWith("job:", StringComparison.OrdinalIgnoreCase) => $"{label} live output",
             _ => $"{label} diagnostic log"
         };
@@ -534,27 +507,25 @@ public partial class MainWindow
             $"{machine.MachineName}: restart queued. The PC restarts 60 seconds after it receives the command.");
     }
 
-    /// <summary>Sends a PC-level command ("agent", "machine" or "rdc") to another PC and shows it as pending until it reports back.</summary>
+    /// <summary>Sends a PC-level command ("agent" or "machine") to another PC and shows it as pending until it reports back.</summary>
     private async Task QueueMachineCommandAsync(MachineInfo machine, string target, string action, string value,
         string pendingLabel, string queuedMessage)
     {
         if (!CanSendTo(machine.MachineKey)) return;
         try
         {
-            if (pendingLabel.Length > 0) machine.SetRdcPending(pendingLabel);
+            if (pendingLabel.Length > 0) machine.SetPending(pendingLabel);
             var id = await MachineRelay.SendCommandAsync(machine.MachineKey, target, string.Empty, action, value: value);
             if (pendingLabel.Length > 0)
-                _pendingRdcCommands[machine.MachineKey] = new PendingCommand(id, pendingLabel, DateTime.UtcNow);
+                _pendingMachineCommands[machine.MachineKey] = new PendingCommand(id, pendingLabel, DateTime.UtcNow);
             AddActivity(queuedMessage);
             SetStatus(queuedMessage, StatusKind.Ok);
         }
         catch (Exception ex)
         {
-            machine.SetRdcPending(string.Empty);
-            _pendingRdcCommands.Remove(machine.MachineKey);
-            AddActivity(target == "rdc"
-                ? $"{machine.MachineName}: Remote Desktop Commander {action.ToLowerInvariant()} failed: {ex.Message}"
-                : $"{machine.MachineName}: {action} failed: {ex.Message}");
+            machine.SetPending(string.Empty);
+            _pendingMachineCommands.Remove(machine.MachineKey);
+            AddActivity($"{machine.MachineName}: {action} failed: {ex.Message}");
             await RefreshAsync();
         }
     }

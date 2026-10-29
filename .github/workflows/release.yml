@@ -71,12 +71,14 @@ jobs:
           -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
           -p:Version=$env:VERSION -o publish
 
+      # Not compressed: antivirus scanners treat a compressed bundle that unpacks itself like a packed dropper, so
+      # Defender's machine-learning checks flag it more often. The download is larger instead.
       - name: Publish standalone exe (includes .NET)
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: >
           dotnet publish src/RunnerManager/RunnerManager.csproj -c Release -r win-x64 -p:SelfContained=true
-          -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true
+          -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
           -p:Version=$env:VERSION -o publish-standalone
 
       - name: Smoke-test both exes

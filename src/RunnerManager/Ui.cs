@@ -218,6 +218,8 @@ public sealed class AppSettings
     public bool CloseToTray { get; set; } = true;
     public bool ActivityPanelOpen { get; set; } = true;
     public double ActivityPanelHeight { get; set; } = 130;
+    /// <summary>PCs (by name) whose cards are collapsed to their header.</summary>
+    public List<string> CollapsedPcs { get; set; } = new();
     /// <summary>The setup wizard ran (installed copies only).</summary>
     public bool SetupCompleted { get; set; }
     public bool StartMinimizedHint { get; set; }
@@ -262,6 +264,7 @@ public sealed class AppSettings
             MachineRelay.AppendAgentLog($"settings.json could not be read; kept a copy in {copy}.");
         }
         settings.RefreshSeconds = Math.Clamp(settings.RefreshSeconds, 5, 60);
+        settings.CollapsedPcs ??= new();
         return settings;
     }
 

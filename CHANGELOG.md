@@ -3,6 +3,20 @@
 Runner Manager updates itself from [Releases](https://github.com/Sandiozo/runner-manager/releases): open
 **Settings → Updates**, or click **Update** on a PC's card.
 
+## 2.6.0
+
+- **Remote Desktop Commander is no longer part of Runner Manager.** Its panel, tile, settings page, setup step and
+  log are gone, and the fleet agent no longer starts or restarts it. A copy that is running keeps running until it
+  stops or the PC restarts. Remove it, or start it yourself, as you prefer.
+- **Collapse a PC's card** by clicking its name. Runner Manager remembers which cards are collapsed.
+- **Runner details are more compact:** the job and recent runs are on the left, and the runner's facts (repository,
+  service, version, work folder, labels and so on) are in a column on the right.
+- **The live output of an open runner is in a tab next to Activity**, so you can switch between them, select and
+  copy the output, and see up to 40 lines of it.
+- The PC's status pill shows "Updating…" or "Restarting PC…" while Runner Manager updates or restarts it.
+- The exe lists Sandiozo as its publisher, with a description and copyright, and the standalone setup is no longer
+  compressed. Antivirus programs flag compressed self-extracting exes more often.
+
 ## 2.5.0
 
 - **Start with Windows** in a runner's ⋯ menu: turn it off and the runner stays stopped after a restart until you

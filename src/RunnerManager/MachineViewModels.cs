@@ -182,6 +182,7 @@ public sealed class MachineRunnerStatus : INotifyPropertyChanged
             _recentRuns = value;
             Notify(nameof(RecentRuns));
             Notify(nameof(RecentRunsVisibility));
+            Notify(nameof(NoJobsVisibility));
         }
     }
     [JsonIgnore] public Visibility RecentRunsVisibility => IsExpanded && _recentRuns.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
@@ -198,10 +199,16 @@ public sealed class MachineRunnerStatus : INotifyPropertyChanged
             Notify(nameof(LiveJob));
             Notify(nameof(LiveJobVisibility));
             Notify(nameof(JobLineVisibility));
+            Notify(nameof(NoJobsVisibility));
         }
     }
     [JsonIgnore] public Visibility LiveJobVisibility => IsExpanded && IsBusy && _liveJob != null ? Visibility.Visible : Visibility.Collapsed;
     [JsonIgnore] public Visibility JobLineVisibility => IsBusy && !string.IsNullOrEmpty(_liveJob?.Summary) ? Visibility.Visible : Visibility.Collapsed;
+    /// <summary>The details' left column has no job, runs or note to show.</summary>
+    [JsonIgnore] public Visibility NoJobsVisibility => IsExpanded && LiveJobVisibility != Visibility.Visible
+        && RecentRunsVisibility != Visibility.Visible && ConsoleNoteVisibility != Visibility.Visible ? Visibility.Visible : Visibility.Collapsed;
+    /// <summary>The live output shown in the dashboard's bottom panel while the runner is open (empty otherwise).</summary>
+    [JsonIgnore] public string OutputText => LiveJobVisibility == Visibility.Visible ? _liveJob?.Output ?? string.Empty : string.Empty;
 
     [JsonIgnore]
     public bool IsExpanded
@@ -264,17 +271,14 @@ public sealed class MachineRunnerStatus : INotifyPropertyChanged
 
 public sealed class MachineInfo : INotifyPropertyChanged
 {
-    private string _rdcPendingAction = string.Empty;
+    private string _pendingAction = string.Empty;
     private DateTime _updatedUtc;
     public event PropertyChangedEventHandler? PropertyChanged;
 
     /// <summary>Newest Runner Manager release, set by the dashboard.</summary>
     public static string LatestAppVersion { get; set; } = string.Empty;
-    /// <summary>Whether Remote Desktop Commander is set up on any PC (then its tile and texts are shown).</summary>
-    public static bool ShowRdc { get; set; }
-    /// <summary>The Remote Desktop panel only appears on PCs where it's set up (or while setup runs).</summary>
-    public Visibility RdcPanelVisibility => RdcConfigured || _rdcPendingAction == "Setup" ? Visibility.Visible : Visibility.Collapsed;
-    public Visibility RdcSetupMenuVisibility => RdcConfigured ? Visibility.Collapsed : Visibility.Visible;
+    /// <summary>PCs (by name) whose cards are collapsed to their header, set by the dashboard from its settings.</summary>
+    public static HashSet<string> CollapsedPcs { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
     public string MachineKey { get; init; } = string.Empty;
     public string MachineName { get; init; } = string.Empty;
@@ -284,19 +288,6 @@ public sealed class MachineInfo : INotifyPropertyChanged
     public string AppVersion { get; init; } = string.Empty;
     public DateTime UpdatedUtc { get => _updatedUtc; init => _updatedUtc = value; }
     public bool FleetAgentRunning { get; init; }
-    public bool RdcRunning { get; init; }
-    public bool RdcConnected { get; init; }
-    public bool RdcConnectionKnown { get; init; }
-    public DateTime? RdcConnectionChangedUtc { get; init; }
-    public string RdcConnectionText { get; init; } = string.Empty;
-    public bool RdcConfigured { get; init; }
-    public int RdcProcessCount { get; init; }
-    public uint[] RdcPids { get; init; } = Array.Empty<uint>();
-    public DateTime? RdcStartedUtc { get; init; }
-    public int RdcActiveCalls { get; init; }
-    public DateTime? RdcLastUsedUtc { get; init; }
-    public string RdcLastTool { get; init; } = string.Empty;
-    public string RdcSecurityText { get; init; } = string.Empty;
     public string LastCommandId { get; init; } = string.Empty;
     public string LastCommandResult { get; init; } = string.Empty;
     /// <summary>Results of the agent's last commands (protocol 12).</summary>
@@ -377,7 +368,7 @@ public sealed class MachineInfo : INotifyPropertyChanged
         merged.Fingerprint = Fingerprint + "|local:" + string.Join(';', extra.Select(r => $"{r.CommandKey}/{r.IsRunning}/{r.ActivityText}/{r.IsInteractive}/{r.ServiceInstalled}/{r.StartsAt}"));
         return merged;
     }
-    public string PendingAction => _rdcPendingAction;
+    public string PendingAction => _pendingAction;
 
     public bool IsLocal => MachineName.Equals(Environment.MachineName, StringComparison.OrdinalIgnoreCase);
     public bool IsOnline => !IsLocalOnly && ConnectionProblem.Length == 0
@@ -392,9 +383,28 @@ public sealed class MachineInfo : INotifyPropertyChanged
     public Visibility LeaveVisibility => IsLocal && !IsLocalOnly ? Visibility.Visible : Visibility.Collapsed;
     public bool IsPairingProblem => ConnectionProblem.Contains("airing", StringComparison.OrdinalIgnoreCase);
 
+    // ----- Collapsed to its header -----
+    public bool IsCollapsed => CollapsedPcs.Contains(MachineName);
+    public string CollapseGlyph => IsCollapsed ? "\uE76C" : "\uE70D";
+    public Visibility BodyVisibility => IsCollapsed ? Visibility.Collapsed : Visibility.Visible;
+
+    /// <summary>Collapses or expands the card; returns whether it is collapsed now.</summary>
+    public bool ToggleCollapsed()
+    {
+        if (!CollapsedPcs.Remove(MachineName)) CollapsedPcs.Add(MachineName);
+        Notify(new[] { nameof(IsCollapsed), nameof(CollapseGlyph), nameof(BodyVisibility), nameof(HealthVisibility) });
+        return IsCollapsed;
+    }
+
     // ----- Machine header -----
-    public string StatusText => IsLocalOnly ? "Local only" : IsPairingProblem ? "Not paired" : IsOnline ? "Online" : "Offline";
-    public Brush StatusBrush => IsLocalOnly ? Palette.Info : IsPairingProblem ? Palette.Warning : IsOnline ? Palette.Success : Palette.Danger;
+    public string StatusText => _pendingAction switch
+    {
+        "Update" => "Updating…",
+        "Reboot" => "Restarting PC…",
+        _ => IsLocalOnly ? "Local only" : IsPairingProblem ? "Not paired" : IsOnline ? "Online" : "Offline"
+    };
+    public Brush StatusBrush => _pendingAction.Length > 0 ? Palette.Warning
+        : IsLocalOnly ? Palette.Info : IsPairingProblem ? Palette.Warning : IsOnline ? Palette.Success : Palette.Danger;
     public Brush StatusTint => Palette.Tint(StatusBrush);
     public string AgentText => ConnectionProblem.Length > 0 ? ConnectionProblem
         : IsLocalOnly
@@ -426,12 +436,12 @@ public sealed class MachineInfo : INotifyPropertyChanged
     public string UpdateBadgeText => LocalAgentOutdated ? "Update fleet agent" : $"Runner Manager v{LatestAppVersion} available";
     public string UpdateBadgeTip => LocalAgentOutdated
         ? "The fleet agent on this PC is older than this app. Other PCs use it to connect to this PC. " +
-          "Click to update it. Runners and Remote Desktop Commander keep running. This does not update GitHub runners."
+          "Click to update it. Runners keep running. This does not update GitHub runners."
         : $"Runner Manager v{LatestAppVersion} is available. Click to install it on {MachineName}. Its fleet agent restarts automatically. This does not update GitHub runners.";
-    public bool CanUpdateAgent => (LocalAgentOutdated || UpdateAvailable) && string.IsNullOrEmpty(_rdcPendingAction) && (IsLocal || IsOnline);
+    public bool CanUpdateAgent => (LocalAgentOutdated || UpdateAvailable) && string.IsNullOrEmpty(_pendingAction) && (IsLocal || IsOnline);
 
     // ----- Health -----
-    public Visibility HealthVisibility => (IsLocalOnly || AgentProtocolVersion >= 9) && Disks.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+    public Visibility HealthVisibility => !IsCollapsed && (IsLocalOnly || AgentProtocolVersion >= 9) && Disks.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
     public string CpuText => $"CPU {CpuPercent}%";
     public Brush CpuBrush => CpuPercent >= 90 ? Palette.Warning : Palette.TextMuted;
     public string MemoryText => MemoryTotalGb > 0 ? $"RAM {MemoryPercent}% of {MemoryTotalGb:0.#} GB" : $"RAM {MemoryPercent}%";
@@ -462,86 +472,9 @@ public sealed class MachineInfo : INotifyPropertyChanged
     public string RunnerSummary => Runners.Length == 0
         ? "No runners"
         : $"{RunningCount} of {Runners.Length} running" + (BusyCount > 0 ? $"  ·  {BusyCount} busy" : string.Empty);
-    public string SidebarSubtitle => RdcConfigured ? $"{RunnerCountText} runners  ·  RDC {RdcShortText}" : $"{RunnerCountText} runners running";
+    public string SidebarSubtitle => $"{RunnerCountText} runners running";
     public Visibility NoRunnersVisibility => Runners.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
 
-    // ----- Remote Desktop Commander -----
-    public string RdcPillText => _rdcPendingAction switch
-    {
-        "Start" => "Starting…",
-        "Stop" => "Stopping…",
-        "Restart" => "Restarting…",
-        "Setup" => "Setting up…",
-        "Update" => "Updating…",
-        "Reboot" => "Restarting PC…",
-        _ => char.ToUpperInvariant(RdcShortText[0]) + RdcShortText[1..]
-    };
-    private string RdcShortText => !RdcConfigured ? "not set up"
-        : RdcConnected ? "connected"
-        : AgentProtocolVersion < 6 ? (RdcRunning ? "running" : "stopped")
-        : RdcRunning && !RdcConnectionKnown ? "unverified"
-        : RdcRunning ? "relay offline"
-        : "stopped";
-    public Brush RdcStatusBrush => !string.IsNullOrEmpty(_rdcPendingAction)
-        ? Palette.Warning
-        : !RdcConfigured ? Palette.Muted
-        : RdcConnected ? Palette.Success
-        : AgentProtocolVersion < 6 ? (RdcRunning ? Palette.Warning : Palette.Danger)
-        : RdcRunning && !RdcConnectionKnown ? Palette.Warning
-        : Palette.Danger;
-    public Brush RdcStatusTint => Palette.Tint(RdcStatusBrush);
-    public string RdcConnectionValue => !RdcConfigured ? "Not set up"
-        : RdcConnected ? "Relay connected"
-        : RdcRunning && !RdcConnectionKnown ? "Not verified (started outside Runner Manager)"
-        : RdcRunning ? "Relay offline"
-        : "Offline";
-    public string RdcActivityValue
-    {
-        get
-        {
-            if (AgentProtocolVersion < 3) return "Update the fleet agent to see this";
-            if (RdcActiveCalls > 0) return string.IsNullOrWhiteSpace(RdcLastTool) ? "In use" : $"In use  ·  {RdcLastTool}";
-            if (RdcLastUsedUtc.HasValue)
-            {
-                var age = DateTime.UtcNow - RdcLastUsedUtc.Value;
-                var tool = string.IsNullOrWhiteSpace(RdcLastTool) ? string.Empty : $"  ·  {RdcLastTool}";
-                if (age.TotalSeconds < 15) return "Used just now" + tool;
-                if (age.TotalMinutes < 1) return $"{(int)age.TotalSeconds}s ago{tool}";
-                if (age.TotalHours < 1) return $"{(int)age.TotalMinutes}m ago{tool}";
-                if (age.TotalDays < 1) return $"{(int)age.TotalHours}h ago{tool}";
-                return $"{RdcLastUsedUtc.Value.ToLocalTime():g}{tool}";
-            }
-            return RdcRunning ? "Idle" : "—";
-        }
-    }
-    public Brush RdcActivityBrush => RdcActiveCalls > 0 ? Palette.Success : Palette.Text;
-    public string RdcProcessesValue => RdcRunning ? $"{RdcProcessCount}" : "0";
-    public string RdcPidTip => RdcRunning && RdcPids.Length > 0 ? $"PIDs: {string.Join(", ", RdcPids)}" : "No Remote Desktop Commander processes";
-    public string RdcUptimeValue
-    {
-        get
-        {
-            if (!RdcRunning || !RdcStartedUtc.HasValue) return "—";
-            var uptime = DateTime.UtcNow - RdcStartedUtc.Value;
-            if (uptime.TotalDays >= 1) return $"{(int)uptime.TotalDays}d {uptime.Hours}h";
-            if (uptime.TotalHours >= 1) return $"{(int)uptime.TotalHours}h {uptime.Minutes}m";
-            return $"{Math.Max(0, (int)uptime.TotalMinutes)}m";
-        }
-    }
-    public string RdcSecurityValue => AgentProtocolVersion < 3 ? "Update the fleet agent to check"
-        : string.IsNullOrWhiteSpace(RdcSecurityText) ? "Unavailable"
-        : RdcSecurityText.StartsWith("Security: ", StringComparison.OrdinalIgnoreCase) ? RdcSecurityText[10..] : RdcSecurityText;
-    public Brush RdcSecurityBrush => RdcSecurityValue.Contains("review", StringComparison.OrdinalIgnoreCase) ? Palette.Warning : Palette.Text;
-    public string RdcPowerButtonText => _rdcPendingAction switch
-    {
-        "Start" => "Starting…",
-        "Stop" => "Stopping…",
-        _ => RdcRunning ? "Stop" : "Start"
-    };
-    public string RdcPowerGlyph => RdcRunning ? "" : "";
-    public Visibility RdcControlsVisibility => RdcConfigured ? Visibility.Visible : Visibility.Collapsed;
-    public bool CanControl => RdcConfigured && string.IsNullOrEmpty(_rdcPendingAction) && (IsLocal || IsOnline);
-    public bool CanSetupRdc => !RdcConfigured && string.IsNullOrEmpty(_rdcPendingAction) && (IsLocal || IsOnline);
     public string LastResultText
     {
         get
@@ -559,16 +492,15 @@ public sealed class MachineInfo : INotifyPropertyChanged
     {
         nameof(UpdatedUtc), nameof(SyncText), nameof(CpuPercent), nameof(CpuText), nameof(CpuBrush),
         nameof(MemoryPercent), nameof(MemoryText), nameof(MemoryBrush), nameof(UptimeText),
-        nameof(RdcActivityValue), nameof(RdcUptimeValue), nameof(LastResultText), nameof(LastResultVisibility),
+        nameof(LastResultText), nameof(LastResultVisibility),
         nameof(IsOnline), nameof(IsReachable), nameof(StatusText), nameof(StatusBrush), nameof(StatusTint),
-        nameof(SupportsFleetTools), nameof(CanUpdateAgent), nameof(CanControl), nameof(CanSetupRdc)
+        nameof(SupportsFleetTools), nameof(CanUpdateAgent)
     };
 
-    /// <summary>Properties that depend on the pending Remote Desktop Commander (or PC) action.</summary>
+    /// <summary>Properties that depend on the pending PC action (an update or a restart).</summary>
     private static readonly string[] PendingProperties =
     {
-        nameof(PendingAction), nameof(RdcPanelVisibility), nameof(RdcPillText), nameof(RdcStatusBrush), nameof(RdcStatusTint),
-        nameof(RdcPowerButtonText), nameof(CanUpdateAgent), nameof(CanControl), nameof(CanSetupRdc)
+        nameof(PendingAction), nameof(StatusText), nameof(StatusBrush), nameof(StatusTint), nameof(CanUpdateAgent)
     };
 
     /// <summary>
@@ -584,17 +516,17 @@ public sealed class MachineInfo : INotifyPropertyChanged
         Notify(TimeBasedProperties);
     }
 
-    /// <summary>Re-evaluates every binding (used when the theme, the latest version or the RDC visibility changes).</summary>
+    /// <summary>Re-evaluates every binding (used when the theme or the latest version changes).</summary>
     public void Refresh()
     {
         RefreshRunnerReachability();
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(string.Empty));
     }
 
-    public void SetRdcPending(string action)
+    public void SetPending(string action)
     {
-        if (_rdcPendingAction == action) return;
-        _rdcPendingAction = action;
+        if (_pendingAction == action) return;
+        _pendingAction = action;
         Notify(PendingProperties);
     }
 
@@ -638,19 +570,6 @@ public sealed class MachineInfo : INotifyPropertyChanged
             AppVersion = payload.AppVersion,
             UpdatedUtc = payload.UpdatedUtc,
             FleetAgentRunning = payload.FleetAgentRunning,
-            RdcRunning = payload.RdcRunning,
-            RdcConnected = payload.RdcConnected,
-            RdcConnectionKnown = payload.RdcConnectionKnown,
-            RdcConnectionChangedUtc = payload.RdcConnectionChangedUtc,
-            RdcConnectionText = payload.RdcConnectionText,
-            RdcConfigured = payload.RdcConfigured,
-            RdcProcessCount = payload.RdcProcessCount,
-            RdcPids = payload.RdcPids,
-            RdcStartedUtc = payload.RdcStartedUtc,
-            RdcActiveCalls = payload.RdcActiveCalls,
-            RdcLastUsedUtc = payload.RdcLastUsedUtc,
-            RdcLastTool = payload.RdcLastTool,
-            RdcSecurityText = payload.RdcSecurityText,
             LastCommandId = payload.LastCommandId,
             LastCommandResult = payload.LastCommandResult,
             RecentCommands = payload.RecentCommands,
@@ -705,8 +624,6 @@ public sealed class LiveJobView
     public Visibility ActivityNoteVisibility => ActivityNote.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
     public Visibility OutputVisibility => Output.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
 
-    private const int OutputLines = 14;
-
     public static LiveJobView Build(GitHubJobState? job, string jobNote, RunnerJobActivity? activity, string activityNote, DateTime nowUtc)
     {
         var steps = job?.Steps.Select(s => LiveStepView.From(s, nowUtc)).ToList() ?? new List<LiveStepView>();
@@ -728,7 +645,7 @@ public sealed class LiveJobView
             ProcessSummary = processes.Count == 0 ? string.Empty
                 : $"CPU {activity!.Processes.Sum(p => p.CpuPercent):0}%  ·  {SystemHealth.FormatBytes(activity.Processes.Sum(p => p.MemoryBytes))}",
             ActivityNote = activityNote,
-            Output = activity == null ? string.Empty : string.Join('\n', activity.Output.TakeLast(OutputLines))
+            Output = activity == null ? string.Empty : string.Join('\n', activity.Output)
         };
     }
 }

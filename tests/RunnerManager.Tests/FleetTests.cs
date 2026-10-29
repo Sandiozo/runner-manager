@@ -815,31 +815,6 @@ public class ChangeFleetCodeTests
     }
 }
 
-public class RemoteDesktopProcessTests
-{
-    private static bool Matches(string name, string commandLine)
-        => RemoteDesktopManager.IsRemoteDesktopCommanderProcess(new ProcessInfo { Name = name, CommandLine = commandLine });
-
-    [Fact]
-    public void ItsOwnProcessesAreRecognized()
-    {
-        var launcher = Path.Combine(FleetConfig.StateDir, "rdc-launch.ps1");
-        Assert.True(Matches("powershell.exe", $"\"powershell.exe\" -NoLogo -NoProfile -ExecutionPolicy Bypass -File \"{launcher}\" -Npx x"));
-        Assert.True(Matches("cmd.exe", "C:\\WINDOWS\\system32\\cmd.exe /d /s /c \"npx.cmd --yes @wonderwhy-er/desktop-commander@0.2.3 remote\""));
-        Assert.True(Matches("node.exe", "\"C:\\Program Files\\nodejs\\node.exe\" \"C:\\Users\\a\\AppData\\Local\\npm-cache\\_npx\\abc\\node_modules\\@wonderwhy-er\\desktop-commander\\dist\\index.js\" remote"));
-    }
-
-    [Fact]
-    public void OtherProgramsThatMentionItAreLeftAlone()
-    {
-        // The MCP server mode that AI apps start.
-        Assert.False(Matches("node.exe", "node npx-cli.js -y @wonderwhy-er/desktop-commander@latest"));
-        Assert.False(Matches("Code.exe", "\"Code.exe\" C:\\notes\\desktop-commander remote setup.md"));
-        Assert.False(Matches("node.exe", "node C:\\tools\\my-desktop-commander-remote-helper.js"));
-        Assert.False(Matches("powershell.exe", "powershell -File C:\\Temp\\rdc-launch.ps1"));
-    }
-}
-
 public class MoveSettingsTests
 {
     [Fact]

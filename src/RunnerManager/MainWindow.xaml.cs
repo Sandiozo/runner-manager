@@ -31,7 +31,7 @@ public partial class MainWindow : Window
     private readonly AppSettings _settings = AppSettings.Load();
     private readonly Dictionary<string, string> _lastRunnerStates = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, bool> _machineRunnerExpansionStates = new(StringComparer.OrdinalIgnoreCase);
-    private readonly Dictionary<string, PendingCommand> _pendingRdcCommands = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, PendingCommand> _pendingMachineCommands = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, PendingCommand> _pendingRunnerCommands = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, DateTime> _recentUserActions = new(StringComparer.OrdinalIgnoreCase);
     private Dictionary<string, MachineSnapshot>? _previousSnapshot;
@@ -61,6 +61,7 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         MachinesView = new ListCollectionView(Machines) { Filter = FilterMachine };
+        MachineInfo.CollapsedPcs = new HashSet<string>(_settings.CollapsedPcs ?? new(), StringComparer.OrdinalIgnoreCase);
         InitializeComponent();
         WindowTheme.Apply(this);
         DataContext = this;
@@ -339,15 +340,15 @@ public partial class MainWindow : Window
         foreach (var machine in machines)
         {
             var pending = string.Empty;
-            if (_pendingRdcCommands.TryGetValue(machine.MachineKey, out var command))
+            if (_pendingMachineCommands.TryGetValue(machine.MachineKey, out var command))
             {
                 if (machine.HasFinished(command.CommandId)
                     || DateTime.UtcNow - command.QueuedUtc > PendingCommandTimeout)
-                    _pendingRdcCommands.Remove(machine.MachineKey);
+                    _pendingMachineCommands.Remove(machine.MachineKey);
                 else
                     pending = command.Action;
             }
-            machine.SetRdcPending(pending);
+            machine.SetPending(pending);
         }
 
         var sameShape = Machines.Count == machines.Count
@@ -375,7 +376,7 @@ public partial class MainWindow : Window
             var incoming = machines[i];
             if (existing.Fingerprint == incoming.Fingerprint)
             {
-                existing.SetRdcPending(incoming.PendingAction);
+                existing.SetPending(incoming.PendingAction);
                 existing.Touch(incoming);
                 foreach (var runner in existing.Runners) LinkLocalRunner(runner);
                 continue;
@@ -484,8 +485,6 @@ public partial class MainWindow : Window
         var runners = machines.SelectMany(m => m.Runners).ToList();
         var running = runners.Count(r => r.IsRunning);
         var busy = runners.Where(r => r.IsBusy).ToList();
-        var rdcMachines = machines.Where(m => m.RdcConfigured).ToList();
-        var rdcConnected = rdcMachines.Count(m => m.RdcConnected);
         var queued = Runners.Sum(r => r.QueueCount);
 
         TileMachines.Text = $"{reachable} / {machines.Count}";
@@ -498,13 +497,10 @@ public partial class MainWindow : Window
         TileBusy.Text = busy.Count.ToString();
         TileBusySub.Text = busy.Count > 0 ? string.Join(", ", busy.Select(r => r.TitleText))
             : queued > 0 ? $"{queued} job{(queued == 1 ? "" : "s")} queued on this PC" : "No jobs running";
-        TileRdc.Text = rdcMachines.Count == 0 ? "–" : $"{rdcConnected} / {rdcMachines.Count}";
-        TileRdcSub.Text = rdcMachines.Count == 0 ? "Not set up on any PC"
-            : rdcConnected == rdcMachines.Count ? "All relays connected" : $"{rdcMachines.Count - rdcConnected} disconnected";
-        TileRdcSub.Foreground = rdcMachines.Count > 0 && rdcConnected < rdcMachines.Count ? Palette.Warning : Palette.TextMuted;
 
         _allMachines.Update($"{machines.Count} PC{(machines.Count == 1 ? "" : "s")}  ·  {runners.Count} runners");
         ApplyOptionalSections(machines);
+        UpdateOutputTabs();
         UpdatePageHeader();
         _tray?.SetTooltip($"Runner Manager — {running}/{runners.Count} runners running, {busy.Count} busy");
     }
@@ -514,12 +510,11 @@ public partial class MainWindow : Window
         var selected = Machines.FirstOrDefault(m => m.MachineKey == _selectedMachineKey)
                        ?? (IsSinglePc ? Machines.FirstOrDefault() : null);
         PageTitle.Text = selected?.MachineName ?? "All PCs";
-        var rdc = MachineInfo.ShowRdc && selected is { RdcConfigured: true } ? $"  ·  Remote Desktop Commander {selected.RdcPillText.ToLowerInvariant()}" : string.Empty;
         PageSubtitle.Text = !_githubAuthenticated
             ? "Connect GitHub in the account menu (bottom left) to add runners and see job status"
             : selected != null
-                ? $"{selected.RunnerSummary}{rdc}"
-                : MachineInfo.ShowRdc ? "GitHub runners and Remote Desktop Commander on all PCs" : "GitHub runners on all PCs";
+                ? selected.RunnerSummary
+                : "GitHub runners on all PCs";
     }
 
     private bool FilterMachine(object item)
@@ -568,13 +563,13 @@ public partial class MainWindow : Window
 
     // ================= Change notifications =================
 
-    private sealed record MachineSnapshot(string Name, bool Reachable, bool IsLocal, bool RdcConfigured, bool RdcConnected,
+    private sealed record MachineSnapshot(string Name, bool Reachable, bool IsLocal,
         Dictionary<string, (string Title, bool Running)> Runners);
 
     private void DetectChanges()
     {
         var current = Machines.ToDictionary(m => m.MachineKey, m => new MachineSnapshot(
-            m.MachineName, m.IsReachable, m.IsLocal, m.RdcConfigured, m.RdcConnected,
+            m.MachineName, m.IsReachable, m.IsLocal,
             m.Runners.GroupBy(RunnerKey).ToDictionary(g => g.Key, g => (g.First().TitleText, g.First().IsRunning))));
         var previous = _previousSnapshot;
         _previousSnapshot = current;
@@ -586,10 +581,6 @@ public partial class MainWindow : Window
             if (!now.IsLocal && before.Reachable != now.Reachable)
                 RaiseAlert(now.Reachable ? $"{now.Name} is back online." : $"{now.Name} is offline. Its fleet agent stopped reporting.",
                     warning: !now.Reachable);
-            if (now.RdcConfigured && before.RdcConfigured && before.RdcConnected != now.RdcConnected && !WasUserAction(key))
-                RaiseAlert(now.RdcConnected
-                    ? $"{now.Name}: Remote Desktop Commander reconnected."
-                    : $"{now.Name}: Remote Desktop Commander disconnected from the relay.", warning: !now.RdcConnected);
             foreach (var (runnerKey, runner) in now.Runners)
             {
                 if (!before.Runners.TryGetValue(runnerKey, out var old) || old.Running == runner.Running) continue;
@@ -834,8 +825,26 @@ public partial class MainWindow : Window
         if (ItemFrom<MachineRunnerStatus>(sender) is not { } runner) return;
         runner.IsExpanded = !runner.IsExpanded;
         _machineRunnerExpansionStates[RunnerKey(runner)] = runner.IsExpanded;
+        // Opening a runner that is running a job shows its output in the bottom panel once it arrives.
+        if (runner.IsExpanded && runner.IsBusy) _selectOutputFor = RunnerKey(runner);
         ApplyLiveJob(runner);
+        UpdateOutputTabs();
         if (runner.IsExpanded && runner.IsBusy) _ = RefreshLiveJobsAsync();
+    }
+
+    private void MachineHeader_Click(object sender, MouseButtonEventArgs e)
+    {
+        for (var current = e.OriginalSource as DependencyObject; current != null && current != sender;
+             current = current is Visual ? VisualTreeHelper.GetParent(current) : LogicalTreeHelper.GetParent(current))
+        {
+            // The update badge, the ⋯ menu and other buttons keep working without collapsing the card.
+            if (current is ButtonBase) return;
+        }
+        if (ItemFrom<MachineInfo>(sender) is not { } machine) return;
+        var collapsed = machine.ToggleCollapsed();
+        _settings.CollapsedPcs.RemoveAll(n => n.Equals(machine.MachineName, StringComparison.OrdinalIgnoreCase));
+        if (collapsed) _settings.CollapsedPcs.Add(machine.MachineName);
+        _settings.Save();
     }
 
     private async void RunnerPower_Click(object sender, RoutedEventArgs e)
@@ -923,7 +932,7 @@ public partial class MainWindow : Window
         if (sender is Button button) Menus.OpenBelow(button, alignRight: true);
     }
 
-    // ================= Fleet / RDC actions =================
+    // ================= Fleet actions =================
 
     private void AddPcRow_Click(object sender, RoutedEventArgs e)
     {
@@ -940,7 +949,7 @@ public partial class MainWindow : Window
         var others = Machines.Where(m => !m.IsLocal).Select(m => m.MachineName).ToList();
         if (!DialogWindow.Confirm(this, $"Remove {Environment.MachineName} from the fleet?",
                 (others.Count > 0 ? $"{string.Join(", ", others)} will forget this PC. " : string.Empty) +
-                "The fleet agent and pairing code are removed from this PC. Runners and Remote Desktop Commander keep running. " +
+                "The fleet agent and pairing code are removed from this PC. Runners keep running. " +
                 "You can add this PC again later.",
                 "Leave fleet", danger: true)) return;
         await RunOperationAsync("Leave fleet", async log =>
@@ -1013,72 +1022,6 @@ public partial class MainWindow : Window
         _forceDiscovery = true;
         await RefreshAsync();
     }
-
-    private async void MachineRdcSetup_Click(object sender, RoutedEventArgs e)
-    {
-        if (ItemFrom<MachineInfo>(sender) is not { CanSetupRdc: true } machine) return;
-        if (machine.IsLocal)
-        {
-            await RunOperationAsync("Set up Remote Desktop Commander", async log =>
-            {
-                await RemoteDesktopManager.SetupAsync();
-                log("Setup console opened. Complete sign-in there.");
-            });
-            return;
-        }
-        if (machine.AgentProtocolVersion < 2)
-        {
-            DialogWindow.Info(this, "Fleet agent update required",
-                $"{machine.MachineName} has an older fleet agent. Update Runner Manager on that PC to the latest version and open it once. After that, this option opens the setup console remotely.");
-            return;
-        }
-        await QueueRdcCommandAsync(machine, "Setup",
-            $"{machine.MachineName}: started Remote Desktop Commander setup. Complete sign-in on that PC.");
-    }
-
-    private async void MachineRdcPower_Click(object sender, RoutedEventArgs e)
-    {
-        if (ItemFrom<MachineInfo>(sender) is not { CanControl: true } machine) return;
-        var action = machine.RdcRunning ? "Stop" : "Start";
-        if (action == "Stop" && machine.RdcActiveCalls > 0 && !DialogWindow.Confirm(this, "Stop Remote Desktop Commander?",
-                $"It is in use ({machine.RdcLastTool}). Stopping it ends the active session.", "Stop", danger: true))
-            return;
-        MarkUserAction(machine.MachineKey);
-        if (machine.IsLocal)
-        {
-            await RunOperationAsync($"{action} Remote Desktop Commander", async log =>
-            {
-                machine.SetRdcPending(action);
-                FleetConfig.SetManuallyStopped("rdc", action == "Stop");
-                if (action == "Stop") await RemoteDesktopManager.StopAsync();
-                else await RemoteDesktopManager.StartAsync();
-                log(action == "Stop" ? "Stopped." : "Relay connected.");
-            });
-            return;
-        }
-        await QueueRdcCommandAsync(machine, action, $"{machine.MachineName}: Remote Desktop Commander {action.ToLowerInvariant()} queued.");
-    }
-
-    private async void MachineRdcRestart_Click(object sender, RoutedEventArgs e)
-    {
-        if (ItemFrom<MachineInfo>(sender) is not { CanControl: true } machine) return;
-        MarkUserAction(machine.MachineKey);
-        if (machine.IsLocal)
-        {
-            await RunOperationAsync("Restart Remote Desktop Commander", async log =>
-            {
-                machine.SetRdcPending("Restart");
-                FleetConfig.SetManuallyStopped("rdc", false);
-                await RemoteDesktopManager.RestartAsync();
-                log("Restarted and relay connection verified.");
-            });
-            return;
-        }
-        await QueueRdcCommandAsync(machine, "Restart", $"{machine.MachineName}: Remote Desktop Commander restart queued.");
-    }
-
-    private Task QueueRdcCommandAsync(MachineInfo machine, string action, string queuedMessage)
-        => QueueMachineCommandAsync(machine, "rdc", action, string.Empty, action, queuedMessage);
 
     private async void RefreshButton_Click(object sender, RoutedEventArgs e) => await ManualRefreshAsync();
 
@@ -1216,7 +1159,7 @@ public partial class MainWindow : Window
     private void ApplyActivityPanelState()
     {
         var open = _settings.ActivityPanelOpen;
-        ActivityList.Visibility = open ? Visibility.Visible : Visibility.Collapsed;
+        ApplyBottomPanel();
         ActivitySplitter.IsEnabled = open;
         ActivityRow.Height = open ? new GridLength(Math.Clamp(_settings.ActivityPanelHeight, 90, 600)) : GridLength.Auto;
         ActivityChevron.Text = open ? "" : "";
@@ -1238,6 +1181,12 @@ public partial class MainWindow : Window
     {
         try
         {
+            if (OutputRunner is { } runner)
+            {
+                Clipboard.SetText(OutputBox.SelectionLength > 0 ? OutputBox.SelectedText : runner.OutputText.Replace("\n", Environment.NewLine));
+                SetStatus("Output copied to clipboard", StatusKind.Ok);
+                return;
+            }
             Clipboard.SetText(string.Join(Environment.NewLine, ActivityLog.Reverse().Select(a => a.ToString())));
             SetStatus("Activity copied to clipboard", StatusKind.Ok);
         }
@@ -1247,7 +1196,7 @@ public partial class MainWindow : Window
     private void ClearActivity_Click(object sender, RoutedEventArgs e)
     {
         ActivityLog.Clear();
-        ActivityCount.Text = string.Empty;
+        ActivityCount.Text = ActivityTabCount.Text = string.Empty;
     }
 
     public void AddActivity(string message)
@@ -1259,7 +1208,7 @@ public partial class MainWindow : Window
         }
         ActivityLog.Insert(0, new ActivityEntry { Message = message, Kind = ActivityEntry.Classify(message) });
         while (ActivityLog.Count > 300) ActivityLog.RemoveAt(ActivityLog.Count - 1);
-        ActivityCount.Text = ActivityLog.Count.ToString();
+        ActivityCount.Text = ActivityTabCount.Text = ActivityLog.Count.ToString();
     }
 
     private void OpenFolder(string path)

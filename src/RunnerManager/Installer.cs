@@ -6,9 +6,8 @@ using Microsoft.Win32;
 namespace RunnerManager;
 
 public enum FleetChoice { SinglePc, NewFleet, JoinFleet }
-public enum RdcChoice { NotUsed, AlreadySetUp, SetUpNow }
 
-public sealed record SetupChoices(bool DesktopShortcut, bool StartWithWindows, FleetChoice Fleet, RdcChoice Rdc);
+public sealed record SetupChoices(bool DesktopShortcut, bool StartWithWindows, FleetChoice Fleet);
 
 /// <summary>
 /// Per-user install of Runner Manager: copies the app to %LOCALAPPDATA%\Programs\RunnerManager, adds shortcuts and an
@@ -322,7 +321,7 @@ public static class Installer
     /// <summary>
     /// Removes Runner Manager from this PC: leaves the fleet (the other PCs forget it), removes the agent, the start-up
     /// task, shortcuts and the Apps entry, then deletes the program folder (and optionally settings and logs) after exit.
-    /// GitHub runners and Remote Desktop Commander are not touched. Returns a sentence to add to the result, or empty.
+    /// GitHub runners are not touched. Returns a sentence to add to the result, or empty.
     /// </summary>
     public static async Task<string> UninstallAsync(bool removeData, Action<string> log)
     {

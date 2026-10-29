@@ -37,7 +37,6 @@ public static class MachineRelay
     private static DateTime _cachedStatusUtc = DateTime.MinValue;
     // Bumped whenever the cached status goes stale, so a status build already in progress does not store an old result.
     private static int _statusVersion;
-    private static int _rdcUnhealthyChecks;
     private static volatile bool _restartAgentAfterUpdate;
     /// <summary>How long an update waits for the agent's work to finish before it restarts the agent anyway.</summary>
     private static readonly TimeSpan UpdateRestartWait = TimeSpan.FromMinutes(15);
@@ -465,7 +464,7 @@ public static class MachineRelay
         => FailedResultPattern.IsMatch(result);
 
     private static readonly System.Text.RegularExpressions.Regex FailedResultPattern =
-        new(@"^(rdc|runner|agent|machine) \S+ failed: ", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        new(@"^(runner|agent|machine) \S+ failed: ", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
 
     // ================= Agent =================
 
@@ -537,28 +536,7 @@ public static class MachineRelay
         // The MCP endpoint for AI assistants, while it is turned on in Settings → AI assistants.
         using var assistantEndpoint = new AssistantHttpServer();
         _ = assistantEndpoint.RunAsync();
-
-        var initialRdc = RemoteDesktopManager.ReadSnapshot();
-        if (RemoteDesktopManager.IsConfigured() && !IsManuallyStopped("rdc"))
-        {
-            try
-            {
-                if (!initialRdc.Running)
-                {
-                    await Task.Delay(TimeSpan.FromSeconds(3), cancellationToken);
-                    await RemoteDesktopManager.StartAsync();
-                    lastResult = "Fleet agent started. Remote Desktop Commander relay connection verified.";
-                }
-                else if (initialRdc.ConnectionKnown && !initialRdc.Connected)
-                {
-                    await Task.Delay(TimeSpan.FromSeconds(3), cancellationToken);
-                    await RemoteDesktopManager.RestartAsync();
-                    lastResult = "Fleet agent started. Remote Desktop Commander relay reconnected.";
-                }
-            }
-            catch (OperationCanceledException) { return; }
-            catch (Exception ex) { AppendAgentLog($"Remote Desktop Commander start failed: {ex.Message}"); }
-        }
+        RemoveRemoteDesktopLeftovers();
 
         var lastWatchdogUtc = DateTime.MinValue;
         DateTime? restartByUtc = null;
@@ -631,6 +609,19 @@ public static class MachineRelay
         }
     }
 
+    /// <summary>
+    /// Versions before 2.6 also managed Remote Desktop Commander. Its launcher script and logs are removed; a copy that
+    /// is still running keeps running until it stops or the PC restarts, and is no longer started again.
+    /// </summary>
+    private static void RemoveRemoteDesktopLeftovers()
+    {
+        foreach (var name in new[] { "rdc-launch.ps1", "rdc-activity.log", "rdc-runtime.log" })
+        {
+            try { File.Delete(Path.Combine(FleetConfig.StateDir, name)); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        }
+    }
+
     private static void InvalidateStatus()
     {
         Interlocked.Increment(ref _statusVersion);
@@ -640,30 +631,6 @@ public static class MachineRelay
     private static async Task<string> ExecuteCommandAsync(MachineCommand command)
     {
         AppendAgentLog($"Running command: {command.Target} {command.Action} {command.TargetKey}".TrimEnd());
-        if (command.Target.Equals("rdc", StringComparison.OrdinalIgnoreCase))
-        {
-            if (command.Action.Equals("Start", StringComparison.OrdinalIgnoreCase))
-                await RemoteDesktopManager.StartAsync();
-            else if (command.Action.Equals("Stop", StringComparison.OrdinalIgnoreCase))
-                await RemoteDesktopManager.StopAsync();
-            else if (command.Action.Equals("Restart", StringComparison.OrdinalIgnoreCase))
-                await RemoteDesktopManager.RestartAsync();
-            else if (command.Action.Equals("Setup", StringComparison.OrdinalIgnoreCase))
-                await RemoteDesktopManager.SetupAsync();
-            else throw new InvalidOperationException($"Unsupported Remote Desktop Commander action: {command.Action}");
-            FleetConfig.SetManuallyStopped("rdc", command.Action.Equals("Stop", StringComparison.OrdinalIgnoreCase));
-            if (command.Action.Equals("Stop", StringComparison.OrdinalIgnoreCase))
-            {
-                WantRunning.Remove("rdc");
-                return "Remote Desktop Commander stop completed";
-            }
-            var relay = await RemoteDesktopManager.ProbeRelayAsync();
-            var connected = relay.Known ? relay.Connected : RemoteDesktopManager.ReadSnapshot().Connected;
-            return connected
-                ? $"Remote Desktop Commander {command.Action.ToLowerInvariant()} completed. Relay connected."
-                : $"Remote Desktop Commander {command.Action.ToLowerInvariant()} completed. Relay not connected.";
-        }
-
         if (command.Target.Equals("runner", StringComparison.OrdinalIgnoreCase))
         {
             switch (command.Action)
@@ -781,7 +748,7 @@ public static class MachineRelay
     }
 
     /// <summary>
-    /// Restarts runners and Remote Desktop Commander that stopped unexpectedly. Only things this agent has seen
+    /// Restarts runners that stopped unexpectedly. Only things this agent has seen
     /// running (and the user didn't stop on purpose) are recovered, at most three times an hour each.
     /// </summary>
     private static async Task<bool> RunWatchdogAsync(LocalState local)
@@ -813,32 +780,6 @@ public static class MachineRelay
             acted = true;
         }
 
-        if (RemoteDesktopManager.IsConfigured())
-        {
-            var connected = local.Relay.Known ? local.Relay.Connected : local.Rdc.Connected;
-            if (local.Rdc.Running && connected)
-            {
-                WantRunning.Add("rdc");
-                _rdcUnhealthyChecks = 0;
-            }
-            else if (config.Watchdog && WantRunning.Contains("rdc") && !IsManuallyStopped("rdc")
-                     && (!local.Rdc.Running || local.Relay.Known))
-            {
-                // Two checks in a row (about 20 seconds) so a brief relay blip doesn't trigger a restart.
-                if (++_rdcUnhealthyChecks >= 2 && TryUseRecoveryAttempt("rdc", "Remote Desktop Commander"))
-                {
-                    _rdcUnhealthyChecks = 0;
-                    try
-                    {
-                        if (local.Rdc.Running) await RemoteDesktopManager.RestartAsync();
-                        else await RemoteDesktopManager.StartAsync();
-                        AddEvent("Auto-recovery reconnected Remote Desktop Commander", warning: true);
-                    }
-                    catch (Exception ex) { AddEvent($"Auto-recovery could not reconnect Remote Desktop Commander: {ex.Message}", warning: true); }
-                    acted = true;
-                }
-            }
-        }
         return acted;
     }
 
@@ -1192,7 +1133,7 @@ public static class MachineRelay
         try
         {
             await ScheduledTasks.RegisterLogonTaskAsync(ScheduledTasks.AgentTaskName, exe, "--agent",
-                "Runner Manager fleet agent. Reports runner and Remote Desktop Commander status and runs commands from other PCs.", restartOnFailure: true);
+                "Runner Manager fleet agent. Reports runner status and runs commands from other PCs.", restartOnFailure: true);
         }
         finally { ForgetAgentInstalled(); }
     }
@@ -1207,24 +1148,22 @@ public static class MachineRelay
         return MachineInfo.FromPayload(LocalMachineKey, payload, localOnly: true, localAgentOutdated: agentOutdated);
     }
 
-    private sealed record LocalState(List<RunnerInfo> Runners, RemoteInfo Rdc, RemoteRelayProbe Relay, bool AgentRunning, HealthSnapshot Health);
+    private sealed record LocalState(List<RunnerInfo> Runners, bool AgentRunning, HealthSnapshot Health);
 
     /// <param name="agentRunning">Whether the agent runs, when the caller already checked.</param>
     private static async Task<LocalState> GatherLocalStateAsync(bool? agentRunning = null)
     {
         // The snapshots start with synchronous WMI and file work, so keep them off the calling (UI) thread.
         var runnersTask = Task.Run(() => RunnerService.ReadSnapshotAsync(queryGitHub: false));
-        var relayTask = Task.Run(RemoteDesktopManager.ProbeRelayAsync);
         var agentTask = agentRunning is { } known ? Task.FromResult(known) : IsAgentRunningAsync();
-        var remote = await Task.Run(RemoteDesktopManager.ReadSnapshot);
         var runners = await runnersTask;
         var health = await Task.Run(() => SystemHealth.Read(runners.Select(r => r.InstallPath)));
-        return new LocalState(runners, remote, await relayTask, await agentTask, health);
+        return new LocalState(runners, await agentTask, health);
     }
 
     private static MachineStatusPayload BuildPayload(LocalState local, string lastCommandId, string lastResult)
     {
-        var (runners, remote, relay) = (local.Runners, local.Rdc, local.Relay);
+        var runners = local.Runners;
         var config = FleetConfig.Current;
         AgentEvent[] events;
         lock (RecentEvents) events = RecentEvents.ToArray();
@@ -1236,19 +1175,6 @@ public static class MachineRelay
             AppVersion = AppUpdater.CurrentVersion,
             UpdatedUtc = DateTime.UtcNow,
             FleetAgentRunning = local.AgentRunning,
-            RdcRunning = remote.Running,
-            RdcConnected = relay.Known ? relay.Connected : remote.Connected,
-            RdcConnectionKnown = relay.Known || remote.ConnectionKnown,
-            RdcConnectionChangedUtc = relay.Known ? relay.ChangedUtc : remote.ConnectionChangedUtc,
-            RdcConnectionText = relay.Known ? relay.Detail : remote.ConnectionText,
-            RdcConfigured = RemoteDesktopManager.IsConfigured(),
-            RdcProcessCount = remote.Pids.Length,
-            RdcPids = remote.Pids,
-            RdcStartedUtc = remote.Started?.ToUniversalTime(),
-            RdcActiveCalls = remote.ActiveCalls,
-            RdcLastUsedUtc = remote.LastUsedUtc,
-            RdcLastTool = remote.LastTool,
-            RdcSecurityText = remote.SecurityText,
             LastCommandId = lastCommandId,
             LastCommandResult = lastResult,
             CpuPercent = local.Health.CpuPercent,
@@ -1381,13 +1307,13 @@ public static class MachineRelay
     }
 }
 
-/// <summary>Reads the tail of the agent, Remote Desktop Commander or runner logs (locally, or for another PC's dashboard).</summary>
+/// <summary>Reads the tail of the agent or runner logs (locally, or for another PC's dashboard).</summary>
 public static class LogReader
 {
     private const int MaxLines = 400;
     private const int MaxBytes = 30_000;
 
-    /// <param name="logKey">"agent", "rdc", or "runner:&lt;service name&gt;".</param>
+    /// <param name="logKey">"agent" or "runner:&lt;service name&gt;".</param>
     public static async Task<LogPayload> ReadAsync(string logKey)
     {
         string title;
@@ -1396,11 +1322,6 @@ public static class LogReader
         {
             title = $"Fleet agent log — {Environment.MachineName}";
             path = MachineRelay.AgentLogPath;
-        }
-        else if (logKey.Equals("rdc", StringComparison.OrdinalIgnoreCase))
-        {
-            title = $"Remote Desktop Commander log — {Environment.MachineName}";
-            path = RemoteDesktopManager.RuntimeLogFile;
         }
         else if (logKey.StartsWith("runner:", StringComparison.OrdinalIgnoreCase))
         {
@@ -1478,19 +1399,6 @@ public sealed record MachineStatusPayload
     public string AppVersion { get; init; } = string.Empty;
     public DateTime UpdatedUtc { get; init; }
     public bool FleetAgentRunning { get; init; }
-    public bool RdcRunning { get; init; }
-    public bool RdcConnected { get; init; }
-    public bool RdcConnectionKnown { get; init; }
-    public DateTime? RdcConnectionChangedUtc { get; init; }
-    public string RdcConnectionText { get; init; } = string.Empty;
-    public bool RdcConfigured { get; init; }
-    public int RdcProcessCount { get; init; }
-    public uint[] RdcPids { get; init; } = Array.Empty<uint>();
-    public DateTime? RdcStartedUtc { get; init; }
-    public int RdcActiveCalls { get; init; }
-    public DateTime? RdcLastUsedUtc { get; init; }
-    public string RdcLastTool { get; init; } = string.Empty;
-    public string RdcSecurityText { get; init; } = string.Empty;
     public string LastCommandId { get; init; } = string.Empty;
     public string LastCommandResult { get; init; } = string.Empty;
     /// <summary>Results of the last commands, oldest first (protocol 12; empty from older agents).</summary>
@@ -1519,7 +1427,6 @@ public sealed record MachineStatusPayload
     {
         UpdatedUtc = default,
         Busy = false,
-        RdcConnectionChangedUtc = null,
         CpuPercent = 0,
         MemoryPercent = 0
     });

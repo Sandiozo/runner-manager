@@ -41,7 +41,7 @@ It asks for administrator rights, because it controls Windows services.
 - Add or update tests for behavior changes. `dotnet test` must pass; CI runs it on every pull request.
 - Match the style of the surrounding code.
 - User-facing text is neutral, professional and simple: short sentences, no contractions, and the same terms as the
-  rest of the app ("PC", "fleet", "fleet agent", "Remote Desktop Commander").
+  rest of the app ("PC", "fleet", "fleet agent").
 - Keep compatibility with older fleet agents: other PCs may run an earlier version. Protocol changes need a new
   `MachineRelay.ProtocolVersion` and a fallback for older agents.
 

@@ -38,7 +38,6 @@ public partial class SettingsWindow : Window
         VersionRow.Title = $"Runner Manager {AppUpdater.CurrentVersion}";
         DataRow.Description = FleetConfig.StateDir;
         ProgramRow.Description = $"{AppUpdater.InstallDir}. To move it, run the setup again and choose another folder.";
-        UpdateRdcStatus();
         UpdateRunnerFolder();
         UpdateKeyStatus();
         RefreshPeers();
@@ -67,7 +66,6 @@ public partial class SettingsWindow : Window
         _lastPage = page;
         GeneralPage.Visibility = page == "General" ? Visibility.Visible : Visibility.Collapsed;
         FleetPage.Visibility = page == "Fleet" ? Visibility.Visible : Visibility.Collapsed;
-        RdcPage.Visibility = page == "Rdc" ? Visibility.Visible : Visibility.Collapsed;
         AssistantsPage.Visibility = page == "Assistants" ? Visibility.Visible : Visibility.Collapsed;
         if (page == "Assistants") UpdateAssistants();
         UpdatesPage.Visibility = page == "Updates" ? Visibility.Visible : Visibility.Collapsed;
@@ -426,31 +424,6 @@ public partial class SettingsWindow : Window
         if (!confirmed) return null;
         return (boxes.Where(b => b.Box.IsChecked == true).Select(b => b.Pc).ToList(),
                 boxes.Where(b => b.Box.IsChecked != true).Select(b => b.Pc).ToList());
-    }
-
-    // ----- Remote Desktop Commander -----
-
-    private void UpdateRdcStatus()
-    {
-        var configured = RemoteDesktopManager.IsConfigured();
-        RdcRow.Title = configured ? "Set up on this PC" : "Not set up on this PC";
-        RdcRow.Description = configured
-            ? "Runner Manager monitors it and restarts it when it stops."
-            : "Set it up to monitor and restart it from Runner Manager.";
-        RdcSetupButton.Content = configured ? "Run setup again" : "Set up";
-        RdcSetupButton.Style = (Style)FindResource(configured ? typeof(Button) : "PrimaryButton");
-    }
-
-    private async void RdcSetup_Click(object sender, RoutedEventArgs e)
-    {
-        await _runOperation("Set up Remote Desktop Commander", async log =>
-        {
-            await RemoteDesktopManager.SetupAsync();
-            log(RemoteDesktopManager.IsConfigured()
-                ? "Remote Desktop Commander is set up and starting."
-                : "Setup window opened. Sign in there. Runner Manager detects the connection automatically.");
-        });
-        UpdateRdcStatus();
     }
 
     // ----- AI assistants -----

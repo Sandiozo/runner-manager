@@ -31,4 +31,4 @@ Runner Manager runs with administrator rights and listens on the network, so the
   Manager window. Connect by URL listens on 127.0.0.1 only and needs a bearer token.
 
 Out of scope: problems that need administrator access to the PC already, and the security of GitHub Actions runners
-or Remote Desktop Commander themselves.
+themselves.

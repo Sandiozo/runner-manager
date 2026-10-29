@@ -82,12 +82,6 @@
                         <TextBlock Text="Fleet"/>
                     </StackPanel>
                 </ListBoxItem>
-                <ListBoxItem Tag="Rdc">
-                    <StackPanel Orientation="Horizontal">
-                        <TextBlock Text="&#xE8AF;" Style="{StaticResource Icon}" Width="26"/>
-                        <TextBlock Text="Remote Desktop Commander" TextTrimming="CharacterEllipsis"/>
-                    </StackPanel>
-                </ListBoxItem>
                 <ListBoxItem Tag="Assistants">
                     <StackPanel Orientation="Horizontal">
                         <TextBlock Text="&#xE99A;" Style="{StaticResource Icon}" Width="26"/>
@@ -270,18 +264,6 @@
                     <TextBlock x:Name="ThisPcAddressText" Style="{StaticResource Hint}" Margin="2,0,0,8"/>
                 </StackPanel>
 
-                <!-- Remote Desktop Commander -->
-                <StackPanel x:Name="RdcPage" Visibility="Collapsed">
-                    <TextBlock Text="Remote Desktop Commander" Style="{StaticResource PageTitle}"/>
-                    <Border Style="{StaticResource Group}">
-                        <local:SettingRow x:Name="RdcRow" Glyph="&#xE8AF;" Title="Not set up on this PC">
-                            <Button x:Name="RdcSetupButton" Content="Set up" Click="RdcSetup_Click"/>
-                        </local:SettingRow>
-                    </Border>
-                    <TextBlock Style="{StaticResource Hint}" Margin="2,0,0,0"
-                               Text="Optional. Lets AI assistants operate this PC remotely. Runner Manager shows, monitors and restarts it only on PCs where it is set up. Setup needs Node.js and opens a console window for sign-in."/>
-                </StackPanel>
-
                 <!-- AI assistants -->
                 <StackPanel x:Name="AssistantsPage" Visibility="Collapsed">
                     <TextBlock Text="AI assistants" Style="{StaticResource PageTitle}"/>
@@ -371,7 +353,7 @@
                                 <Button Content="Open folder" Style="{StaticResource GhostButton}" Click="OpenDataFolder_Click"/>
                             </local:SettingRow>
                             <Border Style="{StaticResource Divider}"/>
-                            <local:SettingRow Glyph="&#xE74D;" Title="Uninstall Runner Manager" Description="Your runners and Remote Desktop Commander keep running.">
+                            <local:SettingRow Glyph="&#xE74D;" Title="Uninstall Runner Manager" Description="Your runners keep running.">
                                 <Button Content="Uninstall…" Style="{StaticResource DangerButton}" Click="Uninstall_Click"/>
                             </local:SettingRow>
                         </StackPanel>

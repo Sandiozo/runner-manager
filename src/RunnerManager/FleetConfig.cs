@@ -38,9 +38,9 @@ public sealed class FleetConfig
     public List<PeerRecord> KnownPeers { get; set; } = new();
     /// <summary>Addresses added by hand, for PCs that broadcast discovery can't find (e.g. over Tailscale).</summary>
     public List<string> ManualAddresses { get; set; } = new();
-    /// <summary>Restart runners and Remote Desktop Commander automatically when they stop unexpectedly.</summary>
+    /// <summary>Restart runners automatically when they stop unexpectedly.</summary>
     public bool Watchdog { get; set; } = true;
-    /// <summary>Runner service names (and "rdc") the user stopped on purpose, so the watchdog leaves them alone.</summary>
+    /// <summary>Runner service names the user stopped on purpose, so the watchdog leaves them alone.</summary>
     public List<string> ManuallyStopped { get; set; } = new();
     /// <summary>Runner folders found outside C:\GitHub-Runners (console runners), so they stay listed while stopped.</summary>
     public List<string> KnownRunnerRoots { get; set; } = new();
@@ -48,11 +48,6 @@ public sealed class FleetConfig
     public string RunnerFolder { get; set; } = string.Empty;
     /// <summary>What AI assistants may do through Runner Manager (Settings → AI assistants).</summary>
     public AssistantOptions Assistant { get; set; } = new();
-    /// <summary>
-    /// The Remote Desktop Commander version this PC runs. Chosen when it is set up (or set up again), so starting it
-    /// does not run whatever version was published last.
-    /// </summary>
-    public string RdcVersion { get; set; } = string.Empty;
     /// <summary>
     /// This PC's own random ID, made once. Other PCs use it to recognize this PC after it was renamed, and to tell
     /// two PCs with the same name apart. Use <see cref="LocalMachineId"/>.
@@ -313,12 +308,12 @@ public sealed class FleetConfig
         ManualAddresses ??= new();
         ManualAddresses.RemoveAll(string.IsNullOrWhiteSpace);
         ManuallyStopped ??= new();
-        ManuallyStopped.RemoveAll(string.IsNullOrWhiteSpace);
+        // "rdc" was Remote Desktop Commander, which Runner Manager no longer manages (2.6).
+        ManuallyStopped.RemoveAll(k => string.IsNullOrWhiteSpace(k) || k.Equals("rdc", StringComparison.OrdinalIgnoreCase));
         KnownRunnerRoots ??= new();
         KnownRunnerRoots.RemoveAll(string.IsNullOrWhiteSpace);
         RunnerFolder ??= string.Empty;
         MachineId ??= string.Empty;
-        RdcVersion ??= string.Empty;
         Assistant ??= new();
         Assistant.ProtectedHttpToken ??= string.Empty;
     }
