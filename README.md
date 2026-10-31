@@ -19,14 +19,15 @@ A Windows dashboard for GitHub Actions self-hosted runners, on one PC or several
   Manager downloads the official runner, verifies its SHA-256 checksum and installs it as a Windows service, in a
   runner folder you choose for each PC. Choose for each runner whether it starts with Windows.
 - **Live jobs.** A busy runner shows its job and every step with its state and duration, and the processes the job
-  runs with their CPU and memory. Its latest output opens in a tab next to Activity, where you can select and copy it. This works for runners on every PC; steps
-  are shown for repository runners.
+  runs with their CPU and memory. Its latest output opens in a tab next to Activity, where you can select and copy
+  it. This works for runners on every PC; steps are shown for repository runners.
 - **Status at a glance.** Each runner shows its state, recent workflow runs, version and work folder size. Each PC
   shows CPU, memory, disk space, uptime and pending restarts. Click a PC's name to collapse its card.
 - **Several PCs.** PCs connect directly over the local network, encrypted. Control the runners on every PC from any
   of them. A single PC works without any fleet setup.
 - **AI assistants.** Claude, Codex, Copilot, Cursor, Gemini and other AI tools that support MCP can list your runners,
-  check jobs and create a runner for a new project. Changes ask for your approval first.
+  check jobs, see stuck jobs and recent alerts, and create a runner for a new project. Changes ask for your approval
+  first.
 - **Auto-recovery.** The fleet agent restarts runners that stop unexpectedly.
 - **Notifications.** Alerts in the notification area when a PC goes offline, a runner stops or a workflow run fails.
 - **Stuck and waiting jobs.** A runner shows **Stuck** when its job has used no CPU and printed nothing for 15 minutes
@@ -59,6 +60,7 @@ service and a page on GitHub. Runner Manager puts them in one window, across all
 | Installs and removes runners | Yes, as Windows services | Shows the commands to run | Yes, as containers |
 | Live job steps, output and processes | Yes | Job logs on GitHub | Job logs on GitHub |
 | PC health, auto-recovery, notifications | Yes | No | Through Kubernetes |
+| Alerts for stuck jobs and idle runners with waiting jobs | Yes | No | No |
 | Moves runners between PCs | Yes | No | Not applicable |
 | Extra infrastructure | None | None | Cluster and controller |
 

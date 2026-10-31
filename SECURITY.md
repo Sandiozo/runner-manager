@@ -27,8 +27,8 @@ Runner Manager runs with administrator rights and listens on the network, so the
 - **Updates**: releases are verified with their SHA-256 checksum before they replace the installed copy, and an older
   version is never installed over a newer one.
 - **AI assistants** (off by default): tool calls go to the fleet agent on the same PC. The assistant and the agent prove to
-  each other with Windows DPAPI that they run as the same Windows user, and changes ask for approval in a Runner
-  Manager window. Connect by URL listens on 127.0.0.1 only and needs a bearer token.
+  each other with Windows DPAPI that they run as the same Windows user, and changes (including stopping a stuck job's
+  processes) ask for approval in a Runner Manager window. Connect by URL listens on 127.0.0.1 only and needs a bearer token.
 
 Out of scope: problems that need administrator access to the PC already, and the security of GitHub Actions runners
 themselves.
