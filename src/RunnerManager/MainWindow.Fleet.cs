@@ -38,6 +38,9 @@ public partial class MainWindow
         {
             await LegacyInstall.MigrateAsync(AddActivity);
             await Installer.EnsureLaunchTaskAsync(force: App.ElevatedByPrompt);
+            if (Elevation.IsElevated)
+                foreach (var name in await ScheduledTasks.RepairOwnTasksAsync(fromAgent: false))
+                    AddActivity($"Repaired the scheduled task \"{name}\". Windows could not start it.");
         }
         catch (Exception ex) { AddActivity($"Could not update the install: {ex.Message}"); }
         if (UpdateGuard.TakeRollbackNotice() is { } notice) RaiseAlert(notice, warning: true);

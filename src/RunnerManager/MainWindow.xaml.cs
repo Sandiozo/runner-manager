@@ -221,6 +221,8 @@ public partial class MainWindow : Window
         try
         {
             if (!await MachineRelay.IsAgentInstalledAsync()) return;
+            if (Elevation.IsElevated && await ScheduledTasks.RepairIfUnindexedAsync(ScheduledTasks.AgentTaskName))
+                AddActivity("Repaired the fleet agent task. Windows could not start it.");
             var (exitCode, output) = await ScheduledTasks.RunTaskAsync(ScheduledTasks.AgentTaskName);
             AddActivity(exitCode == 0 ? "The fleet agent on this PC was not running. Started it again." : $"Could not start the fleet agent: {output.Trim()}");
         }

@@ -129,6 +129,8 @@ public partial class App : Application
                             MachineRelay.AppendAgentLog("Updated the fleet agent task: it now starts again by itself when it stopped.");
                     }
                     catch (Exception ex) { MachineRelay.AppendAgentLog($"Could not update the fleet agent task: {ex.Message}"); }
+                    foreach (var name in await ScheduledTasks.RepairOwnTasksAsync(fromAgent: true))
+                        MachineRelay.AppendAgentLog($"Repaired the scheduled task \"{name}\". Windows could not start it.");
                 });
             try { await MachineRelay.RunAgentAsync(CancellationToken.None); }
             catch (Exception ex)

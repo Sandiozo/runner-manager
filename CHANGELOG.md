@@ -3,6 +3,14 @@
 Runner Manager updates itself from [Releases](https://github.com/Sandiozo/runner-manager/releases): open
 **Settings → Updates**, or click **Update** on a PC's card.
 
+## 2.6.1
+
+- **Fix: the fleet agent could stop starting after an update** ("Could not start the fleet agent: Element not found").
+  When the agent, the dashboard and setup registered the same scheduled task at the same moment, Windows could lose
+  track of it, so it never ran again, and the dashboard asked for UAC each time it started. Runner Manager now
+  registers its tasks one at a time, checks that Windows can run each one, and repairs a task that Windows cannot
+  start when the dashboard or the agent starts.
+
 ## 2.6.0
 
 - **Remote Desktop Commander is no longer part of Runner Manager.** Its panel, tile, settings page, setup step and

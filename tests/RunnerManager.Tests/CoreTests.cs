@@ -660,3 +660,11 @@ public class MachineCardTests
         Assert.False(machine.CanUpdateAgent);
     }
 }
+
+public class TaskIndexTests
+{
+    [Fact]
+    public void MissingTask_IsNotReportedAsUnindexed()
+        // Only a task that exists and is missing from Task Scheduler's index is repaired.
+        => Assert.Null(ScheduledTasks.IsIndexed("Runner Manager test " + Guid.NewGuid().ToString("N")));
+}
