@@ -15,7 +15,7 @@
     <AssemblyName>RunnerManager</AssemblyName>
     <RootNamespace>RunnerManager</RootNamespace>
     <!-- Release builds override this from the git tag (see .github/workflows/release.yml). -->
-    <Version>2.6.1</Version>
+    <Version>2.7.0</Version>
     <Product>Runner Manager</Product>
     <!-- Shown in the exe's Properties → Details. An exe without a publisher or description looks more like malware to
          antivirus scanners. AssemblyTitle is the file description that Task Manager and Defender show. -->

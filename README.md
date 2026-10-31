@@ -29,6 +29,11 @@ A Windows dashboard for GitHub Actions self-hosted runners, on one PC or several
   check jobs and create a runner for a new project. Changes ask for your approval first.
 - **Auto-recovery.** The fleet agent restarts runners that stop unexpectedly.
 - **Notifications.** Alerts in the notification area when a PC goes offline, a runner stops or a workflow run fails.
+- **Stuck and waiting jobs.** A runner shows **Stuck** when its job has used no CPU and printed nothing for 15 minutes
+  (you can change this), and **Running long** when the job takes three times longer than usual. **Stop the job's
+  processes** ends a hung build tool, such as a Unity compiler, without stopping the runner. Runner Manager also warns
+  when a runner is idle while jobs it can take have waited 5 minutes, and when a queued job has no runner that can
+  take it. Each runner lists the jobs it can take: running and waiting.
 - **Updates.** Installs new releases on every PC from the dashboard. If a new version keeps failing to start, the PC
   goes back to the version it had before.
 
@@ -162,7 +167,9 @@ on the least busy PC, and tell you which `runs-on` labels to use.
 | --- | --- | --- |
 | `list_pcs`, `list_runners` | PCs with CPU, memory and disk space; runners and their state | No |
 | `find_runner_for_repo` | Whether a repository already has a runner, and the `runs-on` labels | No |
-| `job_status`, `runner_log`, `recent_runs` | A runner's current job, steps, output and processes; its log; recent workflow runs | No |
+| `job_status`, `runner_log`, `recent_runs` | A runner's current job, steps, output and processes, whether it is stuck, and its queue; its log; recent workflow runs | No |
+| `recent_alerts` | What needs attention now (stuck or long jobs, idle runners with waiting jobs, PCs offline) and recent alerts | No |
+| `stop_job_processes` | Stops what a stuck job started; the runner keeps running | Asks first (setting) |
 | `create_runner` | Creates a runner on a PC you name, or on the least busy one | Asks first (setting) |
 | `control_runner` | Starts, stops or restarts a runner | Asks first (setting) |
 | `move_runner`, `remove_runner` | Moves a runner to another PC, or deletes it | Always asks |

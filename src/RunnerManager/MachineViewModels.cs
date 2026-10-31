@@ -13,6 +13,8 @@ public sealed class MachineRunnerStatus : INotifyPropertyChanged
     private RunnerInfo? _localRunner;
     private IReadOnlyList<WorkflowRunSummary> _recentRuns = Array.Empty<WorkflowRunSummary>();
     private LiveJobView? _liveJob;
+    private RunnerHealth _health = RunnerHealth.Healthy;
+    private IReadOnlyList<QueueEntry> _queue = Array.Empty<QueueEntry>();
     public event PropertyChangedEventHandler? PropertyChanged;
 
     /// <summary>Latest GitHub Actions runner release, set by the dashboard for "update available" hints.</summary>
@@ -47,6 +49,10 @@ public sealed class MachineRunnerStatus : INotifyPropertyChanged
     public string RunnerVersion { get; init; } = string.Empty;
     public long? WorkFolderBytes { get; init; }
     public bool ManuallyStopped { get; init; }
+    /// <summary>When the running job started on its PC (protocol 14; null while idle and from older agents).</summary>
+    public DateTime? JobStartedUtc { get; init; }
+    /// <summary>Since when the running job has used no CPU and written no output, once that is a minute (protocol 14).</summary>
+    public DateTime? QuietSinceUtc { get; init; }
 
     [JsonIgnore] public bool IsBusy => IsRunning && ActivityText.Equals("Busy", StringComparison.OrdinalIgnoreCase);
     /// <summary>How commands address this runner: its service name, or its folder when it has no service.</summary>
@@ -104,18 +110,22 @@ public sealed class MachineRunnerStatus : INotifyPropertyChanged
         "Move" => "Moving…",
         "Convert" => "Converting…",
         "Startup" => "Updating…",
+        "StopJob" => "Stopping processes…",
+        _ when _health.IsProblem => _health.Label + (IsInteractive ? " · console" : string.Empty),
         _ => IsInteractive ? (IsBusy ? "Busy · console" : "Console")
             : IsStoppedConsole ? "Console · stopped"
             : !ServiceInstalled ? "No service" : IsBusy ? "Busy" : IsRunning ? "Idle" : "Stopped"
     };
     [JsonIgnore]
     public Brush StatusBrush => !string.IsNullOrEmpty(_pendingAction) ? Palette.Warning
+        : _health.IsProblem ? Palette.Warning
         : !ServiceInstalled ? Palette.Warning
         : IsBusy ? Palette.Info
         : IsRunning ? Palette.Success
         : Palette.Danger;
     [JsonIgnore] public Brush StatusTint => Palette.Tint(StatusBrush);
-    [JsonIgnore] public string StatusTip => IsInteractive && ServiceInstalled
+    [JsonIgnore] public string StatusTip => _health.IsProblem ? _health.Detail
+        : IsInteractive && ServiceInstalled
         ? "Runs in a console window in your session. Its Windows service is not used; starting it would run the runner twice."
         : IsInteractive
         ? "Runs in a console window in your session, so its jobs can use your desktop. It goes offline when the window closes or you sign out."
@@ -187,6 +197,47 @@ public sealed class MachineRunnerStatus : INotifyPropertyChanged
     }
     [JsonIgnore] public Visibility RecentRunsVisibility => IsExpanded && _recentRuns.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
 
+    /// <summary>Whether the runner needs attention (a stuck or long job, or jobs waiting while it idles); set by the dashboard.</summary>
+    [JsonIgnore]
+    public RunnerHealth Health
+    {
+        get => _health;
+        set
+        {
+            if (_health == value) return;
+            _health = value;
+            Notify(nameof(Health));
+            Notify(nameof(HealthVisibility));
+            Notify(nameof(StatusText));
+            Notify(nameof(StatusBrush));
+            Notify(nameof(StatusTint));
+            Notify(nameof(StatusTip));
+            Notify(nameof(StopJobVisibility));
+            Notify(nameof(NoJobsVisibility));
+        }
+    }
+    [JsonIgnore] public Visibility HealthVisibility => IsExpanded && _health.IsProblem ? Visibility.Visible : Visibility.Collapsed;
+    /// <summary>The note's button: for a job that is stuck or runs long.</summary>
+    [JsonIgnore] public Visibility StopJobVisibility => _health.Concern is RunnerConcern.Stuck or RunnerConcern.RunningLong ? Visibility.Visible : Visibility.Collapsed;
+    [JsonIgnore] public bool CanStopJob => IsBusy && string.IsNullOrEmpty(_pendingAction)
+        && (IsLocalMachine || (MachineOnline && AgentProtocolVersion >= 14));
+
+    /// <summary>The jobs this runner can take that GitHub lists as running or queued for its repository; set by the dashboard.</summary>
+    [JsonIgnore]
+    public IReadOnlyList<QueueEntry> Queue
+    {
+        get => _queue;
+        set
+        {
+            if (_queue.SequenceEqual(value)) return;
+            _queue = value;
+            Notify(nameof(Queue));
+            Notify(nameof(QueueVisibility));
+            Notify(nameof(NoJobsVisibility));
+        }
+    }
+    [JsonIgnore] public Visibility QueueVisibility => IsExpanded && _queue.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+
     /// <summary>The running job, its steps, output and processes; set by the dashboard while the runner is busy.</summary>
     [JsonIgnore]
     public LiveJobView? LiveJob
@@ -206,7 +257,8 @@ public sealed class MachineRunnerStatus : INotifyPropertyChanged
     [JsonIgnore] public Visibility JobLineVisibility => IsBusy && !string.IsNullOrEmpty(_liveJob?.Summary) ? Visibility.Visible : Visibility.Collapsed;
     /// <summary>The details' left column has no job, runs or note to show.</summary>
     [JsonIgnore] public Visibility NoJobsVisibility => IsExpanded && LiveJobVisibility != Visibility.Visible
-        && RecentRunsVisibility != Visibility.Visible && ConsoleNoteVisibility != Visibility.Visible ? Visibility.Visible : Visibility.Collapsed;
+        && RecentRunsVisibility != Visibility.Visible && ConsoleNoteVisibility != Visibility.Visible
+        && QueueVisibility != Visibility.Visible && HealthVisibility != Visibility.Visible ? Visibility.Visible : Visibility.Collapsed;
     /// <summary>The live output shown in the dashboard's bottom panel while the runner is open (empty otherwise).</summary>
     [JsonIgnore] public string OutputText => LiveJobVisibility == Visibility.Visible ? _liveJob?.Output ?? string.Empty : string.Empty;
 

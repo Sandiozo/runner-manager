@@ -214,6 +214,10 @@ public sealed class AppSettings
 
     public bool Notifications { get; set; } = true;
     public bool NotifyOnFailedRuns { get; set; } = true;
+    /// <summary>Alerts for stuck and long-running jobs, runners that idle while jobs wait, and jobs no runner takes.</summary>
+    public bool NotifyOnJobProblems { get; set; } = true;
+    /// <summary>A job that uses no CPU and writes no output for this many minutes counts as stuck.</summary>
+    public int QuietMinutes { get; set; } = JobHealth.DefaultQuietMinutes;
     /// <summary>Closing the window hides it to the notification area, so monitoring continues. Exit from the tray icon.</summary>
     public bool CloseToTray { get; set; } = true;
     public bool ActivityPanelOpen { get; set; } = true;
@@ -265,6 +269,7 @@ public sealed class AppSettings
         }
         settings.RefreshSeconds = Math.Clamp(settings.RefreshSeconds, 5, 60);
         settings.CollapsedPcs ??= new();
+        settings.QuietMinutes = Math.Clamp(settings.QuietMinutes, 5, 240);
         return settings;
     }
 

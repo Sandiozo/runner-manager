@@ -14,7 +14,7 @@ public static class MachineRelay
     /// 11: answers "job" requests (live output and processes of a runner's job).
     /// 12: machine IDs, recent command results, busy state, and "rekey" (Change fleet code).
     /// </summary>
-    public const int ProtocolVersion = 13;
+    public const int ProtocolVersion = 14;
     private const string AgentMutexName = @"Global\RunnerWidgetFleetAgent";
     private static readonly TimeSpan WatchdogInterval = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan DiscoveryInterval = TimeSpan.FromSeconds(30);
@@ -683,6 +683,9 @@ public static class MachineRelay
                     // The move failed: this copy keeps the runner.
                     await FleetActions.StartAfterFailedMoveAsync(command.TargetKey);
                     return "Runner start completed";
+                case "StopJob":
+                    var stopped = await RunnerActivity.StopJobProcessesAsync(command.TargetKey);
+                    return stopped.Count == 0 ? "The job had no processes to stop" : $"Stopped the job's processes: {string.Join(", ", stopped)}";
                 case "Startup":
                     await RunnerService.SetStartAutomaticallyAsync(command.TargetKey, command.Value == "on", message => AppendAgentLog($"Runner startup: {message}"));
                     return command.Value == "on" ? "The runner starts automatically after a restart" : "The runner no longer starts automatically after a restart";
@@ -1158,6 +1161,7 @@ public static class MachineRelay
         var agentTask = agentRunning is { } known ? Task.FromResult(known) : IsAgentRunningAsync();
         var runners = await runnersTask;
         var health = await Task.Run(() => SystemHealth.Read(runners.Select(r => r.InstallPath)));
+        await Task.Run(() => JobWatch.Update(runners));
         return new LocalState(runners, await agentTask, health);
     }
 
@@ -1205,7 +1209,9 @@ public static class MachineRelay
                 StartsAt = r.StartsAt,
                 RunnerVersion = r.RunnerVersion,
                 WorkFolderBytes = r.WorkFolderBytes,
-                ManuallyStopped = config.ManuallyStopped.Contains(r.Name, StringComparer.OrdinalIgnoreCase)
+                ManuallyStopped = config.ManuallyStopped.Contains(r.Name, StringComparer.OrdinalIgnoreCase),
+                JobStartedUtc = JobWatch.For(r.InstallPath).StartedUtc,
+                QuietSinceUtc = JobWatch.For(r.InstallPath).QuietSinceUtc
             }).ToArray()
         };
     }

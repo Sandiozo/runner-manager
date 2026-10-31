@@ -53,6 +53,58 @@ public static class GitHubApi
             j.Status.Equals("in_progress", StringComparison.OrdinalIgnoreCase) && j.RunnerId == runnerId));
     }
 
+    /// <summary>The jobs of a repository's queued and running workflow runs, or null when GitHub could not be read.</summary>
+    public static Task<RepositoryWorkState?> GetRepositoryJobsAsync(string repositoryPath) => GetRepositoryWorkAsync(repositoryPath);
+
+    private static readonly Dictionary<string, (DateTime Until, TimeSpan? Usual)> UsualDurations = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>The jobs of finished runs, which no longer change.</summary>
+    private static readonly Dictionary<long, List<GitHubJobState>> FinishedRunJobs = new();
+
+    /// <summary>
+    /// How long a job usually takes: the median of its successful runs among the workflow's latest successful runs
+    /// (null with fewer than three). Remembered for 10 minutes.
+    /// </summary>
+    public static async Task<TimeSpan?> GetUsualJobDurationAsync(string repositoryPath, string workflowName, string jobName)
+    {
+        var key = $"{repositoryPath}|{workflowName}|{jobName}";
+        lock (CacheLock)
+            if (UsualDurations.TryGetValue(key, out var known) && DateTime.UtcNow < known.Until) return known.Usual;
+
+        var body = await GetPolledAsync($"repos/{repositoryPath}/actions/runs?status=success&per_page=30");
+        if (body == null) return null;
+        List<WorkflowRunState> runs;
+        try
+        {
+            using var json = JsonDocument.Parse(body);
+            runs = json.RootElement.GetProperty("workflow_runs").EnumerateArray().Select(ReadRun)
+                .Where(r => r.WorkflowName.Equals(workflowName, StringComparison.Ordinal)).Take(6).ToList();
+        }
+        catch { return null; }
+
+        var durations = new List<TimeSpan>();
+        foreach (var run in runs)
+        {
+            List<GitHubJobState>? jobs;
+            lock (CacheLock) jobs = FinishedRunJobs.GetValueOrDefault(run.Id);
+            if (jobs == null)
+            {
+                jobs = await GetJobsAsync(repositoryPath, run);
+                if (jobs == null) continue;
+                lock (CacheLock)
+                {
+                    if (FinishedRunJobs.Count > 500) FinishedRunJobs.Clear();
+                    FinishedRunJobs[run.Id] = jobs;
+                }
+            }
+            durations.AddRange(jobs.Where(j => j.Name.Equals(jobName, StringComparison.Ordinal) && j.Conclusion == "success"
+                                               && j.StartedUtc != null && j.CompletedUtc != null)
+                .Select(j => j.CompletedUtc!.Value - j.StartedUtc!.Value));
+        }
+        var usual = JobHealth.Usual(durations);
+        lock (CacheLock) UsualDurations[key] = (DateTime.UtcNow + TimeSpan.FromMinutes(10), usual);
+        return usual;
+    }
+
     private static Task<RepositoryWorkState?> GetRepositoryWorkAsync(string repositoryPath)
     {
         lock (CacheLock)
@@ -172,7 +224,13 @@ public static class GitHubApi
         return new GitHubJobState
         {
             Id = job.TryGetProperty("id", out var id) && id.ValueKind == JsonValueKind.Number ? id.GetInt64() : 0,
+            CreatedUtc = ReadTime(job, "created_at"),
             StartedUtc = ReadTime(job, "started_at"),
+            CompletedUtc = ReadTime(job, "completed_at"),
+            Conclusion = job.TryGetProperty("conclusion", out var jobConclusion) && jobConclusion.ValueKind == JsonValueKind.String
+                ? jobConclusion.GetString() ?? string.Empty : string.Empty,
+            RunnerName = job.TryGetProperty("runner_name", out var runnerName) && runnerName.ValueKind == JsonValueKind.String
+                ? runnerName.GetString() ?? string.Empty : string.Empty,
             Steps = steps,
             RunnerId = job.TryGetProperty("runner_id", out var runnerId) && runnerId.ValueKind == JsonValueKind.Number
                 ? runnerId.GetInt64() : 0,
@@ -354,7 +412,12 @@ public sealed class GitHubJobStep
 public sealed class GitHubJobState
 {
     public long Id { get; init; }
+    /// <summary>When the job was queued: GitHub creates a job once the jobs it needs have finished.</summary>
+    public DateTime? CreatedUtc { get; init; }
     public DateTime? StartedUtc { get; init; }
+    public DateTime? CompletedUtc { get; init; }
+    public string Conclusion { get; init; } = string.Empty;
+    public string RunnerName { get; init; } = string.Empty;
     public IReadOnlyList<GitHubJobStep> Steps { get; init; } = Array.Empty<GitHubJobStep>();
     public long RunnerId { get; init; }
     public string Name { get; init; } = string.Empty;

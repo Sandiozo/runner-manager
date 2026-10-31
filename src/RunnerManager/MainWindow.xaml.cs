@@ -167,6 +167,7 @@ public partial class MainWindow : Window
             UpdateSummary();
             DetectChanges();
             ReportAgentEvents();
+            await CheckRunnerHealthAsync();
             await RefreshFleetExtrasAsync();
             LastUpdatedText.Text = $"Updated {DateTime.Now:HH:mm:ss}  ·  Refreshes every {_settings.RefreshSeconds}s";
             if (!_operationRunning)
@@ -440,6 +441,7 @@ public partial class MainWindow : Window
             LinkLocalRunner(runner);
             ApplyRecentRuns(runner);
             ApplyLiveJob(runner);
+            ApplyHealth(runner);
         }
     }
 
@@ -468,7 +470,7 @@ public partial class MainWindow : Window
             var done = DateTime.UtcNow - pending.QueuedUtc > PendingCommandTimeout
                 || (pending.Action == "Start" && runner.IsRunning)
                 || (pending.Action == "Stop" && !runner.IsRunning)
-                || (pending.Action is "Restart" or "Edit" or "CleanWork" or "Remove" or "Convert" or "Startup" && !string.IsNullOrEmpty(pending.CommandId)
+                || (pending.Action is "Restart" or "Edit" or "CleanWork" or "Remove" or "Convert" or "Startup" or "StopJob" && !string.IsNullOrEmpty(pending.CommandId)
                     && machine.HasFinished(pending.CommandId));
             if (done) _pendingRunnerCommands.Remove(key);
             runner.SetPending(done ? string.Empty : pending.Action);
@@ -615,6 +617,8 @@ public partial class MainWindow : Window
     private void RaiseAlert(string message, bool warning)
     {
         AddActivity(message);
+        // AI assistants read the alerts with recent_alerts.
+        AlertLog.Append(message, warning);
         if (_settings.Notifications && !IsActive)
             _tray?.Notify("Runner Manager", message, warning);
     }

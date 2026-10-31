@@ -113,41 +113,8 @@ public static class RunnerActivity
     /// <summary>The runner's job process (Runner.Worker) and everything it started, busiest first.</summary>
     internal static RunnerProcess[] ReadProcesses(string root)
     {
-        var bin = Path.Combine(root, "bin") + Path.DirectorySeparatorChar;
-        var all = new List<ProcessRow>();
-        using (var searcher = new ManagementObjectSearcher(
-                   "SELECT ProcessId, ParentProcessId, Name, ExecutablePath, CommandLine, WorkingSetSize, KernelModeTime, UserModeTime, CreationDate FROM Win32_Process"))
-        using (var results = searcher.Get())
-        {
-            foreach (ManagementObject item in results)
-            {
-                using (item)
-                {
-                    all.Add(new ProcessRow(
-                        Convert.ToInt32(item["ProcessId"]), Convert.ToInt32(item["ParentProcessId"]),
-                        item["Name"]?.ToString() ?? string.Empty, item["ExecutablePath"]?.ToString() ?? string.Empty,
-                        item["CommandLine"]?.ToString() ?? string.Empty, Convert.ToInt64(item["WorkingSetSize"] ?? 0L),
-                        Convert.ToUInt64(item["KernelModeTime"] ?? 0UL) + Convert.ToUInt64(item["UserModeTime"] ?? 0UL),
-                        item["CreationDate"]?.ToString() ?? string.Empty));
-                }
-            }
-        }
-
-        var workers = all.Where(p => p.Name.Equals("Runner.Worker.exe", StringComparison.OrdinalIgnoreCase)
-                                     && p.Path.StartsWith(bin, StringComparison.OrdinalIgnoreCase)).ToList();
-        if (workers.Count == 0) return Array.Empty<RunnerProcess>();
-
-        var children = all.ToLookup(p => p.ParentId);
-        var job = new List<ProcessRow>();
-        var queue = new Queue<ProcessRow>(workers);
-        var seen = new HashSet<int>();
-        while (queue.Count > 0)
-        {
-            var process = queue.Dequeue();
-            if (!seen.Add(process.Id)) continue;
-            job.Add(process);
-            foreach (var child in children[process.Id]) queue.Enqueue(child);
-        }
+        var job = ReadJobRows(root);
+        if (job.Count == 0) return Array.Empty<RunnerProcess>();
 
         var now = DateTime.UtcNow;
         var cores = Environment.ProcessorCount;
@@ -182,6 +149,117 @@ public static class RunnerActivity
         return result.OrderByDescending(p => p.CpuPercent).ThenByDescending(p => p.MemoryBytes).Take(MaxProcesses).ToArray();
     }
 
+    /// <summary>The job's processes: the runner's Runner.Worker processes and everything they started.</summary>
+    private static List<ProcessRow> ReadJobRows(string root)
+    {
+        var bin = Path.Combine(root, "bin") + Path.DirectorySeparatorChar;
+        var all = new List<ProcessRow>();
+        using (var searcher = new ManagementObjectSearcher(
+                   "SELECT ProcessId, ParentProcessId, Name, ExecutablePath, CommandLine, WorkingSetSize, KernelModeTime, UserModeTime, CreationDate FROM Win32_Process"))
+        using (var results = searcher.Get())
+        {
+            foreach (ManagementObject item in results)
+            {
+                using (item)
+                {
+                    all.Add(new ProcessRow(
+                        Convert.ToInt32(item["ProcessId"]), Convert.ToInt32(item["ParentProcessId"]),
+                        item["Name"]?.ToString() ?? string.Empty, item["ExecutablePath"]?.ToString() ?? string.Empty,
+                        item["CommandLine"]?.ToString() ?? string.Empty, Convert.ToInt64(item["WorkingSetSize"] ?? 0L),
+                        Convert.ToUInt64(item["KernelModeTime"] ?? 0UL) + Convert.ToUInt64(item["UserModeTime"] ?? 0UL),
+                        item["CreationDate"]?.ToString() ?? string.Empty));
+                }
+            }
+        }
+
+        var workers = all.Where(p => p.Name.Equals("Runner.Worker.exe", StringComparison.OrdinalIgnoreCase)
+                                     && p.Path.StartsWith(bin, StringComparison.OrdinalIgnoreCase)).ToList();
+        var children = all.ToLookup(p => p.ParentId);
+        var job = new List<ProcessRow>();
+        var queue = new Queue<ProcessRow>(workers);
+        var seen = new HashSet<int>();
+        while (queue.Count > 0)
+        {
+            var process = queue.Dequeue();
+            if (!seen.Add(process.Id)) continue;
+            job.Add(process);
+            foreach (var child in children[process.Id]) queue.Enqueue(child);
+        }
+        return job;
+    }
+
+    /// <summary>
+    /// A reading of a running job for <see cref="JobWatch"/>: when its Runner.Worker started, the processor time of each
+    /// of its processes, and the state of the running step's output file. Null when the runner runs no job.
+    /// </summary>
+    internal static JobSample? ReadJobSample(string root)
+    {
+        var job = ReadJobRows(root);
+        var worker = job.FirstOrDefault(p => p.Name.Equals("Runner.Worker.exe", StringComparison.OrdinalIgnoreCase));
+        if (worker == null) return null;
+        var outputState = string.Empty;
+        if (CurrentOutputFile(root) is { } output)
+        {
+            try
+            {
+                var file = new FileInfo(output);
+                outputState = $"{file.Name}|{file.Length}|{file.LastWriteTimeUtc.Ticks}";
+            }
+            catch (IOException) { }
+        }
+        var times = new Dictionary<string, ulong>();
+        foreach (var process in job) times[$"{process.Id}|{process.Started}"] = process.Cpu;
+        return new JobSample(ParseStarted(worker.Started) ?? DateTime.UtcNow, times, outputState);
+    }
+
+    /// <summary>
+    /// Stops everything the runner's running job started (and what those started), leaving the runner and its
+    /// Runner.Worker running: the step fails, and the job goes on to its next step or ends. For a hung build tool, such
+    /// as a Unity compiler that no longer does anything. Returns the names of the processes it stopped.
+    /// </summary>
+    public static async Task<List<string>> StopJobProcessesAsync(string runnerKey)
+    {
+        var root = await FindRootAsync(runnerKey);
+        return await Task.Run(() => StopJobProcesses(root));
+    }
+
+    internal static List<string> StopJobProcesses(string root)
+    {
+        var job = ReadJobRows(root);
+        var workers = job.Where(p => p.Name.Equals("Runner.Worker.exe", StringComparison.OrdinalIgnoreCase)).Select(p => p.Id).ToHashSet();
+        if (workers.Count == 0) throw new InvalidOperationException("The runner is not running a job.");
+        var parents = job.ToDictionary(p => p.Id, p => p.ParentId);
+        var stopped = new List<string>();
+        foreach (var top in job.Where(p => workers.Contains(p.ParentId) && !workers.Contains(p.Id)))
+        {
+            try
+            {
+                using var running = System.Diagnostics.Process.GetProcessById(top.Id);
+                // The same process, not a new one that got its ID after it ended.
+                if (ParseStarted(top.Started) is { } started && Math.Abs((running.StartTime.ToUniversalTime() - started).TotalSeconds) > 2) continue;
+                var tree = job.Where(p => IsUnder(p.Id, top.Id, parents)).Select(p => Path.GetFileNameWithoutExtension(p.Name)).ToList();
+                running.Kill(entireProcessTree: true);
+                running.WaitForExit(5000);
+                stopped.AddRange(tree);
+            }
+            catch (ArgumentException) { }
+            catch (InvalidOperationException) { }
+        }
+        return stopped.Where(n => !n.Equals("conhost", StringComparison.OrdinalIgnoreCase)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
+    /// <summary>Whether a process is <paramref name="ancestor"/> or was started by it, directly or through others.</summary>
+    private static bool IsUnder(int id, int ancestor, Dictionary<int, int> parents)
+    {
+        for (var hops = 0; hops < 64; hops++)
+        {
+            if (id == ancestor) return true;
+            if (!parents.TryGetValue(id, out var parent) || parent == id) return false;
+            id = parent;
+        }
+        return false;
+    }
+
     /// <summary>
     /// The first few arguments of a command line, without the program itself: enough to tell "dotnet build" from
     /// "dotnet test". Paths are shortened to their file name, and arguments that look like secrets are left out.
@@ -212,4 +290,7 @@ public static class RunnerActivity
     }
 
     private sealed record ProcessRow(int Id, int ParentId, string Name, string Path, string CommandLine, long Memory, ulong Cpu, string Started);
+
+    /// <param name="ProcessorTime">Processor time in 100 ns units, per process ("ID|start time").</param>
+    internal sealed record JobSample(DateTime WorkerStartedUtc, Dictionary<string, ulong> ProcessorTime, string OutputState);
 }

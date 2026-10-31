@@ -116,7 +116,8 @@ public static class AssistantTools
             "Lists the PCs in the Runner Manager fleet: online state, version, CPU, memory, free disk space and runner counts.",
             AssistantToolKind.Read, Schema(), ListPcsAsync),
         new AssistantTool("list_runners",
-            "Lists the GitHub Actions self-hosted runners on every PC (or one PC): state (busy, idle, stopped), repository or organization, labels and version.",
+            "Lists the GitHub Actions self-hosted runners on every PC (or one PC): state (busy, idle, stopped), repository or organization, labels and version. " +
+            "problem says when a runner needs attention: its job is stuck (no CPU use or output for a while) or runs far longer than usual, or it is idle while jobs it can take wait.",
             AssistantToolKind.Read, Schema(("pc", "string", "Only this PC. Optional.", false)), ListRunnersAsync),
         new AssistantTool("find_runner_for_repo",
             "Checks whether a GitHub repository already has a self-hosted runner in the fleet (its own, or an organization runner). Call this before create_runner. Also returns the runs-on labels to use in workflows.",
@@ -156,7 +157,8 @@ public static class AssistantTools
                 ("repository", "string", RunnerRepositoryArgument, false)),
             RemoveRunnerAsync),
         new AssistantTool("job_status",
-            "Shows what a runner is doing: the running job and its steps, the latest output lines, and the job's processes with CPU and memory.",
+            "Shows what a runner is doing: the running job and its steps, the latest output lines, the job's processes with CPU and memory, " +
+            "whether the job is stuck or runs long, and the queue: the jobs this runner can take that are running or waiting.",
             AssistantToolKind.Read, Schema(
                 ("pc", "string", PcArgument, true),
                 ("runner", "string", RunnerArgument, true),
@@ -168,6 +170,18 @@ public static class AssistantTools
                 ("repository", "string", "owner/name or a https://github.com/owner/name URL.", true),
                 ("count", "integer", "How many runs, 1 to 20. Default 10.", false)),
             RecentRunsAsync),
+        new AssistantTool("recent_alerts",
+            "What needs attention in the fleet now (stuck or long-running jobs, idle runners with jobs waiting, jobs no runner takes), and the alerts " +
+            "Runner Manager showed recently: failed workflow runs, PCs going offline, runners stopping, auto-recovery. A good first call when asked whether anything is wrong.",
+            AssistantToolKind.Read, Schema(("hours", "integer", "How far back to list alerts, 1 to 168. Default 24.", false)), RecentAlertsAsync),
+        new AssistantTool("stop_job_processes",
+            "Stops the processes that a runner's running job started, such as a hung build tool or Unity compiler. The runner keeps running: the " +
+            "current step fails and the job goes on or ends. Use when job_status or recent_alerts shows the job is stuck.",
+            AssistantToolKind.Change, Schema(
+                ("pc", "string", PcArgument, true),
+                ("runner", "string", RunnerArgument, true),
+                ("repository", "string", RunnerRepositoryArgument, false)),
+            StopJobProcessesAsync),
         new AssistantTool("runner_log",
             "Reads the end of a runner's diagnostic log, useful when a runner does not start or does not pick up jobs.",
             AssistantToolKind.Read, Schema(
@@ -232,7 +246,8 @@ public static class AssistantTools
     {
         var machines = await MachineRelay.ReadFleetAsync();
         if (call.Text("pc") is { } pc) machines = new List<MachineInfo> { FindPc(machines, pc) };
-        return machines.SelectMany(m => m.Runners.Select(r => DescribeRunner(m, r))).ToList();
+        var health = await EvaluateHealthAsync(machines);
+        return machines.SelectMany(m => m.Runners.Select(r => DescribeRunner(m, r, health))).ToList();
     }
 
     private static async Task<object> FindRunnerAsync(AssistantCall call)
@@ -240,12 +255,13 @@ public static class AssistantTools
         var target = await ResolveTargetAsync(call.RequiredText("repository"));
         var machines = await MachineRelay.ReadFleetAsync();
         var matches = await RunnersForAsync(machines, target);
+        var health = await EvaluateHealthAsync(matches.Select(x => x.Machine).Distinct().ToList());
         (string[] Labels, string Note)? runsOn = matches.Count > 0 ? RunsOn(matches) : null;
         return new
         {
             target = target.Display,
             has_runner = matches.Count > 0,
-            runners = matches.Select(x => DescribeRunner(x.Machine, x.Runner)),
+            runners = matches.Select(x => DescribeRunner(x.Machine, x.Runner, health)),
             runs_on = runsOn?.Labels,
             next_step = runsOn is { } labels
                 ? $"Use runs-on: [{string.Join(", ", labels.Labels)}] in the workflow.{labels.Note}"
@@ -256,7 +272,11 @@ public static class AssistantTools
     private static async Task<object> JobStatusAsync(AssistantCall call)
     {
         var (machine, runner) = await LocateRunnerAsync(call);
-        if (!runner.IsBusy) return new { pc = machine.MachineName, runner = runner.TitleText, target = TargetOf(runner), busy = false, state = StateOf(runner) };
+        var health = await EvaluateHealthAsync(new List<MachineInfo> { machine });
+        var problem = ProblemOf(runner, health);
+        var queue = QueueOf(runner, health);
+        if (!runner.IsBusy)
+            return new { notice = UntrustedNotice, pc = machine.MachineName, runner = runner.TitleText, target = TargetOf(runner), busy = false, state = StateOf(runner), problem, queue };
 
         object? job = null;
         if (!string.IsNullOrEmpty(runner.RepositoryPath) && runner.AgentId != 0)
@@ -294,7 +314,9 @@ public static class AssistantTools
             runner = runner.TitleText,
             target = TargetOf(runner),
             busy = true,
+            problem,
             job,
+            queue,
             output = (activity?.Output ?? Array.Empty<string>()).TakeLast(200).Select(line => Bounded(line, 500)),
             processes = activity?.Processes.Take(50).Select(p => new
             {
@@ -343,7 +365,47 @@ public static class AssistantTools
         return new { notice = UntrustedNotice, pc = machine.MachineName, runner = runner.TitleText, target = TargetOf(runner), log = log.Title, text };
     }
 
+    private static async Task<object> RecentAlertsAsync(AssistantCall call)
+    {
+        var machines = await MachineRelay.ReadFleetAsync();
+        var health = await EvaluateHealthAsync(machines);
+        var hours = call.Number("hours", 24, 1, 168);
+        var problems = machines.SelectMany(m => m.Runners.Select(r => (Machine: m, Runner: r)))
+            .Select(x => (x.Machine, x.Runner, Health: health.Runners.GetValueOrDefault(JobHealth.Key(x.Runner))))
+            .Where(x => x.Health is { IsProblem: true })
+            .Select(x => (object)new { pc = x.Machine.MachineName, runner = x.Runner.TitleText, target = TargetOf(x.Runner), problem = x.Health!.Label, detail = Bounded(x.Health.Detail, 500) })
+            .Concat(health.Unserved.Select(j => (object)new { repository = j.Repository, problem = "Job waiting for a runner", detail = Bounded(j.Text, 500) }))
+            .Concat(machines.Where(m => !m.IsReachable).Select(m => (object)new { pc = m.MachineName, problem = "PC offline", detail = m.ConnectionProblem.Length > 0 ? m.ConnectionProblem : "Its fleet agent is not reporting." }))
+            .ToList();
+        return new
+        {
+            notice = UntrustedNotice,
+            current_problems = problems,
+            recent_alerts = AlertLog.Recent(TimeSpan.FromHours(hours)).Take(100)
+                .Select(a => new { utc = a.Utc, warning = a.Warning, text = Bounded(a.Text, 500) }),
+            note = "Alerts are recorded while the Runner Manager window or tray icon runs on this PC; current_problems are checked now."
+        };
+    }
+
     // ----- Change tools -----
+
+    private static async Task<object> StopJobProcessesAsync(AssistantCall call)
+    {
+        var (machine, runner) = await LocateRunnerAsync(call);
+        RequireAgent(machine);
+        if (!runner.IsBusy) throw new AssistantException($"{runner.TitleText} is not running a job.");
+        if (!machine.IsLocal && machine.AgentProtocolVersion < 14)
+            throw new AssistantException($"{machine.MachineName} runs an older Runner Manager. Update it to stop a job's processes.");
+        await call.ConfirmAsync(AssistantToolKind.Change, "Stop a job's processes?",
+            $"An AI assistant wants to stop the processes of the job that “{runner.TitleText}” runs on {machine.MachineName}. The runner keeps running; the current step fails.");
+        (machine, runner) = await RecheckAsync(machine, runner, mustBeIdle: false);
+        if (!runner.IsBusy) throw new AssistantException($"{runner.TitleText} finished its job while the approval was open, so nothing was changed.");
+        call.CancellationToken.ThrowIfCancellationRequested();
+        var stopped = new List<string>();
+        await Actions.RunOnMachineAsync(machine, "runner", runner.CommandKey, "StopJob", call.Log,
+            async () => stopped = await RunnerActivity.StopJobProcessesAsync(runner.CommandKey), TimeSpan.FromMinutes(2));
+        return new { done = true, pc = machine.MachineName, runner = runner.TitleText, target = TargetOf(runner), stopped = stopped.Count > 0 ? stopped : null };
+    }
 
     private static async Task<object> CreateRunnerAsync(AssistantCall call)
     {
@@ -574,7 +636,27 @@ public static class AssistantTools
         return (common.ToArray(), note);
     }
 
-    private static object DescribeRunner(MachineInfo machine, MachineRunnerStatus runner)
+    /// <summary>Stuck and waiting checks for these PCs, with the quiet time set in the dashboard's settings.</summary>
+    private static async Task<FleetHealth> EvaluateHealthAsync(List<MachineInfo> machines)
+    {
+        try
+        {
+            return await JobHealth.EvaluateAsync(machines, TimeSpan.FromMinutes(AppSettings.Load().QuietMinutes), null, useGitHub: true, DateTime.UtcNow);
+        }
+        catch { return new FleetHealth(); }
+    }
+
+    private static object? ProblemOf(MachineRunnerStatus runner, FleetHealth health)
+        => health.Runners.GetValueOrDefault(JobHealth.Key(runner)) is { IsProblem: true } problem
+            ? new { kind = problem.Label, detail = Bounded(problem.Detail, 500) }
+            : null;
+
+    private static object? QueueOf(MachineRunnerStatus runner, FleetHealth health)
+        => health.Queues.GetValueOrDefault(JobHealth.Key(runner)) is { Count: > 0 } queue
+            ? queue.Take(30).Select(q => new { job = Bounded(q.Title, 300), state = Bounded(q.Detail, 200), running = q.Running, url = q.Url })
+            : null;
+
+    private static object DescribeRunner(MachineInfo machine, MachineRunnerStatus runner, FleetHealth? health = null)
     {
         var labels = LabelsOf(machine, runner);
         return new
@@ -583,6 +665,7 @@ public static class AssistantTools
             name = runner.TitleText,
             target = TargetOf(runner),
             state = StateOf(runner),
+            problem = health == null ? null : ProblemOf(runner, health),
             console = runner.IsInteractive,
             // "windows", "signin" or "signin-shared" (a console runner opened at sign-in), "off", "disabled", "none"; null from older agents.
             starts_after_restart = runner.StartsAt.Length > 0 ? runner.StartsAt

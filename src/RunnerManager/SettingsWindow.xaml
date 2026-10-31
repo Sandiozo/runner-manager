@@ -161,6 +161,22 @@
                             <local:SettingRow Glyph="&#xE7BA;" Title="Failed workflow runs" Description="For repositories that use your runners.">
                                 <CheckBox x:Name="FailedRunsToggle" Style="{StaticResource ToggleSwitch}" AutomationProperties.Name="Failed workflow runs" Click="Toggle_Click"/>
                             </local:SettingRow>
+                            <Border Style="{StaticResource Divider}"/>
+                            <local:SettingRow Glyph="&#xE916;" Title="Stuck and waiting jobs"
+                                              Description="A job that makes no progress or runs far longer than usual, a runner that idles while jobs wait for it, and jobs that no runner takes.">
+                                <CheckBox x:Name="JobProblemsToggle" Style="{StaticResource ToggleSwitch}" AutomationProperties.Name="Stuck and waiting jobs" Click="Toggle_Click"/>
+                            </local:SettingRow>
+                            <Border Style="{StaticResource Divider}"/>
+                            <local:SettingRow Glyph="&#xE823;" Title="Stuck after" Description="How long a job may use no CPU and print no output.">
+                                <Border Style="{StaticResource SegmentHost}">
+                                    <StackPanel Orientation="Horizontal">
+                                        <RadioButton x:Name="Quiet10" Content="10 min" Style="{StaticResource Segment}" GroupName="Quiet" Checked="Quiet_Checked" Tag="10"/>
+                                        <RadioButton x:Name="Quiet15" Content="15 min" Style="{StaticResource Segment}" GroupName="Quiet" Checked="Quiet_Checked" Tag="15"/>
+                                        <RadioButton x:Name="Quiet30" Content="30 min" Style="{StaticResource Segment}" GroupName="Quiet" Checked="Quiet_Checked" Tag="30"/>
+                                        <RadioButton x:Name="Quiet60" Content="1 h" Style="{StaticResource Segment}" GroupName="Quiet" Checked="Quiet_Checked" Tag="60"/>
+                                    </StackPanel>
+                                </Border>
+                            </local:SettingRow>
                         </StackPanel>
                     </Border>
                 </StackPanel>

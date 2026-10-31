@@ -32,6 +32,8 @@ public partial class SettingsWindow : Window
         (settings.RefreshSeconds switch { >= 30 => Refresh30, >= 10 => Refresh10, _ => Refresh5 }).IsChecked = true;
         NotificationsToggle.IsChecked = settings.Notifications;
         FailedRunsToggle.IsChecked = settings.NotifyOnFailedRuns;
+        JobProblemsToggle.IsChecked = settings.NotifyOnJobProblems;
+        (settings.QuietMinutes switch { >= 60 => Quiet60, >= 30 => Quiet30, >= 15 => Quiet15, _ => Quiet10 }).IsChecked = true;
         CloseToTrayToggle.IsChecked = settings.CloseToTray;
         WatchdogToggle.IsChecked = FleetConfig.Current.Watchdog;
         NavVersionText.Text = $"Runner Manager {AppUpdater.CurrentVersion}";
@@ -104,10 +106,21 @@ public partial class SettingsWindow : Window
         }
     }
 
+    private void Quiet_Checked(object sender, RoutedEventArgs e)
+    {
+        if (_loading) return;
+        if (sender is RadioButton { Tag: string tag } && int.TryParse(tag, out var minutes))
+        {
+            _settings.QuietMinutes = minutes;
+            Save();
+        }
+    }
+
     private void Toggle_Click(object sender, RoutedEventArgs e)
     {
         _settings.Notifications = NotificationsToggle.IsChecked == true;
         _settings.NotifyOnFailedRuns = FailedRunsToggle.IsChecked == true;
+        _settings.NotifyOnJobProblems = JobProblemsToggle.IsChecked == true;
         _settings.CloseToTray = CloseToTrayToggle.IsChecked == true;
         Save();
     }

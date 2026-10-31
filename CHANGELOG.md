@@ -3,6 +3,26 @@
 Runner Manager updates itself from [Releases](https://github.com/Sandiozo/runner-manager/releases): open
 **Settings → Updates**, or click **Update** on a PC's card.
 
+## 2.7.0
+
+- **Stuck jobs.** A busy runner shows **Stuck** when its job has used no CPU, started no process and printed no
+  output for 15 minutes, and **Running long** when it has run three times longer than the same job usually takes (at
+  least 20 minutes; 2 hours for a job without earlier successful runs). You get a notification once per job, and
+  the runner's details say what is wrong.
+- **Stop the job's processes** in a runner's ⋯ menu, and on the note of a stuck job: stops everything the running job
+  started, such as a Unity compiler that no longer does anything. The runner keeps running; the step fails and the job
+  goes on or ends. It works for runners on other PCs that run 2.7.
+- **Idle runners with waiting jobs.** A notification when a runner is idle while a job it can take has been queued for
+  5 minutes, and when a queued job has no runner that can take it, or only stopped ones.
+- **Queue in the runner's details:** the jobs this runner can take, running on a runner with the same labels or
+  waiting, and for how long. It replaces the queue line, and now also works for runners on other PCs.
+- **Settings → Notifications → Stuck and waiting jobs** turns these alerts on or off, and **Stuck after** sets the
+  quiet time: 10, 15, 30 minutes or 1 hour.
+- **AI assistants** see the same: list_runners and job_status say when a runner needs attention, job_status shows the
+  queue, recent_alerts lists current problems and the alerts Runner Manager showed, and stop_job_processes stops a
+  stuck job's processes (with the same approval as other changes).
+- Fleet protocol 14: agents report when each job started and since when it has made no progress.
+
 ## 2.6.1
 
 - **Fix: the fleet agent could stop starting after an update** ("Could not start the fleet agent: Element not found").

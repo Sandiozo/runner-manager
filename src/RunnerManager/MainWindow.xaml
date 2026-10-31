@@ -474,6 +474,8 @@
                                                                                               IsEnabled="{Binding CanChangeStartup}" ToolTip="{Binding StartupTip}" Click="RunnerStartup_Click"/>
                                                                                     <MenuItem Header="Move to another PC…" Tag="&#xE8AB;" Click="RunnerMove_Click" IsEnabled="{Binding CanMove}"/>
                                                                                     <MenuItem Header="Clean work folder…" Tag="&#xE74D;" Click="RunnerCleanWork_Click" IsEnabled="{Binding CanCleanWork}"/>
+                                                                                    <MenuItem Header="Stop the job's processes…" Tag="&#xE71A;" Click="RunnerStopJob_Click" IsEnabled="{Binding CanStopJob}"
+                                                                                              ToolTip="Stops what the running job started, such as a hung build tool. The runner keeps running."/>
                                                                                     <Separator/>
                                                                                     <MenuItem Header="View diagnostic log" Tag="&#xE9F9;" Click="RunnerViewLog_Click" IsEnabled="{Binding CanViewLog}"/>
                                                                                     <MenuItem Header="Open install folder" Tag="&#xE838;" Click="RunnerFolder_Click" Visibility="{Binding LocalVisibility}"/>
@@ -495,6 +497,19 @@
                                                                                 <ColumnDefinition Width="Auto"/>
                                                                             </Grid.ColumnDefinitions>
                                                                             <StackPanel Margin="0,0,14,0">
+                                                                            <!-- Needs attention: a stuck or long job, or jobs waiting while the runner idles -->
+                                                                            <Border Background="{DynamicResource BadgeWarnBgBrush}" BorderBrush="{DynamicResource BadgeWarnBorderBrush}" BorderThickness="1"
+                                                                                    CornerRadius="6" Padding="10,7" Margin="0,0,0,8" Visibility="{Binding HealthVisibility}">
+                                                                                <DockPanel>
+                                                                                    <Button DockPanel.Dock="Right" Content="Stop the job's processes…" Padding="10,3" FontSize="12" Margin="10,0,0,0"
+                                                                                            VerticalAlignment="Center" Visibility="{Binding StopJobVisibility}" IsEnabled="{Binding CanStopJob}" Click="RunnerStopJob_Click"/>
+                                                                                    <TextBlock Text="&#xE7BA;" Style="{StaticResource Icon}" FontSize="12" Foreground="{DynamicResource WarningBrush}"
+                                                                                               VerticalAlignment="Top" Margin="0,2,8,0"/>
+                                                                                    <TextBlock TextWrapping="Wrap" FontSize="12" VerticalAlignment="Center">
+                                                                                        <Run Text="{Binding Health.Label, Mode=OneWay}" FontWeight="SemiBold" Foreground="{DynamicResource WarningBrush}"/><Run Text="  "/><Run Text="{Binding Health.Detail, Mode=OneWay}" Foreground="{DynamicResource TextMutedBrush}"/>
+                                                                                    </TextBlock>
+                                                                                </DockPanel>
+                                                                            </Border>
                                                                             <Border Background="{DynamicResource BadgeInfoBgBrush}" BorderBrush="{DynamicResource BadgeInfoBorderBrush}" BorderThickness="1"
                                                                                     CornerRadius="6" Padding="10,7" Margin="0,0,0,8" Visibility="{Binding ConsoleNoteVisibility}">
                                                                                 <TextBlock TextWrapping="Wrap" FontSize="12" Foreground="{DynamicResource TextMutedBrush}"
@@ -593,6 +608,37 @@
                                                                             </Border>
                                                                             <TextBlock Text="No job is running, and there are no recent runs to show." Style="{StaticResource Caption}"
                                                                                        FontSize="12" Margin="0,2,0,0" Visibility="{Binding NoJobsVisibility}"/>
+                                                                            <!-- Jobs this runner can take: running on one of its runners, or waiting -->
+                                                                            <StackPanel Visibility="{Binding QueueVisibility}" Margin="0,0,0,10">
+                                                                                <TextBlock Text="QUEUE" Style="{StaticResource SectionLabel}" Margin="0,0,0,4"
+                                                                                           ToolTip="Jobs of this repository that this runner can take, as GitHub lists them: running on a runner with the same labels, or waiting"/>
+                                                                                <ItemsControl ItemsSource="{Binding Queue}">
+                                                                                    <ItemsControl.ItemTemplate>
+                                                                                        <DataTemplate DataType="{x:Type local:QueueEntry}">
+                                                                                            <Border Style="{StaticResource RunRow}" Tag="{Binding Url}" MouseLeftButtonUp="Link_Click" ToolTip="Open the job on GitHub">
+                                                                                                <DockPanel>
+                                                                                                    <TextBlock FontSize="11" Margin="0,0,10,0" VerticalAlignment="Center">
+                                                                                                        <TextBlock.Style>
+                                                                                                            <Style TargetType="TextBlock" BasedOn="{StaticResource Icon}">
+                                                                                                                <Setter Property="Text" Value="&#xE823;"/>
+                                                                                                                <Setter Property="Foreground" Value="{DynamicResource WarningBrush}"/>
+                                                                                                                <Style.Triggers>
+                                                                                                                    <DataTrigger Binding="{Binding Running}" Value="True">
+                                                                                                                        <Setter Property="Text" Value="&#xE768;"/>
+                                                                                                                        <Setter Property="Foreground" Value="{DynamicResource AccentBrush}"/>
+                                                                                                                    </DataTrigger>
+                                                                                                                </Style.Triggers>
+                                                                                                            </Style>
+                                                                                                        </TextBlock.Style>
+                                                                                                    </TextBlock>
+                                                                                                    <TextBlock DockPanel.Dock="Right" Text="{Binding Detail}" Style="{StaticResource Caption}" FontSize="11" Margin="12,0,6,0" VerticalAlignment="Center"/>
+                                                                                                    <TextBlock Text="{Binding Title}" FontSize="12" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
+                                                                                                </DockPanel>
+                                                                                            </Border>
+                                                                                        </DataTemplate>
+                                                                                    </ItemsControl.ItemTemplate>
+                                                                                </ItemsControl>
+                                                                            </StackPanel>
                                                                             <!-- Recent workflow runs -->
                                                                             <StackPanel Visibility="{Binding RecentRunsVisibility}" Margin="0,0,0,0">
                                                                                 <TextBlock Text="RECENT RUNS" Style="{StaticResource SectionLabel}" Margin="0,0,0,4"/>
@@ -691,10 +737,6 @@
                                                                                             </Style>
                                                                                         </TextBlock.Style>
                                                                                     </TextBlock>
-                                                                                </DockPanel>
-                                                                                <DockPanel Style="{StaticResource KeyRow}">
-                                                                                    <TextBlock Text="Queue" Style="{StaticResource KeyText}"/>
-                                                                                    <TextBlock Text="{Binding LocalRunner.QueueText}" Style="{StaticResource ValueText}"/>
                                                                                 </DockPanel>
                                                                                 <DockPanel Style="{StaticResource KeyRow}">
                                                                                     <TextBlock Text="Last log activity" Style="{StaticResource KeyText}"/>
