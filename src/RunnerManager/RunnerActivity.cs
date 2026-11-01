@@ -230,7 +230,9 @@ public static class RunnerActivity
         if (workers.Count == 0) throw new InvalidOperationException("The runner is not running a job.");
         var parents = job.ToDictionary(p => p.Id, p => p.ParentId);
         var stopped = new List<string>();
-        foreach (var top in job.Where(p => workers.Contains(p.ParentId) && !workers.Contains(p.Id)))
+        // Not the worker's console host: stopping it ends the worker too.
+        foreach (var top in job.Where(p => workers.Contains(p.ParentId) && !workers.Contains(p.Id)
+                                           && !p.Name.Equals("conhost.exe", StringComparison.OrdinalIgnoreCase)))
         {
             try
             {

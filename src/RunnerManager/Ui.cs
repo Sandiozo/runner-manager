@@ -224,6 +224,9 @@ public sealed class AppSettings
     public double ActivityPanelHeight { get; set; } = 130;
     /// <summary>PCs (by name) whose cards are collapsed to their header.</summary>
     public List<string> CollapsedPcs { get; set; } = new();
+    /// <summary>The Queue and Recent runs lists in runners' details are hidden.</summary>
+    public bool QueueCollapsed { get; set; }
+    public bool RecentRunsCollapsed { get; set; }
     /// <summary>The setup wizard ran (installed copies only).</summary>
     public bool SetupCompleted { get; set; }
     public bool StartMinimizedHint { get; set; }

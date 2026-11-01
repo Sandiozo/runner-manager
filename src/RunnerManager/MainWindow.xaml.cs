@@ -62,6 +62,8 @@ public partial class MainWindow : Window
     {
         MachinesView = new ListCollectionView(Machines) { Filter = FilterMachine };
         MachineInfo.CollapsedPcs = new HashSet<string>(_settings.CollapsedPcs ?? new(), StringComparer.OrdinalIgnoreCase);
+        MachineRunnerStatus.QueueCollapsed = _settings.QueueCollapsed;
+        MachineRunnerStatus.RecentRunsCollapsed = _settings.RecentRunsCollapsed;
         InitializeComponent();
         WindowTheme.Apply(this);
         DataContext = this;
@@ -836,6 +838,20 @@ public partial class MainWindow : Window
         ApplyLiveJob(runner);
         UpdateOutputTabs();
         if (runner.IsExpanded && runner.IsBusy) _ = RefreshLiveJobsAsync();
+    }
+
+    private void QueueHeader_Click(object sender, RoutedEventArgs e)
+    {
+        _settings.QueueCollapsed = MachineRunnerStatus.QueueCollapsed = !MachineRunnerStatus.QueueCollapsed;
+        _settings.Save();
+        foreach (var runner in Machines.SelectMany(m => m.Runners)) runner.Refresh();
+    }
+
+    private void RecentRunsHeader_Click(object sender, RoutedEventArgs e)
+    {
+        _settings.RecentRunsCollapsed = MachineRunnerStatus.RecentRunsCollapsed = !MachineRunnerStatus.RecentRunsCollapsed;
+        _settings.Save();
+        foreach (var runner in Machines.SelectMany(m => m.Runners)) runner.Refresh();
     }
 
     private void MachineHeader_Click(object sender, MouseButtonEventArgs e)

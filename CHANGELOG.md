@@ -3,6 +3,14 @@
 Runner Manager updates itself from [Releases](https://github.com/Sandiozo/runner-manager/releases): open
 **Settings → Updates**, or click **Update** on a PC's card.
 
+## 2.7.1
+
+- Click **Queue** or **Recent runs** in a runner's details to collapse or expand the list. The headings show how
+  many jobs are running and waiting, and how many recent runs there are. Runner Manager remembers the choice for all
+  runners.
+- Fix: **Stop the job's processes** could also stop the job's console host, which ended the job itself. It now leaves
+  the console host alone.
+
 ## 2.7.0
 
 - **Stuck jobs.** A busy runner shows **Stuck** when its job has used no CPU, started no process and printed no

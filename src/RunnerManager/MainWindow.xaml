@@ -29,6 +29,27 @@
             <Setter Property="FontSize" Value="12"/>
             <Setter Property="TextWrapping" Value="Wrap"/>
         </Style>
+        <!-- A section heading in a runner's details that shows or hides the list under it. -->
+        <Style x:Key="SectionToggle" TargetType="Button">
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="HorizontalAlignment" Value="Left"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextFaintBrush}"/>
+            <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border Background="Transparent" Padding="2,1">
+                            <ContentPresenter/>
+                        </Border>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Foreground" Value="{DynamicResource TextBrush}"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
         <Style x:Key="KeyRow" TargetType="DockPanel">
             <Setter Property="Margin" Value="0,2"/>
             <Setter Property="LastChildFill" Value="True"/>
@@ -610,9 +631,15 @@
                                                                                        FontSize="12" Margin="0,2,0,0" Visibility="{Binding NoJobsVisibility}"/>
                                                                             <!-- Jobs this runner can take: running on one of its runners, or waiting -->
                                                                             <StackPanel Visibility="{Binding QueueVisibility}" Margin="0,0,0,10">
-                                                                                <TextBlock Text="QUEUE" Style="{StaticResource SectionLabel}" Margin="0,0,0,4"
-                                                                                           ToolTip="Jobs of this repository that this runner can take, as GitHub lists them: running on a runner with the same labels, or waiting"/>
-                                                                                <ItemsControl ItemsSource="{Binding Queue}">
+<Button Style="{StaticResource SectionToggle}" Click="QueueHeader_Click" Margin="-2,0,0,4"
+                                                                                        ToolTip="Jobs of this repository that this runner can take, as GitHub lists them: running on a runner with the same labels, or waiting. Click to show or hide them.">
+                                                                                    <StackPanel Orientation="Horizontal">
+                                                                                        <TextBlock Text="{Binding QueueGlyph}" Style="{StaticResource Icon}" FontSize="8" Margin="0,0,6,0" VerticalAlignment="Center"/>
+                                                                                        <TextBlock Text="QUEUE" Style="{StaticResource SectionLabel}" VerticalAlignment="Center"/>
+                                                                                        <TextBlock Text="{Binding QueueCountText}" Style="{StaticResource Caption}" FontSize="11" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                                                                                    </StackPanel>
+                                                                                </Button>
+                                                                                <ItemsControl ItemsSource="{Binding Queue}" Visibility="{Binding QueueListVisibility}">
                                                                                     <ItemsControl.ItemTemplate>
                                                                                         <DataTemplate DataType="{x:Type local:QueueEntry}">
                                                                                             <Border Style="{StaticResource RunRow}" Tag="{Binding Url}" MouseLeftButtonUp="Link_Click" ToolTip="Open the job on GitHub">
@@ -641,8 +668,14 @@
                                                                             </StackPanel>
                                                                             <!-- Recent workflow runs -->
                                                                             <StackPanel Visibility="{Binding RecentRunsVisibility}" Margin="0,0,0,0">
-                                                                                <TextBlock Text="RECENT RUNS" Style="{StaticResource SectionLabel}" Margin="0,0,0,4"/>
-                                                                                <ItemsControl ItemsSource="{Binding RecentRuns}">
+<Button Style="{StaticResource SectionToggle}" Click="RecentRunsHeader_Click" Margin="-2,0,0,4" ToolTip="Click to show or hide the recent runs">
+                                                                                    <StackPanel Orientation="Horizontal">
+                                                                                        <TextBlock Text="{Binding RecentRunsGlyph}" Style="{StaticResource Icon}" FontSize="8" Margin="0,0,6,0" VerticalAlignment="Center"/>
+                                                                                        <TextBlock Text="RECENT RUNS" Style="{StaticResource SectionLabel}" VerticalAlignment="Center"/>
+                                                                                        <TextBlock Text="{Binding RecentRunsCountText}" Style="{StaticResource Caption}" FontSize="11" Margin="6,0,0,0" VerticalAlignment="Center"/>
+                                                                                    </StackPanel>
+                                                                                </Button>
+                                                                                <ItemsControl ItemsSource="{Binding RecentRuns}" Visibility="{Binding RecentRunsListVisibility}">
                                                                                     <ItemsControl.ItemTemplate>
                                                                                         <DataTemplate DataType="{x:Type local:WorkflowRunSummary}">
                                                                                             <Border Style="{StaticResource RunRow}" Tag="{Binding HtmlUrl}" MouseLeftButtonUp="Link_Click" ToolTip="{Binding Title}">

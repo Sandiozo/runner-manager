@@ -17,6 +17,10 @@ public sealed class MachineRunnerStatus : INotifyPropertyChanged
     private IReadOnlyList<QueueEntry> _queue = Array.Empty<QueueEntry>();
     public event PropertyChangedEventHandler? PropertyChanged;
 
+    /// <summary>The Queue and Recent runs lists in the details are hidden (for every runner); set by the dashboard.</summary>
+    public static bool QueueCollapsed { get; set; }
+    public static bool RecentRunsCollapsed { get; set; }
+
     /// <summary>Latest GitHub Actions runner release, set by the dashboard for "update available" hints.</summary>
     public static string LatestRunnerVersion { get; set; } = string.Empty;
 
@@ -192,10 +196,19 @@ public sealed class MachineRunnerStatus : INotifyPropertyChanged
             _recentRuns = value;
             Notify(nameof(RecentRuns));
             Notify(nameof(RecentRunsVisibility));
+            Notify(nameof(RecentRunsCountText));
             Notify(nameof(NoJobsVisibility));
         }
     }
     [JsonIgnore] public Visibility RecentRunsVisibility => IsExpanded && _recentRuns.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+    [JsonIgnore] public Visibility RecentRunsListVisibility => RecentRunsCollapsed ? Visibility.Collapsed : Visibility.Visible;
+    [JsonIgnore] public string RecentRunsGlyph => RecentRunsCollapsed ? "\uE76C" : "\uE70D";
+    [JsonIgnore] public string RecentRunsCountText => _recentRuns.Count.ToString();
+    [JsonIgnore] public Visibility QueueListVisibility => QueueCollapsed ? Visibility.Collapsed : Visibility.Visible;
+    [JsonIgnore] public string QueueGlyph => QueueCollapsed ? "\uE76C" : "\uE70D";
+    [JsonIgnore] public string QueueCountText => string.Join("  ·  ",
+        new[] { (Count: _queue.Count(q => q.Running), Text: "running"), (Count: _queue.Count(q => !q.Running), Text: "waiting") }
+            .Where(p => p.Count > 0).Select(p => $"{p.Count} {p.Text}"));
 
     /// <summary>Whether the runner needs attention (a stuck or long job, or jobs waiting while it idles); set by the dashboard.</summary>
     [JsonIgnore]
@@ -233,6 +246,7 @@ public sealed class MachineRunnerStatus : INotifyPropertyChanged
             _queue = value;
             Notify(nameof(Queue));
             Notify(nameof(QueueVisibility));
+            Notify(nameof(QueueCountText));
             Notify(nameof(NoJobsVisibility));
         }
     }

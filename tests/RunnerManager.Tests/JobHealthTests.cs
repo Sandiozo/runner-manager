@@ -154,3 +154,26 @@ public class StopJobProcessesTests
         }
     }
 }
+
+public class DetailSectionTests
+{
+    [Fact]
+    public void QueueAndRecentRuns_CanBeCollapsed_AndShowTheirCounts()
+    {
+        var (queue, runs) = (MachineRunnerStatus.QueueCollapsed, MachineRunnerStatus.RecentRunsCollapsed);
+        try
+        {
+            var runner = new MachineRunnerStatus
+            {
+                Queue = new[] { new QueueEntry("a", "Running", "", true), new QueueEntry("b", "Waiting", "", false), new QueueEntry("c", "Waiting", "", false) }
+            };
+            Assert.Equal("1 running  ·  2 waiting", runner.QueueCountText);
+            MachineRunnerStatus.QueueCollapsed = true;
+            MachineRunnerStatus.RecentRunsCollapsed = false;
+            Assert.Equal(System.Windows.Visibility.Collapsed, runner.QueueListVisibility);
+            Assert.Equal(System.Windows.Visibility.Visible, runner.RecentRunsListVisibility);
+            Assert.Equal("2 waiting", new MachineRunnerStatus { Queue = new[] { new QueueEntry("b", "Waiting", "", false), new QueueEntry("c", "Waiting", "", false) } }.QueueCountText);
+        }
+        finally { (MachineRunnerStatus.QueueCollapsed, MachineRunnerStatus.RecentRunsCollapsed) = (queue, runs); }
+    }
+}
