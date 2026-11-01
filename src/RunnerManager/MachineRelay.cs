@@ -13,8 +13,11 @@ public static class MachineRelay
     /// <summary>
     /// 11: answers "job" requests (live output and processes of a runner's job).
     /// 12: machine IDs, recent command results, busy state, and "rekey" (Change fleet code).
+    /// 15: "managed" and "release" (PCs managed one way).
     /// </summary>
-    public const int ProtocolVersion = 14;
+    public const int ProtocolVersion = 15;
+    /// <summary>The first protocol whose agents share the PCs they manage one way.</summary>
+    public const int ManagedProtocolVersion = 15;
     private const string AgentMutexName = @"Global\RunnerWidgetFleetAgent";
     private static readonly TimeSpan WatchdogInterval = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan DiscoveryInterval = TimeSpan.FromSeconds(30);
@@ -62,12 +65,18 @@ public static class MachineRelay
         // last; the address changes once an encrypted request there succeeds. This also keeps a PC with several
         // network adapters at one address.
         var candidates = new Dictionary<string, List<DiscoveredPeer>>(StringComparer.OrdinalIgnoreCase);
-        if (forceDiscovery || DateTime.UtcNow - _lastDiscovery > DiscoveryInterval)
+        var managedCandidates = new Dictionary<string, List<DiscoveredPeer>>(StringComparer.Ordinal);
+        var discovered = forceDiscovery || DateTime.UtcNow - _lastDiscovery > DiscoveryInterval;
+        if (discovered)
         {
             _lastDiscovery = DateTime.UtcNow;
             var hints = config.KnownPeers.Select(p => FleetNetwork.HostOf(p.Address)).Concat(config.ManualAddresses);
             var localId = FleetConfig.LocalMachineId;
-            foreach (var peer in await FleetNetwork.DiscoverAsync(hints, TimeSpan.FromSeconds(1.2)))
+            // Managed PCs answer only probes made with their own code.
+            var managedSearch = DiscoverManagedAsync(config.ManagedPcs);
+            var fleetPeers = await FleetNetwork.DiscoverAsync(hints, TimeSpan.FromSeconds(1.2));
+            managedCandidates = await managedSearch;
+            foreach (var peer in fleetPeers)
             {
                 if (peer.MachineId.Length > 0 && peer.MachineId == localId) continue;
                 NoteSighting(peer.Name, peer.MachineId, peer.Address);
@@ -93,11 +102,13 @@ public static class MachineRelay
             // PCs found by discovery that aren't known yet are listed once they answer.
             .Concat(candidates.Where(c => !peers.Any(p => Sanitize(p.Name) == c.Key))
                 .Select(c => FetchPeerAsync(null, c.Value[0].Name, string.Empty, c.Value, listIfUnreachable: false)))
-            .Concat(unnamed.Select(a => FetchPeerAsync(null, null, a, null)));
+            .Concat(unnamed.Select(a => FetchPeerAsync(null, null, a, null)))
+            .Concat(config.ManagedPcs.Select(pc => FetchManagedAsync(pc, managedCandidates.GetValueOrDefault(pc.KeyId))));
         var results = await Task.WhenAll(fetches);
         machines.AddRange(results.OfType<MachineInfo>().Where(m => !m.IsLocal)
             .GroupBy(m => m.MachineKey).Select(g => g.First())
             .OrderBy(m => m.MachineName, StringComparer.OrdinalIgnoreCase));
+        if (discovered) await SyncManagedPcsAsync(machines);
         if (DuplicateNameProblem(LocalMachineKey) is { } problem)
             machines.Add(MachineInfo.Placeholder("DUPLICATE_" + LocalMachineKey, $"{Environment.MachineName} (another PC)",
                 DateTime.UtcNow, OtherAddresses(LocalMachineKey), problem));
@@ -254,6 +265,150 @@ public static class MachineRelay
         lock (LastStatus) LastStatus.Remove(Sanitize(name));
     }
 
+    // ----- PCs managed one way -----
+
+    /// <summary>Why a managed PC can't be used under its name: a PC in the fleet has the same one.</summary>
+    internal static string ManagedNameProblem(string name)
+        => $"{name} is managed one way, and a PC in the fleet has the same name. Rename one of them in Windows Settings → System → About. " +
+           $"Until then, commands to {name} are refused.";
+
+    /// <summary>Finds managed PCs that moved to another address on the local network, by key fingerprint.</summary>
+    private static async Task<Dictionary<string, List<DiscoveredPeer>>> DiscoverManagedAsync(IReadOnlyList<ManagedPcRecord> pcs)
+    {
+        var found = new Dictionary<string, List<DiscoveredPeer>>(StringComparer.Ordinal);
+        await Task.WhenAll(pcs.Select(async pc =>
+        {
+            if (pc.Key is not { } key) return;
+            var peers = await FleetNetwork.DiscoverAsync(new[] { FleetNetwork.HostOf(pc.Address) }, TimeSpan.FromSeconds(1.2), pairingKey: key);
+            var matching = peers.Where(p => Sanitize(p.Name) == Sanitize(pc.Name) && !SameEndpoint(p.Address, pc.Address)
+                                            && (pc.MachineId.Length == 0 || p.MachineId.Length == 0 || p.MachineId.Equals(pc.MachineId, StringComparison.OrdinalIgnoreCase)))
+                .ToList();
+            if (matching.Count > 0) lock (found) found[pc.KeyId] = matching;
+        }));
+        return found;
+    }
+
+    /// <summary>Asks a managed PC for its status with its own code, at its last address and then where discovery found it.</summary>
+    private static async Task<MachineInfo?> FetchManagedAsync(ManagedPcRecord pc, IReadOnlyList<DiscoveredPeer>? candidates)
+    {
+        var key = Sanitize(pc.Name);
+        // A managed PC can't take a fleet PC's place, not even by answering under its name.
+        if (key == LocalMachineKey || FleetConfig.Current.KnownPeers.Any(p => Sanitize(p.Name) == key))
+            return MachineInfo.Placeholder("MANAGED_" + key, pc.Name, pc.LastSeenUtc, pc.Address, ManagedNameProblem(pc.Name), managed: true);
+        if (pc.Key is not { } pairingKey)
+            return MachineInfo.Placeholder(key, pc.Name, pc.LastSeenUtc, pc.Address,
+                $"This PC can't read the pairing code for {pc.Name}. Remove it and pair it again.", managed: true);
+
+        var addresses = new List<string> { pc.Address };
+        if (candidates != null) addresses.AddRange(candidates.Select(c => c.Address).Where(a => !addresses.Any(b => SameEndpoint(a, b))));
+        var problem = string.Empty;
+        foreach (var attempt in addresses.Where(a => a.Length > 0))
+        {
+            try
+            {
+                var response = await FleetNetwork.CallAsync(attempt, key, new FleetRequest { Op = "status", TargetId = pc.MachineId }, pairingKey: pairingKey);
+                return AcceptManaged(pc, response.Status, attempt);
+            }
+            catch (PairingMismatchException ex) when (ex.Reason == "wrong PC" && pc.MachineId.Length > 0)
+            {
+                // Maybe it was renamed: ask the PC at this address who it is.
+                problem = ex.Message;
+                try
+                {
+                    var response = await FleetNetwork.CallAsync(attempt, "*", new FleetRequest { Op = "status" }, pairingKey: pairingKey);
+                    if (response.Status is { } status && status.MachineId.Equals(pc.MachineId, StringComparison.OrdinalIgnoreCase))
+                        return AcceptManaged(pc, status, attempt);
+                }
+                catch { }
+            }
+            catch (PairingMismatchException ex)
+            {
+                problem = ex.Reason is "" or "denied"
+                    ? $"{pc.Name} no longer accepts this fleet's requests. It may have been disconnected there. Remove it here, or pair it again."
+                    : ex.Message;
+            }
+            catch (Exception) { if (problem.Length == 0) problem = $"Not reachable at {FleetNetwork.WithPort(attempt)}"; }
+        }
+        if (problem.Length == 0) problem = $"Not reachable at {FleetNetwork.WithPort(pc.Address)}";
+        MachineStatusPayload? last;
+        lock (LastStatus) LastStatus.TryGetValue(key, out last);
+        return last != null
+            ? MachineInfo.FromPayload(key, last, address: pc.Address, problem: problem, managed: true)
+            : MachineInfo.Placeholder(key, pc.Name, pc.LastSeenUtc, pc.Address, problem, managed: true);
+    }
+
+    /// <summary>A managed PC answered: remember where (and its new name after a rename), and list it.</summary>
+    private static MachineInfo AcceptManaged(ManagedPcRecord pc, MachineStatusPayload? payload, string address)
+    {
+        if (payload == null) throw new InvalidOperationException("The PC returned no status.");
+        var machineKey = Sanitize(payload.MachineName);
+        if (machineKey != Sanitize(pc.Name) && (machineKey == LocalMachineKey || FleetConfig.Current.KnownPeers.Any(p => Sanitize(p.Name) == machineKey)))
+            return MachineInfo.Placeholder("MANAGED_" + machineKey, payload.MachineName, DateTime.UtcNow, address, ManagedNameProblem(payload.MachineName), managed: true);
+        lock (LastStatus) LastStatus[machineKey] = payload;
+        NoteSighting(payload.MachineName, payload.MachineId, address);
+        var at = FleetNetwork.WithPort(address);
+        if (pc.Name != payload.MachineName || pc.Address != at || pc.Version != payload.AppVersion
+            || (payload.MachineId.Length > 0 && pc.MachineId != payload.MachineId) || DateTime.UtcNow - pc.LastSeenUtc > TimeSpan.FromMinutes(10))
+        {
+            if (Sanitize(pc.Name) != machineKey) AppendAgentLog($"{pc.Name} is now called {payload.MachineName}.");
+            FleetConfig.NoteManagedPc(pc.KeyId, payload.MachineName, at, payload.MachineId, payload.AppVersion);
+        }
+        return MachineInfo.FromPayload(machineKey, payload, address: address, problem: DuplicateNameProblem(machineKey) ?? string.Empty, managed: true);
+    }
+
+    /// <summary>
+    /// Brings this PC's list of managed PCs up to date with the other fleet PCs', so any of them can manage a PC that one
+    /// of them paired. Each takes in the others' lists, so a change spreads as the PCs check on each other.
+    /// </summary>
+    private static async Task SyncManagedPcsAsync(IEnumerable<MachineInfo> machines)
+    {
+        var config = FleetConfig.Current;
+        if (config.ManagedBy.Length > 0) return;
+        var peers = machines.Where(m => !m.IsLocal && !m.IsManaged && m.IsOnline && m.AgentProtocolVersion >= ManagedProtocolVersion)
+            .Select(m => config.KnownPeers.FirstOrDefault(p => Sanitize(p.Name) == m.MachineKey)).OfType<PeerRecord>().ToList();
+        var answers = await Task.WhenAll(peers.Select(async peer =>
+        {
+            try
+            {
+                return await FleetNetwork.CallAsync(peer.Address, Sanitize(peer.Name),
+                    new FleetRequest { Op = "managed", TargetId = peer.MachineId }, TimeSpan.FromSeconds(4));
+            }
+            catch { return null; }
+        }));
+        var shared = answers.OfType<FleetResponse>().ToList();
+        if (shared.Count == 0) return;
+        try
+        {
+            FleetConfig.UpdateIf(c => shared.Aggregate(false, (changed, answer) =>
+                c.MergeManaged(answer.ManagedPcs ?? new(), answer.RemovedManagedPcs ?? new()) | changed));
+        }
+        catch (IOException) { }
+    }
+
+    /// <summary>
+    /// Stops managing a PC: tells it, so it switches to a new code of its own, and removes it here (and, through the sync,
+    /// on the other fleet PCs). Returns whether the PC was told; one that is off still has the old code, which the fleet
+    /// no longer uses.
+    /// </summary>
+    public static async Task<bool> RemoveManagedPcAsync(string machineKey)
+    {
+        var pc = FleetConfig.Current.ManagedPc(machineKey) ?? throw new InvalidOperationException($"{machineKey} is not managed by this fleet.");
+        var told = false;
+        if (pc.Key is { } key)
+        {
+            try
+            {
+                await FleetNetwork.CallAsync(pc.Address, Sanitize(pc.Name),
+                    new FleetRequest { Op = "release", From = Environment.MachineName, TargetId = pc.MachineId }, TimeSpan.FromSeconds(4), pairingKey: key);
+                told = true;
+            }
+            catch { }
+        }
+        FleetConfig.RemoveManagedPc(pc.KeyId);
+        lock (LastStatus) LastStatus.Remove(Sanitize(pc.Name));
+        return told;
+    }
+
     // ----- Two PCs with one name -----
 
     private sealed record Sighting(string Name, string Address, DateTime SeenUtc);
@@ -323,15 +478,24 @@ public static class MachineRelay
                || FleetNetwork.LocalAddresses().Contains(host);
     }
 
-    /// <summary>Where to send requests for a PC, and its machine ID (empty when unknown) so only that PC acts on them.</summary>
-    private static (string Address, string MachineId) Route(string machineKey)
+    /// <summary>
+    /// Where to send requests for a PC, its machine ID (empty when unknown) so only that PC acts on them, and the code to
+    /// use: a managed PC's own, or null for the fleet's.
+    /// </summary>
+    private static (string Address, string MachineId, byte[]? Key) Route(string machineKey)
     {
         // This PC's own agent: AI assistant tools run without administrator rights and hand their work to it.
-        if (Sanitize(machineKey) == LocalMachineKey) return ($"127.0.0.1:{FleetNetwork.AgentPort}", string.Empty);
+        if (Sanitize(machineKey) == LocalMachineKey) return ($"127.0.0.1:{FleetNetwork.AgentPort}", string.Empty, null);
         if (DuplicateNameProblem(machineKey) is { } problem) throw new InvalidOperationException(problem);
-        var peer = FleetConfig.Current.KnownPeers.FirstOrDefault(p => Sanitize(p.Name) == Sanitize(machineKey))
-                   ?? throw new InvalidOperationException($"Could not reach {machineKey}. Check that it is on and on the same network.");
-        return (peer.Address, peer.MachineId);
+        var config = FleetConfig.Current;
+        var peer = config.KnownPeers.FirstOrDefault(p => Sanitize(p.Name) == Sanitize(machineKey));
+        var managed = config.ManagedPc(machineKey);
+        if (peer != null && managed != null) throw new InvalidOperationException(ManagedNameProblem(managed.Name));
+        if (managed != null)
+            return (managed.Address, managed.MachineId, managed.Key
+                ?? throw new InvalidOperationException($"This PC can't read the pairing code for {managed.Name}. Remove it and pair it again."));
+        if (peer == null) throw new InvalidOperationException($"Could not reach {machineKey}. Check that it is on and on the same network.");
+        return (peer.Address, peer.MachineId, null);
     }
 
     /// <summary>Why commands to a machine would fail, or null when it can be reached.</summary>
@@ -356,9 +520,9 @@ public static class MachineRelay
             RegistrationOptions = options,
             Value = value
         };
-        var (address, machineId) = Route(machineKey);
+        var (address, machineId, key) = Route(machineKey);
         var response = await FleetNetwork.CallAsync(address, Sanitize(machineKey),
-            new FleetRequest { Op = "command", Command = command, TargetId = machineId });
+            new FleetRequest { Op = "command", Command = command, TargetId = machineId }, pairingKey: key);
         return string.IsNullOrEmpty(response.CommandId) ? command.Id : response.CommandId;
     }
 
@@ -395,9 +559,9 @@ public static class MachineRelay
     /// <summary>A busy runner's live output and processes from the PC it runs on (agents with protocol 11 or later).</summary>
     public static async Task<RunnerJobActivity> RequestJobActivityAsync(string machineKey, string runnerKey, CancellationToken cancellationToken = default)
     {
-        var (address, machineId) = Route(machineKey);
+        var (address, machineId, key) = Route(machineKey);
         var response = await FleetNetwork.CallAsync(address, Sanitize(machineKey),
-            new FleetRequest { Op = "job", LogKey = runnerKey, TargetId = machineId }, TimeSpan.FromSeconds(10), cancellationToken);
+            new FleetRequest { Op = "job", LogKey = runnerKey, TargetId = machineId }, TimeSpan.FromSeconds(10), cancellationToken, key);
         if (!response.Ok) throw new InvalidOperationException(response.Error);
         return response.Job ?? throw new InvalidOperationException("The PC returned no job details.");
     }
@@ -405,9 +569,9 @@ public static class MachineRelay
     /// <summary>Reads the tail of one of another PC's logs directly from its agent.</summary>
     public static async Task<LogPayload> RequestRemoteLogAsync(string machineKey, string logKey, CancellationToken cancellationToken)
     {
-        var (address, machineId) = Route(machineKey);
+        var (address, machineId, key) = Route(machineKey);
         var response = await FleetNetwork.CallAsync(address, Sanitize(machineKey),
-            new FleetRequest { Op = "log", LogKey = logKey, TargetId = machineId }, TimeSpan.FromSeconds(45), cancellationToken);
+            new FleetRequest { Op = "log", LogKey = logKey, TargetId = machineId }, TimeSpan.FromSeconds(45), cancellationToken, key);
         return response.Log ?? throw new InvalidOperationException("The PC returned no log.");
     }
 
@@ -430,8 +594,8 @@ public static class MachineRelay
             MachineStatusPayload? status;
             try
             {
-                var (address, machineId) = Route(machineKey);
-                status = (await FleetNetwork.CallAsync(address, Sanitize(machineKey), new FleetRequest { Op = "status", TargetId = machineId })).Status;
+                var (address, machineId, key) = Route(machineKey);
+                status = (await FleetNetwork.CallAsync(address, Sanitize(machineKey), new FleetRequest { Op = "status", TargetId = machineId }, pairingKey: key)).Status;
             }
             catch { continue; }
             if (status == null) continue;
@@ -890,6 +1054,15 @@ public static class MachineRelay
     {
         var told = new List<string>();
         var config = FleetConfig.Current;
+        // Without another fleet PC, nobody could manage them any more: let them go.
+        if (config.FleetKey != null && config.ManagedPcs.Count > 0 && !config.KnownPeers.Any(p => Sanitize(p.Name) != LocalMachineKey))
+        {
+            log($"Releasing {string.Join(", ", config.ManagedPcs.Select(p => p.Name))}, which no other fleet PC manages…");
+            await Task.WhenAll(config.ManagedPcs.Select(pc => pc.Name).ToList().Select(async name =>
+            {
+                try { await RemoveManagedPcAsync(name); } catch { }
+            }));
+        }
         if (config.FleetKey != null)
         {
             var peers = config.KnownPeers.Where(p => Sanitize(p.Name) != LocalMachineKey).ToList();
@@ -912,6 +1085,9 @@ public static class MachineRelay
             c.ProtectedFleetKey = string.Empty;
             c.ProtectedPendingFleetKey = string.Empty;
             c.KnownPeers.Clear();
+            c.ManagedPcs.Clear();
+            c.RemovedManagedPcs.Clear();
+            c.ManagedBy = string.Empty;
         });
         lock (LastStatus) LastStatus.Clear();
         return told;
@@ -925,7 +1101,10 @@ public static class MachineRelay
     /// <param name="NotConfirmed">PCs that got the new code but didn't answer with it yet; they switch the next time a PC contacts them.</param>
     /// <param name="Failed">PCs that didn't get the new code, with the reason. They must pair again.</param>
     /// <param name="LeftOut">PCs the user left out. They were forgotten and must pair again.</param>
-    public sealed record FleetCodeChange(List<string> Switched, List<string> NotConfirmed, List<string> Failed, List<string> LeftOut);
+    /// <param name="ManagedSwitched">Managed PCs that got a new code of their own.</param>
+    /// <param name="ManagedFailed">Managed PCs that kept their old code (off, or too old), with the reason.</param>
+    public sealed record FleetCodeChange(List<string> Switched, List<string> NotConfirmed, List<string> Failed, List<string> LeftOut,
+        List<string> ManagedSwitched, List<string> ManagedFailed);
 
     /// <summary>
     /// Change fleet code: makes a new pairing code and gives it to the PCs in <paramref name="keep"/>, encrypted with
@@ -965,7 +1144,7 @@ public static class MachineRelay
         {
             try
             {
-                var (address, machineId) = Route(machine.MachineKey);
+                var (address, machineId, _) = Route(machine.MachineKey);
                 await FleetNetwork.CallAsync(address, Sanitize(machine.MachineKey), new FleetRequest { Op = "status", TargetId = machineId }, pairingKey: newKey);
                 lock (switched) switched.Add(machine.MachineName);
             }
@@ -979,21 +1158,50 @@ public static class MachineRelay
         {
             try
             {
-                var (address, machineId) = Route(machine.MachineKey);
+                var (address, machineId, _) = Route(machine.MachineKey);
                 await FleetNetwork.CallAsync(address, Sanitize(machine.MachineKey),
                     new FleetRequest { Op = "leave", From = name, TargetId = machineId }, TimeSpan.FromSeconds(4), pairingKey: newKey);
             }
             catch { }
         })));
+        // Managed PCs have codes of their own, which a PC that was left out may still have: replace those too.
+        var managedSwitched = new List<string>();
+        var managedFailed = new List<string>();
+        await Task.WhenAll(FleetConfig.Current.ManagedPcs.ToList().Select(async pc =>
+        {
+            try
+            {
+                var oldManaged = pc.Key ?? throw new InvalidOperationException("This PC can't read its pairing code.");
+                var newManaged = CommandSigner.NewKey();
+                await SendNewKeyAsync(pc.Address, Sanitize(pc.Name), pc.MachineId, oldManaged, newManaged);
+                FleetConfig.ReplaceManagedKey(pc.KeyId, newManaged);
+                // The first request with the new code makes it switch.
+                try
+                {
+                    await FleetNetwork.CallAsync(pc.Address, Sanitize(pc.Name), new FleetRequest { Op = "status", TargetId = pc.MachineId }, pairingKey: newManaged);
+                }
+                catch { }
+                lock (managedSwitched) managedSwitched.Add(pc.Name);
+            }
+            catch (Exception ex)
+            {
+                var reason = ex.Message.StartsWith("Unknown request", StringComparison.Ordinal) ? "Update Runner Manager on it first." : ex.Message;
+                lock (managedFailed) managedFailed.Add($"{pc.Name}: {reason}");
+            }
+        }));
         lock (LastStatus) LastStatus.Clear();
-        return new FleetCodeChange(switched, notConfirmed, failed, leftOut);
+        return new FleetCodeChange(switched, notConfirmed, failed, leftOut, managedSwitched, managedFailed);
     }
 
     /// <summary>Gives one PC the new code (see <see cref="ChangeFleetCodeAsync"/>), and checks that it got the same one.</summary>
     private static async Task SendNewKeyAsync(MachineInfo machine, byte[] oldKey, byte[] newKey)
     {
-        var (address, machineId) = Route(machine.MachineKey);
-        var key = Sanitize(machine.MachineKey);
+        var (address, machineId, _) = Route(machine.MachineKey);
+        await SendNewKeyAsync(address, Sanitize(machine.MachineKey), machineId, oldKey, newKey);
+    }
+
+    private static async Task SendNewKeyAsync(string address, string key, string machineId, byte[] oldKey, byte[] newKey)
+    {
         using var ecdh = ECDiffieHellman.Create(ECCurve.NamedCurves.nistP256);
         var mine = Convert.ToBase64String(ecdh.PublicKey.ExportSubjectPublicKeyInfo());
         var offer = await FleetNetwork.CallAsync(address, key,

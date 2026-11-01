@@ -53,6 +53,15 @@ public sealed class FleetConfig
     /// two PCs with the same name apart. Use <see cref="LocalMachineId"/>.
     /// </summary>
     public string MachineId { get; set; } = string.Empty;
+    /// <summary>
+    /// PCs this fleet manages one way: each has its own pairing code, which only this fleet knows. They answer this
+    /// fleet's requests but never get the fleet's code, so they can't see or control its PCs.
+    /// </summary>
+    public List<ManagedPcRecord> ManagedPcs { get; set; } = new();
+    /// <summary>Fingerprints of managed PC codes that were removed or replaced, so other fleet PCs drop them too.</summary>
+    public List<RemovedManagedPc> RemovedManagedPcs { get; set; } = new();
+    /// <summary>On a managed PC: the fleet PC it paired with. Empty on a fleet member.</summary>
+    public string ManagedBy { get; set; } = string.Empty;
 
     private static string? _machineId;
 
@@ -213,6 +222,26 @@ public sealed class FleetConfig
         }
     }
 
+    /// <summary>Like <see cref="Update"/>, but saves only when <paramref name="change"/> returns true. Returns whether it saved.</summary>
+    public static bool UpdateIf(Func<FleetConfig, bool> change)
+    {
+        var saved = false;
+        lock (Gate)
+        {
+            WithFileLock(() =>
+            {
+                var config = Read(out _);
+                if (!change(config)) return;
+                Write(config);
+                _cached = config;
+                _cachedStamp = File.GetLastWriteTimeUtc(ConfigPath);
+                _readFailedUtc = null;
+                saved = true;
+            });
+        }
+        return saved;
+    }
+
     /// <summary>The name of the mutex that guards fleet.json: one per settings file, so other users and tests don't share it.</summary>
     internal static string FileLockName
         => @"Global\RunnerManagerFleetConfig-" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(ConfigPath.ToUpperInvariant())))[..16];
@@ -314,6 +343,18 @@ public sealed class FleetConfig
         KnownRunnerRoots.RemoveAll(string.IsNullOrWhiteSpace);
         RunnerFolder ??= string.Empty;
         MachineId ??= string.Empty;
+        ManagedBy ??= string.Empty;
+        ManagedPcs ??= new();
+        ManagedPcs.RemoveAll(p => p == null || string.IsNullOrWhiteSpace(p.Name) || string.IsNullOrEmpty(p.ProtectedKey));
+        foreach (var pc in ManagedPcs)
+        {
+            pc.Address ??= string.Empty;
+            pc.Version ??= string.Empty;
+            pc.MachineId ??= string.Empty;
+            pc.KeyId ??= string.Empty;
+        }
+        RemovedManagedPcs ??= new();
+        RemovedManagedPcs.RemoveAll(r => r == null || string.IsNullOrEmpty(r.KeyId) || DateTime.UtcNow - r.RemovedUtc > RemovedManagedPc.KeepFor);
         Assistant ??= new();
         Assistant.ProtectedHttpToken ??= string.Empty;
     }
@@ -359,10 +400,12 @@ public sealed class FleetConfig
         catch { return null; }
     }
 
+    /// <summary>Sets the fleet's pairing code (a new fleet, a full join or a pasted code), so this PC is no longer managed.</summary>
     public static void SetFleetKey(byte[]? key) => Update(c =>
     {
         c.ProtectedFleetKey = Protect(key);
         c.ProtectedPendingFleetKey = string.Empty;
+        c.ManagedBy = string.Empty;
     });
 
     private static string Protect(byte[]? key)
@@ -378,6 +421,124 @@ public sealed class FleetConfig
     public byte[]? PendingFleetKey => Unprotect(ProtectedPendingFleetKey);
 
     public static void SetPendingFleetKey(byte[] key) => Update(c => c.ProtectedPendingFleetKey = Protect(key));
+
+    // ----- Managed PCs -----
+
+    /// <summary>The managed PC for a PC name (sanitized, as requests address it), or null.</summary>
+    public ManagedPcRecord? ManagedPc(string machineKey)
+        => ManagedPcs.FirstOrDefault(p => MachineRelay.Sanitize(p.Name) == MachineRelay.Sanitize(machineKey));
+
+    /// <summary>
+    /// This PC was managed one way and stops being managed (the fleet removed it, or the user disconnected it here):
+    /// it gets a new code of its own, which the fleet doesn't know.
+    /// </summary>
+    public static void StopBeingManaged() => Update(c =>
+    {
+        c.ProtectedFleetKey = Protect(CommandSigner.NewKey());
+        c.ProtectedPendingFleetKey = string.Empty;
+        c.ManagedBy = string.Empty;
+        c.KnownPeers.Clear();
+    });
+
+    /// <summary>This PC joined a fleet one way: <paramref name="key"/> is its own code, known only to that fleet.</summary>
+    public static void BecomeManaged(byte[] key, string managedBy) => Update(c =>
+    {
+        c.ProtectedFleetKey = Protect(key);
+        c.ProtectedPendingFleetKey = string.Empty;
+        c.ManagedBy = managedBy.Length > 0 ? managedBy : "another fleet";
+    });
+
+    /// <summary>A PC paired one way from this PC. Replaces an earlier pairing of a PC with the same name.</summary>
+    public static void AddManagedPc(string name, string address, byte[] key) => Update(c =>
+    {
+        foreach (var old in c.ManagedPcs.Where(p => MachineRelay.Sanitize(p.Name) == MachineRelay.Sanitize(name)).ToList())
+            c.ForgetManaged(old);
+        c.ManagedPcs.Add(ManagedPcRecord.Create(name, address, key, DateTime.UtcNow));
+    });
+
+    /// <summary>Removes a managed PC here; the fleet PCs this PC syncs with remove it too.</summary>
+    public static void RemoveManagedPc(string keyId) => Update(c =>
+    {
+        foreach (var pc in c.ManagedPcs.Where(p => p.KeyId == keyId).ToList()) c.ForgetManaged(pc);
+    });
+
+    /// <summary>A managed PC switched to a new code (Change fleet code): the old one is dropped across the fleet.</summary>
+    public static void ReplaceManagedKey(string oldKeyId, byte[] newKey) => Update(c =>
+    {
+        if (c.ManagedPcs.FirstOrDefault(p => p.KeyId == oldKeyId) is not { } pc) return;
+        c.ForgetManaged(pc);
+        var replaced = ManagedPcRecord.Create(pc.Name, pc.Address, newKey, DateTime.UtcNow);
+        replaced.MachineId = pc.MachineId;
+        replaced.Version = pc.Version;
+        replaced.LastSeenUtc = pc.LastSeenUtc;
+        c.ManagedPcs.Add(replaced);
+    });
+
+    /// <summary>Records what a managed PC answered: where it was reached, its ID and version, and its name after a rename.</summary>
+    public static void NoteManagedPc(string keyId, string name, string address, string machineId, string version) => Update(c =>
+    {
+        if (c.ManagedPcs.FirstOrDefault(p => p.KeyId == keyId) is not { } pc) return;
+        pc.Name = name;
+        pc.Address = address;
+        if (machineId.Length > 0) pc.MachineId = machineId;
+        pc.Version = version;
+        pc.LastSeenUtc = DateTime.UtcNow;
+    });
+
+    private void ForgetManaged(ManagedPcRecord pc)
+    {
+        ManagedPcs.Remove(pc);
+        if (!RemovedManagedPcs.Any(r => r.KeyId == pc.KeyId))
+            RemovedManagedPcs.Add(new RemovedManagedPc { KeyId = pc.KeyId, RemovedUtc = DateTime.UtcNow });
+    }
+
+    /// <summary>What this PC tells other fleet PCs about its managed PCs (inside the fleet's encryption).</summary>
+    public (List<ManagedPcShare> Pcs, List<RemovedManagedPc> Removed) ShareManaged()
+        => (ManagedPcs.Select(p => p.Key is { } key ? new ManagedPcShare
+            {
+                Name = p.Name, Address = p.Address, MachineId = p.MachineId, AddedUtc = p.AddedUtc, Key = Convert.ToBase64String(key)
+            } : null).OfType<ManagedPcShare>().ToList(),
+            RemovedManagedPcs.ToList());
+
+    /// <summary>
+    /// Takes in another fleet PC's managed PCs: removals first, then PCs not known here. Of two pairings of the same PC
+    /// (by machine ID, or by name while the ID is unknown), the newer one is kept. Returns whether anything changed.
+    /// </summary>
+    internal bool MergeManaged(IEnumerable<ManagedPcShare> pcs, IEnumerable<RemovedManagedPc> removed)
+    {
+        var changed = false;
+        foreach (var gone in removed.Where(r => r != null && !string.IsNullOrEmpty(r.KeyId) && DateTime.UtcNow - r.RemovedUtc <= RemovedManagedPc.KeepFor))
+        {
+            if (RemovedManagedPcs.Any(r => r.KeyId == gone.KeyId)) continue;
+            RemovedManagedPcs.Add(new RemovedManagedPc { KeyId = gone.KeyId, RemovedUtc = gone.RemovedUtc });
+            ManagedPcs.RemoveAll(p => p.KeyId == gone.KeyId);
+            changed = true;
+        }
+        foreach (var share in pcs.Where(s => s != null && !string.IsNullOrWhiteSpace(s.Name)))
+        {
+            byte[] key;
+            try { key = Convert.FromBase64String(share.Key ?? string.Empty); }
+            catch (FormatException) { continue; }
+            if (key.Length != 32) continue;
+            var keyId = CommandSigner.KeyId(key);
+            if (ManagedPcs.Any(p => p.KeyId == keyId) || RemovedManagedPcs.Any(r => r.KeyId == keyId)) continue;
+            var same = ManagedPcs.Where(p => share.MachineId?.Length > 0 && p.MachineId.Length > 0
+                    ? p.MachineId.Equals(share.MachineId, StringComparison.OrdinalIgnoreCase)
+                    : MachineRelay.Sanitize(p.Name) == MachineRelay.Sanitize(share.Name)).ToList();
+            if (same.Any(p => p.AddedUtc >= share.AddedUtc))
+            {
+                RemovedManagedPcs.Add(new RemovedManagedPc { KeyId = keyId, RemovedUtc = DateTime.UtcNow });
+                changed = true;
+                continue;
+            }
+            foreach (var older in same) ForgetManaged(older);
+            var record = ManagedPcRecord.Create(share.Name, share.Address ?? string.Empty, key, share.AddedUtc);
+            record.MachineId = share.MachineId ?? string.Empty;
+            ManagedPcs.Add(record);
+            changed = true;
+        }
+        return changed;
+    }
 
     /// <summary>
     /// Makes the pending code the pairing code, if it still is <paramref name="key"/> (in fleet.json, or the copy the agent
@@ -446,6 +607,60 @@ public sealed class AssistantOptions
 
     public static string ProtectToken(string token)
         => Convert.ToBase64String(ProtectedData.Protect(Encoding.UTF8.GetBytes(token), null, DataProtectionScope.CurrentUser));
+}
+
+/// <summary>A PC this fleet manages one way (see <see cref="FleetConfig.ManagedPcs"/>).</summary>
+public sealed class ManagedPcRecord
+{
+    public string Name { get; set; } = string.Empty;
+    public string Address { get; set; } = string.Empty;
+    public string Version { get; set; } = string.Empty;
+    public string MachineId { get; set; } = string.Empty;
+    public DateTime LastSeenUtc { get; set; }
+    /// <summary>When it was paired; of two pairings of one PC, the newer one wins.</summary>
+    public DateTime AddedUtc { get; set; }
+    /// <summary>The PC's own pairing code, encrypted for this Windows user with DPAPI.</summary>
+    public string ProtectedKey { get; set; } = string.Empty;
+    /// <summary>The code's fingerprint, which identifies this pairing.</summary>
+    public string KeyId { get; set; } = string.Empty;
+
+    [JsonIgnore]
+    public byte[]? Key
+    {
+        get
+        {
+            try { return ProtectedData.Unprotect(Convert.FromBase64String(ProtectedKey), null, DataProtectionScope.CurrentUser); }
+            catch { return null; }
+        }
+    }
+
+    internal static ManagedPcRecord Create(string name, string address, byte[] key, DateTime addedUtc) => new()
+    {
+        Name = name,
+        Address = address,
+        AddedUtc = addedUtc,
+        ProtectedKey = Convert.ToBase64String(ProtectedData.Protect(key, null, DataProtectionScope.CurrentUser)),
+        KeyId = CommandSigner.KeyId(key)
+    };
+}
+
+/// <summary>A managed PC as one fleet PC tells another, with its code in plain (the request itself is encrypted).</summary>
+public sealed class ManagedPcShare
+{
+    public string Name { get; set; } = string.Empty;
+    public string Address { get; set; } = string.Empty;
+    public string MachineId { get; set; } = string.Empty;
+    public DateTime AddedUtc { get; set; }
+    public string Key { get; set; } = string.Empty;
+}
+
+/// <summary>A managed PC's code that is no longer used.</summary>
+public sealed class RemovedManagedPc
+{
+    /// <summary>How long a removal is remembered: long enough for a fleet PC that was off to hear of it.</summary>
+    public static readonly TimeSpan KeepFor = TimeSpan.FromDays(180);
+    public string KeyId { get; set; } = string.Empty;
+    public DateTime RemovedUtc { get; set; }
 }
 
 public sealed class PeerRecord

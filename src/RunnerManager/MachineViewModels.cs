@@ -391,6 +391,8 @@ public sealed class MachineInfo : INotifyPropertyChanged
     public string ConnectionProblem { get; init; } = string.Empty;
     /// <summary>This PC's fleet agent is installed but older than this dashboard (or not answering), so it needs updating.</summary>
     public bool LocalAgentOutdated { get; init; }
+    /// <summary>Managed one way: the fleet controls this PC with its own code, and it can't see or control the fleet.</summary>
+    public bool IsManaged { get; init; }
 
     /// <summary>
     /// This PC's relay status plus local runners its agent didn't report (e.g. console runners an older agent
@@ -529,7 +531,11 @@ public sealed class MachineInfo : INotifyPropertyChanged
     public string WatchdogText => WatchdogEnabled ? "Auto-recovery on" : "Auto-recovery off";
     public Brush WatchdogBrush => WatchdogEnabled ? Palette.Success : Palette.TextMuted;
     public Visibility SignedVisibility => string.IsNullOrEmpty(SigningKeyId) ? Visibility.Collapsed : Visibility.Visible;
-    public string SignedTip => $"Paired. Connections to other PCs are encrypted with pairing code {SigningKeyId}.";
+    public string SignedTip => IsManaged
+        ? $"Managed one way. Connections to it are encrypted with its own pairing code {SigningKeyId}, which it can't use to reach the other PCs."
+        : $"Paired. Connections to other PCs are encrypted with pairing code {SigningKeyId}.";
+    public Visibility ManagedVisibility => IsManaged ? Visibility.Visible : Visibility.Collapsed;
+    public string ForgetHeader => IsManaged ? "Stop managing this PC…" : "Forget this PC…";
 
     // ----- Runner summary -----
     public int RunningCount => Runners.Count(r => r.IsRunning);
@@ -613,18 +619,19 @@ public sealed class MachineInfo : INotifyPropertyChanged
     }
 
     /// <summary>A known PC that hasn't answered yet, shown as offline with the reason.</summary>
-    public static MachineInfo Placeholder(string key, string name, DateTime lastSeenUtc, string address, string problem) => new()
+    public static MachineInfo Placeholder(string key, string name, DateTime lastSeenUtc, string address, string problem, bool managed = false) => new()
     {
         MachineKey = key,
         MachineName = name,
         UpdatedUtc = lastSeenUtc,
         Address = address,
         ConnectionProblem = problem,
-        Fingerprint = $"placeholder|{name}|{address}|{problem}"
+        IsManaged = managed,
+        Fingerprint = $"placeholder|{name}|{address}|{problem}|{managed}"
     };
 
     public static MachineInfo FromPayload(string key, MachineStatusPayload payload, bool localOnly = false,
-        string address = "", string problem = "", bool localAgentOutdated = false)
+        string address = "", string problem = "", bool localAgentOutdated = false, bool managed = false)
     {
         var isLocal = payload.MachineName.Equals(Environment.MachineName, StringComparison.OrdinalIgnoreCase);
         var machine = new MachineInfo
@@ -655,7 +662,8 @@ public sealed class MachineInfo : INotifyPropertyChanged
             Address = address,
             ConnectionProblem = problem,
             LocalAgentOutdated = localAgentOutdated,
-            Fingerprint = $"{(localOnly ? "local" : "peer")}|{address}|{problem}|{localAgentOutdated}|" + payload.Fingerprint()
+            IsManaged = managed,
+            Fingerprint = $"{(localOnly ? "local" : managed ? "managed" : "peer")}|{address}|{problem}|{localAgentOutdated}|" + payload.Fingerprint()
         };
         foreach (var runner in payload.Runners)
         {

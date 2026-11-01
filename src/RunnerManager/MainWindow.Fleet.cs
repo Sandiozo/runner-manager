@@ -467,6 +467,11 @@ public partial class MainWindow
     private async void MachineForget_Click(object sender, RoutedEventArgs e)
     {
         if (ItemFrom<MachineInfo>(sender) is not { IsLocal: false } machine) return;
+        if (machine.IsManaged)
+        {
+            await StopManagingAsync(machine.MachineName);
+            return;
+        }
         if (!DialogWindow.Confirm(this, $"Forget {machine.MachineName}?",
                 machine.IsOnline
                     ? $"{machine.MachineName} is online and still has the pairing code, so it may appear again. To remove it permanently, use \u201cLeave fleet\u201d in its \u22ef menu on {machine.MachineName}."
@@ -477,6 +482,26 @@ public partial class MainWindow
         FleetConfig.Update(c => c.ManualAddresses.RemoveAll(a => a.Split(':')[0].Equals(host, StringComparison.OrdinalIgnoreCase)));
         AddActivity($"Forgot {machine.MachineName}.");
         if (_selectedMachineKey == machine.MachineKey) _selectedMachineKey = null;
+        await RefreshAsync();
+    }
+
+    /// <summary>Stops managing a PC that was paired one way: it gets a code of its own, and the fleet's PCs forget it.</summary>
+    internal async Task StopManagingAsync(string name)
+    {
+        if (!DialogWindow.Confirm(this, $"Stop managing {name}?",
+                $"The fleet's PCs and AI assistants can no longer view or control {name}. Its runners keep running. " +
+                $"To manage it again, pair it again with “Add a PC”.",
+                "Stop managing", danger: true)) return;
+        bool told;
+        try { told = await MachineRelay.RemoveManagedPcAsync(name); }
+        catch (Exception ex)
+        {
+            DialogWindow.Error(this, $"Could not remove {name}", ex.Message);
+            return;
+        }
+        AddActivity(told ? $"Stopped managing {name}." : $"Stopped managing {name}. It was not reachable, so it still shows as managed there until it is disconnected on {name}.");
+        if (_selectedMachineKey == MachineRelay.Sanitize(name)) _selectedMachineKey = null;
+        _forceDiscovery = true;
         await RefreshAsync();
     }
 

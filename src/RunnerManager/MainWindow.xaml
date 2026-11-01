@@ -355,6 +355,10 @@
                                                     <Border Style="{StaticResource Badge}" Background="{DynamicResource BadgeInfoBgBrush}" BorderBrush="{DynamicResource BadgeInfoBorderBrush}" Visibility="{Binding ThisPcVisibility}">
                                                         <TextBlock Text="This PC" FontSize="11" Foreground="{DynamicResource AccentBrush}"/>
                                                     </Border>
+                                                    <Border Style="{StaticResource Badge}" Background="{DynamicResource Bg3Brush}" BorderBrush="{DynamicResource BorderSubtleBrush}" Visibility="{Binding ManagedVisibility}"
+                                                            ToolTip="Managed one way: the fleet can view and control this PC, but it can't see or control the fleet's PCs.">
+                                                        <TextBlock Text="Managed" FontSize="11" Foreground="{DynamicResource TextMutedBrush}"/>
+                                                    </Border>
                                                     <Button Style="{StaticResource BadgeButton}" Visibility="{Binding UpdateBadgeVisibility}"
                                                             ToolTip="{Binding UpdateBadgeTip}" Click="MachineUpdate_Click">
                                                         <StackPanel Orientation="Horizontal">
@@ -386,7 +390,7 @@
                                                             <MenuItem Header="Update Runner Manager" Tag="&#xE896;" IsEnabled="{Binding CanUpdateAgent}" Click="MachineUpdate_Click"/>
                                                             <Separator/>
                                                             <MenuItem Header="Restart PC…" Tag="&#xE7E8;" Style="{StaticResource DangerMenuItem}" IsEnabled="{Binding SupportsFleetTools}" Click="MachineReboot_Click"/>
-                                                            <MenuItem Header="Forget this PC…" Tag="&#xE711;" Visibility="{Binding ForgetVisibility}" Click="MachineForget_Click"/>
+                                                            <MenuItem Header="{Binding ForgetHeader}" Tag="&#xE711;" Visibility="{Binding ForgetVisibility}" Click="MachineForget_Click"/>
                                                             <MenuItem Header="Leave fleet…" Tag="&#xF3B1;" Style="{StaticResource DangerMenuItem}" Visibility="{Binding LeaveVisibility}" Click="LeaveFleet_Click"/>
                                                         </ContextMenu>
                                                     </Button.ContextMenu>

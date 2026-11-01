@@ -4,6 +4,15 @@
         Title="Add a PC" Icon="assets/RunnerManager.ico" Width="500" SizeToContent="Height"
         ResizeMode="NoResize" WindowStartupLocation="CenterOwner" ShowInTaskbar="False"
         Background="{DynamicResource Bg1Brush}" Foreground="{DynamicResource TextBrush}" FontFamily="{StaticResource UiFont}" FontSize="13">
+    <Window.Resources>
+        <Style x:Key="OptionTitle" TargetType="TextBlock" BasedOn="{StaticResource {x:Type TextBlock}}">
+            <Setter Property="FontWeight" Value="SemiBold"/>
+        </Style>
+        <Style x:Key="OptionText" TargetType="TextBlock" BasedOn="{StaticResource Caption}">
+            <Setter Property="TextWrapping" Value="Wrap"/>
+            <Setter Property="Margin" Value="0,2,0,0"/>
+        </Style>
+    </Window.Resources>
     <Grid>
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
@@ -36,8 +45,24 @@
                     <TextBlock x:Name="CodeText" FontSize="36" FontWeight="SemiBold" FontFamily="{StaticResource MonoFont}"
                                HorizontalAlignment="Center"/>
                 </Border>
-                <TextBlock Style="{StaticResource Caption}" FontSize="11" TextWrapping="Wrap" Margin="0,10,0,0"
-                           Text="Allow only if the codes match. Allowing gives that PC the pairing code, so it can view and control the PCs in the fleet."/>
+                <TextBlock Text="What can it do?" FontWeight="SemiBold" Margin="0,18,0,8"/>
+                <RadioButton x:Name="FullAccessOption" Style="{StaticResource OptionCard}" GroupName="Access" IsChecked="True" Checked="AccessOption_Checked">
+                    <StackPanel>
+                        <TextBlock Text="Join the fleet" Style="{StaticResource OptionTitle}"/>
+                        <TextBlock Text="It gets the fleet's pairing code. It can view and control every PC in the fleet, and they can control it." Style="{StaticResource OptionText}"/>
+                    </StackPanel>
+                </RadioButton>
+                <RadioButton x:Name="ManagedAccessOption" Style="{StaticResource OptionCard}" GroupName="Access" Checked="AccessOption_Checked">
+                    <StackPanel>
+                        <TextBlock Text="Manage it one way" Style="{StaticResource OptionTitle}"/>
+                        <TextBlock Style="{StaticResource OptionText}"
+                                   Text="It gets a code of its own. The fleet's PCs and AI assistants can view and control it, but it can't see or control them. For a PC that belongs to someone else."/>
+                    </StackPanel>
+                </RadioButton>
+                <TextBlock x:Name="ManagedUnavailableText" Style="{StaticResource Caption}" FontSize="11" TextWrapping="Wrap" Margin="0,2,0,0" Visibility="Collapsed"
+                           Text="To manage it one way, update Runner Manager on it to 2.8 or later first."/>
+                <TextBlock x:Name="AllowNoteText" Style="{StaticResource Caption}" FontSize="11" TextWrapping="Wrap" Margin="0,10,0,0"
+                           Text="Allow only if the codes match."/>
             </StackPanel>
         </StackPanel>
         <Border Grid.Row="1" Background="{DynamicResource Bg0Brush}" BorderBrush="{DynamicResource BorderSubtleBrush}" BorderThickness="0,1,0,0" Padding="28,14">

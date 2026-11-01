@@ -104,12 +104,27 @@ To add a PC to the fleet:
 Both PCs need Runner Manager 2.4 or later to pair. To lock a PC out of the fleet, for example a lost laptop, use
 **Settings → Fleet → Change code…** and leave that PC out; the PCs you keep switch to a new code.
 
+### A PC that belongs to someone else
+
+When the request comes in, choose **Manage it one way** before you click Allow. The PC gets a pairing code of its own
+instead of the fleet's: your PCs and AI assistants can see and control it like your other PCs, but it can't see or
+control yours. Use it, for example, when a friend runs runners for you on their PC. Both PCs need Runner Manager 2.8 or
+later. On another network, put both PCs on the same Tailscale network (invite the other PC's owner to yours), click
+**Add a PC** here, and on the other PC enter this PC's Tailscale address under **Other ways to join**.
+
+- Your other fleet PCs pick it up within a minute, so any of them can manage it.
+- The card shows **Managed**. To end it, choose **Stop managing this PC…** in its ⋯ menu. On the managed PC, the owner can
+  end it with **Settings → Fleet → Disconnect…**.
+- **Change code…** also gives managed PCs new codes of their own.
+- Jobs that run on the PC still use your code and secrets, as on any self-hosted runner. Only use PCs whose owner you
+  trust with them.
+
 | | |
 | --- | --- |
 | Transport | Direct PC-to-PC connections. Fleet traffic does not go through GitHub. |
 | Encryption | AES-256-GCM. The key is derived from the pairing code and bound to the target PC and a timestamp. Replayed requests are rejected. |
 | Pairing | ECDH P-256 key exchange, confirmed with a 6-digit code on both PCs. The new PC commits to its key first, so a device in between cannot make the codes match. |
-| Storage | The pairing code is encrypted for your Windows account (DPAPI). |
+| Storage | The pairing code, and the codes of PCs managed one way, are encrypted for your Windows account (DPAPI). |
 | Ports | TCP 47821 and UDP 47822. TCP 47823 and UDP 47824 during pairing only. Firewall rules allow the local subnet and Tailscale (`100.64.0.0/10`). |
 | Other networks | Install [Tailscale](https://tailscale.com) on both PCs, then use **Settings → Fleet → Add a PC by address**. |
 

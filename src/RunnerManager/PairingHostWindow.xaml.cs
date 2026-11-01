@@ -11,9 +11,12 @@ public partial class PairingHostWindow : Window
     private readonly DispatcherTimer _expiry = new() { Interval = TimeSpan.FromMinutes(10) };
     private Pairing.JoinRequest? _current;
     private readonly List<string> _joined = new();
+    private readonly List<string> _managed = new();
 
     /// <summary>Names of the PCs that joined while the window was open.</summary>
     public IReadOnlyList<string> JoinedPcs => _joined;
+    /// <summary>Names of the PCs that were paired one way while the window was open.</summary>
+    public IReadOnlyList<string> ManagedPcs => _managed;
 
     public PairingHostWindow(byte[] pairingKey)
     {
@@ -27,8 +30,9 @@ public partial class PairingHostWindow : Window
         _host.JoinRequested += request => Dispatcher.Invoke(() => Enqueue(request));
         _host.Joined += name => Dispatcher.Invoke(() =>
         {
-            _joined.Add(name);
-            JoinedText.Text = $"✓  {string.Join(", ", _joined)} joined. It appears in the sidebar within a few seconds. Add more PCs, or click Done.";
+            if (!_managed.Contains(name)) _joined.Add(name);
+            var added = _joined.Select(n => $"{n} joined").Concat(_managed.Select(n => $"{n} is managed one way"));
+            JoinedText.Text = $"✓  {string.Join(". ", added)}. It appears in the sidebar within a few seconds. Add more PCs, or click Done.";
             JoinedText.Visibility = Visibility.Visible;
         });
         _expiry.Tick += (_, _) => Close();
@@ -80,6 +84,10 @@ public partial class PairingHostWindow : Window
         _current = request;
         RequestTitle.Text = $"{request.Name} wants to join";
         CodeText.Text = request.Code;
+        FullAccessOption.IsChecked = true;
+        ManagedAccessOption.IsEnabled = request.CanBeManaged;
+        ManagedUnavailableText.Visibility = request.CanBeManaged ? Visibility.Collapsed : Visibility.Visible;
+        AccessOption_Checked(this, new RoutedEventArgs());
         WaitingPanel.Visibility = Visibility.Collapsed;
         RequestPanel.Visibility = Visibility.Visible;
         AllowButton.Visibility = DenyButton.Visibility = Visibility.Visible;
@@ -98,9 +106,29 @@ public partial class PairingHostWindow : Window
         CloseButton.Visibility = CopyCodeButton.Visibility = Visibility.Visible;
     }
 
+    private void AccessOption_Checked(object sender, RoutedEventArgs e)
+    {
+        if (AllowButton == null) return;
+        AllowButton.Content = ManagedAccessOption.IsChecked == true ? "Allow one way" : "Allow";
+    }
+
     private void Allow_Click(object sender, RoutedEventArgs e)
     {
-        _current?.Allow();
+        if (_current is not { } request) return;
+        if (ManagedAccessOption.IsChecked == true && request.CanBeManaged)
+        {
+            // Its own code, saved before it is sent, so the fleet knows the PC as soon as it has the code.
+            var key = CommandSigner.NewKey();
+            try { FleetConfig.AddManagedPc(request.Name, FleetNetwork.WithPort(request.Address), key); }
+            catch (Exception ex)
+            {
+                DialogWindow.Error(this, "Could not save the PC", ex.Message);
+                return;
+            }
+            _managed.Add(request.Name);
+            request.AllowManaged(key);
+        }
+        else request.Allow();
         Next();
     }
 

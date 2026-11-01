@@ -3,6 +3,18 @@
 Runner Manager updates itself from [Releases](https://github.com/Sandiozo/runner-manager/releases): open
 **Settings → Updates**, or click **Update** on a PC's card.
 
+## 2.8.0
+
+- **Manage a PC one way.** When a PC asks to join, choose **Manage it one way**: it gets a pairing code of its own
+  instead of the fleet's. Your PCs and AI assistants can view and control it like your other PCs, but it can't see or
+  control them. Use it for runners on a friend's PC, for example. The fleet's PCs share managed PCs with each other, so
+  any of them can manage it.
+- The card of a managed PC shows **Managed**, and its ⋯ menu has **Stop managing this PC…**, which also gives the PC a
+  new code of its own. On the managed PC, **Settings → Fleet → Disconnect…** ends it there.
+- **Change fleet code** also gives managed PCs new codes, so a PC that was left out can't reach them either.
+- AI assistants: list_pcs says which PCs are managed.
+- Fleet protocol 15: managed PCs, and the requests that share and release them.
+
 ## 2.7.1
 
 - Click **Queue** or **Recent runs** in a runner's details to collapse or expand the list. The headings show how

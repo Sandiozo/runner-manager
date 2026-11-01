@@ -113,7 +113,8 @@ public static class AssistantTools
     public static IReadOnlyList<AssistantTool> All { get; } = new[]
     {
         new AssistantTool("list_pcs",
-            "Lists the PCs in the Runner Manager fleet: online state, version, CPU, memory, free disk space and runner counts.",
+            "Lists the PCs in the Runner Manager fleet: online state, version, CPU, memory, free disk space and runner counts. " +
+            "managed means the fleet manages the PC one way (usually a PC that belongs to someone else): it is used like the other PCs, but it cannot reach them.",
             AssistantToolKind.Read, Schema(), ListPcsAsync),
         new AssistantTool("list_runners",
             "Lists the GitHub Actions self-hosted runners on every PC (or one PC): state (busy, idle, stopped), repository or organization, labels and version. " +
@@ -228,6 +229,7 @@ public static class AssistantTools
         {
             name = m.MachineName,
             this_pc = m.IsLocal,
+            managed = m.IsManaged,
             online = m.IsReachable,
             problem = m.ConnectionProblem.Length > 0 ? m.ConnectionProblem : null,
             version = m.AppVersion,

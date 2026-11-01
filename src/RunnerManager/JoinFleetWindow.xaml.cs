@@ -14,6 +14,8 @@ public partial class JoinFleetWindow : Window
     public byte[]? PairingKey { get; private set; }
     public string HostName { get; private set; } = string.Empty;
     public string HostAddress { get; private set; } = string.Empty;
+    /// <summary>The host allowed this PC one way: <see cref="PairingKey"/> is its own code, not the fleet's.</summary>
+    public bool Managed { get; private set; }
 
     public JoinFleetWindow(bool openJoinPage = false)
     {
@@ -110,6 +112,7 @@ public partial class JoinFleetWindow : Window
             PairingKey = result.PairingKey;
             HostName = result.HostName;
             HostAddress = result.HostAddress;
+            Managed = result.Managed;
             DialogResult = true;
         }
         catch (OperationCanceledException) when (!IsLoaded) { }

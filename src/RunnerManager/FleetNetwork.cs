@@ -13,8 +13,9 @@ namespace RunnerManager;
 public sealed record FleetRequest
 {
     /// <summary>
-    /// "status", "command", "log", "leave", "job" (protocol 11: a runner's live output and processes), or "rekey"
-    /// (protocol 12: a new pairing code from Change fleet code).
+    /// "status", "command", "log", "leave", "job" (protocol 11: a runner's live output and processes), "rekey"
+    /// (protocol 12: a new pairing code from Change fleet code), "managed" (protocol 15: the PCs this fleet manages one
+    /// way, for the other fleet PCs) or "release" (protocol 15: the fleet stops managing this PC).
     /// </summary>
     public string Op { get; init; } = "status";
     public MachineCommand? Command { get; init; }
@@ -44,6 +45,10 @@ public sealed record FleetResponse
     public string RekeyPublicKey { get; init; } = string.Empty;
     /// <summary>"rekey", second step: the fingerprint of the code the agent received, to confirm it.</summary>
     public string KeyId { get; init; } = string.Empty;
+    /// <summary>"managed": the PCs this PC manages one way, with their codes.</summary>
+    public List<ManagedPcShare>? ManagedPcs { get; init; }
+    /// <summary>"managed": codes of managed PCs that were removed or replaced.</summary>
+    public List<RemovedManagedPc>? RemovedManagedPcs { get; init; }
 }
 
 /// <summary>Where an agent finds its pairing code, and the new one from "Change fleet code" until it is first used.</summary>
@@ -54,6 +59,10 @@ public interface IAgentKeys
     void SetPending(byte[] key);
     /// <summary>A request came with the pending code: it becomes the pairing code, and the old one stops working.</summary>
     void UsePending(byte[] key);
+    /// <summary>This PC is managed one way: its code is its own, known only to the fleet that manages it.</summary>
+    bool IsManaged { get; }
+    /// <summary>The managing fleet let this PC go: it switches to a new code of its own, which that fleet doesn't know.</summary>
+    void Release();
 }
 
 /// <summary>
@@ -77,10 +86,18 @@ internal sealed class ConfigAgentKeys : IAgentKeys
         FleetConfig.UsePendingFleetKey(key, _pending);
         _pending = null;
     }
+
+    public bool IsManaged => FleetConfig.Current.ManagedBy.Length > 0;
+
+    public void Release()
+    {
+        _pending = null;
+        FleetConfig.StopBeingManaged();
+    }
 }
 
 /// <summary>Codes kept in memory, for an agent given its code as a function (tests).</summary>
-internal sealed class MemoryAgentKeys(Func<byte[]?> current) : IAgentKeys
+internal sealed class MemoryAgentKeys(Func<byte[]?> current, bool managed = false) : IAgentKeys
 {
     private byte[]? _current;
     private byte[]? _pending;
@@ -92,6 +109,15 @@ internal sealed class MemoryAgentKeys(Func<byte[]?> current) : IAgentKeys
     {
         _current = key;
         _pending = null;
+    }
+
+    public bool IsManaged { get; private set; } = managed;
+
+    public void Release()
+    {
+        _current = CommandSigner.NewKey();
+        _pending = null;
+        IsManaged = false;
     }
 }
 
@@ -645,6 +671,8 @@ public sealed class AgentServer : IDisposable
                     "job" when _job != null => new FleetResponse { Ok = true, Job = await _job(request.LogKey) },
                     "leave" when request.From.Length > 0 => Leave(request.From),
                     "rekey" => Rekey(request),
+                    "managed" => ShareManaged(),
+                    "release" => Release(request.From),
                     _ => new FleetResponse { Ok = false, Error = $"Unknown request: {request.Op}" }
                 };
             }
@@ -726,6 +754,29 @@ public sealed class AgentServer : IDisposable
                 return new FleetResponse { Ok = true, KeyId = CommandSigner.KeyId(newKey) };
             }
         }
+    }
+
+    /// <summary>
+    /// The PCs this PC manages one way, so another fleet PC can manage them too. Only fleet members are told: a managed
+    /// PC is reached with its own code, and the fleet managing it has no business with the PCs it manages itself.
+    /// </summary>
+    private FleetResponse ShareManaged()
+    {
+        if (_keys.IsManaged) return new FleetResponse { Ok = false, Error = "This PC is managed one way and doesn't share its PCs." };
+        var (pcs, removed) = FleetConfig.Current.ShareManaged();
+        return new FleetResponse { Ok = true, ManagedPcs = pcs, RemovedManagedPcs = removed };
+    }
+
+    /// <summary>
+    /// The fleet that manages this PC removed it. It switches to a new code of its own, so a fleet PC that still has the
+    /// old one (one that was locked out, for example) can't control it either.
+    /// </summary>
+    private FleetResponse Release(string from)
+    {
+        if (!_keys.IsManaged) return new FleetResponse { Ok = false, Error = "This PC is a member of the fleet, not managed by it. Use Leave fleet on it instead." };
+        _keys.Release();
+        MachineRelay.AppendAgentLog($"{(from.Length > 0 ? from : "The fleet")} stopped managing this PC. Its old pairing code no longer works.");
+        return new FleetResponse { Ok = true };
     }
 
     /// <summary>Another PC left the fleet: forget it here so dashboards stop listing it.</summary>

@@ -41,7 +41,11 @@ public static class Pairing
         public string Detail => IsOutdated ? $"{Address}  ·  older Runner Manager, update it first" : Address;
     }
 
-    public sealed record JoinResult(byte[] PairingKey, string HostName, string HostAddress);
+    /// <param name="Managed">
+    /// The host allowed this PC one way: <paramref name="PairingKey"/> is this PC's own code, not the fleet's, so this PC
+    /// can be managed by the fleet but can't reach its PCs.
+    /// </param>
+    public sealed record JoinResult(byte[] PairingKey, string HostName, string HostAddress, bool Managed = false);
 
     /// <summary>The 6-digit number both PCs show; derived from the exchanged secret and both public keys.</summary>
     public static string ComparisonCode(byte[] sharedSecret, byte[] hostPublicKey, byte[] joinerPublicKey)
@@ -127,7 +131,7 @@ public static class Pairing
         // 1. Commit to our key without showing it.
         await WriteAsync(stream, new PairMessage
         {
-            Type = "commit", Version = Version, Name = myName, Commit = Convert.ToBase64String(Commitment(myPublic, nonce))
+            Type = "commit", Version = Version, Name = myName, Commit = Convert.ToBase64String(Commitment(myPublic, nonce)), CanBeManaged = true
         }, cancellationToken);
         PairMessage hello;
         // A version 1 host does not know "commit" and closes the connection without an answer.
@@ -151,7 +155,7 @@ public static class Pairing
         var key = FleetCrypto.Open(TransferKey(shared), Convert.FromBase64String(decision.Payload), "rw-pair-transfer")
                   ?? throw new CryptographicException("Could not decrypt the pairing code.");
         if (key.Length != 32) throw new CryptographicException("Received an invalid pairing code.");
-        return new JoinResult(key, hello.Name, FleetNetwork.JoinHostPort(AgentHost(tcp, host), FleetNetwork.AgentPort));
+        return new JoinResult(key, hello.Name, FleetNetwork.JoinHostPort(AgentHost(tcp, host), FleetNetwork.AgentPort), decision.Managed);
     }
 
     /// <summary>The host's IPv4 address as connected, or the name or address the user typed otherwise.</summary>
@@ -164,18 +168,25 @@ public static class Pairing
 
     // ================= Host (PC already in the fleet) =================
 
+    /// <summary>The host's answer: deny, allow into the fleet, or allow one way with the PC's own code.</summary>
+    internal sealed record Decision(bool Allowed, byte[]? ManagedKey = null);
+
     public sealed class JoinRequest
     {
-        private readonly TaskCompletionSource<bool> _decision = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource<Decision> _decision = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly TaskCompletionSource _ended = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public string Name { get; init; } = string.Empty;
         public string Code { get; init; } = string.Empty;
         public string Address { get; init; } = string.Empty;
-        internal Task<bool> Decision => _decision.Task;
+        /// <summary>The joiner can be allowed one way (2.8 and later). Older PCs only join as fleet members.</summary>
+        public bool CanBeManaged { get; init; }
+        internal Task<Decision> Answer => _decision.Task;
         /// <summary>Completes when the host no longer waits for an answer: it was answered, timed out, or the other PC left.</summary>
         public Task Ended => _ended.Task;
-        public void Allow() => _decision.TrySetResult(true);
-        public void Deny() => _decision.TrySetResult(false);
+        public void Allow() => _decision.TrySetResult(new Decision(true));
+        /// <summary>Allows the PC one way: it gets <paramref name="key"/>, its own code, instead of the fleet's.</summary>
+        public void AllowManaged(byte[] key) => _decision.TrySetResult(new Decision(true, key));
+        public void Deny() => _decision.TrySetResult(new Decision(false));
         internal void End() => _ended.TrySetResult();
     }
 
@@ -300,7 +311,8 @@ public static class Pairing
                     {
                         Name = string.IsNullOrWhiteSpace(commit.Name) ? "A PC" : commit.Name.Trim(),
                         Code = ComparisonCode(shared, myPublic, joinerPublic),
-                        Address = ((IPEndPoint?)client.Client.RemoteEndPoint)?.Address.ToString() ?? string.Empty
+                        Address = RemoteAddress(client),
+                        CanBeManaged = commit.CanBeManaged
                     };
                     lock (_open) _open.Add(request);
                     if (_listen.IsCancellationRequested) request.Deny();
@@ -309,21 +321,25 @@ public static class Pairing
                     // The joiner sends nothing more, so a finished read means it went away.
                     var gone = stream.ReadAsync(new byte[1], _cts.Token).AsTask();
                     _ = gone.ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);
-                    var finished = await Task.WhenAny(request.Decision, gone, Task.Delay(DecisionTimeout, _cts.Token));
+                    var finished = await Task.WhenAny(request.Answer, gone, Task.Delay(DecisionTimeout, _cts.Token));
                     if (finished == gone) return;
-                    if (finished != request.Decision)
+                    if (finished != request.Answer)
                     {
                         request.End();
                         await WriteAsync(stream, new PairMessage { Type = "deny", Error = $"{_name} did not answer in time." }, _cts.Token);
                         return;
                     }
-                    if (!await request.Decision)
+                    var decision = await request.Answer;
+                    if (!decision.Allowed)
                     {
                         await WriteAsync(stream, new PairMessage { Type = "deny", Error = $"{_name} did not allow this PC to join." }, _cts.Token);
                         return;
                     }
-                    var payload = FleetCrypto.Seal(TransferKey(shared), _pairingKey, "rw-pair-transfer");
-                    await WriteAsync(stream, new PairMessage { Type = "allow", Name = _name, Payload = Convert.ToBase64String(payload) }, _cts.Token);
+                    var payload = FleetCrypto.Seal(TransferKey(shared), decision.ManagedKey ?? _pairingKey, "rw-pair-transfer");
+                    await WriteAsync(stream, new PairMessage
+                    {
+                        Type = "allow", Name = _name, Payload = Convert.ToBase64String(payload), Managed = decision.ManagedKey != null
+                    }, _cts.Token);
                     Joined?.Invoke(request.Name);
                 }
                 catch { }
@@ -378,6 +394,17 @@ public static class Pairing
         public string Nonce { get; init; } = string.Empty;
         public string Payload { get; init; } = string.Empty;
         public string Error { get; init; } = string.Empty;
+        /// <summary>"commit": the joiner understands being allowed one way.</summary>
+        public bool CanBeManaged { get; init; }
+        /// <summary>"allow": the payload is the joiner's own code, and it is managed by the fleet one way.</summary>
+        public bool Managed { get; init; }
+    }
+
+    /// <summary>The other PC's IPv4 address (or IPv6 when it has none) as this connection sees it.</summary>
+    private static string RemoteAddress(TcpClient client)
+    {
+        if (client.Client.RemoteEndPoint is not IPEndPoint remote) return string.Empty;
+        return (remote.Address.IsIPv4MappedToIPv6 ? remote.Address.MapToIPv4() : remote.Address).ToString();
     }
 
     private static byte[] DeriveShared(ECDiffieHellman mine, byte[] otherPublic)

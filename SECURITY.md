@@ -22,7 +22,11 @@ Runner Manager runs with administrator rights and listens on the network, so the
   bound to the target PC and a timestamp, and checked against replays.
 - **Pairing** (TCP 47823, UDP 47824, only while a PC is being added): ECDH P-256, confirmed with a 6-digit code. The
   new PC commits to its key before it sees the other one, so a device in between cannot make the codes match.
-- **Stored secrets**: the pairing code is encrypted with Windows DPAPI for the current user.
+- **PCs managed one way**: such a PC gets a pairing code of its own instead of the fleet's. The fleet's PCs use that code
+  to reach it, but they never accept it themselves, so the managed PC cannot see or control them, even with a modified
+  Runner Manager. Removing it, or changing the fleet code, gives it a new code that a PC with the old one doesn't know.
+- **Stored secrets**: the pairing code, and the codes of PCs managed one way, are encrypted with Windows DPAPI for the
+  current user.
 - **Runner configuration**: runner names, labels and URLs are checked before they reach `config.cmd`.
 - **Updates**: releases are verified with their SHA-256 checksum before they replace the installed copy, and an older
   version is never installed over a newer one.

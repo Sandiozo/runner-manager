@@ -183,10 +183,16 @@ public partial class SettingsWindow : Window
 
     private void UpdateKeyStatus()
     {
-        var key = FleetConfig.Current.FleetKey;
+        var config = FleetConfig.Current;
+        var key = config.FleetKey;
+        var managedBy = key == null ? string.Empty : config.ManagedBy;
+        ManagedGroup.Visibility = managedBy.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+        ManagedRow.Description = $"By {managedBy}'s fleet. Its PCs and AI assistants can view and control this PC. This PC can't see or control theirs.";
         KeyRow.Description = key == null
             ? "Not set. Start a new fleet here, or enter the code from a PC that is already in one."
-            : $"Set. Fingerprint {CommandSigner.KeyId(key)}, the same on every PC in the fleet.";
+            : managedBy.Length > 0
+                ? $"This PC's own code (fingerprint {CommandSigner.KeyId(key)}), known only to the fleet that manages it."
+                : $"Set. Fingerprint {CommandSigner.KeyId(key)}, the same on every PC in the fleet.";
         GenerateKeyButton.Visibility = key == null ? Visibility.Visible : Visibility.Collapsed;
         CopyKeyButton.Visibility = key == null ? Visibility.Collapsed : Visibility.Visible;
         ReplaceKeyItem.Visibility = key == null ? Visibility.Collapsed : Visibility.Visible;
@@ -252,19 +258,37 @@ public partial class SettingsWindow : Window
         await _fleetChanged();
     }
 
+    private async void StopBeingManaged_Click(object sender, RoutedEventArgs e)
+    {
+        var managedBy = FleetConfig.Current.ManagedBy;
+        if (!DialogWindow.Confirm(this, "Disconnect from the fleet?",
+                $"{managedBy}'s fleet can no longer view or control this PC. Its runners keep running. To connect it again, pair it again.",
+                "Disconnect", danger: true)) return;
+        FleetConfig.StopBeingManaged();
+        UpdateKeyStatus();
+        RefreshPeers();
+        await _fleetChanged();
+    }
+
     private async void WatchdogToggle_Click(object sender, RoutedEventArgs e)
     {
         FleetConfig.Update(c => c.Watchdog = WatchdogToggle.IsChecked == true);
         await _fleetChanged();
     }
 
-    private sealed record PeerRow(string Name, string Detail);
+    private sealed record PeerRow(string Name, string Detail, bool Managed)
+    {
+        public string Action => Managed ? "Stop managing" : "Forget";
+    }
+
+    private static string LastSeen(DateTime utc) => utc == DateTime.MinValue ? "never" : utc.ToLocalTime().ToString("g");
 
     private void RefreshPeers()
     {
         var config = FleetConfig.Current;
-        var peers = config.KnownPeers.OrderBy(p => p.Name).Select(p => new PeerRow(p.Name,
-            $"{p.Address}  ·  last seen {(p.LastSeenUtc == DateTime.MinValue ? "never" : p.LastSeenUtc.ToLocalTime().ToString("g"))}")).ToList();
+        var peers = config.KnownPeers.Select(p => new PeerRow(p.Name, $"{p.Address}  ·  last seen {LastSeen(p.LastSeenUtc)}", false))
+            .Concat(config.ManagedPcs.Select(p => new PeerRow(p.Name, $"Managed one way  ·  {p.Address}  ·  last seen {LastSeen(p.LastSeenUtc)}", true)))
+            .OrderBy(p => p.Name, StringComparer.OrdinalIgnoreCase).ToList();
         PeersList.ItemsSource = peers;
         PeersEmptyPanel.Visibility = peers.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         AddressList.ItemsSource = config.ManualAddresses.ToList();
@@ -315,10 +339,17 @@ public partial class SettingsWindow : Window
 
     private async void ForgetPeer_Click(object sender, RoutedEventArgs e)
     {
-        if (sender is not FrameworkElement { Tag: string name }) return;
-        MachineRelay.ForgetPeer(name);
+        if (sender is not FrameworkElement { Tag: PeerRow peer }) return;
+        if (peer.Managed)
+        {
+            if (Owner is MainWindow main) await main.StopManagingAsync(peer.Name);
+        }
+        else
+        {
+            MachineRelay.ForgetPeer(peer.Name);
+            await _fleetChanged();
+        }
         RefreshPeers();
-        await _fleetChanged();
     }
 
     private async void LeaveFleet_Click(object sender, RoutedEventArgs e)
@@ -338,13 +369,19 @@ public partial class SettingsWindow : Window
             DialogWindow.Info(this, "No fleet yet", "Start a fleet or join one first.");
             return;
         }
+        if (FleetConfig.Current.ManagedBy.Length > 0)
+        {
+            DialogWindow.Info(this, "This PC is managed one way",
+                $"Only {FleetConfig.Current.ManagedBy}'s fleet changes this PC's code. To stop it from managing this PC, click Disconnect.");
+            return;
+        }
         List<MachineInfo> pcs;
         ChangeFleetCodeButton.IsEnabled = false;
         ChangeFleetCodeButton.Content = "Checking PCs…";
         try
         {
             pcs = (await MachineRelay.ReadFleetAsync(forceDiscovery: true))
-                .Where(m => !m.IsLocal && !m.MachineKey.StartsWith("ADDR_") && !m.MachineKey.StartsWith("DUPLICATE_")).ToList();
+                .Where(m => !m.IsLocal && !m.IsManaged && !m.MachineKey.StartsWith("ADDR_") && !m.MachineKey.StartsWith("DUPLICATE_")).ToList();
         }
         catch (Exception ex)
         {
@@ -380,8 +417,10 @@ public partial class SettingsWindow : Window
         if (result.NotConfirmed.Count > 0) lines.Add($"Got the new code and switch when contacted next: {string.Join(", ", result.NotConfirmed)}.");
         if (result.Failed.Count > 0) lines.Add($"Did not get it, and must be paired again:\n{string.Join("\n", result.Failed)}");
         if (result.LeftOut.Count > 0) lines.Add($"Left out and forgotten: {string.Join(", ", result.LeftOut)}. Pair them again to bring them back.");
+        if (result.ManagedSwitched.Count > 0) lines.Add($"Managed PCs with a new code of their own: {string.Join(", ", result.ManagedSwitched)}.");
+        if (result.ManagedFailed.Count > 0) lines.Add($"Managed PCs that kept their old code:\n{string.Join("\n", result.ManagedFailed)}\nA PC that was left out may still reach them. Stop managing them and pair them again.");
         if (lines.Count == 0) lines.Add("No other PCs are in the fleet.");
-        DialogWindow.Show(this, result.Failed.Count > 0 ? DialogTone.Warning : DialogTone.Info, "The fleet has a new pairing code",
+        DialogWindow.Show(this, result.Failed.Count + result.ManagedFailed.Count > 0 ? DialogTone.Warning : DialogTone.Info, "The fleet has a new pairing code",
             string.Join("\n\n", lines), "OK", cancel: null);
     }
 

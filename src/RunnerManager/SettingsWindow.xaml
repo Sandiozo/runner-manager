@@ -184,6 +184,11 @@
                 <!-- Fleet -->
                 <StackPanel x:Name="FleetPage" Visibility="Collapsed">
                     <TextBlock Text="Fleet" Style="{StaticResource PageTitle}"/>
+                    <Border x:Name="ManagedGroup" Style="{StaticResource Group}" Visibility="Collapsed">
+                        <local:SettingRow x:Name="ManagedRow" Glyph="&#xE7EF;" Title="Managed one way">
+                            <Button Content="Disconnect…" Style="{StaticResource DangerButton}" Click="StopBeingManaged_Click"/>
+                        </local:SettingRow>
+                    </Border>
                     <Border Style="{StaticResource Group}">
                         <StackPanel>
                             <local:SettingRow x:Name="KeyRow" Glyph="&#xE8D7;" Title="Pairing code">
@@ -235,8 +240,8 @@
                                     <DataTemplate>
                                         <StackPanel>
                                             <local:SettingRow Glyph="&#xE7F8;" Title="{Binding Name}" Description="{Binding Detail}">
-                                                <Button Content="Forget" Style="{StaticResource GhostButton}" Padding="8,2" FontSize="12"
-                                                        Tag="{Binding Name}" Click="ForgetPeer_Click"/>
+                                                <Button Content="{Binding Action}" Style="{StaticResource GhostButton}" Padding="8,2" FontSize="12"
+                                                        Tag="{Binding}" Click="ForgetPeer_Click"/>
                                             </local:SettingRow>
                                             <Border Style="{StaticResource Divider}"/>
                                         </StackPanel>

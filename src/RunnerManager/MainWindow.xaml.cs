@@ -968,7 +968,7 @@ public partial class MainWindow : Window
     public async Task LeaveFleetAsync()
     {
         if (!InFleet || IsAgentWorkRunning()) return;
-        var others = Machines.Where(m => !m.IsLocal).Select(m => m.MachineName).ToList();
+        var others = Machines.Where(m => !m.IsLocal && !m.IsManaged).Select(m => m.MachineName).ToList();
         if (!DialogWindow.Confirm(this, $"Remove {Environment.MachineName} from the fleet?",
                 (others.Count > 0 ? $"{string.Join(", ", others)} will forget this PC. " : string.Empty) +
                 "The fleet agent and pairing code are removed from this PC. Runners keep running. " +
@@ -1013,6 +1013,12 @@ public partial class MainWindow : Window
                 FleetConfig.SetFleetKey(CommandSigner.NewKey());
                 newFleet = true;
             }
+            else if (join.PairingKey != null && join.Managed)
+            {
+                // Its own code: the fleet can reach this PC, but this PC can't reach the fleet, so it doesn't list the host.
+                FleetConfig.BecomeManaged(join.PairingKey, join.HostName);
+                AddActivity($"{join.HostName}'s fleet manages this PC one way now. It can view and control this PC; this PC can't see its PCs.");
+            }
             else if (join.PairingKey != null)
             {
                 FleetConfig.SetFleetKey(join.PairingKey);
@@ -1041,6 +1047,7 @@ public partial class MainWindow : Window
         var window = new PairingHostWindow(key) { Owner = this };
         window.ShowDialog();
         foreach (var name in window.JoinedPcs) AddActivity($"{name} joined the fleet.");
+        foreach (var name in window.ManagedPcs) AddActivity($"{name} is managed one way. It can't see or control the fleet's PCs.");
         _forceDiscovery = true;
         await RefreshAsync();
     }
