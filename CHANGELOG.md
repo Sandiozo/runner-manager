@@ -3,6 +3,13 @@
 Runner Manager updates itself from [Releases](https://github.com/Sandiozo/runner-manager/releases): open
 **Settings → Updates**, or click **Update** on a PC's card.
 
+## 2.8.1
+
+- Fix: a PC that joined the fleet over Tailscale (or from another network) did not appear on the PC that added it,
+  because discovery only searches the local network. The PC that adds it now remembers where it joined from.
+- **Add a PC** no longer picks **Join the fleet** for you: choose **Join the fleet** or **Manage it one way** before
+  you can click Allow.
+
 ## 2.8.0
 
 - **Manage a PC one way.** When a PC asks to join, choose **Manage it one way**: it gets a pairing code of its own

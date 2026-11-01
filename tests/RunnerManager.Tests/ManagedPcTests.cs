@@ -28,18 +28,23 @@ public class ManagedPairingTests
     }
 
     [Fact]
-    public async Task FullPairing_IsNotManaged()
+    public async Task FullPairing_IsNotManaged_AndTheHostLearnsWhereThePcIs()
     {
         var fleetKey = CommandSigner.NewKey();
         var port = TestPorts.FreeRange(2);
         using var host = new Pairing.PairingHost(fleetKey, "HOSTPC", port, port + 1);
+        var joined = new TaskCompletionSource<Pairing.JoinRequest>();
         host.JoinRequested += request => request.Allow();
+        host.Joined += request => joined.TrySetResult(request);
         host.Start();
 
         var result = await Pairing.JoinAsync($"127.0.0.1:{port}", "NEWPC", _ => { }, CancellationToken.None);
 
         Assert.False(result.Managed);
         Assert.Equal(fleetKey, result.PairingKey);
+        // Over Tailscale, discovery can't find the new PC, so the host keeps the address it joined from.
+        var request = await joined.Task.WaitAsync(Step);
+        Assert.Equal(("NEWPC", "127.0.0.1"), (request.Name, request.Address));
     }
 }
 

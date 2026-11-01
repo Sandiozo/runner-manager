@@ -46,7 +46,7 @@
                                HorizontalAlignment="Center"/>
                 </Border>
                 <TextBlock Text="What can it do?" FontWeight="SemiBold" Margin="0,18,0,8"/>
-                <RadioButton x:Name="FullAccessOption" Style="{StaticResource OptionCard}" GroupName="Access" IsChecked="True" Checked="AccessOption_Checked">
+                <RadioButton x:Name="FullAccessOption" Style="{StaticResource OptionCard}" GroupName="Access" Checked="AccessOption_Checked">
                     <StackPanel>
                         <TextBlock Text="Join the fleet" Style="{StaticResource OptionTitle}"/>
                         <TextBlock Text="It gets the fleet's pairing code. It can view and control every PC in the fleet, and they can control it." Style="{StaticResource OptionText}"/>

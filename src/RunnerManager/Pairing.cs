@@ -208,7 +208,8 @@ public static class Pairing
 
         /// <summary>Raised on a background thread; call Allow() or Deny() on the request.</summary>
         public event Action<JoinRequest>? JoinRequested;
-        public event Action<string>? Joined;
+        /// <summary>Raised on a background thread once a PC has its code.</summary>
+        public event Action<JoinRequest>? Joined;
 
         public PairingHost(byte[] pairingKey, string name, int pairingPort = PairingPort, int announcePort = AnnouncePort)
         {
@@ -340,7 +341,7 @@ public static class Pairing
                     {
                         Type = "allow", Name = _name, Payload = Convert.ToBase64String(payload), Managed = decision.ManagedKey != null
                     }, _cts.Token);
-                    Joined?.Invoke(request.Name);
+                    Joined?.Invoke(request);
                 }
                 catch { }
                 finally

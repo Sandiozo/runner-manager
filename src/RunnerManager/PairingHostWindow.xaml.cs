@@ -1,3 +1,4 @@
+using System.IO;
 using System.Windows;
 using System.Windows.Threading;
 
@@ -28,9 +29,15 @@ public partial class PairingHostWindow : Window
 
         _host = new Pairing.PairingHost(pairingKey, Environment.MachineName);
         _host.JoinRequested += request => Dispatcher.Invoke(() => Enqueue(request));
-        _host.Joined += name => Dispatcher.Invoke(() =>
+        _host.Joined += request => Dispatcher.Invoke(() =>
         {
-            if (!_managed.Contains(name)) _joined.Add(name);
+            if (!_managed.Contains(request.Name))
+            {
+                _joined.Add(request.Name);
+                // Discovery finds it only on the local network, so remember where it joined from (over Tailscale, for example).
+                try { MachineRelay.AddKnownPeer(request.Name, request.Address); }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+            }
             var added = _joined.Select(n => $"{n} joined").Concat(_managed.Select(n => $"{n} is managed one way"));
             JoinedText.Text = $"✓  {string.Join(". ", added)}. It appears in the sidebar within a few seconds. Add more PCs, or click Done.";
             JoinedText.Visibility = Visibility.Visible;
@@ -84,7 +91,9 @@ public partial class PairingHostWindow : Window
         _current = request;
         RequestTitle.Text = $"{request.Name} wants to join";
         CodeText.Text = request.Code;
-        FullAccessOption.IsChecked = true;
+        // A choice to make each time: only a PC that can't be managed one way joins the fleet without one.
+        FullAccessOption.IsChecked = !request.CanBeManaged;
+        ManagedAccessOption.IsChecked = false;
         ManagedAccessOption.IsEnabled = request.CanBeManaged;
         ManagedUnavailableText.Visibility = request.CanBeManaged ? Visibility.Collapsed : Visibility.Visible;
         AccessOption_Checked(this, new RoutedEventArgs());
@@ -110,11 +119,12 @@ public partial class PairingHostWindow : Window
     {
         if (AllowButton == null) return;
         AllowButton.Content = ManagedAccessOption.IsChecked == true ? "Allow one way" : "Allow";
+        AllowButton.IsEnabled = FullAccessOption.IsChecked == true || ManagedAccessOption.IsChecked == true;
     }
 
     private void Allow_Click(object sender, RoutedEventArgs e)
     {
-        if (_current is not { } request) return;
+        if (_current is not { } request || AllowButton.IsEnabled != true) return;
         if (ManagedAccessOption.IsChecked == true && request.CanBeManaged)
         {
             // Its own code, saved before it is sent, so the fleet knows the PC as soon as it has the code.
