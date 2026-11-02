@@ -29,17 +29,20 @@ public static class MachineRelay
 
     // Dashboard-side cache of each PC's last answer, so a PC that drops off stays listed as offline.
     private static readonly Dictionary<string, MachineStatusPayload> LastStatus = new(StringComparer.OrdinalIgnoreCase);
+    // When each PC last answered, by this PC's clock (guarded by LastStatus's lock).
+    private static readonly Dictionary<string, DateTime> LastAnswerUtc = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>
+    /// How long a PC that stops answering still counts as online: one slow answer (a busy PC, or a connection over the
+    /// internet) shouldn't make it flicker offline. Shorter than the 30 seconds after which its last status is too old.
+    /// </summary>
+    internal static readonly TimeSpan OfflineGrace = TimeSpan.FromSeconds(25);
     private static DateTime _lastDiscovery = DateTime.MinValue;
 
     // Agent-process state
     private static readonly List<AgentEvent> RecentEvents = new();
     private static readonly HashSet<string> WantRunning = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<string, List<DateTime>> RecoveryAttempts = new(StringComparer.OrdinalIgnoreCase);
-    private static readonly SemaphoreSlim StatusGate = new(1, 1);
-    private static MachineStatusPayload? _cachedStatus;
-    private static DateTime _cachedStatusUtc = DateTime.MinValue;
-    // Bumped whenever the cached status goes stale, so a status build already in progress does not store an old result.
-    private static int _statusVersion;
+    private static StatusCache? _status;
     private static volatile bool _restartAgentAfterUpdate;
     /// <summary>How long an update waits for the agent's work to finish before it restarts the agent anyway.</summary>
     private static readonly TimeSpan UpdateRestartWait = TimeSpan.FromMinutes(15);
@@ -182,6 +185,7 @@ public static class MachineRelay
         if (address.Length > 0) addresses.Add(address);
         if (candidates != null) addresses.AddRange(candidates.Select(c => c.Address).Where(a => !addresses.Any(b => SameEndpoint(a, b))));
         var problem = string.Empty;
+        var refused = false;
         foreach (var attempt in addresses)
         {
             try
@@ -193,6 +197,7 @@ public static class MachineRelay
             {
                 // Maybe the PC was renamed: ask the PC at this address who it is.
                 problem = ex.Message;
+                refused = true;
                 try
                 {
                     var response = await FleetNetwork.CallAsync(attempt, "*", new FleetRequest { Op = "status" });
@@ -201,7 +206,11 @@ public static class MachineRelay
                 }
                 catch { }
             }
-            catch (PairingMismatchException ex) { problem = ex.Message; }
+            catch (PairingMismatchException ex)
+            {
+                problem = ex.Message;
+                refused = true;
+            }
             catch (Exception) { if (problem.Length == 0) problem = $"Not reachable at {FleetNetwork.WithPort(attempt)}"; }
         }
         if (problem.Length == 0) problem = $"Not reachable at {FleetNetwork.WithPort(address)}";
@@ -209,11 +218,35 @@ public static class MachineRelay
         if (name == null)
             return MachineInfo.Placeholder("ADDR_" + Sanitize(address), address, DateTime.MinValue, address, problem);
         if (!listIfUnreachable) return null;
+        return Unanswered(key, address, problem, refused, managed: false)
+               ?? MachineInfo.Placeholder(key, name, known?.LastSeenUtc ?? DateTime.MinValue, address, problem);
+    }
+
+    /// <summary>
+    /// A PC that didn't answer this time, from its last status: still online when it answered within
+    /// <see cref="OfflineGrace"/> and only couldn't be reached (a refusal shows right away). Null when it never answered.
+    /// </summary>
+    private static MachineInfo? Unanswered(string key, string address, string problem, bool refused, bool managed)
+    {
         MachineStatusPayload? last;
-        lock (LastStatus) LastStatus.TryGetValue(key, out last);
-        return last != null
-            ? MachineInfo.FromPayload(key, last, address: address, problem: problem)
-            : MachineInfo.Placeholder(key, name, known?.LastSeenUtc ?? DateTime.MinValue, address, problem);
+        DateTime answered;
+        lock (LastStatus)
+        {
+            LastStatus.TryGetValue(key, out last);
+            LastAnswerUtc.TryGetValue(key, out answered);
+        }
+        if (last == null) return null;
+        var briefly = !refused && DateTime.UtcNow - answered < OfflineGrace;
+        return MachineInfo.FromPayload(key, last, address: address, problem: briefly ? string.Empty : problem, managed: managed);
+    }
+
+    private static void NoteAnswer(string key, MachineStatusPayload payload)
+    {
+        lock (LastStatus)
+        {
+            LastStatus[key] = payload;
+            LastAnswerUtc[key] = DateTime.UtcNow;
+        }
     }
 
     /// <summary>A PC answered at <paramref name="address"/>: remember it there, and list it (with a warning if its name is taken twice).</summary>
@@ -221,7 +254,7 @@ public static class MachineRelay
     {
         if (payload == null) throw new InvalidOperationException("The PC returned no status.");
         var machineKey = Sanitize(payload.MachineName);
-        lock (LastStatus) LastStatus[machineKey] = payload;
+        NoteAnswer(machineKey, payload);
         NoteSighting(payload.MachineName, payload.MachineId, address);
         RememberPeer(payload.MachineName, FleetNetwork.WithPort(address), payload.AppVersion, payload.MachineId);
         return MachineInfo.FromPayload(machineKey, payload, address: address, problem: DuplicateNameProblem(machineKey) ?? string.Empty);
@@ -302,6 +335,7 @@ public static class MachineRelay
         var addresses = new List<string> { pc.Address };
         if (candidates != null) addresses.AddRange(candidates.Select(c => c.Address).Where(a => !addresses.Any(b => SameEndpoint(a, b))));
         var problem = string.Empty;
+        var refused = false;
         foreach (var attempt in addresses.Where(a => a.Length > 0))
         {
             try
@@ -313,6 +347,7 @@ public static class MachineRelay
             {
                 // Maybe it was renamed: ask the PC at this address who it is.
                 problem = ex.Message;
+                refused = true;
                 try
                 {
                     var response = await FleetNetwork.CallAsync(attempt, "*", new FleetRequest { Op = "status" }, pairingKey: pairingKey);
@@ -323,6 +358,7 @@ public static class MachineRelay
             }
             catch (PairingMismatchException ex)
             {
+                refused = true;
                 problem = ex.Reason is "" or "denied"
                     ? $"{pc.Name} no longer accepts this fleet's requests. It may have been disconnected there. Remove it here, or pair it again."
                     : ex.Message;
@@ -330,11 +366,8 @@ public static class MachineRelay
             catch (Exception) { if (problem.Length == 0) problem = $"Not reachable at {FleetNetwork.WithPort(attempt)}"; }
         }
         if (problem.Length == 0) problem = $"Not reachable at {FleetNetwork.WithPort(pc.Address)}";
-        MachineStatusPayload? last;
-        lock (LastStatus) LastStatus.TryGetValue(key, out last);
-        return last != null
-            ? MachineInfo.FromPayload(key, last, address: pc.Address, problem: problem, managed: true)
-            : MachineInfo.Placeholder(key, pc.Name, pc.LastSeenUtc, pc.Address, problem, managed: true);
+        return Unanswered(key, pc.Address, problem, refused, managed: true)
+               ?? MachineInfo.Placeholder(key, pc.Name, pc.LastSeenUtc, pc.Address, problem, managed: true);
     }
 
     /// <summary>A managed PC answered: remember where (and its new name after a rename), and list it.</summary>
@@ -344,7 +377,7 @@ public static class MachineRelay
         var machineKey = Sanitize(payload.MachineName);
         if (machineKey != Sanitize(pc.Name) && (machineKey == LocalMachineKey || FleetConfig.Current.KnownPeers.Any(p => Sanitize(p.Name) == machineKey)))
             return MachineInfo.Placeholder("MANAGED_" + machineKey, payload.MachineName, DateTime.UtcNow, address, ManagedNameProblem(payload.MachineName), managed: true);
-        lock (LastStatus) LastStatus[machineKey] = payload;
+        NoteAnswer(machineKey, payload);
         NoteSighting(payload.MachineName, payload.MachineId, address);
         var at = FleetNetwork.WithPort(address);
         if (pc.Name != payload.MachineName || pc.Address != at || pc.Version != payload.AppVersion
@@ -657,35 +690,20 @@ public static class MachineRelay
             InvalidateStatus();
             return command.Id;
         }
+        // Several dashboards may poll at once; the (WMI-heavy) status is built at most every two seconds, in the background.
+        var status = _status = new StatusCache(async () => BuildPayload(await GatherLocalStateAsync(), state.LastCommandId, lastResult));
         async Task<MachineStatusPayload> StatusAsync()
         {
-            await StatusGate.WaitAsync();
-            try
+            var cached = await status.GetAsync();
+            // Pending before results: a command that finishes in between then shows in both, never in neither.
+            var running = pending.Keys.ToArray();
+            return cached with
             {
-                // Several dashboards may poll at once; build the (WMI-heavy) status at most every two seconds.
-                var cached = _cachedStatus;
-                if (cached == null || DateTime.UtcNow - _cachedStatusUtc > TimeSpan.FromSeconds(2))
-                {
-                    var version = Volatile.Read(ref _statusVersion);
-                    cached = BuildPayload(await GatherLocalStateAsync(), state.LastCommandId, lastResult);
-                    // Only keep it when nothing changed while it was built.
-                    if (version == Volatile.Read(ref _statusVersion))
-                    {
-                        _cachedStatus = cached;
-                        _cachedStatusUtc = DateTime.UtcNow;
-                    }
-                }
-                // Pending before results: a command that finishes in between then shows in both, never in neither.
-                var running = pending.Keys.ToArray();
-                return cached with
-                {
-                    UpdatedUtc = DateTime.UtcNow,
-                    PendingCommandIds = running,
-                    RecentCommands = state.Results,
-                    Busy = running.Length > 0 || !AgentWork.IsIdle
-                };
-            }
-            finally { StatusGate.Release(); }
+                UpdatedUtc = DateTime.UtcNow,
+                PendingCommandIds = running,
+                RecentCommands = state.Results,
+                Busy = running.Length > 0 || !AgentWork.IsIdle
+            };
         }
 
         using var server = new AgentServer(StatusAsync, Enqueue, LogReader.ReadAsync, job: RunnerActivity.ReadAsync);
@@ -786,11 +804,7 @@ public static class MachineRelay
         }
     }
 
-    private static void InvalidateStatus()
-    {
-        Interlocked.Increment(ref _statusVersion);
-        _cachedStatus = null;
-    }
+    private static void InvalidateStatus() => _status?.Invalidate();
 
     private static async Task<string> ExecuteCommandAsync(MachineCommand command)
     {

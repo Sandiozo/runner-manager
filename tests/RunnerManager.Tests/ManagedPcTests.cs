@@ -228,6 +228,25 @@ public class ManagedFleetTests
     }
 
     [Fact]
+    public async Task APcThatMissesOneAnswer_StaysOnline_ForAWhile()
+    {
+        await WithConfigAsync(async () =>
+        {
+            var own = CommandSigner.NewKey();
+            var friend = new TestAgent("FRIENDPC", key: own);
+            FleetConfig.SetFleetKey(CommandSigner.NewKey());
+            FleetConfig.AddManagedPc("FRIENDPC", friend.Address, own);
+            Assert.Empty(Assert.Single(await MachineRelay.ReadFleetAsync(), m => m.MachineName == "FRIENDPC").ConnectionProblem);
+
+            // It stops answering (a slow answer looks the same): shown online for now, without a problem.
+            friend.Dispose();
+            var missed = Assert.Single(await MachineRelay.ReadFleetAsync(), m => m.MachineName == "FRIENDPC");
+            Assert.Empty(missed.ConnectionProblem);
+            Assert.True(missed.IsOnline);
+        });
+    }
+
+    [Fact]
     public async Task ManagedPc_CantTakeAFleetPcsName()
     {
         await WithConfigAsync(async () =>
@@ -336,5 +355,67 @@ public class ManagedFleetTests
             Assert.Empty(FleetConfig.Current.ManagedBy);
             return Task.CompletedTask;
         }).GetAwaiter().GetResult();
+    }
+}
+
+public class StatusCacheTests
+{
+    private static MachineStatusPayload Payload(int n) => new() { MachineName = "PC", LastCommandId = n.ToString() };
+
+    [Fact]
+    public async Task ASlowBuild_DoesNotHoldUpRequests_OnceThereIsAStatus()
+    {
+        var builds = 0;
+        var cache = new StatusCache(async () =>
+        {
+            var n = Interlocked.Increment(ref builds);
+            await Task.Delay(n == 1 ? 0 : 1500);
+            return Payload(n);
+        });
+        Assert.Equal("1", (await cache.GetAsync()).LastCommandId);
+
+        await Task.Delay(StatusCache.FreshFor + TimeSpan.FromMilliseconds(100));
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        // Old by now: answered right away with the last status, while the next one is built.
+        Assert.Equal("1", (await cache.GetAsync()).LastCommandId);
+        Assert.True(watch.ElapsedMilliseconds < 500, $"took {watch.ElapsedMilliseconds} ms");
+        // Requests meanwhile don't start more builds.
+        await cache.GetAsync();
+        Assert.Equal(2, builds);
+
+        await Task.Delay(2000);
+        Assert.Equal("2", (await cache.GetAsync()).LastCommandId);
+    }
+
+    [Fact]
+    public async Task AfterAChange_ARequestWaitsForTheStatusThatShowsIt()
+    {
+        var builds = 0;
+        var cache = new StatusCache(async () =>
+        {
+            var n = Interlocked.Increment(ref builds);
+            await Task.Delay(n == 1 ? 0 : 300);
+            return Payload(n);
+        });
+        await cache.GetAsync();
+
+        cache.Invalidate();
+        Assert.Equal("2", (await cache.GetAsync()).LastCommandId);
+    }
+
+    [Fact]
+    public async Task AfterAChange_ABuildThatTakesTooLong_GivesTheLastStatus()
+    {
+        var builds = 0;
+        var cache = new StatusCache(async () =>
+        {
+            var n = Interlocked.Increment(ref builds);
+            await Task.Delay(n == 1 ? 0 : 5000);
+            return Payload(n);
+        }) { ChangeWait = TimeSpan.FromMilliseconds(200) };
+        await cache.GetAsync();
+
+        cache.Invalidate();
+        Assert.Equal("1", (await cache.GetAsync()).LastCommandId);
     }
 }

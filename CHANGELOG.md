@@ -3,6 +3,14 @@
 Runner Manager updates itself from [Releases](https://github.com/Sandiozo/runner-manager/releases): open
 **Settings → Updates**, or click **Update** on a PC's card.
 
+## 2.8.2
+
+- Fix: a busy PC, or one reached over the internet, kept dropping offline although its runners worked. Its fleet agent
+  built its status while the request waited, which on a busy PC took up to 6 seconds, the time a dashboard waits. The
+  agent now answers right away with its latest status and builds the next one in the background.
+- A PC that misses one answer is no longer shown offline at once: only when it hasn't answered for 25 seconds, or
+  refuses the request.
+
 ## 2.8.1
 
 - Fix: a PC that joined the fleet over Tailscale (or from another network) did not appear on the PC that added it,
