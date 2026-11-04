@@ -379,6 +379,8 @@ public class StatusCacheTests
         // Old by now: answered right away with the last status, while the next one is built.
         Assert.Equal("1", (await cache.GetAsync()).LastCommandId);
         Assert.True(watch.ElapsedMilliseconds < 500, $"took {watch.ElapsedMilliseconds} ms");
+        // The next build runs on the thread pool, so on a busy PC it can start only after that answer.
+        Assert.True(SpinWait.SpinUntil(() => Volatile.Read(ref builds) == 2, TimeSpan.FromSeconds(1)));
         // Requests meanwhile don't start more builds.
         await cache.GetAsync();
         Assert.Equal(2, builds);
