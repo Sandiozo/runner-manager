@@ -44,22 +44,40 @@ public static class RunnerActivity
     public static async Task<RunnerJobActivity> ReadAsync(string runnerKey)
     {
         var root = await FindRootAsync(runnerKey);
-        return await Task.Run(() => new RunnerJobActivity
+        return await Task.Run(() =>
         {
-            Output = ReadOutput(root, OutputLines),
-            Processes = ReadProcesses(root),
-            CapturedUtc = DateTime.UtcNow
+            var processes = ProcessSnapshot.Read();
+            return new RunnerJobActivity
+            {
+                Output = ReadOutput(root, OutputLines, OutputNotBefore(WorkerStartedUtc(root, processes))),
+                Processes = ReadProcesses(root, processes),
+                CapturedUtc = DateTime.UtcNow
+            };
         });
     }
 
     internal static async Task<string> FindRootAsync(string runnerKey)
     {
         lock (RootCache)
-            if (RootCache.TryGetValue(runnerKey, out var cached) && Directory.Exists(cached)) return cached;
+            if (RootCache.TryGetValue(runnerKey, out var cached) && StillHoldsRunner(cached, runnerKey)) return cached;
         var runner = await RunnerService.FindRunnerAsync(runnerKey)
                      ?? throw new InvalidOperationException("The runner was not found on this PC.");
         lock (RootCache) RootCache[runnerKey] = runner.InstallPath;
         return runner.InstallPath;
+    }
+
+    /// <summary>
+    /// Whether a remembered folder still holds the runner. "Remove and keep files" leaves the folder without .runner, and
+    /// a runner created again with the same name (and service name) gets a new folder.
+    /// </summary>
+    internal static bool StillHoldsRunner(string root, string runnerKey)
+    {
+        if (!File.Exists(Path.Combine(root, ".runner"))) return false;
+        if (!runnerKey.StartsWith("actions.runner.", StringComparison.OrdinalIgnoreCase))
+            return root.TrimEnd('\\').Equals(runnerKey.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase);
+        // config.cmd writes the service name to .service.
+        try { return File.ReadAllText(Path.Combine(root, ".service")).Trim().TrimStart('﻿').Equals(runnerKey, StringComparison.OrdinalIgnoreCase); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return false; }
     }
 
     /// <summary>
@@ -106,7 +124,13 @@ public static class RunnerActivity
     }
 
     /// <summary>The last lines of the running step's output, without timestamps and color codes.</summary>
-    internal static string[] ReadOutput(string root, int lines) => ReadOutput(root, lines, null);
+    internal static string[] ReadOutput(string root, int lines)
+    {
+        DateTime? workerStarted = null;
+        try { workerStarted = WorkerStartedUtc(root, ProcessSnapshot.Read(WorkerName)); }
+        catch (Exception ex) when (ex is ManagementException or System.Runtime.InteropServices.COMException) { }
+        return ReadOutput(root, lines, OutputNotBefore(workerStarted));
+    }
 
     private static string[] ReadOutput(string root, int lines, DateTime? notBeforeUtc)
     {
@@ -142,9 +166,9 @@ public static class RunnerActivity
     }
 
     /// <summary>The runner's job process (Runner.Worker) and everything it started, busiest first.</summary>
-    internal static RunnerProcess[] ReadProcesses(string root)
+    internal static RunnerProcess[] ReadProcesses(string root, ProcessSnapshot? processes = null)
     {
-        var job = ReadJobRows(root);
+        var job = JobRows(root, (processes ?? ProcessSnapshot.Read()).Rows);
         if (job.Count == 0) return Array.Empty<RunnerProcess>();
 
         var now = DateTime.UtcNow;
@@ -180,15 +204,24 @@ public static class RunnerActivity
         return result.OrderByDescending(p => p.CpuPercent).ThenByDescending(p => p.MemoryBytes).Take(MaxProcesses).ToArray();
     }
 
-    /// <summary>The job's processes: the runner's Runner.Worker processes and everything they started.</summary>
-    private static List<ProcessRow> ReadJobRows(string root)
+    private const string WorkerName = "Runner.Worker.exe";
+
+    /// <summary>
+    /// The PC's processes with their command lines. A full Win32_Process query is slow, so one reading is shared by
+    /// everything that looks at jobs in the same update.
+    /// </summary>
+    internal sealed class ProcessSnapshot(IReadOnlyList<ProcessRow> rows)
     {
-        var bin = Path.Combine(root, "bin") + Path.DirectorySeparatorChar;
-        var all = new List<ProcessRow>();
-        using (var searcher = new ManagementObjectSearcher(
-                   "SELECT ProcessId, ParentProcessId, Name, ExecutablePath, CommandLine, WorkingSetSize, KernelModeTime, UserModeTime, CreationDate FROM Win32_Process"))
-        using (var results = searcher.Get())
+        public IReadOnlyList<ProcessRow> Rows { get; } = rows;
+
+        /// <param name="name">Only processes with this file name, for a quick look.</param>
+        public static ProcessSnapshot Read(string? name = null)
         {
+            var all = new List<ProcessRow>();
+            var query = "SELECT ProcessId, ParentProcessId, Name, ExecutablePath, CommandLine, WorkingSetSize, KernelModeTime, UserModeTime, CreationDate FROM Win32_Process"
+                        + (name == null ? string.Empty : $" WHERE Name = '{name.Replace("'", string.Empty)}'");
+            using var searcher = new ManagementObjectSearcher(query);
+            using var results = searcher.Get();
             foreach (ManagementObject item in results)
             {
                 using (item)
@@ -201,20 +234,41 @@ public static class RunnerActivity
                         item["CreationDate"]?.ToString() ?? string.Empty));
                 }
             }
+            return new ProcessSnapshot(all);
         }
+    }
 
-        var workers = all.Where(p => p.Name.Equals("Runner.Worker.exe", StringComparison.OrdinalIgnoreCase)
-                                     && p.Path.StartsWith(bin, StringComparison.OrdinalIgnoreCase)).ToList();
+    private static bool IsWorkerOf(ProcessRow process, string root)
+        => process.Name.Equals(WorkerName, StringComparison.OrdinalIgnoreCase)
+           && process.Path.StartsWith(Path.Combine(root, "bin") + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>When the runner's earliest running Runner.Worker started, or null when it runs no job.</summary>
+    private static DateTime? WorkerStartedUtc(string root, ProcessSnapshot processes)
+        => processes.Rows.Where(p => IsWorkerOf(p, root)).Select(p => ParseStarted(p.Started)).Where(s => s != null).Min();
+
+    /// <summary>
+    /// The job's processes: the runner's Runner.Worker processes and everything they started. A process whose parent
+    /// ended keeps that parent's ID, and Windows can give the ID to a new process, so a child counts only when it was
+    /// created at or after its parent (explorer.exe, whose parent userinit.exe always exits, would otherwise join a job).
+    /// </summary>
+    internal static List<ProcessRow> JobRows(string root, IReadOnlyList<ProcessRow> all)
+    {
         var children = all.ToLookup(p => p.ParentId);
         var job = new List<ProcessRow>();
-        var queue = new Queue<ProcessRow>(workers);
+        var queue = new Queue<ProcessRow>(all.Where(p => IsWorkerOf(p, root)));
         var seen = new HashSet<int>();
         while (queue.Count > 0)
         {
             var process = queue.Dequeue();
             if (!seen.Add(process.Id)) continue;
             job.Add(process);
-            foreach (var child in children[process.Id]) queue.Enqueue(child);
+            var parentStarted = ParseStarted(process.Started);
+            foreach (var child in children[process.Id])
+            {
+                if (child.Id == process.Id) continue;
+                if (parentStarted is { } parent && ParseStarted(child.Started) is { } started && started < parent) continue;
+                queue.Enqueue(child);
+            }
         }
         return job;
     }
@@ -223,10 +277,10 @@ public static class RunnerActivity
     /// A reading of a running job for <see cref="JobWatch"/>: when its Runner.Worker started, the processor time of each
     /// of its processes, and the state of the running step's output file. Null when the runner runs no job.
     /// </summary>
-    internal static JobSample? ReadJobSample(string root)
+    internal static JobSample? ReadJobSample(string root, ProcessSnapshot? processes = null)
     {
-        var job = ReadJobRows(root);
-        var worker = job.FirstOrDefault(p => p.Name.Equals("Runner.Worker.exe", StringComparison.OrdinalIgnoreCase));
+        var job = JobRows(root, (processes ?? ProcessSnapshot.Read()).Rows);
+        var worker = job.FirstOrDefault(p => p.Name.Equals(WorkerName, StringComparison.OrdinalIgnoreCase));
         if (worker == null) return null;
         var workerStarted = ParseStarted(worker.Started);
         var outputState = CurrentOutputFile(root, OutputNotBefore(workerStarted))?.State ?? string.Empty;
@@ -248,8 +302,8 @@ public static class RunnerActivity
 
     internal static List<string> StopJobProcesses(string root)
     {
-        var job = ReadJobRows(root);
-        var workers = job.Where(p => p.Name.Equals("Runner.Worker.exe", StringComparison.OrdinalIgnoreCase)).Select(p => p.Id).ToHashSet();
+        var job = JobRows(root, ProcessSnapshot.Read().Rows);
+        var workers = job.Where(p => p.Name.Equals(WorkerName, StringComparison.OrdinalIgnoreCase)).Select(p => p.Id).ToHashSet();
         if (workers.Count == 0) throw new InvalidOperationException("The runner is not running a job.");
         var parents = job.ToDictionary(p => p.Id, p => p.ParentId);
         var stopped = new List<string>();
@@ -317,7 +371,7 @@ public static class RunnerActivity
         catch { return null; }
     }
 
-    private sealed record ProcessRow(int Id, int ParentId, string Name, string Path, string CommandLine, long Memory, ulong Cpu, string Started);
+    internal sealed record ProcessRow(int Id, int ParentId, string Name, string Path, string CommandLine, long Memory, ulong Cpu, string Started);
 
     /// <param name="ProcessorTime">Processor time in 100 ns units, per process ("ID|start time").</param>
     internal sealed record JobSample(DateTime WorkerStartedUtc, Dictionary<string, ulong> ProcessorTime, string OutputState);

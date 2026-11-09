@@ -209,7 +209,10 @@ public static class JobWatch
     private static readonly Dictionary<string, State> States = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>Takes a new reading of each busy runner's job when the last one is 30 seconds old, and forgets idle runners.</summary>
-    public static void Update(IEnumerable<RunnerInfo> runners)
+    public static void Update(IEnumerable<RunnerInfo> runners) => Update(runners, () => RunnerActivity.ProcessSnapshot.Read());
+
+    /// <param name="readProcesses">Reads the PC's processes: once per update, shared by all busy runners.</param>
+    internal static void Update(IEnumerable<RunnerInfo> runners, Func<RunnerActivity.ProcessSnapshot> readProcesses)
     {
         var now = DateTime.UtcNow;
         var busy = runners.Where(r => r.IsRunning && r.ActivityText.Equals("Busy", StringComparison.OrdinalIgnoreCase))
@@ -219,10 +222,14 @@ public static class JobWatch
             foreach (var gone in States.Keys.Where(k => !busy.Contains(k)).ToList()) States.Remove(gone);
             busy.RemoveWhere(root => States.TryGetValue(root, out var state) && now - state.SampledUtc < SampleInterval);
         }
+        if (busy.Count == 0) return;
+        RunnerActivity.ProcessSnapshot processes;
+        try { processes = readProcesses(); }
+        catch { return; }
         foreach (var root in busy)
         {
             RunnerActivity.JobSample? sample;
-            try { sample = RunnerActivity.ReadJobSample(root); }
+            try { sample = RunnerActivity.ReadJobSample(root, processes); }
             catch { continue; }
             lock (States)
             {

@@ -73,6 +73,87 @@ public class AuditRunnerTests
         finally { Directory.Delete(root, recursive: true); }
     }
 
+    private static RunnerActivity.ProcessRow Row(int id, int parent, string name, string path, DateTime startedUtc)
+        => new(id, parent, name, path, string.Empty, 0, 0, System.Management.ManagementDateTimeConverter.ToDmtfDateTime(startedUtc.ToLocalTime()));
+
+    private static RunnerInfo Busy(string root) => new() { InstallPath = root, IsRunning = true, ActivityText = "Busy" };
+
+    [Fact]
+    public void JobProcesses_LeaveOutAnOlderProcess_WhoseEndedParentHadTheWorkersId()
+    {
+        const string root = @"C:\GitHub-Runners\app";
+        var started = DateTime.UtcNow.AddHours(-1);
+        var rows = new[]
+        {
+            Row(100, 50, "Runner.Worker.exe", root + @"\bin\Runner.Worker.exe", started),
+            Row(200, 100, "dotnet.exe", @"C:\dotnet\dotnet.exe", started.AddSeconds(10)),
+            Row(201, 200, "MSBuild.exe", @"C:\dotnet\MSBuild.exe", started.AddSeconds(20)),
+            // explorer.exe outlives userinit.exe, whose ID Windows later gave to the worker.
+            Row(300, 100, "explorer.exe", @"C:\Windows\explorer.exe", started.AddDays(-1)),
+            Row(301, 300, "notepad.exe", @"C:\Windows\notepad.exe", started.AddMinutes(5)),
+            // Another runner's worker.
+            Row(400, 51, "Runner.Worker.exe", @"C:\GitHub-Runners\other\bin\Runner.Worker.exe", started)
+        };
+
+        var job = RunnerActivity.JobRows(root, rows);
+
+        Assert.Equal(new[] { 100, 200, 201 }, job.Select(p => p.Id).Order());
+    }
+
+    [Fact]
+    public void RememberedRunnerFolder_IsUsed_OnlyWhileItStillHoldsTheRunner()
+    {
+        var root = Directory.CreateTempSubdirectory("rm-audit-").FullName;
+        try
+        {
+            const string service = "actions.runner.owner-repo.build-01";
+            File.WriteAllText(Path.Combine(root, ".runner"), "{}");
+            File.WriteAllText(Path.Combine(root, ".service"), service);
+
+            Assert.True(RunnerActivity.StillHoldsRunner(root, service));
+            Assert.True(RunnerActivity.StillHoldsRunner(root, root + "\\"));
+            Assert.False(RunnerActivity.StillHoldsRunner(root, "actions.runner.owner-repo.other"));
+            // "Remove and keep files" deletes the registration.
+            File.Delete(Path.Combine(root, ".runner"));
+            Assert.False(RunnerActivity.StillHoldsRunner(root, service));
+            Assert.False(RunnerActivity.StillHoldsRunner(root, root));
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
+    public void JobWatch_ReadsTheProcessesOnce_ForAllBusyRunners()
+    {
+        var a = NewRunnerRoot();
+        var b = NewRunnerRoot();
+        try
+        {
+            var started = DateTime.UtcNow.AddMinutes(-3);
+            var snapshot = new RunnerActivity.ProcessSnapshot(new[]
+            {
+                Row(1, 0, "Runner.Worker.exe", Path.Combine(a, "bin", "Runner.Worker.exe"), started),
+                Row(2, 0, "Runner.Worker.exe", Path.Combine(b, "bin", "Runner.Worker.exe"), started)
+            });
+            var reads = 0;
+            RunnerActivity.ProcessSnapshot Read() { reads++; return snapshot; }
+
+            JobWatch.Update(new[] { Busy(a), Busy(b) }, Read);
+            Assert.Equal(1, reads);
+            Assert.NotNull(JobWatch.For(a).StartedUtc);
+            Assert.NotNull(JobWatch.For(b).StartedUtc);
+
+            // Both readings are fresh, so nothing is read again.
+            JobWatch.Update(new[] { Busy(a), Busy(b) }, Read);
+            Assert.Equal(1, reads);
+        }
+        finally
+        {
+            JobWatch.Update(Array.Empty<RunnerInfo>());
+            Directory.Delete(a, recursive: true);
+            Directory.Delete(b, recursive: true);
+        }
+    }
+
     [Fact]
     public void OutputFile_ThatWentAway_IsNoProgress()
     {
