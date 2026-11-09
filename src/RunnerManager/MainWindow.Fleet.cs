@@ -589,7 +589,7 @@ public partial class MainWindow
                 _pendingMachineCommands[machine.MachineKey] = new PendingCommand(id, pendingLabel, DateTime.UtcNow);
             AwaitResult(id, machine.MachineKey, machine.MachineName, what);
             var sent = $"{what}: sent. Waiting for its fleet agent." + (note.Length > 0 ? $" {note}" : string.Empty);
-            AddActivity(sent);
+            AddActivity(sent, ActivityKind.Info);
             ShowNotice(sent, StatusKind.Ok);
         }
         catch (Exception ex)

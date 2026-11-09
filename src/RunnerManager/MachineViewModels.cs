@@ -521,7 +521,9 @@ public sealed class MachineInfo : INotifyPropertyChanged
 
     // ----- Versions and updates -----
     public string VersionText => IsLocalOnly ? $"v{AppUpdater.CurrentVersion}"
-        : string.IsNullOrWhiteSpace(AppVersion) ? $"agent protocol {AgentProtocolVersion}" : $"v{AppVersion}";
+        : !string.IsNullOrWhiteSpace(AppVersion) ? $"v{AppVersion}"
+        // Older agents send only their protocol; a PC that was never reached has sent nothing.
+        : AgentProtocolVersion > 0 ? $"fleet agent protocol {AgentProtocolVersion}" : "Not reported";
     public bool UpdateAvailable => !IsLocalOnly && AppVersion.Length > 0 && AppUpdater.IsNewer(LatestAppVersion, AppVersion);
     public Visibility UpdateBadgeVisibility => LocalAgentOutdated || UpdateAvailable ? Visibility.Visible : Visibility.Collapsed;
     public string UpdateBadgeText => LocalAgentOutdated ? "Update fleet agent" : $"Runner Manager v{LatestAppVersion} available";
@@ -567,7 +569,8 @@ public sealed class MachineInfo : INotifyPropertyChanged
     public string RunnerSummary => Runners.Length == 0
         ? "No runners"
         : $"{RunningCount} of {Runners.Length} running" + (BusyCount > 0 ? $"  ·  {BusyCount} busy" : string.Empty);
-    public string SidebarSubtitle => $"{RunnerCountText} runners running";
+    public string SidebarSubtitle => Runners.Length == 0 ? "No runners"
+        : $"{RunnerCountText} {(Runners.Length == 1 ? "runner" : "runners")} running";
     public Visibility NoRunnersVisibility => Runners.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
 
     public string LastResultText

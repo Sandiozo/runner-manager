@@ -522,6 +522,38 @@ public class AuditDashboardTests
         });
     }
 
+    // ----- Bug 15: texts -----
+
+    [Fact]
+    public void PcVersion_SaysWhatIsKnown()
+    {
+        Assert.Equal("Not reported", new MachineInfo { MachineName = "BUILD-01" }.VersionText);
+        Assert.Equal("fleet agent protocol 7", new MachineInfo { MachineName = "BUILD-01", AgentProtocolVersion = 7 }.VersionText);
+        Assert.Equal("v2.8.2", new MachineInfo { MachineName = "BUILD-01", AgentProtocolVersion = 15, AppVersion = "2.8.2" }.VersionText);
+    }
+
+    [Fact]
+    public void SidebarSubtitle_CountsRunnersInWords()
+    {
+        Assert.Equal("No runners", PcWith("BUILD-01").SidebarSubtitle);
+        Assert.Equal("0/1 runner running", PcWith("BUILD-01", RunnerWith("api")).SidebarSubtitle);
+        Assert.Equal("0/2 runners running", PcWith("BUILD-01", RunnerWith("api"), RunnerWith("web")).SidebarSubtitle);
+    }
+
+    [Fact]
+    public void Activity_KeepsAKindThatIsKnown()
+    {
+        var window = NewDashboard();
+        WpfTestApp.Run(() =>
+        {
+            // The words alone would make this a warning.
+            window.AddActivity("Turn off auto-recovery on BUILD-01 completed.", ActivityKind.Success);
+            Assert.Equal(ActivityKind.Success, window.ActivityLog[0].Kind);
+            window.AddActivity("Remove runner failed: access denied");
+            Assert.Equal(ActivityKind.Error, window.ActivityLog[0].Kind);
+        });
+    }
+
     // ----- Bug 10: keyboard shortcuts -----
 
     [Theory]

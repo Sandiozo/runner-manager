@@ -185,7 +185,7 @@ public partial class MainWindow : Window
             if (!_operationRunning && DateTime.UtcNow >= _noticeUntilUtc)
             {
                 if (_agentOwner != null) SetStatus($"The fleet agent on this PC runs for {_agentOwner}.", StatusKind.Warning);
-                else SetStatus(_githubAuthenticated ? "Ready" : "GitHub not connected. Showing this PC only.",
+                else SetStatus(_githubAuthenticated ? "Ready" : "GitHub is not connected. Jobs, queues and recent runs are not shown.",
                     _githubAuthenticated ? StatusKind.Ok : StatusKind.Warning);
             }
         }
@@ -316,7 +316,7 @@ public partial class MainWindow : Window
     {
         if (IsAgentWorkBusy)
         {
-            AddActivity($"{title} skipped: “{_agentWorkTitle}” is still running.");
+            AddActivity($"{title} skipped: “{_agentWorkTitle}” is still running.", ActivityKind.Warning);
             return;
         }
         _agentWorkTitle = title;
@@ -324,7 +324,7 @@ public partial class MainWindow : Window
 
         async Task RunAsync()
         {
-            AddActivity($"{title} started. The fleet agent restarts when it is not busy.");
+            AddActivity($"{title} started. The fleet agent restarts when it is not busy.", ActivityKind.Info);
             var waiting = new DispatcherTimer { Interval = TimeSpan.FromMinutes(2) };
             waiting.Tick += (_, _) =>
             {
@@ -335,7 +335,7 @@ public partial class MainWindow : Window
             try
             {
                 await work(AddActivity);
-                AddActivity($"{title} completed.");
+                AddActivity($"{title} completed.", ActivityKind.Success);
             }
             catch (Exception ex)
             {
@@ -542,6 +542,8 @@ public partial class MainWindow : Window
 
     // ================= Summary, filter, navigation =================
 
+    private static string Plural(int count, string word) => $"{count} {word}{(count == 1 ? "" : "s")}";
+
     private void UpdateSummary()
     {
         var machines = Machines.ToList();
@@ -562,11 +564,11 @@ public partial class MainWindow : Window
         TileBusySub.Text = busy.Count > 0 ? string.Join(", ", busy.Select(r => r.TitleText))
             : queued > 0 ? $"{queued} job{(queued == 1 ? "" : "s")} queued on this PC" : "No jobs running";
 
-        _allMachines.Update($"{machines.Count} PC{(machines.Count == 1 ? "" : "s")}  ·  {runners.Count} runners");
+        _allMachines.Update($"{Plural(machines.Count, "PC")}  ·  {Plural(runners.Count, "runner")}");
         ApplyOptionalSections(machines);
         UpdateOutputTabs();
         UpdatePageHeader();
-        _tray?.SetTooltip($"Runner Manager — {running}/{runners.Count} runners running, {busy.Count} busy");
+        _tray?.SetTooltip($"Runner Manager — {running} of {Plural(runners.Count, "runner")} running, {busy.Count} busy");
     }
 
     private void UpdatePageHeader()
@@ -694,9 +696,9 @@ public partial class MainWindow : Window
         _refreshTimer.Interval = IsVisible || interval > HiddenRefreshInterval ? interval : HiddenRefreshInterval;
     }
 
-    private void RaiseAlert(string message, bool warning)
+    private void RaiseAlert(string message, bool warning, ActivityKind? kind = null)
     {
-        AddActivity(message);
+        AddActivity(message, kind ?? ActivityEntry.Classify(message));
         // AI assistants read the alerts with recent_alerts.
         AlertLog.Append(message, warning);
         if (_settings.Notifications && !IsActive)
@@ -740,7 +742,7 @@ public partial class MainWindow : Window
         {
             if (IsOperationRunning("Disconnect GitHub")) return;
             if (!DialogWindow.Confirm(this, "Disconnect GitHub?",
-                    "The GitHub CLI on this PC is signed out. Runner Manager stops showing other PCs and GitHub job status until you connect again.",
+                    "The GitHub CLI on this PC is signed out. Until you connect again, Runner Manager does not show jobs, queues and recent runs from GitHub, and cannot add runners. Other PCs in the fleet are still shown.",
                     "Disconnect", danger: true)) return;
             await RunOperationAsync("Disconnect GitHub", async log =>
             {
@@ -853,15 +855,15 @@ public partial class MainWindow : Window
         var succeeded = false;
         try
         {
-            AddActivity($"{title} started.");
+            AddActivity($"{title} started.", ActivityKind.Info);
             await operation(OperationLog(title, operationId));
             succeeded = true;
-            AddActivity($"{title} completed.");
+            AddActivity($"{title} completed.", ActivityKind.Success);
             if (!IsActive && _settings.Notifications) _tray?.Notify("Runner Manager", $"{title} completed.");
         }
         catch (Exception ex)
         {
-            AddActivity($"{title} failed: {ex.Message}");
+            AddActivity($"{title} failed: {ex.Message}", ActivityKind.Error);
             ShowNotice($"{title} failed: {ex.Message}", StatusKind.Error);
             DialogWindow.Error(this, $"{title} failed", ex.Message);
         }
@@ -882,7 +884,7 @@ public partial class MainWindow : Window
     private bool IsOperationRunning(string title)
     {
         if (!_operationRunning) return false;
-        AddActivity($"{title} skipped: “{_operationTitle}” is still running.");
+        AddActivity($"{title} skipped: “{_operationTitle}” is still running.", ActivityKind.Warning);
         DialogWindow.Info(this, "Another operation is running",
             $"“{_operationTitle}” is still running on this PC. Try “{title}” again when it is done. Its progress is shown in the status bar.");
         return true;
@@ -949,7 +951,7 @@ public partial class MainWindow : Window
             var id = await MachineRelay.SendCommandAsync(runner.MachineKey, "runner", runner.CommandKey, action, runnerName, labels, value);
             _pendingRunnerCommands[key] = new PendingCommand(id, action, DateTime.UtcNow);
             AwaitResult(id, runner.MachineKey, runner.MachineName, what);
-            AddActivity($"{what}: sent. Waiting for its fleet agent.");
+            AddActivity($"{what}: sent. Waiting for its fleet agent.", ActivityKind.Info);
             ShowNotice($"{what}: sent. Waiting for its fleet agent.", StatusKind.Ok);
         }
         catch (Exception ex)
@@ -1032,15 +1034,15 @@ public partial class MainWindow : Window
             switch (outcome)
             {
                 case RemoteOutcome.Succeeded:
-                    AddActivity($"{command.What}: {detail}.");
+                    AddActivity($"{command.What}: {detail}.", ActivityKind.Success);
                     break;
                 case RemoteOutcome.Failed:
-                    RaiseAlert($"{command.What} failed: {detail}", warning: true);
+                    RaiseAlert($"{command.What} failed: {detail}", warning: true, ActivityKind.Error);
                     ShowNotice($"{command.What} failed: {detail}", StatusKind.Error);
                     break;
                 case RemoteOutcome.NoAnswer:
                     var text = $"{command.What}: the fleet agent on {command.MachineName} did not report a result. Check its fleet agent log.";
-                    AddActivity(text);
+                    AddActivity(text, ActivityKind.Warning);
                     ShowNotice(text, StatusKind.Warning);
                     break;
             }
@@ -1549,15 +1551,22 @@ public partial class MainWindow : Window
         ActivityCount.Text = ActivityTabCount.Text = string.Empty;
     }
 
-    public void AddActivity(string message)
+    /// <summary>Adds a line to the activity list, with an icon chosen from its words.</summary>
+    public void AddActivity(string message) => AddActivity(message, ActivityEntry.Classify(message));
+
+    /// <summary>
+    /// Adds a line whose kind is known. Words alone mislead: "Turn off auto-recovery completed" is a success, and an
+    /// agent's "Stopped build-01" answers a stop the user asked for.
+    /// </summary>
+    public void AddActivity(string message, ActivityKind kind)
     {
         if (!Dispatcher.CheckAccess())
         {
             // Queued, not waited for: a background step must not wait for a busy window.
-            Dispatcher.BeginInvoke(() => AddActivity(message));
+            Dispatcher.BeginInvoke(() => AddActivity(message, kind));
             return;
         }
-        ActivityLog.Insert(0, new ActivityEntry { Message = message, Kind = ActivityEntry.Classify(message) });
+        ActivityLog.Insert(0, new ActivityEntry { Message = message, Kind = kind });
         while (ActivityLog.Count > 300) ActivityLog.RemoveAt(ActivityLog.Count - 1);
         ActivityCount.Text = ActivityTabCount.Text = ActivityLog.Count.ToString();
     }
