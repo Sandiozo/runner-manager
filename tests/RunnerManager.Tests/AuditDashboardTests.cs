@@ -138,6 +138,68 @@ public class AuditDashboardTests
         });
     }
 
+    // ================= Results of commands sent to other PCs =================
+
+    private static MachineInfo Pc(int protocol = 14, bool online = true, FleetCommandResult[]? results = null, string[]? running = null) => new()
+    {
+        MachineKey = "build-01",
+        MachineName = "BUILD-01",
+        AgentProtocolVersion = protocol,
+        UpdatedUtc = DateTime.UtcNow,
+        FleetAgentRunning = online,
+        RecentCommands = results ?? Array.Empty<FleetCommandResult>(),
+        PendingCommandIds = running ?? Array.Empty<string>()
+    };
+
+    private static MainWindow.AwaitedCommand Sent(DateTime when) => new()
+    {
+        CommandId = "c1", MachineKey = "build-01", MachineName = "BUILD-01", What = "Start build-01-api on BUILD-01",
+        QueuedUtc = when, ActiveUtc = when
+    };
+
+    [Fact]
+    public void RemoteCommand_FailureGivesTheAgentsReason()
+    {
+        var pc = Pc(results: new[] { new FleetCommandResult { Id = "c1", Result = "runner Start failed: Access is denied." } });
+        Assert.Equal((MainWindow.RemoteOutcome.Failed, "Access is denied."), MainWindow.CheckRemoteCommand(pc, Sent(DateTime.UtcNow), DateTime.UtcNow));
+        Assert.True(pc.HasFinished("c1"));
+    }
+
+    [Fact]
+    public void RemoteCommand_SuccessGivesTheAgentsResult()
+    {
+        var pc = Pc(results: new[] { new FleetCommandResult { Id = "C1", Result = "Runner start completed" } });
+        Assert.Equal((MainWindow.RemoteOutcome.Succeeded, "Runner start completed"), MainWindow.CheckRemoteCommand(pc, Sent(DateTime.UtcNow), DateTime.UtcNow));
+    }
+
+    [Fact]
+    public void RemoteCommand_WithoutAResult_WaitsWhileItRunsOrItsPcIsAway()
+    {
+        var now = DateTime.UtcNow;
+        var command = Sent(now - TimeSpan.FromMinutes(5));
+        // Still listed as running: it keeps waiting, and the wait starts again.
+        Assert.Equal(MainWindow.RemoteOutcome.Waiting, MainWindow.CheckRemoteCommand(Pc(running: new[] { "c1" }), command, now).Outcome);
+        Assert.Equal(now, command.ActiveUtc);
+        Assert.Equal(MainWindow.RemoteOutcome.Waiting, MainWindow.CheckRemoteCommand(Pc(), command, now + TimeSpan.FromSeconds(30)).Outcome);
+        // Not running and no result long after it ran: lost.
+        var later = now + MainWindow.RemoteResultWait + TimeSpan.FromSeconds(1);
+        Assert.Equal(MainWindow.RemoteOutcome.NoAnswer, MainWindow.CheckRemoteCommand(Pc(), command, later).Outcome);
+        // An offline PC or an older agent that does not list its commands may still report it.
+        Assert.Equal(MainWindow.RemoteOutcome.Waiting, MainWindow.CheckRemoteCommand(Pc(online: false), command, later).Outcome);
+        Assert.Equal(MainWindow.RemoteOutcome.Waiting, MainWindow.CheckRemoteCommand(Pc(protocol: 11), command, later).Outcome);
+        Assert.Equal(MainWindow.RemoteOutcome.Waiting, MainWindow.CheckRemoteCommand(null, command, later).Outcome);
+        Assert.Equal(MainWindow.RemoteOutcome.Forgotten, MainWindow.CheckRemoteCommand(Pc(online: false), command, now + TimeSpan.FromHours(2)).Outcome);
+    }
+
+    [Fact]
+    public void OlderAgents_ReportOnlyTheLastCommand()
+    {
+        var pc = new MachineInfo { LastCommandId = "c1", LastCommandResult = "Runner restart completed" };
+        Assert.Equal("Runner restart completed", pc.CommandResult("c1"));
+        Assert.Null(pc.CommandResult("c2"));
+        Assert.Null(new MachineInfo().CommandResult(string.Empty));
+    }
+
     /// <summary>The app's source folder, for checks of the XAML text.</summary>
     private static string SourceDir
     {

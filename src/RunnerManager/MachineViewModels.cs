@@ -367,9 +367,18 @@ public sealed class MachineInfo : INotifyPropertyChanged
     /// Whether the agent reported a result for a command. Several commands can finish between two refreshes, so the
     /// recent results are checked, not only the last command.
     /// </summary>
-    public bool HasFinished(string commandId)
-        => LastCommandId.Equals(commandId, StringComparison.OrdinalIgnoreCase)
-           || RecentCommands.Any(r => r.Id.Equals(commandId, StringComparison.OrdinalIgnoreCase));
+    public bool HasFinished(string commandId) => CommandResult(commandId) != null;
+
+    /// <summary>What the agent reported for a command ("runner Start failed: …" when it failed), or null while it has not.</summary>
+    public string? CommandResult(string commandId)
+    {
+        if (string.IsNullOrEmpty(commandId)) return null;
+        if (RecentCommands.FirstOrDefault(r => r.Id.Equals(commandId, StringComparison.OrdinalIgnoreCase)) is { } recent) return recent.Result;
+        return LastCommandId.Equals(commandId, StringComparison.OrdinalIgnoreCase) ? LastCommandResult : null;
+    }
+
+    /// <summary>The agent has the command queued or is running it (protocol 12).</summary>
+    public bool IsRunningCommand(string commandId) => PendingCommandIds.Contains(commandId, StringComparer.OrdinalIgnoreCase);
     private int _cpuPercent;
     private int _memoryPercent;
     public int CpuPercent { get => _cpuPercent; init => _cpuPercent = value; }

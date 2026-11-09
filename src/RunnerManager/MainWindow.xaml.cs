@@ -170,6 +170,7 @@ public partial class MainWindow : Window
             ScheduleLocalAgentUpdate(machines.FirstOrDefault(m => m.IsLocal));
             StartStoppedLocalAgent(machines.FirstOrDefault(m => m.IsLocal));
             ApplyPendingStates();
+            ReportRemoteResults();
             ApplyFilter();
             UpdateSummary();
             DetectChanges();
@@ -177,7 +178,7 @@ public partial class MainWindow : Window
             await CheckRunnerHealthAsync();
             await RefreshFleetExtrasAsync();
             LastUpdatedText.Text = $"Updated {DateTime.Now:HH:mm:ss}  ·  Refreshes every {_settings.RefreshSeconds}s";
-            if (!_operationRunning)
+            if (!_operationRunning && DateTime.UtcNow >= _noticeUntilUtc)
             {
                 if (_agentOwner != null) SetStatus($"The fleet agent on this PC runs for {_agentOwner}.", StatusKind.Warning);
                 else SetStatus(_githubAuthenticated ? "Ready" : "GitHub not connected. Showing this PC only.",
@@ -474,11 +475,13 @@ public partial class MainWindow : Window
                 runner.SetPending(string.Empty);
                 continue;
             }
+            var result = machine.CommandResult(pending.CommandId);
             var done = DateTime.UtcNow - pending.QueuedUtc > PendingCommandTimeout
+                // A failed start or stop does not change the state, so it ends with the agent's result (shown by ReportRemoteResults).
+                || (result != null && MachineRelay.IsFailedResult(result))
                 || (pending.Action == "Start" && runner.IsRunning)
                 || (pending.Action == "Stop" && !runner.IsRunning)
-                || (pending.Action is "Restart" or "Edit" or "CleanWork" or "Remove" or "Convert" or "Startup" or "StopJob" && !string.IsNullOrEmpty(pending.CommandId)
-                    && machine.HasFinished(pending.CommandId));
+                || (pending.Action is not ("Start" or "Stop") && result != null);
             if (done) _pendingRunnerCommands.Remove(key);
             runner.SetPending(done ? string.Empty : pending.Action);
         }
@@ -745,7 +748,7 @@ public partial class MainWindow : Window
         catch (Exception ex)
         {
             AddActivity($"{title} failed: {ex.Message}");
-            SetStatus($"{title} failed", StatusKind.Error);
+            ShowNotice($"{title} failed: {ex.Message}", StatusKind.Error);
             DialogWindow.Error(this, $"{title} failed", ex.Message);
         }
         finally
@@ -809,24 +812,124 @@ public partial class MainWindow : Window
         };
     }
 
-    private async Task QueueRunnerCommandAsync(MachineRunnerStatus runner, string action,
+    private static readonly TimeSpan NoticeTime = TimeSpan.FromSeconds(30);
+    private DateTime _noticeUntilUtc = DateTime.MinValue;
+
+    /// <summary>Shows a result in the status bar and keeps it there for a while, instead of "Ready" on the next refresh.</summary>
+    private void ShowNotice(string text, StatusKind kind)
+    {
+        SetStatus(text, kind);
+        _noticeUntilUtc = DateTime.UtcNow + NoticeTime;
+    }
+
+    private async Task QueueRunnerCommandAsync(MachineRunnerStatus runner, string action, string title,
         string runnerName = "", string[]? labels = null, string value = "")
     {
         var key = RunnerKey(runner);
         if (!CanSendTo(runner.MachineKey)) return;
+        var what = $"{title} on {runner.MachineName}";
         try
         {
             MarkUserAction(key);
             runner.SetPending(action);
             var id = await MachineRelay.SendCommandAsync(runner.MachineKey, "runner", runner.CommandKey, action, runnerName, labels, value);
             _pendingRunnerCommands[key] = new PendingCommand(id, action, DateTime.UtcNow);
-            AddActivity($"{runner.TitleText}: {action.ToLowerInvariant()} queued on {runner.MachineName}.");
-            SetStatus($"{action} queued on {runner.MachineName}. Waiting for its fleet agent.", StatusKind.Ok);
+            AwaitResult(id, runner.MachineKey, runner.MachineName, what);
+            AddActivity($"{what}: sent. Waiting for its fleet agent.");
+            ShowNotice($"{what}: sent. Waiting for its fleet agent.", StatusKind.Ok);
         }
         catch (Exception ex)
         {
             runner.SetPending(string.Empty);
-            AddActivity($"{runner.TitleText}: {action} failed: {ex.Message}");
+            ReportSendFailure(what, runner.MachineName, ex);
+        }
+    }
+
+    /// <summary>A command could not be sent to another PC: the user just asked for it, so say so plainly.</summary>
+    private void ReportSendFailure(string what, string machineName, Exception ex)
+    {
+        AddActivity($"{what} failed: {ex.Message}");
+        ShowNotice($"{what} failed: {ex.Message}", StatusKind.Error);
+        DialogWindow.Error(this, $"Could not reach {machineName}", $"“{what}” was not sent. {ex.Message}");
+    }
+
+    // ================= Results of commands sent to other PCs =================
+
+    /// <summary>How long a PC may take to report a result after it last showed the command as running.</summary>
+    internal static readonly TimeSpan RemoteResultWait = TimeSpan.FromSeconds(75);
+    /// <summary>After this, a command is forgotten without a message (its PC may be offline for a long time).</summary>
+    private static readonly TimeSpan RemoteResultMemory = TimeSpan.FromHours(1);
+
+    internal sealed class AwaitedCommand
+    {
+        public string CommandId { get; init; } = string.Empty;
+        public string MachineKey { get; init; } = string.Empty;
+        public string MachineName { get; init; } = string.Empty;
+        /// <summary>What the command does, for messages: "Start build-01 on BUILD-01".</summary>
+        public string What { get; init; } = string.Empty;
+        public DateTime QueuedUtc { get; init; }
+        /// <summary>When the command was last known to be queued or running on its PC.</summary>
+        public DateTime ActiveUtc { get; set; }
+    }
+
+    internal enum RemoteOutcome { Waiting, Succeeded, Failed, NoAnswer, Forgotten }
+
+    private readonly Dictionary<string, AwaitedCommand> _awaitedCommands = new(StringComparer.OrdinalIgnoreCase);
+
+    private void AwaitResult(string commandId, string machineKey, string machineName, string what)
+    {
+        if (string.IsNullOrEmpty(commandId)) return;
+        _awaitedCommands[commandId] = new AwaitedCommand
+        {
+            CommandId = commandId, MachineKey = machineKey, MachineName = machineName, What = what,
+            QueuedUtc = DateTime.UtcNow, ActiveUtc = DateTime.UtcNow
+        };
+    }
+
+    /// <summary>
+    /// How a command sent to another PC ended, as far as its PC's status shows, with the agent's result or the reason it
+    /// failed.
+    /// </summary>
+    internal static (RemoteOutcome Outcome, string Detail) CheckRemoteCommand(MachineInfo? machine, AwaitedCommand command, DateTime nowUtc)
+    {
+        if (machine?.CommandResult(command.CommandId) is { } result)
+        {
+            if (!MachineRelay.IsFailedResult(result)) return (RemoteOutcome.Succeeded, result.Trim().TrimEnd('.'));
+            var reason = result.IndexOf("failed: ", StringComparison.OrdinalIgnoreCase) is var at and >= 0 ? result[(at + 8)..] : result;
+            return (RemoteOutcome.Failed, reason.Trim());
+        }
+        if (machine != null && machine.IsRunningCommand(command.CommandId)) command.ActiveUtc = nowUtc;
+        if (nowUtc - command.QueuedUtc > RemoteResultMemory) return (RemoteOutcome.Forgotten, string.Empty);
+        // Only agents that list the commands they run (protocol 12) show that a command was lost; an offline PC may still
+        // report the result once it is back.
+        if (machine is { IsOnline: true, AgentProtocolVersion: >= 12 } && nowUtc - command.ActiveUtc > RemoteResultWait)
+            return (RemoteOutcome.NoAnswer, string.Empty);
+        return (RemoteOutcome.Waiting, string.Empty);
+    }
+
+    /// <summary>Reports how commands sent to other PCs ended: failures in the status bar, as alerts and in the activity list.</summary>
+    private void ReportRemoteResults()
+    {
+        foreach (var command in _awaitedCommands.Values.ToList())
+        {
+            var (outcome, detail) = CheckRemoteCommand(Machines.FirstOrDefault(m => m.MachineKey == command.MachineKey), command, DateTime.UtcNow);
+            if (outcome == RemoteOutcome.Waiting) continue;
+            _awaitedCommands.Remove(command.CommandId);
+            switch (outcome)
+            {
+                case RemoteOutcome.Succeeded:
+                    AddActivity($"{command.What}: {detail}.");
+                    break;
+                case RemoteOutcome.Failed:
+                    RaiseAlert($"{command.What} failed: {detail}", warning: true);
+                    ShowNotice($"{command.What} failed: {detail}", StatusKind.Error);
+                    break;
+                case RemoteOutcome.NoAnswer:
+                    var text = $"{command.What}: the fleet agent on {command.MachineName} did not report a result. Check its fleet agent log.";
+                    AddActivity(text);
+                    ShowNotice(text, StatusKind.Warning);
+                    break;
+            }
         }
     }
 
@@ -840,7 +943,7 @@ public partial class MainWindow : Window
     {
         if (!runner.IsLocalMachine)
         {
-            await QueueRunnerCommandAsync(runner, action, runnerName, labels, value);
+            await QueueRunnerCommandAsync(runner, action, title, runnerName, labels, value);
             return;
         }
         await RunOperationAsync(title, log =>
@@ -1100,6 +1203,7 @@ public partial class MainWindow : Window
     {
         if (_operationRunning || !RefreshButton.IsEnabled) return;
         RefreshButton.IsEnabled = false;
+        _noticeUntilUtc = DateTime.MinValue;
         SetStatus("Refreshing…", StatusKind.Busy);
         try
         {

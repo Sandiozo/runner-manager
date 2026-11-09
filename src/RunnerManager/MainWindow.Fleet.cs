@@ -411,7 +411,7 @@ public partial class MainWindow
                 $"The fleet agent on {machine.MachineName} downloads, verifies and installs Runner Manager v{MachineInfo.LatestAppVersion}, then restarts. Runners keep running.",
                 "Update")) return;
         await QueueMachineCommandAsync(machine, "agent", "Update", string.Empty, "Update",
-            $"{machine.MachineName}: update to v{MachineInfo.LatestAppVersion} queued.");
+            $"Update {machine.MachineName} to v{MachineInfo.LatestAppVersion}");
     }
 
     /// <summary>
@@ -434,7 +434,7 @@ public partial class MainWindow
             return;
         }
         await QueueMachineCommandAsync(machine, "agent", "Watchdog", enable ? "on" : "off", string.Empty,
-            $"{machine.MachineName}: auto-recovery {(enable ? "on" : "off")} queued.");
+            $"Turn {(enable ? "on" : "off")} auto-recovery on {machine.MachineName}");
     }
 
     private void MachineAgentLog_Click(object sender, RoutedEventArgs e) => ShowLog(ItemFrom<MachineInfo>(sender), "agent", null, FleetConfig.StateDir);
@@ -539,13 +539,16 @@ public partial class MainWindow
             }
             return;
         }
-        await QueueMachineCommandAsync(machine, "machine", "Reboot", Environment.MachineName, "Reboot",
-            $"{machine.MachineName}: restart queued. The PC restarts 60 seconds after it receives the command.");
+        await QueueMachineCommandAsync(machine, "machine", "Reboot", Environment.MachineName, "Reboot", $"Restart {machine.MachineName}",
+            "The PC restarts 60 seconds after it receives the command.");
     }
 
-    /// <summary>Sends a PC-level command ("agent" or "machine") to another PC and shows it as pending until it reports back.</summary>
+    /// <summary>
+    /// Sends a PC-level command ("agent" or "machine") to another PC, shows it as pending until it reports back, and
+    /// reports its result. <paramref name="what"/> names it in messages: "Restart BUILD-01".
+    /// </summary>
     private async Task QueueMachineCommandAsync(MachineInfo machine, string target, string action, string value,
-        string pendingLabel, string queuedMessage)
+        string pendingLabel, string what, string note = "")
     {
         if (!CanSendTo(machine.MachineKey)) return;
         try
@@ -554,14 +557,16 @@ public partial class MainWindow
             var id = await MachineRelay.SendCommandAsync(machine.MachineKey, target, string.Empty, action, value: value);
             if (pendingLabel.Length > 0)
                 _pendingMachineCommands[machine.MachineKey] = new PendingCommand(id, pendingLabel, DateTime.UtcNow);
-            AddActivity(queuedMessage);
-            SetStatus(queuedMessage, StatusKind.Ok);
+            AwaitResult(id, machine.MachineKey, machine.MachineName, what);
+            var sent = $"{what}: sent. Waiting for its fleet agent." + (note.Length > 0 ? $" {note}" : string.Empty);
+            AddActivity(sent);
+            ShowNotice(sent, StatusKind.Ok);
         }
         catch (Exception ex)
         {
             machine.SetPending(string.Empty);
             _pendingMachineCommands.Remove(machine.MachineKey);
-            AddActivity($"{machine.MachineName}: {action} failed: {ex.Message}");
+            ReportSendFailure(what, machine.MachineName, ex);
             await RefreshAsync();
         }
     }
