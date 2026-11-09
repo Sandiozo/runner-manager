@@ -114,49 +114,70 @@ public static class JobHealth
     private static bool IsActive(GitHubJobState job)
         => job.Status.Equals("in_progress", StringComparison.OrdinalIgnoreCase) || job.Status.Equals("queued", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>What the health checks read from GitHub. Tests replace it.</summary>
+    internal sealed record GitHubReads(
+        Func<string, Task<RepositoryWorkState?>> RepositoryJobs,
+        Func<string, string, string, Task<TimeSpan?>> UsualDuration,
+        Func<string, Task<IReadOnlyList<RegisteredRunner>?>> Runners)
+    {
+        public static readonly GitHubReads Live = new(GitHubApi.GetRepositoryJobsAsync, GitHubApi.GetUsualJobDurationAsync, RegisteredRunners.GetAsync);
+    }
+
+    /// <summary>A busy runner's job as GitHub last listed it, by <see cref="Key"/>, with the start of the worker that runs it.</summary>
+    private sealed record KnownJob(DateTime? StartedUtc, TimeSpan? Usual, DateTime WorkerStartedUtc);
+    private static readonly Dictionary<string, KnownJob> KnownJobs = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>The last usual duration GitHub gave per "repository|workflow|job".</summary>
+    private static readonly Dictionary<string, TimeSpan> KnownUsual = new(StringComparer.OrdinalIgnoreCase);
+
     /// <summary>
     /// The concerns and queues of all runners. GitHub is asked once per repository (its answers are cached for a few
     /// seconds); without GitHub only stuck jobs are found. <paramref name="idleSince"/> holds when each runner was first
     /// seen idle, by <see cref="Key"/>; without it, a job's wait counts from when it was queued.
     /// </summary>
-    public static async Task<FleetHealth> EvaluateAsync(IReadOnlyCollection<MachineInfo> machines, TimeSpan quietLimit,
+    public static Task<FleetHealth> EvaluateAsync(IReadOnlyCollection<MachineInfo> machines, TimeSpan quietLimit,
         IReadOnlyDictionary<string, DateTime>? idleSince, bool useGitHub, DateTime nowUtc)
+        => EvaluateAsync(machines, quietLimit, idleSince, useGitHub ? GitHubReads.Live : null, nowUtc);
+
+    internal static async Task<FleetHealth> EvaluateAsync(IReadOnlyCollection<MachineInfo> machines, TimeSpan quietLimit,
+        IReadOnlyDictionary<string, DateTime>? idleSince, GitHubReads? github, DateTime nowUtc)
     {
         var health = new FleetHealth();
         var runners = machines.SelectMany(m => m.Runners.Select(r => (Machine: m, Runner: r))).ToList();
         var jobsByRepository = new Dictionary<string, List<GitHubJobState>>(StringComparer.OrdinalIgnoreCase);
-        if (useGitHub)
+        // Repositories whose jobs GitHub did not answer for this time.
+        var unread = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var registered = new Dictionary<string, IReadOnlyList<RegisteredRunner>>(StringComparer.OrdinalIgnoreCase);
+        if (github != null)
         {
             var repositories = runners.Select(x => x.Runner.RepositoryPath).Where(p => p.Contains('/'))
                 .Distinct(StringComparer.OrdinalIgnoreCase).Take(20).ToList();
-            var states = await Task.WhenAll(repositories.Select(GitHubApi.GetRepositoryJobsAsync));
+            var states = await Task.WhenAll(repositories.Select(github.RepositoryJobs));
             for (var i = 0; i < repositories.Count; i++)
+            {
                 if (states[i] != null) jobsByRepository[repositories[i]] = states[i]!.Jobs.Where(IsActive).ToList();
+                else unread.Add(repositories[i]);
+            }
+            // The runners' exact labels matter only where jobs are active.
+            var scopes = jobsByRepository.Where(r => r.Value.Count > 0).Select(r => $"repos/{r.Key}").ToList();
+            var lists = await Task.WhenAll(scopes.Select(github.Runners));
+            for (var i = 0; i < scopes.Count; i++)
+                if (lists[i] != null) registered[scopes[i]] = lists[i]!;
         }
+        var labelsOf = new Dictionary<string, IReadOnlySet<string>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (machine, runner) in runners) labelsOf[Key(runner)] = LabelsOf(machine, runner, registered);
+        lock (KnownJobs)
+            foreach (var gone in KnownJobs.Keys.Where(k => !runners.Any(x => x.Runner.IsBusy && Key(x.Runner).Equals(k, StringComparison.OrdinalIgnoreCase))).ToList())
+                KnownJobs.Remove(gone);
 
         foreach (var (machine, runner) in runners)
         {
             var key = Key(runner);
-            var labels = RunnerLabels.Available(runner.CustomLabels);
-            var jobs = jobsByRepository.TryGetValue(runner.RepositoryPath, out var list)
-                ? list.Where(j => RunnerLabels.CanRun(j.Labels, labels)).ToList()
-                : new List<GitHubJobState>();
+            var active = jobsByRepository.GetValueOrDefault(runner.RepositoryPath);
+            var jobs = active?.Where(j => RunnerLabels.CanRun(j.Labels, labelsOf[key])).ToList() ?? new List<GitHubJobState>();
             if (jobs.Count > 0) health.Queues[key] = QueueFor(jobs, nowUtc);
 
             if (runner.IsBusy)
-            {
-                var current = jobs.FirstOrDefault(j => j.RunnerId != 0 && j.RunnerId == runner.AgentId
-                                                       && j.Status.Equals("in_progress", StringComparison.OrdinalIgnoreCase));
-                TimeSpan? usual = null;
-                if (current != null && useGitHub)
-                {
-                    try { usual = await GitHubApi.GetUsualJobDurationAsync(runner.RepositoryPath, current.WorkflowName, current.Name); }
-                    catch { }
-                }
-                var started = current?.StartedUtc ?? runner.JobStartedUtc;
-                var subject = current != null ? current.Id.ToString() : $"{runner.CommandKey}@{runner.JobStartedUtc?.Ticks}";
-                health.Runners[key] = ForBusyRunner(runner.QuietSinceUtc, started, usual, quietLimit, subject, nowUtc);
-            }
+                health.Runners[key] = await ForBusyRunnerAsync(runner, active, unread.Contains(runner.RepositoryPath), github, quietLimit, nowUtc);
             else if (runner.IsRunning && machine.IsReachable)
             {
                 var waiting = jobs.Where(j => j.Status.Equals("queued", StringComparison.OrdinalIgnoreCase)).ToList();
@@ -164,16 +185,19 @@ public static class JobHealth
             }
         }
 
+        var fleetIds = runners.Select(x => x.Runner.AgentId).Where(id => id > 0).ToHashSet();
         foreach (var (repository, jobs) in jobsByRepository)
         {
+            var owner = repository.Split('/')[0];
             var candidates = runners.Where(x => x.Runner.RepositoryPath.Equals(repository, StringComparison.OrdinalIgnoreCase)
-                                                || x.Runner.Scope.Equals($"orgs/{repository.Split('/')[0]}", StringComparison.OrdinalIgnoreCase)).ToList();
+                                                || x.Runner.Scope.Equals($"orgs/{owner}", StringComparison.OrdinalIgnoreCase)).ToList();
             foreach (var job in jobs.Where(j => j.Status.Equals("queued", StringComparison.OrdinalIgnoreCase)
-                                                && j.Labels.Contains("self-hosted", StringComparer.OrdinalIgnoreCase)
                                                 && nowUtc - (j.CreatedUtc ?? nowUtc) >= WaitLimit))
             {
-                var able = candidates.Where(x => RunnerLabels.CanRun(job.Labels, RunnerLabels.Available(x.Runner.CustomLabels))).ToList();
+                var able = candidates.Where(x => RunnerLabels.CanRun(job.Labels, labelsOf[Key(x.Runner)])).ToList();
                 if (able.Any(x => x.Runner.IsRunning && x.Machine.IsReachable)) continue;
+                if (able.Count == 0 && (!MeantForFleet(job.Labels, candidates.Select(x => labelsOf[Key(x.Runner)]))
+                                        || await HasOtherRunnerAsync(github!, job.Labels, repository, owner, fleetIds))) continue;
                 var waited = Duration(nowUtc - (job.CreatedUtc ?? nowUtc));
                 var title = $"{repository}: {job.WorkflowName} → {job.Name} has waited {waited}.";
                 health.Unserved.Add(new UnservedJob(job.Id, repository, able.Count == 0
@@ -182,6 +206,93 @@ public static class JobHealth
             }
         }
         return health;
+    }
+
+    /// <summary>
+    /// A busy runner's concern. The worker's start names the job on its PC whether GitHub answers or not, so a job is
+    /// reported once. When GitHub does not list the job this time, the job it listed last is used if the same worker
+    /// still runs; when GitHub could not be read and nothing is known, only a stuck job is found, since the 2-hour
+    /// limit for jobs without history would report a normal long job as running long.
+    /// </summary>
+    private static async Task<RunnerHealth> ForBusyRunnerAsync(MachineRunnerStatus runner, List<GitHubJobState>? active, bool unread,
+        GitHubReads? github, TimeSpan quietLimit, DateTime nowUtc)
+    {
+        var key = Key(runner);
+        var subject = runner.JobStartedUtc is { } workerStarted ? $"{runner.CommandKey}@{workerStarted.Ticks}" : null;
+        var current = active?.FirstOrDefault(j => j.RunnerId != 0 && j.RunnerId == runner.AgentId
+                                                  && j.Status.Equals("in_progress", StringComparison.OrdinalIgnoreCase));
+        KnownJob? known;
+        lock (KnownJobs) known = KnownJobs.GetValueOrDefault(key);
+        DateTime? started;
+        TimeSpan? usual = null;
+        if (current != null && github != null)
+        {
+            usual = await UsualDurationAsync(github, runner.RepositoryPath, current);
+            started = current.StartedUtc ?? runner.JobStartedUtc;
+            subject ??= current.Id.ToString();
+            if (runner.JobStartedUtc is { } worker) lock (KnownJobs) KnownJobs[key] = new KnownJob(started, usual, worker);
+        }
+        else if (known != null && runner.JobStartedUtc == known.WorkerStartedUtc)
+        {
+            started = known.StartedUtc;
+            usual = known.Usual;
+        }
+        else started = unread ? null : runner.JobStartedUtc;
+        return ForBusyRunner(runner.QuietSinceUtc, started, usual, quietLimit, subject ?? $"{runner.CommandKey}@", nowUtc);
+    }
+
+    /// <summary>The job's usual duration, or the last one GitHub gave when it cannot be read now.</summary>
+    private static async Task<TimeSpan?> UsualDurationAsync(GitHubReads github, string repository, GitHubJobState job)
+    {
+        var key = $"{repository}|{job.WorkflowName}|{job.Name}";
+        TimeSpan? usual = null;
+        try { usual = await github.UsualDuration(repository, job.WorkflowName, job.Name); }
+        catch { }
+        lock (KnownUsual)
+        {
+            if (usual is { } value)
+            {
+                if (KnownUsual.Count > 500) KnownUsual.Clear();
+                KnownUsual[key] = value;
+            }
+            else if (KnownUsual.TryGetValue(key, out var last)) usual = last;
+        }
+        return usual;
+    }
+
+    /// <summary>A runner's labels as GitHub lists them, or else as its PC reports them.</summary>
+    private static IReadOnlySet<string> LabelsOf(MachineInfo machine, MachineRunnerStatus runner,
+        Dictionary<string, IReadOnlyList<RegisteredRunner>> registered)
+    {
+        if (runner.AgentId > 0 && registered.TryGetValue(runner.Scope, out var list) && list.FirstOrDefault(r => r.Id == runner.AgentId) is { } found)
+            return found.Labels;
+        // Other PCs do not report their architecture.
+        return RunnerLabels.Available(runner.CustomLabels, runner.RegistrationOptions?.NoDefaultLabels != true,
+            machine.IsLocal ? new[] { RunnerService.ArchitectureLabel } : new[] { "X64", "ARM64" });
+    }
+
+    /// <summary>
+    /// Whether a queued job that no runner in the fleet can take was meant for one: it asks for self-hosted or for a
+    /// label the fleet's runners have, and not for Linux or macOS. Jobs for GitHub's hosted runners are not.
+    /// </summary>
+    internal static bool MeantForFleet(IEnumerable<string> jobLabels, IEnumerable<IReadOnlySet<string>> fleetLabels)
+    {
+        var labels = jobLabels.Where(l => !string.IsNullOrWhiteSpace(l)).Select(l => l.Trim()).ToList();
+        if (labels.Any(l => l.Equals("linux", StringComparison.OrdinalIgnoreCase) || l.Equals("macos", StringComparison.OrdinalIgnoreCase)))
+            return false;
+        var fleet = fleetLabels.ToList();
+        return labels.Any(l => l.Equals("self-hosted", StringComparison.OrdinalIgnoreCase) || fleet.Any(set => set.Contains(l)));
+    }
+
+    /// <summary>Whether a runner outside the fleet (on a PC without Runner Manager) is registered with the labels a job needs.</summary>
+    private static async Task<bool> HasOtherRunnerAsync(GitHubReads github, string[] jobLabels, string repository, string owner, HashSet<long> fleetIds)
+    {
+        foreach (var scope in new[] { $"repos/{repository}", $"orgs/{owner}" })
+        {
+            var list = await github.Runners(scope);
+            if (list != null && list.Any(r => !fleetIds.Contains(r.Id) && RunnerLabels.CanRun(jobLabels, r.Labels))) return true;
+        }
+        return false;
     }
 }
 

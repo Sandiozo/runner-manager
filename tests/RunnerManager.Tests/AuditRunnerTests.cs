@@ -273,6 +273,147 @@ public class AuditRunnerTests
         }
     }
 
+    // ----- Fleet health with GitHub -----
+
+    private static readonly TimeSpan Quiet = TimeSpan.FromMinutes(15);
+
+    private static MachineInfo Pc(string name, params MachineRunnerStatus[] runners)
+        => MachineInfo.FromPayload(name, new MachineStatusPayload
+        {
+            MachineName = name, UpdatedUtc = DateTime.UtcNow, FleetAgentRunning = true, Runners = runners
+        });
+
+    private static MachineRunnerStatus Runner(string repository, long id, bool busy = false, DateTime? workerStarted = null)
+        => new()
+        {
+            ServiceName = $"actions.runner.{repository.Replace('/', '-')}.r{id}", AgentName = $"r{id}", AgentId = id,
+            RepositoryPath = repository, Scope = $"repos/{repository}", IsRunning = true, ServiceInstalled = true,
+            ActivityText = busy ? "Busy" : "Idle", JobStartedUtc = workerStarted
+        };
+
+    private static RegisteredRunner Registered(long id, params string[] labels)
+        => new(id, $"r{id}", new HashSet<string>(labels, StringComparer.OrdinalIgnoreCase));
+
+    private static GitHubJobState Queued(long id, DateTime nowUtc, params string[] labels)
+        => new() { Id = id, Name = $"job{id}", WorkflowName = "CI", Status = "queued", CreatedUtc = nowUtc.AddMinutes(-10), Labels = labels };
+
+    private static JobHealth.GitHubReads Reads(Func<string, RepositoryWorkState?> jobs, Func<string, IReadOnlyList<RegisteredRunner>?> runners,
+        Func<TimeSpan?>? usual = null)
+        => new(repository => Task.FromResult(jobs(repository)), (_, _, _) => Task.FromResult(usual?.Invoke()),
+            scope => Task.FromResult(runners(scope)));
+
+    private static RepositoryWorkState Work(params GitHubJobState[] jobs)
+    {
+        var state = new RepositoryWorkState();
+        state.Jobs.AddRange(jobs);
+        return state;
+    }
+
+    [Fact]
+    public async Task OneFailedGitHubRead_DoesNotMakeANormalLongJob_RunLong()
+    {
+        var now = DateTime.UtcNow;
+        var worker = now.AddMinutes(-130);
+        var machine = Pc("PC-LONG", Runner("audit/long", 11, busy: true, workerStarted: worker));
+        var job = new GitHubJobState { Id = 501, Name = "build", WorkflowName = "CI", Status = "in_progress", RunnerId = 11, StartedUtc = worker, Labels = new[] { "self-hosted" } };
+        var github = true;
+        var reads = Reads(_ => github ? Work(job) : null, _ => null, () => github ? TimeSpan.FromMinutes(90) : null);
+        var key = JobHealth.Key(machine.Runners[0]);
+
+        // GitHub knows it usually takes 90 minutes, so 130 minutes is fine.
+        Assert.False((await JobHealth.EvaluateAsync(new[] { machine }, Quiet, null, reads, now)).Runners[key].IsProblem);
+        // GitHub does not answer: the last known values are used, not the 2-hour limit.
+        github = false;
+        Assert.False((await JobHealth.EvaluateAsync(new[] { machine }, Quiet, null, reads, now)).Runners[key].IsProblem);
+
+        // A job that started since then, while GitHub does not answer, is not judged by the 2-hour limit either.
+        var other = Pc("PC-LONG", Runner("audit/long", 11, busy: true, workerStarted: now.AddMinutes(-125)));
+        Assert.False((await JobHealth.EvaluateAsync(new[] { other }, Quiet, null, reads, now)).Runners[key].IsProblem);
+    }
+
+    [Fact]
+    public async Task RunningLongJob_IsTheSameAlert_WhetherGitHubAnswersOrNot()
+    {
+        var now = DateTime.UtcNow;
+        var worker = now.AddMinutes(-40);
+        var machine = Pc("PC-SUBJECT", Runner("audit/subject", 12, busy: true, workerStarted: worker));
+        var job = new GitHubJobState { Id = 502, Name = "build", WorkflowName = "CI", Status = "in_progress", RunnerId = 12, StartedUtc = worker, Labels = new[] { "self-hosted" } };
+        var github = true;
+        var reads = Reads(_ => github ? Work(job) : null, _ => null, () => TimeSpan.FromMinutes(10));
+        var key = JobHealth.Key(machine.Runners[0]);
+
+        var first = (await JobHealth.EvaluateAsync(new[] { machine }, Quiet, null, reads, now)).Runners[key];
+        github = false;
+        var second = (await JobHealth.EvaluateAsync(new[] { machine }, Quiet, null, reads, now)).Runners[key];
+
+        Assert.Equal(RunnerConcern.RunningLong, first.Concern);
+        Assert.Equal(first.Subject, second.Subject);
+        Assert.Contains("usually takes 10 min", second.Detail);
+    }
+
+    [Fact]
+    public async Task UnservedJob_IsReported_OnlyWhenItWasMeantForTheFleet()
+    {
+        var now = DateTime.UtcNow;
+        var machine = Pc("PC-UNSERVED", Runner("audit/unserved", 21));
+        var jobs = Work(
+            Queued(601, now, "self-hosted", "Linux"),          // a Linux runner's job
+            Queued(602, now, "ubuntu-latest"),                 // a GitHub-hosted job
+            Queued(603, now, "self-hosted", "gpu"),            // a runner outside the fleet has gpu
+            Queued(604, now, "self-hosted", "Windows", "cuda") // nobody can take it
+        );
+        var reads = Reads(_ => jobs, scope => scope == "repos/audit/unserved"
+            ? new[] { Registered(21, "self-hosted", "Windows", "X64"), Registered(99, "self-hosted", "gpu") }
+            : null);
+
+        var health = await JobHealth.EvaluateAsync(new[] { machine }, Quiet, null, reads, now);
+
+        var unserved = Assert.Single(health.Unserved);
+        Assert.Equal(604, unserved.JobId);
+        Assert.Contains("No runner in the fleet has the labels self-hosted, Windows, cuda", unserved.Text);
+    }
+
+    [Fact]
+    public async Task RunnerLabels_ComeFromGitHub_ForAnArm64PcAndForJobsWithoutSelfHosted()
+    {
+        var now = DateTime.UtcNow;
+        var arm = Runner("audit/labels", 31);
+        var bare = Runner("audit/labels", 32);
+        var machine = Pc("PC-ARM64", arm, bare);
+        var jobs = Work(Queued(701, now, "self-hosted", "Windows", "ARM64"), Queued(702, now, "unity"));
+        var reads = Reads(_ => jobs, scope => scope == "repos/audit/labels"
+            ? new[] { Registered(31, "self-hosted", "Windows", "ARM64", "unity"), Registered(32, "unity") }
+            : null);
+
+        var health = await JobHealth.EvaluateAsync(new[] { machine }, Quiet, null, reads, now);
+
+        Assert.Equal(2, health.Queues[JobHealth.Key(machine.Runners.Single(r => r.AgentId == 31))].Count);
+        // Registered without default labels: only the job that asks for unity.
+        Assert.Single(health.Queues[JobHealth.Key(machine.Runners.Single(r => r.AgentId == 32))]);
+        Assert.Equal(RunnerConcern.IdleWithWaitingJobs, health.Runners[JobHealth.Key(machine.Runners.Single(r => r.AgentId == 31))].Concern);
+        Assert.Empty(health.Unserved);
+    }
+
+    [Theory]
+    [InlineData(new[] { "self-hosted", "Windows" }, true)]
+    [InlineData(new[] { "gpu" }, true)]
+    [InlineData(new[] { "windows-latest" }, false)]
+    [InlineData(new string[0], false)]
+    public void Job_CanRun_WhenTheRunnerHasAllItsLabels(string[] runsOn, bool expected)
+        => Assert.Equal(expected, RunnerLabels.CanRun(runsOn, RunnerLabels.Available(new[] { "gpu" })));
+
+    [Fact]
+    public void RegisteredRunnerList_HasAllLabels()
+    {
+        using var json = System.Text.Json.JsonDocument.Parse("""
+            {"total_count":1,"runners":[{"id":7,"name":"arm","labels":[{"id":1,"name":"self-hosted","type":"read-only"},
+            {"id":2,"name":"Windows","type":"read-only"},{"id":3,"name":"ARM64","type":"read-only"},{"id":4,"name":"unity","type":"custom"}]}]}
+            """);
+        var runner = Assert.Single(RegisteredRunners.Parse(json.RootElement));
+        Assert.Equal(7, runner.Id);
+        Assert.True(runner.Labels.SetEquals(new[] { "self-hosted", "windows", "arm64", "Unity" }));
+    }
+
     [Fact]
     public void OutputFile_ThatWentAway_IsNoProgress()
     {
