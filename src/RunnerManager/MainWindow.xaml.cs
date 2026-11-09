@@ -87,6 +87,8 @@ public partial class MainWindow : Window
             if (IsVisible && _started && !_refreshing) await RefreshAsync();
         };
         Loaded += async (_, _) => await StartAsync();
+        // Coming back from the GitHub sign-in in a browser or console window.
+        Activated += async (_, _) => await CheckGitHubSignInAsync();
         ThemeManager.Changed += OnThemeChanged;
         Closing += OnClosing;
         PreviewKeyDown += OnPreviewKeyDown;
@@ -640,7 +642,7 @@ public partial class MainWindow : Window
         GitHubAccountText.Text = _githubAuthenticated
             ? string.IsNullOrEmpty(_githubLogin) ? "GitHub" : _githubLogin
             : "GitHub";
-        GitHubStatusText.Text = _githubAuthenticated ? "Connected" : "Not connected";
+        GitHubStatusText.Text = _githubAuthenticated ? "Connected" : WaitingForSignIn ? "Waiting for sign-in" : "Not connected";
         GitHubStatusText.Foreground = _githubAuthenticated ? Palette.Success : Palette.Warning;
         AvatarText.Text = _githubAuthenticated && _githubLogin.Length > 0 ? _githubLogin[..1].ToUpperInvariant() : "?";
         AvatarBadge.Background = _githubAuthenticated ? Palette.Tint(Palette.Info) : (Brush)FindResource("Bg3Brush");
@@ -681,8 +683,7 @@ public partial class MainWindow : Window
         }
         GitHubCli.LaunchLogin();
         AddActivity("Opened GitHub sign-in. Complete it in the browser or terminal window.");
-        await Task.Delay(1500);
-        await RefreshAsync(forceAuthCheck: true);
+        WatchGitHubSignIn();
     }
 
     private async void GitHubReconnect_Click(object sender, RoutedEventArgs e)
@@ -695,8 +696,7 @@ public partial class MainWindow : Window
             AddActivity("Reconnecting GitHub. Complete sign-in in the browser or terminal window.");
             _githubAuthenticated = false;
             _githubLogin = string.Empty;
-            ApplyGitHubStatus();
-            await Task.Delay(1500);
+            WatchGitHubSignIn();
             await RefreshAsync(forceAuthCheck: true);
         }
         catch (Exception ex)
@@ -704,6 +704,52 @@ public partial class MainWindow : Window
             AddActivity($"GitHub reconnect failed: {ex.Message}");
             DialogWindow.Error(this, "Could not reconnect GitHub", ex.Message);
         }
+    }
+
+    // Sign-in ends in a browser or console window, at a time the dashboard cannot see. So after the sign-in window
+    // opens, check for it every few seconds for a while, and whenever the user comes back to this window.
+    private static readonly TimeSpan SignInWatchTime = TimeSpan.FromMinutes(3);
+    private static readonly TimeSpan SignInCheckInterval = TimeSpan.FromSeconds(4);
+    private DispatcherTimer? _signInTimer;
+    private DateTime _signInWatchUntilUtc = DateTime.MinValue;
+    private DateTime _lastSignInCheckUtc = DateTime.MinValue;
+    private bool _checkingSignIn;
+
+    private bool WaitingForSignIn => !_githubAuthenticated && DateTime.UtcNow < _signInWatchUntilUtc;
+
+    internal void WatchGitHubSignIn()
+    {
+        _signInWatchUntilUtc = DateTime.UtcNow + SignInWatchTime;
+        if (_signInTimer == null)
+        {
+            _signInTimer = new DispatcherTimer { Interval = SignInCheckInterval };
+            _signInTimer.Tick += async (_, _) => await CheckGitHubSignInAsync();
+        }
+        _signInTimer.Start();
+        ApplyGitHubStatus();
+    }
+
+    /// <summary>Refreshes as soon as gh has a sign-in, instead of at the refresh's next GitHub check.</summary>
+    private async Task CheckGitHubSignInAsync()
+    {
+        if (_signInTimer is { IsEnabled: true } && !WaitingForSignIn)
+        {
+            _signInTimer.Stop();
+            ApplyGitHubStatus();
+        }
+        if (_githubAuthenticated || _checkingSignIn || !_started
+            || DateTime.UtcNow - _lastSignInCheckUtc < TimeSpan.FromSeconds(2)) return;
+        _checkingSignIn = true;
+        _lastSignInCheckUtc = DateTime.UtcNow;
+        try
+        {
+            if (await GitHubCli.IsAuthenticatedAsync()) await RefreshAsync(forceAuthCheck: true);
+        }
+        catch
+        {
+            // The refresh reports problems with gh; this check only makes it come sooner.
+        }
+        finally { _checkingSignIn = false; }
     }
 
     private async void AddRunner_Click(object sender, RoutedEventArgs e)

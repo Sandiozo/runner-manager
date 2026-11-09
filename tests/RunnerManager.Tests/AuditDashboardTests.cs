@@ -345,4 +345,15 @@ public class AuditDashboardTests
             // A check box made in code (Settings, "Change fleet code").
             Assert.Equal(text, WpfTestApp.ColorOf(TextIn(new CheckBox { Content = "BUILD-01" }, "BUILD-01").Foreground));
         });
+
+    // ----- Bug 6: GitHub sign-in is noticed soon after it ends -----
+
+    [Fact]
+    public void SignIn_ShowsThatItIsWaiting()
+    {
+        var window = NewDashboard();
+        Assert.Equal("Not connected", WpfTestApp.Run(() => window.GitHubStatusText.Text));
+        WpfTestApp.Run(window.WatchGitHubSignIn);
+        Assert.Equal("Waiting for sign-in", WpfTestApp.Run(() => window.GitHubStatusText.Text));
+    }
 }
