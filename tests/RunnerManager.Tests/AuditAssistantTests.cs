@@ -524,6 +524,45 @@ public class AuditAssistantTests
         Assert.Equal("BUILD", AssistantTools.PcText(fleet));
     }
 
+    [Fact]
+    public async Task RepositoryNames_AreRememberedOnlyWhenGitHubAnswered()
+    {
+        var path = $"octocat/lookup-{Guid.NewGuid():N}";
+        var calls = 0;
+        var result = new CommandResult(-1, string.Empty, "GitHub CLI timed out (gh api repos).\nCheck the internet connection and try again.");
+        Task<CommandResult> Run(string arguments)
+        {
+            calls++;
+            Assert.Contains(path, arguments);
+            return Task.FromResult(result);
+        }
+
+        // GitHub could not be asked: said as such, and asked again the next time.
+        var failed = await AssistantTools.LookUpRepositoryAsync(path, Run);
+        Assert.False(failed.NotFound);
+        var unreachable = Assert.Throws<AssistantException>(() => AssistantTools.CurrentNameOrThrow(path, failed)).Message;
+        Assert.StartsWith($"GitHub could not be reached to check {path}. GitHub CLI timed out", unreachable);
+        Assert.DoesNotContain('\n', unreachable);
+        await AssistantTools.LookUpRepositoryAsync(path, Run);
+        Assert.Equal(2, calls);
+
+        // GitHub says there is no such repository: remembered for a while.
+        result = new CommandResult(1, string.Empty, "gh: Not Found (HTTP 404)");
+        var missing = await AssistantTools.LookUpRepositoryAsync(path, Run);
+        Assert.True(missing.NotFound);
+        Assert.StartsWith($"Could not find {path} on GitHub.", Assert.Throws<AssistantException>(() => AssistantTools.CurrentNameOrThrow(path, missing)).Message);
+        Assert.True((await AssistantTools.LookUpRepositoryAsync(path, Run)).NotFound);
+        Assert.Equal(3, calls);
+
+        // A repository that was found is remembered under the name GitHub gave.
+        var renamed = $"octocat/renamed-{Guid.NewGuid():N}";
+        result = new CommandResult(0, "octocat/New-Name\n", string.Empty);
+        path = renamed;
+        Assert.Equal("octocat/New-Name", (await AssistantTools.LookUpRepositoryAsync(renamed, Run)).Current);
+        Assert.Equal("octocat/New-Name", (await AssistantTools.LookUpRepositoryAsync(renamed, Run)).Current);
+        Assert.Equal(4, calls);
+    }
+
     // ----- Names and the action log -----
 
     [Fact]

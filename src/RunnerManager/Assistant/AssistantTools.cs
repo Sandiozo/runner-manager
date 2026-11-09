@@ -613,33 +613,59 @@ public static class AssistantTools
         var target = ParseTarget(text);
         if (target.IsOrganization) return target;
         // The current name, so a renamed repository matches its runners and registers correctly.
-        return target with { Path = await CurrentNameAsync(target.Path) ?? throw new AssistantException(
-            $"Could not find {target.Path} on GitHub. Check the name, and that GitHub is connected in Runner Manager with access to it.") };
+        return target with { Path = CurrentNameOrThrow(target.Path, await LookUpRepositoryAsync(target.Path)) };
     }
 
-    /// <summary>Repository names as GitHub knows them now (it follows renames and transfers), for a while.</summary>
-    private static readonly ConcurrentDictionary<string, (string? Current, DateTime Until)> CurrentNames = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>The repository's current name. Says whether GitHub does not know the repository or could not be asked.</summary>
+    internal static string CurrentNameOrThrow(string path, RepositoryLookup lookup)
+        => lookup.Current ?? throw new AssistantException(lookup.NotFound
+            ? $"Could not find {path} on GitHub. Check the name, and that GitHub is connected in Runner Manager with access to it."
+            : $"GitHub could not be reached to check {path}. {lookup.Problem}".TrimEnd());
+
+    /// <summary>
+    /// What GitHub answered about a repository name: its current "owner/name", that there is no such repository
+    /// (a 404), or nothing, with the reason in <paramref name="Problem"/>.
+    /// </summary>
+    internal readonly record struct RepositoryLookup(string? Current, bool NotFound, string Problem);
+
+    /// <summary>What GitHub knows about repository names (it follows renames and transfers), for a while.</summary>
+    private static readonly ConcurrentDictionary<string, (RepositoryLookup Lookup, DateTime Until)> RepositoryLookups = new(StringComparer.OrdinalIgnoreCase);
     private static readonly SemaphoreSlim LookupGate = new(4, 4);
 
-    /// <summary>The repository's current "owner/name", or null when GitHub does not know it (or cannot be asked).</summary>
-    private static async Task<string?> CurrentNameAsync(string path)
+    /// <summary>Asks GitHub for a repository's current name. Only GitHub's own answers are remembered.</summary>
+    /// <param name="run">Runs gh; a test replaces it.</param>
+    internal static async Task<RepositoryLookup> LookUpRepositoryAsync(string path, Func<string, Task<CommandResult>>? run = null)
     {
-        if (CurrentNames.TryGetValue(path, out var known) && DateTime.UtcNow < known.Until) return known.Current;
+        if (RepositoryLookups.TryGetValue(path, out var known) && DateTime.UtcNow < known.Until) return known.Lookup;
         await LookupGate.WaitAsync();
         try
         {
-            var result = await GitHubCli.RunAsync($"api repos/{path} --jq .full_name");
-            string? current = null;
-            if (result.ExitCode == 0)
-            {
-                try { current = ParseTarget(result.Output.Trim()) is { IsOrganization: false } parsed ? parsed.Path : null; }
-                catch (AssistantException) { }
-            }
-            CurrentNames[path] = (current, DateTime.UtcNow + (current != null ? TimeSpan.FromMinutes(30) : TimeSpan.FromMinutes(2)));
-            return current;
+            var arguments = $"api repos/{path} --jq .full_name";
+            var lookup = ReadLookup(run != null ? await run(arguments) : await GitHubCli.RunAsync(arguments));
+            // A timeout, a rate limit or a missing sign-in says nothing about the repository, so the next call asks again.
+            if (lookup.Current != null) RepositoryLookups[path] = (lookup, DateTime.UtcNow + TimeSpan.FromMinutes(30));
+            else if (lookup.NotFound) RepositoryLookups[path] = (lookup, DateTime.UtcNow + TimeSpan.FromMinutes(2));
+            return lookup;
         }
         finally { LookupGate.Release(); }
     }
+
+    internal static RepositoryLookup ReadLookup(CommandResult result)
+    {
+        if (result.ExitCode != 0)
+            return GitHubCli.IsNotFound(result.Error)
+                ? new RepositoryLookup(null, NotFound: true, string.Empty)
+                : new RepositoryLookup(null, NotFound: false, AssistantLog.OneLine(result.Error, 300));
+        try
+        {
+            if (ParseTarget(result.Output.Trim()) is { IsOrganization: false } parsed) return new RepositoryLookup(parsed.Path, NotFound: false, string.Empty);
+        }
+        catch (AssistantException) { }
+        return new RepositoryLookup(null, NotFound: false, "GitHub sent an answer that could not be read.");
+    }
+
+    /// <summary>The repository's current "owner/name", or null when GitHub does not know it (or cannot be asked).</summary>
+    private static async Task<string?> CurrentNameAsync(string path) => (await LookUpRepositoryAsync(path)).Current;
 
     /// <summary>The runners that serve a repository or organization, comparing repositories by their current names.</summary>
     private static async Task<List<(MachineInfo Machine, MachineRunnerStatus Runner)>> RunnersForAsync(IEnumerable<MachineInfo> machines, Target target)
