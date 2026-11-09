@@ -383,6 +383,29 @@ public class FleetConnectionTests
     }
 }
 
+public class ConsoleRunnerCommandTests
+{
+    [Theory]
+    [InlineData("Start")]
+    [InlineData("Restart")]
+    [InlineData("Stop")]
+    public void ARunnerWithAServiceThatRunsInAConsoleWindow_IsNotControlledThroughItsService(string action)
+    {
+        var problem = FleetActions.ConsoleRunnerProblem(interactive: true, serviceInstalled: true, action);
+        Assert.Contains("console window", problem);
+        // The agent reports it the way dashboards recognize a failure.
+        Assert.True(MachineRelay.IsFailedResult($"runner {action} failed: {problem}"));
+    }
+
+    [Fact]
+    public void OtherRunners_AreControlledAsBefore()
+    {
+        Assert.Null(FleetActions.ConsoleRunnerProblem(interactive: false, serviceInstalled: true, "Start"));
+        // A console runner without a service: Stop ends its console, and Start says it needs a service.
+        Assert.Null(FleetActions.ConsoleRunnerProblem(interactive: true, serviceInstalled: false, "Stop"));
+    }
+}
+
 /// <summary>Runs a test with its own fleet.json in the test state folder, and puts back the one before it.</summary>
 internal static class AuditFleetConfig
 {

@@ -934,6 +934,10 @@ public static class MachineRelay
                     await RunnerService.SetStartAutomaticallyAsync(command.TargetKey, command.Value == "on", message => AppendAgentLog($"Runner startup: {message}"));
                     return command.Value == "on" ? "The runner starts automatically after a restart" : "The runner no longer starts automatically after a restart";
                 case "Start" or "Stop" or "Restart":
+                    // Dashboards don't offer these for such a runner, but a command can be sent from an older status.
+                    if (await RunnerService.FindRunnerAsync(command.TargetKey) is { } target
+                        && FleetActions.ConsoleRunnerProblem(target.IsInteractive, target.ServiceInstalled, command.Action) is { } problem)
+                        throw new InvalidOperationException(problem);
                     await RunnerService.ControlServiceAsync(command.TargetKey, command.Action);
                     FleetConfig.SetManuallyStopped(command.TargetKey, command.Action == "Stop");
                     if (command.Action == "Stop") Recovery.Forget(command.TargetKey);
