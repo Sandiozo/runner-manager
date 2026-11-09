@@ -3,6 +3,7 @@ using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
+using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Threading;
 
@@ -427,4 +428,17 @@ public class AuditDashboardTests
         var runner = new MachineRunnerStatus { ServiceName = "actions.runner.app.build-01", DisplayName = "build-01" };
         Assert.Equal(Visibility.Collapsed, runner.LabelsVisibility);
     }
+
+    // ----- Bug 10: keyboard shortcuts -----
+
+    [Theory]
+    [InlineData(Key.D0, ModifierKeys.Control, 0)]
+    [InlineData(Key.D3, ModifierKeys.Control, 3)]
+    [InlineData(Key.NumPad2, ModifierKeys.Control, 2)]
+    [InlineData(Key.D2, ModifierKeys.Control | ModifierKeys.Alt, null)]
+    [InlineData(Key.D2, ModifierKeys.Control | ModifierKeys.Shift, null)]
+    [InlineData(Key.D2, ModifierKeys.None, null)]
+    [InlineData(Key.A, ModifierKeys.Control, null)]
+    public void CtrlAndADigit_SelectsASidebarEntry(Key key, ModifierKeys modifiers, int? index)
+        => Assert.Equal(index, MainWindow.NavShortcutIndex(key, modifiers));
 }

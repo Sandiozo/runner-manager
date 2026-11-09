@@ -1376,7 +1376,8 @@ public partial class MainWindow : Window
 
     private void OnPreviewKeyDown(object sender, KeyEventArgs e)
     {
-        var ctrl = Keyboard.Modifiers.HasFlag(ModifierKeys.Control);
+        // Only Ctrl on its own: AltGr counts as Ctrl+Alt, and with it the same keys type characters such as @ or {.
+        var ctrl = Keyboard.Modifiers == ModifierKeys.Control;
         if (e.Key == Key.F5)
         {
             _ = ManualRefreshAsync();
@@ -1403,13 +1404,19 @@ public partial class MainWindow : Window
             SearchBox.Clear();
             e.Handled = true;
         }
-        else if (ctrl && e.Key is >= Key.D0 and <= Key.D9)
+        else if (NavShortcutIndex(e.Key, Keyboard.Modifiers) is { } index)
         {
-            var index = e.Key - Key.D0;
             if (index < NavItems.Count) MachineNav.SelectedIndex = index;
             e.Handled = true;
         }
     }
+
+    /// <summary>The sidebar entry that Ctrl and a digit, on the main keys or the number pad, selects (0 is all PCs); otherwise null.</summary>
+    internal static int? NavShortcutIndex(Key key, ModifierKeys modifiers)
+        => modifiers != ModifierKeys.Control ? null
+            : key is >= Key.D0 and <= Key.D9 ? key - Key.D0
+            : key is >= Key.NumPad0 and <= Key.NumPad9 ? key - Key.NumPad0
+            : null;
 
     private void ToggleActivity_Click(object sender, RoutedEventArgs e)
     {
