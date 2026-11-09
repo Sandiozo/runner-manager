@@ -127,10 +127,12 @@ public static class AssistantTools
             "runners_online counts the runners on PCs that can be reached now; a runner on an offline PC takes no jobs until its PC is back.",
             AssistantToolKind.Read, Schema(("repository", "string", "owner/name or a https://github.com/owner/name URL.", true)), FindRunnerAsync),
         new AssistantTool("create_runner",
-            "Creates a self-hosted runner for a GitHub repository or organization on a PC in the fleet: downloads the official runner, verifies it, and installs it as a Windows service. Picks the least busy PC when pc is omitted. Refuses when the repository already has a runner unless even_if_exists is true.",
+            "Creates a self-hosted runner for a GitHub repository or organization on a PC in the fleet: downloads the official runner, verifies it, and installs it as a Windows service. " +
+            "When pc is omitted, picks the PC with the fewest runners, and a managed PC (list_pcs: managed) only when no other PC can take it. " +
+            "Refuses when the repository already has a runner unless even_if_exists is true.",
             AssistantToolKind.Change, Schema(
                 ("repository", "string", "owner/name or a https://github.com/owner/name URL. Use an organization URL for an organization runner.", true),
-                ("pc", "string", "The PC to install it on. Optional; the least busy online PC is used.", false),
+                ("pc", "string", "The PC to install it on. Optional; the online PC with the fewest runners is used, a managed PC only as a last choice.", false),
                 ("name", "string", "Runner name. Optional; up to 64 letters, digits, '-', '_' and '.'.", false),
                 ("labels", "array", "Extra labels besides self-hosted, Windows and X64. Optional.", false),
                 ("even_if_exists", "boolean", "Create another runner even if the repository already has one.", false)),
@@ -455,7 +457,7 @@ public static class AssistantTools
         // One create per repository and PC at a time, so a client that gives up and asks again gets no duplicate.
         using var claim = CreateClaims.Claim(target, machine, evenIfExists);
         await call.ConfirmAsync(AssistantToolKind.Change, "Create a runner?",
-            $"An AI assistant wants to create the runner “{name}” for {target.Display} on {machine.MachineName}" +
+            $"An AI assistant wants to create the runner “{name}” for {target.Display} on {PcText(machine)}" +
             (labels.Length > 0 ? $", with the labels {string.Join(", ", labels)}." : "."));
 
         // The approval may have waited a while: check again with the fleet as it is now.
@@ -475,6 +477,7 @@ public static class AssistantTools
             created = true,
             runner = name,
             pc = machine.MachineName,
+            managed_pc = machine.IsManaged ? true : (bool?)null,
             target = target.Display,
             runs_on = runsOn,
             next_step = $"Use runs-on: [{string.Join(", ", runsOn)}] in the repository's workflows."
@@ -530,7 +533,7 @@ public static class AssistantTools
         if (runner.IsBusy) throw new AssistantException($"{runner.TitleText} is running a job. Try again when it is idle.");
         var deleteOld = call.Flag("delete_old_files");
         await call.ConfirmAsync(AssistantToolKind.Destructive, "Move a runner?",
-            $"An AI assistant wants to move the runner “{runner.TitleText}” for {TargetText(runner)} from {source.MachineName} to {target.MachineName}" +
+            $"An AI assistant wants to move the runner “{runner.TitleText}” for {TargetText(runner)} from {source.MachineName} to {PcText(target)}" +
             (deleteOld ? ", and delete its folder on the old PC." : "."));
         (source, runner) = await RecheckAsync(source, runner, mustBeIdle: true);
         target = (await MachineRelay.ReadFleetAsync()).FirstOrDefault(m => m.MachineKey == target.MachineKey)
@@ -844,10 +847,17 @@ public static class AssistantTools
             : $"{machine.MachineName} cannot be reached or runs an older Runner Manager. {machine.ConnectionProblem}".Trim());
     }
 
-    /// <summary>The PC for a new runner when the assistant does not name one: online, then fewest runners, then most free space.</summary>
+    /// <summary>A PC's name for an approval, which says when the PC is managed one way: it usually belongs to someone else.</summary>
+    internal static string PcText(MachineInfo machine) => machine.IsManaged ? $"the managed PC {machine.MachineName}" : machine.MachineName;
+
+    /// <summary>
+    /// The PC for a new runner when the assistant does not name one: online, then the fleet's own PCs before PCs it
+    /// manages one way (which usually belong to someone else), then fewest runners, then most free space.
+    /// </summary>
     internal static MachineInfo PickPc(IEnumerable<MachineInfo> machines)
         => machines.Where(CanManage)
-               .OrderBy(m => m.Runners.Length)
+               .OrderBy(m => m.IsManaged)
+               .ThenBy(m => m.Runners.Length)
                .ThenByDescending(m => m.Disks.FirstOrDefault(d => d.Name.StartsWith("C", StringComparison.OrdinalIgnoreCase))?.FreeGb ?? 0)
                .FirstOrDefault()
            ?? throw new AssistantException("No PC can take a new runner right now. Check that the fleet agents are running.");

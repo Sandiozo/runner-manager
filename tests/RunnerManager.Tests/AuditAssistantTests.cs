@@ -508,6 +508,22 @@ public class AuditAssistantTests
         Assert.DoesNotContain("Use it", refused);
     }
 
+    [Fact]
+    public void NewRunner_GoesToAManagedPcOnlyWhenNoOtherPcCanTakeIt()
+    {
+        var fleet = Online("BUILD", Runner("a", "octocat/a"), Runner("b", "octocat/b"), Runner("c", "octocat/c"));
+        var managed = Online("GUEST", managed: true);
+        var offline = Offline("GPU");
+
+        // The managed PC has fewer runners, but it usually belongs to someone else.
+        Assert.Equal("BUILD", AssistantTools.PickPc(new[] { managed, fleet, offline }).MachineName);
+        Assert.Equal("GUEST", AssistantTools.PickPc(new[] { managed, offline }).MachineName);
+        Assert.Throws<AssistantException>(() => AssistantTools.PickPc(new[] { offline }));
+
+        Assert.Equal("the managed PC GUEST", AssistantTools.PcText(managed));
+        Assert.Equal("BUILD", AssistantTools.PcText(fleet));
+    }
+
     // ----- Names and the action log -----
 
     [Fact]
