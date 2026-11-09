@@ -171,6 +171,7 @@ internal sealed class FakeGh : IDisposable
     {
         // With a token variable set, the first gh call of a process checks the sign-in first, which no test here counts.
         foreach (var name in TokenVariables) Environment.SetEnvironmentVariable(name, null);
+        GitHubCli.ForgetGhFeatures();
         GitHubCli.StartProcess = (startInfo, _, input) =>
         {
             var arguments = startInfo.ArgumentList.ToArray();
@@ -196,7 +197,113 @@ internal sealed class FakeGh : IDisposable
     public void Dispose()
     {
         GitHubCli.StartProcess = _previous;
+        GitHubCli.ForgetGhFeatures();
         for (var i = 0; i < TokenVariables.Length; i++) Environment.SetEnvironmentVariable(TokenVariables[i], _tokens[i]);
+    }
+}
+
+[Collection(GitHubCliCollection.Name)]
+public class GitHubActiveAccountTests
+{
+    private static readonly string[] ActiveStatus = { "auth", "status", "--active", "--hostname", "github.com" };
+    private static readonly string[] AllStatus = { "auth", "status", "--hostname", "github.com" };
+    private static readonly string[] SignedInUser = { "api", "user", "--jq", ".login" };
+    private static readonly CommandResult Works = new(0, "github.com\n  ✓ Logged in to github.com account octo (keyring)\n", string.Empty);
+    private static readonly CommandResult OtherAccountExpired = new(1, string.Empty,
+        "github.com\n  ✓ Logged in to github.com account octo (keyring)\n  X Failed to log in to github.com account old-octo (keyring)\n");
+    private static readonly CommandResult UnknownFlag = new(1, string.Empty, "unknown flag: --active\n\nUsage:  gh auth status [flags]\n");
+
+    [Fact]
+    public async Task SecondAccountWithAProblem_DoesNotDisconnectGitHub()
+    {
+        // What gh 2.57 and later do: all accounts fail the check, the active one alone passes it.
+        using var gh = new FakeGh(arguments => arguments.Contains("--active") ? Works : OtherAccountExpired);
+
+        Assert.True(await GitHubCli.IsAuthenticatedAsync());
+
+        Assert.Equal(ActiveStatus, Assert.Single(gh.Calls));
+    }
+
+    [Fact]
+    public async Task ActiveAccountWithAProblem_IsNotConnected()
+    {
+        using var gh = new FakeGh(_ => new CommandResult(1, string.Empty, "github.com\n  X Failed to log in to github.com account octo (keyring)\n"));
+
+        Assert.False(await GitHubCli.IsAuthenticatedAsync());
+
+        Assert.Equal(ActiveStatus, Assert.Single(gh.Calls));
+    }
+
+    [Fact]
+    public async Task OlderGh_WithASecondAccountProblem_AsksGitHubWhoIsSignedIn()
+    {
+        using var gh = new FakeGh(arguments => arguments.Contains("--active") ? UnknownFlag
+            : arguments[0] == "auth" ? OtherAccountExpired
+            : new CommandResult(0, "octo\n", string.Empty));
+
+        Assert.True(await GitHubCli.IsAuthenticatedAsync());
+        Assert.Equal(new[] { ActiveStatus, AllStatus, SignedInUser }, gh.Calls);
+
+        // --active is not tried again at every check.
+        Assert.True(await GitHubCli.IsAuthenticatedAsync());
+        Assert.Equal(new[] { ActiveStatus, AllStatus, SignedInUser, AllStatus, SignedInUser }, gh.Calls);
+    }
+
+    [Fact]
+    public async Task OlderGh_WithAWorkingSignIn_NeedsNoFurtherCheck()
+    {
+        using var gh = new FakeGh(arguments => arguments.Contains("--active") ? UnknownFlag : Works);
+
+        Assert.True(await GitHubCli.IsAuthenticatedAsync());
+
+        Assert.Equal(new[] { ActiveStatus, AllStatus }, gh.Calls);
+    }
+
+    [Fact]
+    public async Task OlderGh_WithoutASignIn_IsNotConnected()
+    {
+        using var gh = new FakeGh(arguments => arguments.Contains("--active") ? UnknownFlag
+            : arguments[0] == "auth" ? new CommandResult(1, string.Empty, "You are not logged into any GitHub hosts. To log in, run: gh auth login\n")
+            : new CommandResult(4, string.Empty, "To get started with GitHub CLI, please run:  gh auth login\n"));
+
+        Assert.False(await GitHubCli.IsAuthenticatedAsync());
+
+        Assert.Equal(new[] { ActiveStatus, AllStatus }, gh.Calls);
+    }
+
+    [Fact]
+    public async Task OlderGh_WhereNoAccountWorks_IsNotConnected()
+    {
+        using var gh = new FakeGh(arguments => arguments.Contains("--active") ? UnknownFlag
+            : arguments[0] == "auth" ? new CommandResult(1, string.Empty, "github.com\n  X Failed to log in to github.com account octo (keyring)\n")
+            : new CommandResult(1, string.Empty, "gh: Bad credentials (HTTP 401)\n"));
+
+        Assert.False(await GitHubCli.IsAuthenticatedAsync());
+
+        Assert.Equal(new[] { ActiveStatus, AllStatus, SignedInUser }, gh.Calls);
+    }
+
+    [Fact]
+    public async Task MissingGh_IsNotConnected_AfterOneTry()
+    {
+        using var gh = new FakeGh(_ => throw new System.ComponentModel.Win32Exception(2));
+
+        Assert.False(await GitHubCli.IsAuthenticatedAsync());
+
+        Assert.Single(gh.Calls);
+    }
+
+    [Fact]
+    public async Task OrganizationPermissionCheck_ReadsTheActiveAccount()
+    {
+        using var gh = new FakeGh(arguments => arguments[0] == "api"
+            ? new CommandResult(1, string.Empty, "gh: Not Found (HTTP 404)")
+            : new CommandResult(0, "github.com\n  ✓ Logged in to github.com account octo (keyring)\n  - Token scopes: 'gist', 'repo'\n", string.Empty));
+
+        var error = await Assert.ThrowsAsync<GitHubPermissionException>(() => GitHubCli.GetRunnerTokenAsync("orgs/acme", removal: false));
+
+        Assert.Equal(GitHubCli.OrgScopeMessage, error.Message);
+        Assert.Equal(ActiveStatus, gh.Calls[^1]);
     }
 }
 

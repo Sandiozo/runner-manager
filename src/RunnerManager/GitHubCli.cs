@@ -39,18 +39,54 @@ public static class GitHubCli
     public static async Task<bool> IsAuthenticatedAsync()
     {
         lock (TokenChoiceGate) _tokenChoice ??= Task.CompletedTask;
-        var stored = await RunAsync(AuthStatus, environmentToken: false);
-        if (stored.ExitCode == 0 || EnvironmentTokenName() == null)
+        var stored = await HasWorkingSignInAsync(environmentToken: false);
+        if (stored || EnvironmentTokenName() == null)
         {
             _useEnvironmentToken = false;
-            return stored.ExitCode == 0;
+            return stored;
         }
-        var token = await RunAsync(AuthStatus, environmentToken: true);
-        _useEnvironmentToken = token.ExitCode == 0;
-        return token.ExitCode == 0;
+        var token = await HasWorkingSignInAsync(environmentToken: true);
+        _useEnvironmentToken = token;
+        return token;
     }
 
+    private static readonly string[] ActiveAuthStatus = { "auth", "status", "--active", "--hostname", "github.com" };
     private static readonly string[] AuthStatus = { "auth", "status", "--hostname", "github.com" };
+    /// <summary>gh older than 2.57.0 (September 2024) does not know --active. Remembered, so it is not tried at every check.</summary>
+    private static volatile bool _noActiveFlag;
+
+    /// <summary>For tests: checks again whether gh knows --active.</summary>
+    internal static void ForgetGhFeatures() => _noActiveFlag = false;
+
+    /// <summary>
+    /// gh auth status for the active github.com account. Without --active, gh checks every account it has stored for
+    /// github.com and fails when any of them has a problem (a second account whose sign-in expired), although gh
+    /// itself keeps working with the active one. A gh that does not know --active is asked about all accounts.
+    /// </summary>
+    private static async Task<CommandResult> AuthStatusAsync(bool environmentToken)
+    {
+        if (!_noActiveFlag)
+        {
+            var active = await RunAsync(ActiveAuthStatus, environmentToken);
+            if (active.ExitCode == 0 || !active.Error.Contains("unknown flag: --active", StringComparison.OrdinalIgnoreCase)) return active;
+            _noActiveFlag = true;
+        }
+        return await RunAsync(AuthStatus, environmentToken);
+    }
+
+    /// <summary>Whether the active github.com account works, with the stored sign-in or with the token variables.</summary>
+    private static async Task<bool> HasWorkingSignInAsync(bool environmentToken)
+    {
+        var status = await AuthStatusAsync(environmentToken);
+        if (status.ExitCode == 0) return true;
+        // Only a gh without --active can fail here because of another account. Not when gh is missing or did not
+        // finish (-1), or says that no account is signed in.
+        if (!_noActiveFlag || status.ExitCode == -1
+            || status.Error.Contains("not logged in", StringComparison.OrdinalIgnoreCase)) return false;
+        // Asking GitHub who is signed in uses the active account alone.
+        var user = await RunAsync(new[] { "api", "user", "--jq", ".login" }, environmentToken);
+        return user.ExitCode == 0 && !string.IsNullOrWhiteSpace(user.Output);
+    }
 
     /// <summary>GH_TOKEN or GITHUB_TOKEN when one is set, otherwise null.</summary>
     public static string? EnvironmentTokenName()
@@ -137,7 +173,8 @@ public static class GitHubCli
         if (result.ExitCode != 0 && scope.StartsWith("orgs/", StringComparison.OrdinalIgnoreCase)
             && (IsNotFound(result.Error) || result.Error.Contains("(HTTP 403)", StringComparison.Ordinal)))
         {
-            var status = await RunAsync(AuthStatus);
+            // The active account's scopes: the request above ran with it.
+            var status = await AuthStatusAsync(_useEnvironmentToken);
             if (LacksOrgScope(status.Output + "\n" + status.Error)) throw new GitHubPermissionException(OrgScopeMessage);
         }
         if (result.ExitCode != 0 || string.IsNullOrWhiteSpace(result.Output))
