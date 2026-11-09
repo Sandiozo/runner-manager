@@ -307,6 +307,45 @@ public class SealedAllowTests
     }
 }
 
+public class PairingCommitmentTests
+{
+    private static readonly TimeSpan Step = TimeSpan.FromSeconds(5);
+
+    [Fact]
+    public async Task ACommitment_OpensToOneKeyOnly()
+    {
+        var port = TestPorts.FreeRange(2);
+        using var host = new Pairing.PairingHost(CommandSigner.NewKey(), "HOSTPC", port, port + 1);
+        var requested = false;
+        host.JoinRequested += request => { requested = true; request.Deny(); };
+        host.Start();
+
+        using var client = new TcpClient();
+        await client.ConnectAsync(IPAddress.Loopback, port);
+        var stream = client.GetStream();
+        using var first = ECDiffieHellman.Create(ECCurve.NamedCurves.nistP256);
+        using var second = ECDiffieHellman.Create(ECCurve.NamedCurves.nistP256);
+        var nonce = RandomNumberGenerator.GetBytes(32);
+        // One hash over nonce + key 1 + key 2 could be opened as key 1 (with key 2 left over) or as key 2 (with key 1 as
+        // part of the nonce): a device in the middle could then choose its key after it has seen the host's.
+        var twoKeys = FleetCrypto.Concat(first.PublicKey.ExportSubjectPublicKeyInfo(), second.PublicKey.ExportSubjectPublicKeyInfo());
+        await Pairing.WriteAsync(stream, new Pairing.PairMessage
+        {
+            Type = "commit", Version = Pairing.Version, Name = "MITM", Commit = Convert.ToBase64String(Pairing.Commitment(twoKeys, nonce))
+        }, CancellationToken.None);
+        Assert.Equal("hello", (await Pairing.ReadAsync(stream, CancellationToken.None, Step)).Type);
+
+        await Pairing.WriteAsync(stream, new Pairing.PairMessage
+        {
+            Type = "reveal", PublicKey = Convert.ToBase64String(twoKeys), Nonce = Convert.ToBase64String(nonce)
+        }, CancellationToken.None);
+
+        // The host ends the connection without showing a request.
+        await Assert.ThrowsAnyAsync<IOException>(() => Pairing.ReadAsync(stream, CancellationToken.None, Step));
+        Assert.False(requested);
+    }
+}
+
 public class PairingHostLifetimeTests
 {
     [Fact]

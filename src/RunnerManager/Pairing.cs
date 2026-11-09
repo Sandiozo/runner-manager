@@ -524,7 +524,10 @@ public static class Pairing
     private static byte[] DeriveShared(ECDiffieHellman mine, byte[] otherPublic)
     {
         using var other = ECDiffieHellman.Create();
-        other.ImportSubjectPublicKeyInfo(otherPublic, out _);
+        other.ImportSubjectPublicKeyInfo(otherPublic, out var read);
+        // Exactly one key. With bytes left over, one commitment would open to several keys (each one a part of the nonce
+        // or of the rest for the others), and a device in the middle could pick its key after it has seen the host's.
+        if (read != otherPublic.Length) throw new CryptographicException("Invalid public key.");
         return mine.DeriveKeyFromHash(other.PublicKey, HashAlgorithmName.SHA256);
     }
 
