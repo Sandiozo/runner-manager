@@ -142,7 +142,8 @@ public partial class SettingsWindow : Window
 
     private void Window_PreviewKeyDown(object sender, KeyEventArgs e)
     {
-        if (e.Key != Key.Escape || Keyboard.FocusedElement is TextBox { Text.Length: > 0 }) return;
+        // Esc in a box with typed text is left to the box; a read-only box (the assistant setup) does not hold it.
+        if (e.Key != Key.Escape || Keyboard.FocusedElement is TextBox { IsReadOnly: false, Text.Length: > 0 }) return;
         e.Handled = true;
         Close();
     }
@@ -253,7 +254,7 @@ public partial class SettingsWindow : Window
         var key = config.FleetKey;
         var managedBy = key == null ? string.Empty : config.ManagedBy;
         ManagedGroup.Visibility = managedBy.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
-        ManagedRow.Description = $"By {managedBy}'s fleet. Its PCs and AI assistants can view and control this PC. This PC can't see or control theirs.";
+        ManagedRow.Description = $"By {managedBy}'s fleet. Its PCs and AI assistants can view and control this PC. This PC cannot see or control theirs.";
         // Set, but the fleet agent was never installed (the code was entered here, or installing it failed).
         var notJoined = key != null && _agentInstalled == false;
         KeyRow.Description = key == null
@@ -353,6 +354,13 @@ public partial class SettingsWindow : Window
     {
         PasteKeyPanel.Visibility = Visibility.Visible;
         PasteKeyBox.Focus();
+    }
+
+    private void PasteKeyBox_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.Enter) return;
+        e.Handled = true;
+        SaveKey_Click(sender, e);
     }
 
     private void CancelPasteKey_Click(object sender, RoutedEventArgs e)
@@ -693,7 +701,23 @@ public partial class SettingsWindow : Window
             return;
         }
         try { Clipboard.SetText(client.Snippet(AppUpdater.InstalledExe, options.HttpToken)); }
-        catch (Exception ex) { DialogWindow.Error(this, "Could not copy", ex.Message); }
+        catch (Exception ex)
+        {
+            DialogWindow.Error(this, "Could not copy", ex.Message);
+            return;
+        }
+        ShowCopied();
+    }
+
+    private int _copiedShown;
+
+    /// <summary>"Copied" on the button for two seconds, so the click is seen to have worked.</summary>
+    private async void ShowCopied()
+    {
+        var shown = ++_copiedShown;
+        AssistantCopyButton.Content = "Copied";
+        await Task.Delay(TimeSpan.FromSeconds(2));
+        if (shown == _copiedShown) AssistantCopyButton.Content = "Copy";
     }
 
     private async void AssistantToggle_Click(object sender, RoutedEventArgs e)
@@ -779,7 +803,7 @@ public partial class SettingsWindow : Window
             var replacesNewer = _release != null && installed != null && AppUpdater.IsOlder(_release.Version, installed);
             var installable = !replacesNewer && (available || _release != null && !AppUpdater.IsRunningInstalledCopy);
             VersionRow.Description = _release == null
-                ? $"Couldn't check for updates: {check.Problem}"
+                ? $"Could not check for updates: {check.Problem}"
                 : replacesNewer
                     ? $"The newest release is v{_release.Version}. v{installed} is installed, which is newer."
                 : available
