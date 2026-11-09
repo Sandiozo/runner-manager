@@ -66,6 +66,39 @@ public static class Pairing
     internal static byte[] Commitment(byte[] publicKey, byte[] nonce)
         => SHA256.HashData(FleetCrypto.Concat(Encoding.ASCII.GetBytes("rw-pair-commit"), nonce, publicKey));
 
+    /// <summary>
+    /// What a joiner can do. It sends them as one byte after the random bytes of its nonce: the commitment covers the
+    /// nonce, so a device on the path cannot change or remove them, and a host that does not know them (2.4 to 2.8.2)
+    /// takes the longer nonce as it is. A joiner that sends none is one of those versions.
+    /// </summary>
+    [Flags]
+    internal enum JoinerFeatures : byte
+    {
+        None = 0,
+        /// <summary>It expects the host's name and the one-way flag to be sealed with the code (see <see cref="AllowContext"/>).</summary>
+        SealedAllow = 1,
+        /// <summary>It can be allowed one way. Older joiners say so only in "commit", where it is not protected.</summary>
+        CanBeManaged = 2
+    }
+
+    internal const int NonceRandomBytes = 32;
+
+    internal static byte[] NewNonce(JoinerFeatures features)
+        => FleetCrypto.Concat(RandomNumberGenerator.GetBytes(NonceRandomBytes), new[] { (byte)features });
+
+    /// <summary>The features in a joiner's nonce, or null from a joiner that sends none.</summary>
+    internal static JoinerFeatures? FeaturesOf(byte[] nonce)
+        => nonce.Length > NonceRandomBytes ? (JoinerFeatures)nonce[NonceRandomBytes] : null;
+
+    /// <summary>What the code in "allow" was sealed with before the host's name and the one-way flag were sealed with it.</summary>
+    internal const string TransferContext = "rw-pair-transfer";
+
+    /// <summary>
+    /// What the code in "allow" is sealed with for a joiner with <see cref="JoinerFeatures.SealedAllow"/>: the code opens
+    /// only together with the host's name and the one-way flag as the host sent them.
+    /// </summary>
+    internal static string AllowContext(string hostName, bool managed) => $"rw-pair-allow\n{(managed ? "managed" : "member")}\n{hostName}";
+
     private static string UpdateMessage(string pc) => $"{pc} runs an older Runner Manager. Update Runner Manager on {pc}, then try again.";
 
     // ================= Joiner (new PC) =================
@@ -159,7 +192,7 @@ public static class Pairing
         using var stream = tcp.GetStream();
         using var ecdh = ECDiffieHellman.Create(ECCurve.NamedCurves.nistP256);
         var myPublic = ecdh.PublicKey.ExportSubjectPublicKeyInfo();
-        var nonce = RandomNumberGenerator.GetBytes(32);
+        var nonce = NewNonce(JoinerFeatures.SealedAllow | JoinerFeatures.CanBeManaged);
 
         // 1. Commit to our key without showing it.
         await WriteAsync(stream, new PairMessage
@@ -185,10 +218,17 @@ public static class Pairing
         // The user now compares the numbers and clicks Allow on the host.
         var decision = await ReadAsync(stream, cancellationToken, DecisionTimeout + TimeSpan.FromSeconds(15));
         if (decision.Type != "allow") throw new InvalidOperationException(decision.Error.Length > 0 ? decision.Error : "The other PC did not allow this PC to join.");
-        var key = FleetCrypto.Open(TransferKey(shared), Convert.FromBase64String(decision.Payload), "rw-pair-transfer")
+        var transferKey = TransferKey(shared);
+        var payload = Convert.FromBase64String(decision.Payload);
+        // A host that knows our features seals its name and the one-way flag with the code, and never seals the code
+        // alone for us. So when the code opens this way, both are as the host sent them, and when it opens the older
+        // way, the host is an older one, which protects neither.
+        var sealedAllow = FleetCrypto.Open(transferKey, payload, AllowContext(decision.Name, decision.Managed));
+        var key = sealedAllow ?? FleetCrypto.Open(transferKey, payload, TransferContext)
                   ?? throw new CryptographicException("Could not decrypt the pairing code.");
         if (key.Length != 32) throw new CryptographicException("Received an invalid pairing code.");
-        return new JoinResult(key, hello.Name, FleetNetwork.JoinHostPort(AgentHost(tcp, host), FleetNetwork.AgentPort), decision.Managed);
+        return new JoinResult(key, sealedAllow != null ? decision.Name : hello.Name,
+            FleetNetwork.JoinHostPort(AgentHost(tcp, host), FleetNetwork.AgentPort), decision.Managed);
     }
 
     /// <summary>The host's IPv4 address as connected, or the name or address the user typed otherwise.</summary>
@@ -362,13 +402,15 @@ public static class Pairing
                         return;
                     }
                     var shared = DeriveShared(ecdh, joinerPublic);
+                    // Now that the nonce is checked, the features in it are the joiner's own.
+                    var features = FeaturesOf(nonce);
 
                     request = new JoinRequest
                     {
                         Name = string.IsNullOrWhiteSpace(commit.Name) ? "A PC" : commit.Name.Trim(),
                         Code = ComparisonCode(shared, myPublic, joinerPublic),
                         Address = RemoteAddress(client),
-                        CanBeManaged = commit.CanBeManaged
+                        CanBeManaged = features?.HasFlag(JoinerFeatures.CanBeManaged) ?? commit.CanBeManaged
                     };
                     lock (_open) _open.Add(request);
                     if (_listen.IsCancellationRequested) request.Deny();
@@ -391,10 +433,14 @@ public static class Pairing
                         await WriteAsync(stream, new PairMessage { Type = "deny", Error = $"{_name} did not allow this PC to join." }, _cts.Token);
                         return;
                     }
-                    var payload = FleetCrypto.Seal(TransferKey(shared), decision.ManagedKey ?? _pairingKey, "rw-pair-transfer");
+                    var managed = decision.ManagedKey != null;
+                    // The name and the flag also go outside the seal: an older joiner reads them only there, unprotected.
+                    // A joiner that expects them sealed gets the code sealed with them, and no other way.
+                    var context = features?.HasFlag(JoinerFeatures.SealedAllow) == true ? AllowContext(_name, managed) : TransferContext;
+                    var payload = FleetCrypto.Seal(TransferKey(shared), decision.ManagedKey ?? _pairingKey, context);
                     await WriteAsync(stream, new PairMessage
                     {
-                        Type = "allow", Name = _name, Payload = Convert.ToBase64String(payload), Managed = decision.ManagedKey != null
+                        Type = "allow", Name = _name, Payload = Convert.ToBase64String(payload), Managed = managed
                     }, _cts.Token);
                     Joined?.Invoke(request);
                 }
@@ -456,9 +502,15 @@ public static class Pairing
         public string Nonce { get; init; } = string.Empty;
         public string Payload { get; init; } = string.Empty;
         public string Error { get; init; } = string.Empty;
-        /// <summary>"commit": the joiner understands being allowed one way.</summary>
+        /// <summary>
+        /// "commit": the joiner understands being allowed one way. Not protected here, so the host reads it from the
+        /// joiner's <see cref="JoinerFeatures"/> when it sends them.
+        /// </summary>
         public bool CanBeManaged { get; init; }
-        /// <summary>"allow": the payload is the joiner's own code, and it is managed by the fleet one way.</summary>
+        /// <summary>
+        /// "allow": the payload is the joiner's own code, and it is managed by the fleet one way. Sealed with the code,
+        /// like <see cref="Name"/>, for a joiner with <see cref="JoinerFeatures.SealedAllow"/>.
+        /// </summary>
         public bool Managed { get; init; }
     }
 

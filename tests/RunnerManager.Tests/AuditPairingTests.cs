@@ -1,5 +1,7 @@
+using System.IO;
 using System.Net;
 using System.Net.Sockets;
+using System.Security.Cryptography;
 
 namespace RunnerManager.Tests;
 
@@ -110,6 +112,198 @@ public class JoinConfirmationTests
         Assert.Equal(new Pairing.JoinOffer("HOSTPC", Managed: true), offer);
         Assert.True(result.Managed);
         Assert.Equal(ownKey, result.PairingKey);
+    }
+}
+
+/// <summary>The host's name and the one-way flag in "allow" are sealed with the code, and PCs from before that still pair.</summary>
+public class SealedAllowTests
+{
+    private static readonly TimeSpan Step = TimeSpan.FromSeconds(5);
+
+    private static Pairing.PairingHost StartHost(byte[] key, Action<Pairing.JoinRequest> answer, out int port)
+    {
+        port = TestPorts.FreeRange(2);
+        var host = new Pairing.PairingHost(key, "HOSTPC", port, port + 1);
+        host.JoinRequested += answer;
+        host.Start();
+        return host;
+    }
+
+    /// <summary>A device on the path: it passes each pairing message on after <paramref name="change"/>.</summary>
+    private static TcpListener StartRelay(int hostPort, Func<Pairing.PairMessage, Pairing.PairMessage> change, out string address)
+    {
+        var port = TestPorts.FreeRange(1);
+        var listener = new TcpListener(IPAddress.Loopback, port);
+        listener.Start();
+        address = $"127.0.0.1:{port}";
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                using var joinerSide = await listener.AcceptTcpClientAsync();
+                using var hostSide = new TcpClient();
+                await hostSide.ConnectAsync(IPAddress.Loopback, hostPort);
+                var joiner = joinerSide.GetStream();
+                var host = hostSide.GetStream();
+                // commit and hello, then reveal and the host's answer.
+                for (var round = 0; round < 2; round++)
+                {
+                    await Pairing.WriteAsync(host, change(await Pairing.ReadAsync(joiner, CancellationToken.None, Step)), CancellationToken.None);
+                    await Pairing.WriteAsync(joiner, change(await Pairing.ReadAsync(host, CancellationToken.None, Step)), CancellationToken.None);
+                }
+            }
+            catch (Exception ex) when (ex is IOException or SocketException or OperationCanceledException or ObjectDisposedException) { }
+        });
+        return listener;
+    }
+
+    private static byte[] SharedSecret(ECDiffieHellman mine, byte[] otherPublic)
+    {
+        using var other = ECDiffieHellman.Create();
+        other.ImportSubjectPublicKeyInfo(otherPublic, out _);
+        return mine.DeriveKeyFromHash(other.PublicKey, HashAlgorithmName.SHA256);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ADeviceOnThePath_CannotFlipTheOneWayFlag(bool managed)
+    {
+        var ownKey = CommandSigner.NewKey();
+        using var host = StartHost(CommandSigner.NewKey(), request => { if (managed) request.AllowManaged(ownKey); else request.Allow(); }, out var port);
+        var relay = StartRelay(port, message => message.Type == "allow" ? message with { Managed = !managed } : message, out var address);
+        try
+        {
+            await Assert.ThrowsAsync<CryptographicException>(() => Pairing.JoinAsync(address, "NEWPC", _ => { }, CancellationToken.None));
+        }
+        finally { relay.Stop(); }
+    }
+
+    [Fact]
+    public async Task ADeviceOnThePath_CannotRenameTheHost()
+    {
+        var key = CommandSigner.NewKey();
+        using var host = StartHost(key, request => request.Allow(), out var port);
+
+        var relay = StartRelay(port, message => message.Type == "allow" ? message with { Name = "OTHERPC" } : message, out var address);
+        try
+        {
+            await Assert.ThrowsAsync<CryptographicException>(() => Pairing.JoinAsync(address, "NEWPC", _ => { }, CancellationToken.None));
+        }
+        finally { relay.Stop(); }
+
+        // The name in "hello" is not protected, and is not the one that is used.
+        relay = StartRelay(port, message => message.Type == "hello" ? message with { Name = "OTHERPC" } : message, out address);
+        try
+        {
+            var result = await Pairing.JoinAsync(address, "NEWPC", _ => { }, CancellationToken.None);
+            Assert.Equal("HOSTPC", result.HostName);
+            Assert.Equal(key, result.PairingKey);
+        }
+        finally { relay.Stop(); }
+    }
+
+    [Fact]
+    public async Task ADeviceOnThePath_CannotMakeTheHostSealTheOlderWay()
+    {
+        // Without the joiner's features the host would seal the code alone, and the flag could be flipped again.
+        using var host = StartHost(CommandSigner.NewKey(), request => request.Allow(), out var port);
+        var relay = StartRelay(port, message => message.Type == "reveal"
+            ? message with { Nonce = Convert.ToBase64String(Convert.FromBase64String(message.Nonce)[..Pairing.NonceRandomBytes]) }
+            : message, out var address);
+        try
+        {
+            var error = await Assert.ThrowsAsync<InvalidOperationException>(() => Pairing.JoinAsync(address, "NEWPC", _ => { }, CancellationToken.None));
+            Assert.Contains("pairing check failed", error.Message);
+        }
+        finally { relay.Stop(); }
+    }
+
+    [Fact]
+    public async Task ADeviceOnThePath_CannotHideThatTheJoinerCanBeManaged()
+    {
+        var seen = new TaskCompletionSource<Pairing.JoinRequest>();
+        using var host = StartHost(CommandSigner.NewKey(), request => { seen.TrySetResult(request); request.Allow(); }, out var port);
+        var relay = StartRelay(port, message => message.Type == "commit" ? message with { CanBeManaged = false } : message, out var address);
+        try
+        {
+            await Pairing.JoinAsync(address, "NEWPC", _ => { }, CancellationToken.None);
+            Assert.True((await seen.Task.WaitAsync(Step)).CanBeManaged);
+        }
+        finally { relay.Stop(); }
+    }
+
+    [Fact]
+    public async Task AJoinerFromBeforeTheSeal_StillGetsItsCode()
+    {
+        var ownKey = CommandSigner.NewKey();
+        var seen = new TaskCompletionSource<Pairing.JoinRequest>();
+        using var host = StartHost(CommandSigner.NewKey(), request => { seen.TrySetResult(request); request.AllowManaged(ownKey); }, out var port);
+
+        using var client = new TcpClient();
+        await client.ConnectAsync(IPAddress.Loopback, port);
+        var stream = client.GetStream();
+        using var ecdh = ECDiffieHellman.Create(ECCurve.NamedCurves.nistP256);
+        var myPublic = ecdh.PublicKey.ExportSubjectPublicKeyInfo();
+        // What 2.8.0 to 2.8.2 send: 32 random bytes with no features, and "can be managed" in the commit message only.
+        var nonce = RandomNumberGenerator.GetBytes(32);
+        await Pairing.WriteAsync(stream, new Pairing.PairMessage
+        {
+            Type = "commit", Version = Pairing.Version, Name = "OLDPC", Commit = Convert.ToBase64String(Pairing.Commitment(myPublic, nonce)), CanBeManaged = true
+        }, CancellationToken.None);
+        var hello = await Pairing.ReadAsync(stream, CancellationToken.None, Step);
+        await Pairing.WriteAsync(stream, new Pairing.PairMessage
+        {
+            Type = "reveal", PublicKey = Convert.ToBase64String(myPublic), Nonce = Convert.ToBase64String(nonce)
+        }, CancellationToken.None);
+        var allow = await Pairing.ReadAsync(stream, CancellationToken.None, Step);
+
+        Assert.True((await seen.Task.WaitAsync(Step)).CanBeManaged);
+        Assert.Equal("allow", allow.Type);
+        Assert.True(allow.Managed);
+        // It opens the code the only way it knows.
+        var transferKey = Pairing.TransferKey(SharedSecret(ecdh, Convert.FromBase64String(hello.PublicKey)));
+        Assert.Equal(ownKey, FleetCrypto.Open(transferKey, Convert.FromBase64String(allow.Payload), "rw-pair-transfer"));
+    }
+
+    [Fact]
+    public async Task AHostFromBeforeTheSeal_IsStillJoined()
+    {
+        var ownKey = CommandSigner.NewKey();
+        var port = TestPorts.FreeRange(1);
+        var listener = new TcpListener(IPAddress.Loopback, port);
+        listener.Start();
+        try
+        {
+            // What a 2.8.2 host does: it checks the commitment over the nonce as it comes, and seals the code alone.
+            var oldHost = Task.Run(async () =>
+            {
+                using var client = await listener.AcceptTcpClientAsync();
+                var stream = client.GetStream();
+                var commit = await Pairing.ReadAsync(stream, CancellationToken.None, Step);
+                using var ecdh = ECDiffieHellman.Create(ECCurve.NamedCurves.nistP256);
+                await Pairing.WriteAsync(stream, new Pairing.PairMessage
+                {
+                    Type = "hello", Version = Pairing.Version, Name = "OLDHOST", PublicKey = Convert.ToBase64String(ecdh.PublicKey.ExportSubjectPublicKeyInfo())
+                }, CancellationToken.None);
+                var reveal = await Pairing.ReadAsync(stream, CancellationToken.None, Step);
+                var joinerPublic = Convert.FromBase64String(reveal.PublicKey);
+                Assert.Equal(Convert.FromBase64String(commit.Commit), Pairing.Commitment(joinerPublic, Convert.FromBase64String(reveal.Nonce)));
+                var payload = FleetCrypto.Seal(Pairing.TransferKey(SharedSecret(ecdh, joinerPublic)), ownKey, "rw-pair-transfer");
+                await Pairing.WriteAsync(stream, new Pairing.PairMessage
+                {
+                    Type = "allow", Name = "OLDHOST", Payload = Convert.ToBase64String(payload), Managed = true
+                }, CancellationToken.None);
+            });
+
+            var result = await Pairing.JoinAsync($"127.0.0.1:{port}", "NEWPC", _ => { }, CancellationToken.None);
+            await oldHost;
+
+            Assert.Equal(ownKey, result.PairingKey);
+            Assert.Equal("OLDHOST", result.HostName);
+            Assert.True(result.Managed);
+        }
+        finally { listener.Stop(); }
     }
 }
 
