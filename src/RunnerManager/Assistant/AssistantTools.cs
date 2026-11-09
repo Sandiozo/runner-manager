@@ -119,10 +119,12 @@ public static class AssistantTools
             AssistantToolKind.Read, Schema(), ListPcsAsync),
         new AssistantTool("list_runners",
             "Lists the GitHub Actions self-hosted runners on every PC (or one PC): state (busy, idle, stopped), repository or organization, labels and version. " +
-            "problem says when a runner needs attention: its job is stuck (no CPU use or output for a while) or runs far longer than usual, or it is idle while jobs it can take wait.",
+            "problem says when a runner needs attention: its job is stuck (no CPU use or output for a while) or runs far longer than usual, or it is idle while jobs it can take wait. " +
+            "pc_online is false for a runner on a PC that cannot be reached now: its state is unknown, and last_known_state is what the PC reported last.",
             AssistantToolKind.Read, Schema(("pc", "string", "Only this PC. Optional.", false)), ListRunnersAsync),
         new AssistantTool("find_runner_for_repo",
-            "Checks whether a GitHub repository already has a self-hosted runner in the fleet (its own, or an organization runner). Call this before create_runner. Also returns the runs-on labels to use in workflows.",
+            "Checks whether a GitHub repository already has a self-hosted runner in the fleet (its own, or an organization runner). Call this before create_runner. Also returns the runs-on labels to use in workflows. " +
+            "runners_online counts the runners on PCs that can be reached now; a runner on an offline PC takes no jobs until its PC is back.",
             AssistantToolKind.Read, Schema(("repository", "string", "owner/name or a https://github.com/owner/name URL.", true)), FindRunnerAsync),
         new AssistantTool("create_runner",
             "Creates a self-hosted runner for a GitHub repository or organization on a PC in the fleet: downloads the official runner, verifies it, and installs it as a Windows service. Picks the least busy PC when pc is omitted. Refuses when the repository already has a runner unless even_if_exists is true.",
@@ -239,8 +241,9 @@ public static class AssistantTools
             memory_gb = Math.Round(m.MemoryTotalGb, 1),
             disks = m.Disks.Select(d => new { drive = d.Name, free_gb = Math.Round(d.FreeGb), total_gb = Math.Round(d.TotalGb) }),
             runners = m.Runners.Length,
-            runners_running = m.Runners.Count(r => r.IsRunning),
-            runners_busy = m.Runners.Count(r => r.IsBusy),
+            // Left out for a PC that cannot be reached: what it reported last may no longer be true.
+            runners_running = m.IsReachable ? m.Runners.Count(r => r.IsRunning) : (int?)null,
+            runners_busy = m.IsReachable ? m.Runners.Count(r => r.IsBusy) : (int?)null,
             can_manage = CanManage(m)
         }).ToList();
     }
@@ -264,12 +267,23 @@ public static class AssistantTools
         {
             target = target.Display,
             has_runner = matches.Count > 0,
+            runners_online = matches.Count(x => x.Machine.IsReachable),
             runners = matches.Select(x => DescribeRunner(x.Machine, x.Runner, health)),
             runs_on = runsOn?.Labels,
-            next_step = runsOn is { } labels
-                ? $"Use runs-on: [{string.Join(", ", labels.Labels)}] in the workflow.{labels.Note}"
-                : "No runner yet. Call create_runner to add one."
+            next_step = FindNextStep(target, matches, runsOn)
         };
+    }
+
+    /// <summary>What to do with the answer of find_runner_for_repo. A runner on a PC that cannot be reached is not one to count on.</summary>
+    internal static string FindNextStep(Target target, IReadOnlyCollection<(MachineInfo Machine, MachineRunnerStatus Runner)> matches, (string[] Labels, string Note)? runsOn)
+    {
+        if (runsOn is not { } labels) return "No runner yet. Call create_runner to add one.";
+        var use = $"runs-on: [{string.Join(", ", labels.Labels)}]";
+        if (matches.Any(x => x.Machine.IsReachable)) return $"Use {use} in the workflow.{labels.Note}";
+        var pcs = string.Join(", ", matches.Select(x => x.Machine.MachineName).Distinct(StringComparer.OrdinalIgnoreCase));
+        return $"{(matches.Count == 1 ? "The runner" : "Every runner")} for {target.Display} is on a PC that is offline now ({pcs}), so jobs wait until it is back. " +
+               $"Tell the user. With {use} the workflow runs when the PC is online again; " +
+               $"to add a runner on a PC that is online, call create_runner with even_if_exists=true.{labels.Note}";
     }
 
     private static async Task<object> JobStatusAsync(AssistantCall call)
@@ -278,28 +292,19 @@ public static class AssistantTools
         var health = await EvaluateHealthAsync(new List<MachineInfo> { machine });
         var problem = ProblemOf(runner, health);
         var queue = QueueOf(runner, health);
+        // What an offline PC reported last says nothing about now, and it cannot be asked for output. GitHub may
+        // still know a job that the runner took.
+        if (!machine.IsReachable)
+            return new
+            {
+                notice = UntrustedNotice, pc = machine.MachineName, pc_online = false, runner = runner.TitleText, target = TargetOf(runner),
+                state = UnknownState, last_known_state = StateOf(runner), job = await CurrentJobAsync(runner), queue,
+                note = $"{machine.MachineName} cannot be reached now, so what the runner is doing is not known. {machine.ConnectionProblem}".TrimEnd()
+            };
         if (!runner.IsBusy)
-            return new { notice = UntrustedNotice, pc = machine.MachineName, runner = runner.TitleText, target = TargetOf(runner), busy = false, state = StateOf(runner), problem, queue };
+            return new { notice = UntrustedNotice, pc = machine.MachineName, pc_online = true, runner = runner.TitleText, target = TargetOf(runner), busy = false, state = StateOf(runner), problem, queue };
 
-        object? job = null;
-        if (!string.IsNullOrEmpty(runner.RepositoryPath) && runner.AgentId != 0)
-        {
-            var (read, current) = await GitHubApi.GetCurrentJobAsync(runner.RepositoryPath, runner.AgentId);
-            if (read && current != null)
-                job = new
-                {
-                    workflow = Bounded(current.WorkflowName, 200),
-                    name = Bounded(current.Name, 200),
-                    run_number = current.RunNumber,
-                    url = current.HtmlUrl,
-                    started_utc = current.StartedUtc,
-                    steps = current.Steps.Take(100).Select(s =>
-                    {
-                        var view = LiveStepView.From(s, DateTime.UtcNow);
-                        return new { name = Bounded(s.Name, 200), state = view.State, duration = view.DurationText };
-                    })
-                };
-        }
+        var job = await CurrentJobAsync(runner);
 
         RunnerJobActivity? activity = null;
         string? note = null;
@@ -314,6 +319,7 @@ public static class AssistantTools
         {
             notice = UntrustedNotice,
             pc = machine.MachineName,
+            pc_online = true,
             runner = runner.TitleText,
             target = TargetOf(runner),
             busy = true,
@@ -329,6 +335,27 @@ public static class AssistantTools
                 memory_mb = p.MemoryBytes / (1024 * 1024)
             }),
             note
+        };
+    }
+
+    /// <summary>The job GitHub says the runner is running now, or null.</summary>
+    private static async Task<object?> CurrentJobAsync(MachineRunnerStatus runner)
+    {
+        if (string.IsNullOrEmpty(runner.RepositoryPath) || runner.AgentId == 0) return null;
+        var (read, current) = await GitHubApi.GetCurrentJobAsync(runner.RepositoryPath, runner.AgentId);
+        if (!read || current == null) return null;
+        return new
+        {
+            workflow = Bounded(current.WorkflowName, 200),
+            name = Bounded(current.Name, 200),
+            run_number = current.RunNumber,
+            url = current.HtmlUrl,
+            started_utc = current.StartedUtc,
+            steps = current.Steps.Take(100).Select(s =>
+            {
+                var view = LiveStepView.From(s, DateTime.UtcNow);
+                return new { name = Bounded(s.Name, 200), state = view.State, duration = view.DurationText };
+            })
         };
     }
 
@@ -624,12 +651,16 @@ public static class AssistantTools
         catch (AssistantException) { return false; }
     }
 
-    private static AssistantException AlreadyHasRunner(Target target, List<(MachineInfo Machine, MachineRunnerStatus Runner)> existing)
+    internal static AssistantException AlreadyHasRunner(Target target, List<(MachineInfo Machine, MachineRunnerStatus Runner)> existing)
     {
         var runsOn = RunsOn(existing);
-        return new AssistantException($"{target.Display} already has a runner: " +
-                                      string.Join(", ", existing.Select(x => $"{x.Runner.TitleText} on {x.Machine.MachineName}")) +
-                                      $". Use it with runs-on: [{string.Join(", ", runsOn.Labels)}], or pass even_if_exists=true to add another.{runsOn.Note}");
+        var list = string.Join(", ", existing.Select(x => $"{x.Runner.TitleText} on {x.Machine.MachineName}{(x.Machine.IsReachable ? string.Empty : " (offline)")}"));
+        var use = $"runs-on: [{string.Join(", ", runsOn.Labels)}]";
+        // A runner on a PC that cannot be reached takes no jobs now: say so, instead of sending the assistant to it.
+        return new AssistantException(existing.Any(x => x.Machine.IsReachable)
+            ? $"{target.Display} already has a runner: {list}. Use it with {use}, or pass even_if_exists=true to add another.{runsOn.Note}"
+            : $"{target.Display} already has a runner, but its PC is offline now: {list}. Jobs with {use} wait until the PC is back. " +
+              $"Tell the user, or pass even_if_exists=true to add a runner on a PC that is online.{runsOn.Note}");
     }
 
     /// <summary>
@@ -677,15 +708,21 @@ public static class AssistantTools
             ? queue.Take(30).Select(q => new { job = Bounded(q.Title, 300), state = Bounded(q.Detail, 200), running = q.Running, url = q.Url })
             : null;
 
-    private static object DescribeRunner(MachineInfo machine, MachineRunnerStatus runner, FleetHealth? health = null)
+    /// <summary>The state of a runner on a PC that cannot be reached: what the PC reported last may no longer be true.</summary>
+    internal const string UnknownState = "unknown";
+
+    internal static object DescribeRunner(MachineInfo machine, MachineRunnerStatus runner, FleetHealth? health = null)
     {
         var labels = LabelsOf(machine, runner);
+        var online = machine.IsReachable;
         return new
         {
             pc = machine.MachineName,
+            pc_online = online,
             name = runner.TitleText,
             target = TargetOf(runner),
-            state = StateOf(runner),
+            state = online ? StateOf(runner) : UnknownState,
+            last_known_state = online ? null : StateOf(runner),
             problem = health == null ? null : ProblemOf(runner, health),
             console = runner.IsInteractive,
             // "windows", "signin" or "signin-shared" (a console runner opened at sign-in), "off", "disabled", "none"; null from older agents.

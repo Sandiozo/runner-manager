@@ -468,6 +468,46 @@ public class AuditAssistantTests
         Assert.Contains("no Windows service", Assert.Throws<AssistantException>(() => AssistantTools.RequireService(pc, noService, "Stop")).Message);
     }
 
+    [Fact]
+    public void Runners_OnAPcThatCannotBeReached_AreNotReportedAsCurrent()
+    {
+        var online = Online("BUILD", Runner("a", "octocat/web"));
+        var offline = Offline("GPU", Runner("b", "octocat/web"));
+
+        var live = JsonSerializer.SerializeToNode(AssistantTools.DescribeRunner(online, online.Runners[0]), McpServer.ResultJson)!;
+        Assert.True(live["pc_online"]!.GetValue<bool>());
+        Assert.Equal("idle", live["state"]!.GetValue<string>());
+        Assert.Null(live["last_known_state"]);
+
+        // The offline PC's last status still says the runner is idle.
+        var stale = JsonSerializer.SerializeToNode(AssistantTools.DescribeRunner(offline, offline.Runners[0]), McpServer.ResultJson)!;
+        Assert.False(stale["pc_online"]!.GetValue<bool>());
+        Assert.Equal("unknown", stale["state"]!.GetValue<string>());
+        Assert.Equal("idle", stale["last_known_state"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void FindRunner_SaysWhenEveryRunnerIsOnAnOfflinePc()
+    {
+        var target = new AssistantTools.Target("octocat/web", false);
+        var online = Online("BUILD", Runner("a", "octocat/web"));
+        var offline = Offline("GPU", Runner("b", "octocat/web"));
+        var onlyOffline = new[] { (offline, offline.Runners[0]) };
+        var both = new[] { (online, online.Runners[0]), (offline, offline.Runners[0]) };
+
+        Assert.Equal("No runner yet. Call create_runner to add one.", AssistantTools.FindNextStep(target, Array.Empty<(MachineInfo, MachineRunnerStatus)>(), null));
+        Assert.StartsWith("Use runs-on: [self-hosted, Windows, X64]", AssistantTools.FindNextStep(target, both, AssistantTools.RunsOn(both)));
+        var next = AssistantTools.FindNextStep(target, onlyOffline, AssistantTools.RunsOn(onlyOffline));
+        Assert.Contains("offline now (GPU)", next);
+        Assert.Contains("even_if_exists=true", next);
+
+        // create_runner refuses with the same picture.
+        Assert.Contains("already has a runner: a on BUILD, b on GPU (offline). Use it", AssistantTools.AlreadyHasRunner(target, both.ToList()).Message);
+        var refused = AssistantTools.AlreadyHasRunner(target, onlyOffline.ToList()).Message;
+        Assert.Contains("its PC is offline now: b on GPU (offline)", refused);
+        Assert.DoesNotContain("Use it", refused);
+    }
+
     // ----- Names and the action log -----
 
     [Fact]
