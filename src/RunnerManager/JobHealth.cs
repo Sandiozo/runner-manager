@@ -203,10 +203,18 @@ public static class JobWatch
         public Dictionary<string, ulong> ProcessorTime = new();
         public string OutputState = string.Empty;
         public DateTime SampledUtc;
+        /// <summary><see cref="AwakeTicks"/> at the reading.</summary>
+        public ulong SampledAwake;
         public DateTime LastActiveUtc;
     }
 
     private static readonly Dictionary<string, State> States = new(StringComparer.OrdinalIgnoreCase);
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+    private static extern bool QueryUnbiasedInterruptTime(out ulong unbiasedTime);
+
+    /// <summary>How long Windows has been awake, in 100 ns units: it stands still while the PC sleeps or hibernates. 0 when unknown.</summary>
+    private static ulong AwakeTicks() => QueryUnbiasedInterruptTime(out var ticks) ? ticks : 0;
 
     /// <summary>Takes a new reading of each busy runner's job when the last one is 30 seconds old, and forgets idle runners.</summary>
     public static void Update(IEnumerable<RunnerInfo> runners) => Update(runners, () => RunnerActivity.ProcessSnapshot.Read());
@@ -226,29 +234,53 @@ public static class JobWatch
         RunnerActivity.ProcessSnapshot processes;
         try { processes = readProcesses(); }
         catch { return; }
+        var awake = AwakeTicks();
         foreach (var root in busy)
         {
             RunnerActivity.JobSample? sample;
             try { sample = RunnerActivity.ReadJobSample(root, processes); }
             catch { continue; }
-            lock (States)
+            if (sample == null)
             {
-                if (sample == null) { States.Remove(root); continue; }
-                if (!States.TryGetValue(root, out var state) || state.WorkerStartedUtc != sample.WorkerStartedUtc)
-                {
-                    States[root] = new State
-                    {
-                        WorkerStartedUtc = sample.WorkerStartedUtc, ProcessorTime = sample.ProcessorTime,
-                        OutputState = sample.OutputState, SampledUtc = now, LastActiveUtc = now
-                    };
-                    continue;
-                }
-                if (MadeProgress(state.ProcessorTime, sample.ProcessorTime, state.OutputState, sample.OutputState, now - state.SampledUtc))
-                    state.LastActiveUtc = now;
-                state.ProcessorTime = sample.ProcessorTime;
-                state.OutputState = sample.OutputState;
-                state.SampledUtc = now;
+                lock (States) States.Remove(root);
+                continue;
             }
+            Record(root, sample, now, awake);
+        }
+    }
+
+    /// <summary>Compares a new reading of a runner's job with the last one.</summary>
+    /// <param name="awakeTicks"><see cref="AwakeTicks"/> now.</param>
+    internal static void Record(string root, RunnerActivity.JobSample sample, DateTime nowUtc, ulong awakeTicks)
+    {
+        lock (States)
+        {
+            if (!States.TryGetValue(root, out var state) || state.WorkerStartedUtc != sample.WorkerStartedUtc)
+            {
+                States[root] = new State
+                {
+                    WorkerStartedUtc = sample.WorkerStartedUtc, ProcessorTime = sample.ProcessorTime,
+                    OutputState = sample.OutputState, SampledUtc = nowUtc, SampledAwake = awakeTicks, LastActiveUtc = nowUtc
+                };
+                return;
+            }
+            var elapsed = nowUtc - state.SampledUtc;
+            var awake = awakeTicks > state.SampledAwake && state.SampledAwake > 0
+                ? TimeSpan.FromTicks((long)(awakeTicks - state.SampledAwake)) : elapsed;
+            // The PC slept since the last reading. Nothing ran meanwhile, so the sleep is not quiet time, and the CPU
+            // use is spread over the time the PC was awake only.
+            var slept = elapsed - awake;
+            if (slept > TimeSpan.FromSeconds(5))
+            {
+                state.LastActiveUtc = state.LastActiveUtc + slept < nowUtc ? state.LastActiveUtc + slept : nowUtc;
+                elapsed = awake;
+            }
+            if (MadeProgress(state.ProcessorTime, sample.ProcessorTime, state.OutputState, sample.OutputState, elapsed))
+                state.LastActiveUtc = nowUtc;
+            state.ProcessorTime = sample.ProcessorTime;
+            state.OutputState = sample.OutputState;
+            state.SampledUtc = nowUtc;
+            state.SampledAwake = awakeTicks;
         }
     }
 
