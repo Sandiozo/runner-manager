@@ -1,3 +1,5 @@
+using System.IO;
+
 namespace RunnerManager.Tests;
 
 public class AuditDialogTests
@@ -77,6 +79,148 @@ public class AuditDialogTests
         Assert.Equal(new[] { "office.example.ts.net" }, ForgetPc.ManualAddressesFor(manual, new[] { "OFFICE.example.ts.net:47821", "" }));
         Assert.Equal(new[] { "100.101.102.103:47821" }, ForgetPc.ManualAddressesFor(manual, new[] { "100.101.102.103" }));
         Assert.Empty(ForgetPc.ManualAddressesFor(manual, new[] { "other-pc:47821" }));
+    }
+
+    // ----- Add runner -----
+
+    [Theory]
+    [InlineData("owner/repo", "https://github.com/owner/repo")]
+    [InlineData("owner/repo/", "https://github.com/owner/repo")]
+    [InlineData(" owner/repo.git ", "https://github.com/owner/repo")]
+    [InlineData("github.com/owner/repo", "https://github.com/owner/repo")]
+    [InlineData("www.github.com/owner/repo", "https://github.com/owner/repo")]
+    [InlineData("https://github.com/owner/repo/tree/main", "https://github.com/owner/repo")]
+    [InlineData("git@github.com:owner/repo.git", "https://github.com/owner/repo")]
+    [InlineData("ssh://git@github.com/owner/repo.git", "https://github.com/owner/repo")]
+    [InlineData("github.com/my-org", "https://github.com/my-org")]
+    [InlineData("https://github.com/orgs/my-org", "https://github.com/my-org")]
+    public void RepositoryInput_GivesTheRegistrationUrl(string text, string url)
+    {
+        var check = AddRunnerForm.CheckRepository(text);
+        Assert.True(check.IsValid, check.Problem);
+        Assert.Equal(url, check.Url);
+        Assert.Null(RunnerService.RegistrationUrlProblem(check.Url));
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("owner")]
+    [InlineData("https://gitlab.com/owner/repo")]
+    [InlineData("git@gitlab.com:owner/repo.git")]
+    [InlineData("https://github.com/own%22er/repo")]
+    public void RepositoryInputThatCannotBeRegistered_IsNotValid(string text)
+        => Assert.False(AddRunnerForm.CheckRepository(text).IsValid);
+
+    [Fact]
+    public void DefaultRunnerName_IsPcAndRepository_AndFreeForTheRepository()
+    {
+        var repo = AddRunnerForm.CheckRepository("owner/web.app");
+        Assert.Equal("BUILD-PC-web.app", AddRunnerForm.DefaultRunnerName("BUILD-PC", repo, _ => false));
+        var taken = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "BUILD-PC-web.app", "build-pc-web.app-2" };
+        Assert.Equal("BUILD-PC-web.app-3", AddRunnerForm.DefaultRunnerName("BUILD-PC", repo, taken.Contains));
+        Assert.Equal("BUILD-PC-my-org", AddRunnerForm.DefaultRunnerName("BUILD-PC", AddRunnerForm.CheckRepository("github.com/my-org"), _ => false));
+        Assert.Equal("BUILD-PC", AddRunnerForm.DefaultRunnerName("BUILD-PC", AddRunnerForm.CheckRepository(""), _ => false));
+    }
+
+    [Fact]
+    public void DefaultRunnerName_IsAValidNameOfAtMost64Characters()
+    {
+        var repo = AddRunnerForm.CheckRepository("owner/" + new string('r', 80));
+        var name = AddRunnerForm.DefaultRunnerName("PC NAME", repo, n => !n.EndsWith("-2"));
+        Assert.Null(RunnerService.RunnerNameProblem(name));
+        Assert.True(name.Length <= 64, name);
+        Assert.EndsWith("-2", name);
+        Assert.StartsWith("PC-NAME-", name);
+    }
+
+    [Fact]
+    public void RunnerName_TakenForTheSameRepository_IsRefused()
+    {
+        var existing = new[] { ("repos/owner/repo", "BUILD-PC-repo") };
+        Assert.NotNull(AddRunnerForm.NameProblem("build-pc-repo", "repos/owner/repo", existing));
+        Assert.Null(AddRunnerForm.NameProblem("build-pc-repo", "repos/owner/other", existing));
+        Assert.NotNull(AddRunnerForm.NameProblem("bad name", "repos/owner/repo", existing));
+        Assert.NotNull(AddRunnerForm.NameProblem(" ", "repos/owner/repo", existing));
+    }
+
+    [Theory]
+    [InlineData("MyRunner")]
+    [InlineData(@"Runners\app")]
+    [InlineData(@"D:\Runners\100%")]
+    [InlineData(@"D:\Runners\a!b")]
+    [InlineData("D:\\Runners\\\"app\"")]
+    [InlineData(@"\\server\share\runner")]
+    [InlineData("")]
+    public void InstallFolderThatCannotBeUsed_IsRefusedBeforeTheDownload(string path)
+        => Assert.NotNull(AddRunnerForm.FolderProblem(path));
+
+    [Fact]
+    public void InstallFolder_MustBeNewOrEmpty_AndTheSuggestionIsFree()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"rm-add-runner-{Guid.NewGuid():N}");
+        try
+        {
+            Assert.Null(AddRunnerForm.FolderProblem(Path.Combine(root, "app")));
+            Directory.CreateDirectory(Path.Combine(root, "app"));
+            Assert.Null(AddRunnerForm.FolderProblem(Path.Combine(root, "app")));
+            File.WriteAllText(Path.Combine(root, "app", "config.cmd"), string.Empty);
+            Assert.NotNull(AddRunnerForm.FolderProblem(Path.Combine(root, "app")));
+            Assert.Equal(Path.Combine(root, "app-2"), AddRunnerForm.FreeFolder(root, "app"));
+        }
+        finally { if (Directory.Exists(root)) Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
+    public void Labels_AreSplitTrimmedAndDeduplicated()
+        => Assert.Equal(new[] { "gpu", "big" }, AddRunnerForm.ParseLabels(" gpu, ,big,GPU "));
+
+    // ----- Edit runner -----
+
+    [Fact]
+    public void EditWithNothingChanged_CannotBeSaved()
+    {
+        var result = EditRunnerForm.Check("pc-app", new[] { "gpu", "big" }, " pc-app ", "big, gpu", canClearLabels: false);
+        Assert.False(result.Changed);
+        Assert.False(result.CanSave);
+    }
+
+    [Fact]
+    public void EditWithANewNameOrLabels_CanBeSaved()
+    {
+        var renamed = EditRunnerForm.Check("pc-app", new[] { "gpu" }, "pc-app-2", "gpu", canClearLabels: false);
+        Assert.Equal(new RunnerEditRequest("pc-app-2", new[] { "gpu" }).RunnerName, renamed.Request?.RunnerName);
+        Assert.Equal(new[] { "gpu" }, renamed.Request?.Labels);
+        Assert.False(renamed.Request?.ClearLabels);
+
+        var relabelled = EditRunnerForm.Check("pc-app", new[] { "gpu" }, "pc-app", "gpu, big", canClearLabels: false);
+        Assert.Equal(new[] { "gpu", "big" }, relabelled.Request?.Labels);
+    }
+
+    [Fact]
+    public void EmptyingTheLabels_ClearsThemOnlyWhereThatIsPossible()
+    {
+        var cleared = EditRunnerForm.Check("pc-app", new[] { "gpu" }, "pc-app", " ", canClearLabels: true);
+        Assert.True(cleared.Request?.ClearLabels);
+        Assert.Empty(cleared.Request!.Labels);
+
+        var refused = EditRunnerForm.Check("pc-app", new[] { "gpu" }, "pc-app", "", canClearLabels: false);
+        Assert.False(refused.CanSave);
+        Assert.Equal(EditRunnerForm.ClearNotPossible, refused.LabelsProblem);
+
+        // Labels that were not known (an older agent) stay as they are when the box is left empty.
+        var unknown = EditRunnerForm.Check("pc-app", Array.Empty<string>(), "pc-app-2", "", canClearLabels: false);
+        Assert.True(unknown.CanSave);
+        Assert.False(unknown.Request!.ClearLabels);
+    }
+
+    [Fact]
+    public void EditWithAnInvalidNameOrLabel_CannotBeSaved()
+    {
+        Assert.NotNull(EditRunnerForm.Check("pc-app", Array.Empty<string>(), "pc app", "", false).NameProblem);
+        Assert.NotNull(EditRunnerForm.Check("pc-app", Array.Empty<string>(), "", "", false).NameProblem);
+        var badLabel = EditRunnerForm.Check("pc-app", Array.Empty<string>(), "pc-app", "gpu;rm", false);
+        Assert.NotNull(badLabel.LabelsProblem);
+        Assert.False(badLabel.CanSave);
     }
 
     [Fact]

@@ -7,83 +7,99 @@ namespace RunnerManager;
 
 public partial class AddRunnerWindow : Window
 {
+    private const string DefaultFolderName = "NewRunner";
+    private const string FolderRule = "The folder must be empty or new.";
+    private readonly List<(string Scope, string Name)> _existing;
+    private readonly string _alwaysAdded = $"The labels self-hosted, Windows and {RunnerService.ArchitectureLabel} are always added.";
+    private AddRunnerForm.RepositoryCheck _repository = AddRunnerForm.CheckRepository(string.Empty);
     private bool _pathEdited;
+    private bool _nameEdited;
     public RunnerSetup? Setup { get; private set; }
 
-    public AddRunnerWindow()
+    /// <param name="existingRunners">
+    /// Runners already registered, on any PC, so a name that is taken for the repository is caught here instead of
+    /// after the download.
+    /// </param>
+    public AddRunnerWindow(IEnumerable<MachineRunnerStatus>? existingRunners = null)
     {
         InitializeComponent();
         WindowTheme.Apply(this);
+        _existing = (existingRunners ?? Enumerable.Empty<MachineRunnerStatus>()).Select(r => (r.Scope, r.AgentName)).ToList();
+        LabelsHint.Text = _alwaysAdded;
         RunnerNameBox.Text = Environment.MachineName;
-        LabelsHint.Text = $"The labels self-hosted, Windows and {RunnerService.ArchitectureLabel} are always added.";
-        InstallPathBox.Text = Path.Combine(RunnerService.RunnersRoot, "NewRunner");
+        InstallPathBox.Text = FreeFolder(DefaultFolderName);
+        // Typing in a box keeps what was typed; until then, the name and folder follow the repository.
+        RunnerNameBox.TextChanged += (_, _) =>
+        {
+            if (RunnerNameBox.IsKeyboardFocused) _nameEdited = true;
+            Validate();
+        };
         InstallPathBox.TextChanged += (_, _) =>
         {
             if (InstallPathBox.IsKeyboardFocused) _pathEdited = true;
-            ValidateInstallPath();
+            Validate();
         };
+        LabelsBox.TextChanged += (_, _) => Validate();
         Loaded += (_, _) => RepositoryUrlBox.Focus();
-        ValidateInstallPath();
-    }
-
-    private string RepositoryUrl
-    {
-        get
-        {
-            var text = RepositoryUrlBox.Text.Trim();
-            // Accept the short owner/repo form too.
-            if (!text.Contains("://") && text.Count(c => c == '/') == 1 && !text.Contains(' '))
-                return $"https://github.com/{text.TrimEnd('/')}";
-            return text;
-        }
+        Validate();
     }
 
     private void RepositoryUrlBox_TextChanged(object sender, TextChangedEventArgs e)
     {
-        var repoPath = RunnerService.RepositoryPath(RepositoryUrl);
-        var org = RunnerService.OrganizationName(RepositoryUrl);
-        if (RepositoryUrlBox.Text.Trim().Length == 0)
-        {
-            RepositoryHint.Text = "Enter a repository URL or owner/repo. For an organization runner, enter the organization URL.";
-            RepositoryHint.Foreground = Palette.TextMuted;
-        }
-        else if (!string.IsNullOrEmpty(repoPath))
-        {
-            RepositoryHint.Text = $"✓  Repository runner for {repoPath}";
-            RepositoryHint.Foreground = Palette.Success;
-        }
-        else if (!string.IsNullOrEmpty(org))
-        {
-            RepositoryHint.Text = $"✓  Organization runner for {org} (requires organization admin rights)";
-            RepositoryHint.Foreground = Palette.Success;
-        }
-        else
-        {
-            RepositoryHint.Text = "This is not a GitHub repository or organization URL.";
-            RepositoryHint.Foreground = Palette.Warning;
-        }
-        CheckWorkflowsToggle.IsEnabled = !string.IsNullOrEmpty(repoPath);
-        if (string.IsNullOrEmpty(repoPath)) CheckWorkflowsToggle.IsChecked = false;
+        _repository = AddRunnerForm.CheckRepository(RepositoryUrlBox.Text);
+        var typed = RepositoryUrlBox.Text.Trim().Length > 0;
+        RepositoryHint.Text = !typed ? AddRunnerForm.RepositoryHint
+            : !_repository.IsValid ? _repository.Problem
+            : _repository.RepositoryPath.Length > 0 ? $"✓  Repository runner for {_repository.RepositoryPath}"
+            : $"✓  Organization runner for {_repository.Organization} (requires organization admin rights)";
+        RepositoryHint.Foreground = !typed ? Palette.TextMuted : _repository.IsValid ? Palette.Success : Palette.Warning;
 
-        if (_pathEdited) return;
-        var name = (string.IsNullOrEmpty(repoPath) ? org : repoPath).Split('/', StringSplitOptions.RemoveEmptyEntries).LastOrDefault();
-        if (!string.IsNullOrWhiteSpace(name))
-            InstallPathBox.Text = Path.Combine(RunnerService.RunnersRoot, Sanitize(name));
+        var repositoryRunner = _repository.IsValid && _repository.RepositoryPath.Length > 0;
+        CheckWorkflowsToggle.IsEnabled = repositoryRunner;
+        if (!repositoryRunner) CheckWorkflowsToggle.IsChecked = false;
+
+        if (!_nameEdited) RunnerNameBox.Text = AddRunnerForm.DefaultRunnerName(Environment.MachineName, _repository, IsTaken);
+        if (!_pathEdited && _repository.IsValid) InstallPathBox.Text = SuggestFolder(_repository.Url);
+        Validate();
     }
 
-    private void ValidateInstallPath()
+    private bool IsTaken(string name) => AddRunnerForm.NameProblem(name, _repository.Scope, _existing) != null && RunnerService.RunnerNameProblem(name) == null;
+
+    /// <summary>A free folder for the repository, so a second runner for it does not start with a folder that has files.</summary>
+    private static string SuggestFolder(string registrationUrl)
     {
-        var path = InstallPathBox.Text.Trim();
-        var problem = string.Empty;
-        try
+        try { return RunnerService.SuggestInstallPath(registrationUrl); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            if (path.Length > 0 && RunnerService.NetworkFolderProblem(path) is { } network) problem = network;
-            else if (path.Length > 0 && Directory.Exists(path) && Directory.EnumerateFileSystemEntries(path).Any())
-                problem = "This folder already contains files. Choose an empty or new folder.";
+            return Path.Combine(RunnerService.RunnersRoot, RunnerService.SafeFolderName(RunnerService.RepositoryPath(registrationUrl).Split('/').Last()));
         }
-        catch { }
-        InstallHint.Text = problem.Length > 0 ? problem : "The folder must be empty or new.";
-        InstallHint.Foreground = problem.Length > 0 ? Palette.Warning : Palette.TextMuted;
+    }
+
+    private static string FreeFolder(string name)
+    {
+        try { return AddRunnerForm.FreeFolder(RunnerService.RunnersRoot, name); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return Path.Combine(RunnerService.RunnersRoot, name); }
+    }
+
+    /// <summary>Shows the problem of each field next to it, and enables Create only when there is none.</summary>
+    private bool Validate()
+    {
+        var nameProblem = AddRunnerForm.NameProblem(RunnerNameBox.Text, _repository.Scope, _existing);
+        NameHint.Text = nameProblem ?? string.Empty;
+        NameHint.Foreground = Palette.Warning;
+        NameHint.Visibility = nameProblem != null ? Visibility.Visible : Visibility.Collapsed;
+
+        var labelsProblem = RunnerService.LabelsProblem(AddRunnerForm.ParseLabels(LabelsBox.Text));
+        LabelsHint.Text = labelsProblem ?? _alwaysAdded;
+        LabelsHint.Foreground = labelsProblem != null ? Palette.Warning : Palette.TextMuted;
+
+        var folderProblem = AddRunnerForm.FolderProblem(InstallPathBox.Text);
+        InstallHint.Text = folderProblem ?? FolderRule;
+        InstallHint.Foreground = folderProblem != null ? Palette.Warning : Palette.TextMuted;
+
+        var valid = _repository.IsValid && nameProblem == null && labelsProblem == null && folderProblem == null;
+        CreateButton.IsEnabled = valid;
+        return valid;
     }
 
     private void Browse_Click(object sender, RoutedEventArgs e)
@@ -100,62 +116,18 @@ public partial class AddRunnerWindow : Window
 
     private void Create_Click(object sender, RoutedEventArgs e)
     {
-        var repo = RepositoryUrl;
-        var runnerName = RunnerNameBox.Text.Trim();
-        var install = InstallPathBox.Text.Trim();
-        if (string.IsNullOrWhiteSpace(RunnerService.ApiScope(repo)))
-        {
-            DialogWindow.Info(this, "Invalid repository", "Enter a GitHub repository URL such as https://github.com/owner/repository, or an organization URL.");
-            RepositoryUrlBox.Focus();
-            return;
-        }
-        if (string.IsNullOrWhiteSpace(runnerName) || string.IsNullOrWhiteSpace(install))
-        {
-            DialogWindow.Info(this, "Missing information", "Runner name and install folder are required.");
-            return;
-        }
-        var registrationUrl = RunnerService.NormalizeRegistrationUrl(repo);
-        if (RunnerService.RegistrationUrlProblem(registrationUrl) is { } urlProblem)
-        {
-            DialogWindow.Info(this, "Invalid repository", urlProblem);
-            RepositoryUrlBox.Focus();
-            return;
-        }
-        if (RunnerService.RunnerNameProblem(runnerName) is { } nameProblem)
-        {
-            DialogWindow.Info(this, "Invalid runner name", nameProblem);
-            RunnerNameBox.Focus();
-            return;
-        }
-        var labels = LabelsBox.Text.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        if (RunnerService.LabelsProblem(labels) is { } labelProblem)
-        {
-            DialogWindow.Info(this, "Invalid labels", labelProblem);
-            LabelsBox.Focus();
-            return;
-        }
-        if (RunnerService.NetworkFolderProblem(install) is { } networkProblem)
-        {
-            DialogWindow.Info(this, "Choose a local folder", networkProblem);
-            return;
-        }
-        if (Directory.Exists(install) && Directory.EnumerateFileSystemEntries(install).Any())
-        {
-            DialogWindow.Info(this, "Folder is not empty", "Choose an empty or new folder for the runner.");
-            return;
-        }
+        // Checked again: the folder may have been filled since it was typed.
+        if (!Validate()) return;
         Setup = new RunnerSetup
         {
-            RepositoryUrl = registrationUrl,
+            RepositoryUrl = _repository.Url,
             CheckWorkflows = CheckWorkflowsToggle.IsChecked == true,
-            RunnerName = runnerName,
-            InstallPath = install,
-            Labels = labels
+            RunnerName = RunnerNameBox.Text.Trim(),
+            InstallPath = InstallPathBox.Text.Trim(),
+            Labels = AddRunnerForm.ParseLabels(LabelsBox.Text)
         };
         DialogResult = true;
     }
 
     private void Cancel_Click(object sender, RoutedEventArgs e) => DialogResult = false;
-
-    private static string Sanitize(string value) => RunnerService.SafeFolderName(value);
 }
