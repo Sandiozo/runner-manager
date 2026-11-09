@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 
 namespace RunnerManager;
 
@@ -46,7 +47,11 @@ public sealed class McpServer
     private readonly McpToolRunner _runTool;
     /// <summary>Requests still being answered, by their JSON-RPC id, so notifications/cancelled can stop them.</summary>
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _inFlight = new();
-    private string _client = "An AI assistant";
+    private string _client = UnnamedClient;
+
+    /// <summary>How approvals and the action log name a client that gave no name.</summary>
+    internal const string UnnamedClient = "An AI assistant";
+    private const int MaxClientNameLength = 80;
 
     /// <summary>When set, tool calls answer with this error instead of running (the fleet agent cannot be reached).</summary>
     public string? ToolsUnavailable { get; set; }
@@ -183,9 +188,8 @@ public sealed class McpServer
         var requested = parameters.ValueKind == JsonValueKind.Object && parameters.TryGetProperty("protocolVersion", out var v)
                         && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
         if (parameters.ValueKind == JsonValueKind.Object && parameters.TryGetProperty("clientInfo", out var info)
-            && info.ValueKind == JsonValueKind.Object && info.TryGetProperty("name", out var name) && name.ValueKind == JsonValueKind.String
-            && name.GetString()!.Trim() is { Length: > 0 } clientName)
-            _client = clientName.Length > 80 ? clientName[..80] : clientName;
+            && info.ValueKind == JsonValueKind.Object && info.TryGetProperty("name", out var name) && name.ValueKind == JsonValueKind.String)
+            _client = ClientLabel(name.GetString());
         return new JsonObject
         {
             ["protocolVersion"] = SupportedVersions.Contains(requested) ? requested : SupportedVersions[0],
@@ -194,6 +198,20 @@ public sealed class McpServer
             ["instructions"] = Instructions
         };
     }
+
+    /// <summary>
+    /// How approvals and the action log name the client: <c>An AI assistant ("name")</c>. The client chooses its
+    /// name, so it is shown as a quoted name in a fixed frame and never as text of its own: line breaks and other
+    /// characters that are not shown are dropped, and it cannot end the quotation.
+    /// </summary>
+    internal static string ClientLabel(string? name)
+    {
+        var clean = QuotationMarks.Replace(AssistantLog.OneLine(name, MaxClientNameLength), "'");
+        return clean.Length == 0 ? UnnamedClient : $"{UnnamedClient} (\"{clean}\")";
+    }
+
+    /// <summary>Straight and typographic quotation marks of every kind.</summary>
+    private static readonly Regex QuotationMarks = new("[\"\\p{Pi}\\p{Pf}]", RegexOptions.CultureInvariant);
 
     private static JsonObject ListTools()
     {

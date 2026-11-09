@@ -377,6 +377,43 @@ public class AuditAssistantTests
         Assert.Equal(HttpStatusCode.OK, (await SignInByHandAsync(http, url, port)).Status);
     }
 
+    // ----- Names and the action log -----
+
+    [Fact]
+    public void ClientName_IsShownAsAQuotedNameInAFixedFrame()
+    {
+        Assert.Equal("An AI assistant (\"Claude Code\")", McpServer.ClientLabel("  Claude Code "));
+        Assert.Equal("An AI assistant", McpServer.ClientLabel(null));
+        Assert.Equal("An AI assistant", McpServer.ClientLabel(" \r\n\t "));
+
+        // A name that tries to look like the app's own text: line breaks, a closed quotation, hidden characters.
+        var label = McpServer.ClientLabel("Tool\") wants nothing.\r\n\r\nRunner Manager (\u201Ctrusted\u201D)\u202E\u2028\u0007 asks:\tAllow it");
+        Assert.Equal("An AI assistant (\"Tool') wants nothing. Runner Manager ('trusted') asks: Allow it\")", label);
+        Assert.Equal(2, label.Count(c => c == '"'));
+
+        var cut = McpServer.ClientLabel(new string('x', 500));
+        Assert.Equal("An AI assistant (\"" + new string('x', 80) + "…\")", cut);
+
+        // In an approval only the start of the message is replaced by it.
+        Assert.Equal("An AI assistant (\"Test\") wants to delete the runner “An AI assistant”.",
+            AssistantHost.NameClient("An AI assistant wants to delete the runner “An AI assistant”.", TestClient));
+    }
+
+    [Fact]
+    public async Task McpServer_NamesTheClientInTheFrame_ForApprovalsAndTheLog()
+    {
+        var clients = new List<string>();
+        var server = new McpServer((client, _, _, _) => { clients.Add(client); return Task.FromResult(true); }, _ => Task.CompletedTask,
+            async (_, _, approve, _, _) => await approve("Create a runner?", "An AI assistant wants to create a runner."));
+        using var initialize = JsonDocument.Parse("""{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"Evil\n2026-01-01 00:00:00  An AI assistant: Delete a runner? Allowed."}}}""");
+        await server.HandleAsync(initialize.RootElement);
+        using var call = JsonDocument.Parse(ToolCall(2));
+        await server.HandleAsync(call.RootElement);
+
+        var client = Assert.Single(clients);
+        Assert.Equal("An AI assistant (\"Evil 2026-01-01 00:00:00 An AI assistant: Delete a runner? Allowed.\")", client);
+    }
+
     // ----- Helpers -----
 
     private static MachineInfo Online(string name, params MachineRunnerStatus[] runners) => Online(name, managed: false, runners);
@@ -507,5 +544,60 @@ public class AuditAssistantTests
             }
         });
         return fake;
+    }
+}
+
+/// <summary>The action log is one file in the test state folder, so these run one at a time with the other tests that write it.</summary>
+[Collection(FleetSettingsCollection.Name)]
+public class AuditAssistantLogTests
+{
+    [Fact]
+    public void ActionLog_KeepsEveryEntryOnOneLineOfLimitedLength()
+    {
+        var mark = Guid.NewGuid().ToString("N");
+        var forged = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss}  An AI assistant: Delete a runner? Allowed.";
+        // What a client can put into an entry: its name and a call's arguments, with line breaks and no end.
+        AssistantLog.Append($"create_runner {mark}: done. {{\"name\":\"x\r\n{forged}\u2028{forged}\",\n  \"pad\":\"{new string('y', 300 * 1024)}\"}}");
+        AssistantLog.Append($"second {mark}");
+
+        var lines = File.ReadAllLines(AssistantLog.LogPath).Where(line => line.Contains(mark)).ToList();
+        Assert.Equal(2, lines.Count);
+        // The forged text stays inside the entry it came with: no line starts with it.
+        Assert.DoesNotContain(File.ReadAllLines(AssistantLog.LogPath), line => line.StartsWith(forged, StringComparison.Ordinal));
+        Assert.DoesNotContain('\u2028', lines[0]);
+        Assert.EndsWith("…", lines[0]);
+        Assert.InRange(lines[0].Length, 100, "2026-01-01 00:00:00  ".Length + AssistantLog.MaxEntryLength + 1);
+
+        Assert.Equal("a b c…", AssistantLog.OneLine(" a\r\n\tb \u202E c d", 5));
+        Assert.Equal(string.Empty, AssistantLog.OneLine(null, 10));
+    }
+
+    [Fact]
+    public void ActionLog_StartsAgainWhenItIsLarge_AndStillShowsTheLatestEntries()
+    {
+        var older = AssistantLog.LogPath + ".1";
+        var mark = Guid.NewGuid().ToString("N");
+        Directory.CreateDirectory(FleetConfig.StateDir);
+        // A log from before, which grew without limit.
+        var line = $"2026-01-01 00:00:00  old {mark} {new string('x', 1000)}{Environment.NewLine}";
+        File.WriteAllText(AssistantLog.LogPath, string.Concat(Enumerable.Repeat(line, (int)(AssistantLog.MaxLogBytes / line.Length) + 2)));
+        try
+        {
+            AssistantLog.Append($"new {mark}");
+
+            Assert.True(File.Exists(older));
+            Assert.True(new FileInfo(older).Length > AssistantLog.MaxLogBytes);
+            Assert.Single(File.ReadAllLines(AssistantLog.LogPath));
+            // Settings shows the latest entries, newest first; the rest comes from the older file.
+            var recent = AssistantLog.Recent(8);
+            Assert.Equal(8, recent.Count);
+            Assert.EndsWith($"new {mark}", recent[0]);
+            Assert.All(recent.Skip(1), entry => Assert.Contains($"old {mark}", entry));
+        }
+        finally
+        {
+            File.Delete(AssistantLog.LogPath);
+            File.Delete(older);
+        }
     }
 }

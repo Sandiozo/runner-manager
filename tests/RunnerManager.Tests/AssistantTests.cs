@@ -538,7 +538,8 @@ public class AssistantTests
         server.ForgetSessions();
         Assert.False(IsError(await link.SendAsync(ToolCall(3))));
         Assert.Equal(2, initializes);
-        lock (clients) Assert.Equal(new[] { "Test", "Test" }, clients);
+        // The client's name, in the frame every approval shows it in.
+        lock (clients) Assert.Equal(new[] { "An AI assistant (\"Test\")", "An AI assistant (\"Test\")" }, clients);
     }
 
     [Fact]

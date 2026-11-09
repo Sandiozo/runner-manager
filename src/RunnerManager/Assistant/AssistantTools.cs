@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Globalization;
 using System.IO;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
@@ -215,7 +216,7 @@ public static class AssistantTools
         catch (Exception ex)
         {
             var reason = ex is OperationCanceledException && cancellationToken.IsCancellationRequested ? "Cancelled by the assistant." : ex.Message;
-            if (tool.Kind != AssistantToolKind.Read) AssistantLog.Append($"{tool.Name}: {reason} {Summarize(arguments)}");
+            if (tool.Kind != AssistantToolKind.Read) AssistantLog.Append($"{tool.Name}: {AssistantLog.OneLine(reason, 200)} {Summarize(arguments)}");
             throw;
         }
     }
@@ -803,8 +804,9 @@ public static class AssistantTools
         return name.Length > MaxRunnerNameLength ? name[..MaxRunnerNameLength].TrimEnd('-') : name;
     }
 
+    /// <summary>The call's arguments for the action log: on one line and cut short, however large the client made them.</summary>
     private static string Summarize(JsonElement arguments)
-        => arguments.ValueKind == JsonValueKind.Object ? arguments.GetRawText() : string.Empty;
+        => arguments.ValueKind == JsonValueKind.Object ? AssistantLog.OneLine(arguments.GetRawText(), 240) : string.Empty;
 
     private static JsonObject Schema(params (string Name, string Type, string Description, bool Required)[] properties)
     {
@@ -880,10 +882,16 @@ public static class AssistantTools
     }
 }
 
-/// <summary>A record of what assistants changed, shown in Settings → AI assistants.</summary>
+/// <summary>
+/// A record of what assistants changed, shown in Settings → AI assistants. Every entry is one line of limited length
+/// that starts with its time, so text an assistant chose (its name, a call's arguments) cannot pass for an entry of
+/// its own. Like agent.log, the file starts again when it is large, and one older file is kept.
+/// </summary>
 public static class AssistantLog
 {
-    private static readonly string LogPath = Path.Combine(FleetConfig.StateDir, "assistant.log");
+    internal static readonly string LogPath = Path.Combine(FleetConfig.StateDir, "assistant.log");
+    internal const long MaxLogBytes = 1024 * 1024;
+    internal const int MaxEntryLength = 500;
     private static readonly object Gate = new();
 
     public static void Append(string message)
@@ -893,15 +901,50 @@ public static class AssistantLog
             lock (Gate)
             {
                 Directory.CreateDirectory(FleetConfig.StateDir);
-                File.AppendAllText(LogPath, $"{DateTime.Now:yyyy-MM-dd HH:mm:ss}  {message}{Environment.NewLine}");
+                try
+                {
+                    var log = new FileInfo(LogPath);
+                    if (log.Exists && log.Length > MaxLogBytes) File.Move(LogPath, LogPath + ".1", overwrite: true);
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+                File.AppendAllText(LogPath, $"{DateTime.Now:yyyy-MM-dd HH:mm:ss}  {OneLine(message, MaxEntryLength)}{Environment.NewLine}");
             }
         }
         catch { }
     }
 
+    /// <summary>The newest entries, newest first.</summary>
     public static IReadOnlyList<string> Recent(int count)
     {
-        try { return File.Exists(LogPath) ? File.ReadLines(LogPath).TakeLast(count).Reverse().ToList() : Array.Empty<string>(); }
+        try
+        {
+            var lines = ReadLines(LogPath).TakeLast(count).ToList();
+            // Right after the file started again, the rest comes from the older one.
+            if (lines.Count < count) lines.InsertRange(0, ReadLines(LogPath + ".1").TakeLast(count - lines.Count));
+            lines.Reverse();
+            return lines;
+        }
         catch { return Array.Empty<string>(); }
+    }
+
+    private static IEnumerable<string> ReadLines(string path) => File.Exists(path) ? File.ReadLines(path) : Array.Empty<string>();
+
+    /// <summary>
+    /// Text on one line, at most <paramref name="max"/> characters and then "…". Line breaks, tabs, runs of spaces and
+    /// characters that are not shown (such as those that change the reading direction) each become one space.
+    /// </summary>
+    internal static string OneLine(string? text, int max)
+    {
+        var line = new StringBuilder();
+        foreach (var rune in (text ?? string.Empty).EnumerateRunes())
+        {
+            var blank = Rune.GetUnicodeCategory(rune) is UnicodeCategory.Control or UnicodeCategory.Format or UnicodeCategory.LineSeparator
+                or UnicodeCategory.ParagraphSeparator or UnicodeCategory.SpaceSeparator or UnicodeCategory.PrivateUse or UnicodeCategory.OtherNotAssigned;
+            if (blank && (line.Length == 0 || line[^1] == ' ')) continue;
+            if (line.Length + (blank ? 1 : rune.Utf16SequenceLength) > max) return line.ToString().TrimEnd() + "…";
+            if (blank) line.Append(' ');
+            else line.Append(rune.ToString());
+        }
+        return line.ToString().TrimEnd();
     }
 }

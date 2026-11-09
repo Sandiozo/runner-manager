@@ -35,6 +35,7 @@ public static class AssistantHost
         => args[0].Equals(McpArgument, StringComparison.OrdinalIgnoreCase) ? RunStdioAsync() : RunCliAsync(args.Skip(1).ToArray());
 
     /// <summary>Asks the user in a Runner Manager window in front of other windows, after any approval asked before.</summary>
+    /// <param name="client">How to name the client (see <see cref="McpServer.ClientLabel"/>).</param>
     public static async Task<bool> ApproveAsync(string client, string title, string message, CancellationToken cancellationToken = default)
     {
         try
@@ -60,11 +61,18 @@ public static class AssistantHost
         var destructive = title.StartsWith("Delete", StringComparison.Ordinal) || title.StartsWith("Move", StringComparison.Ordinal);
         const string allow = "Allow";
         var choice = await Application.Current.Dispatcher.InvokeAsync(() => DialogWindow.ShowApprovalAsync(
-            destructive ? DialogTone.Danger : DialogTone.Question, title, message.Replace("An AI assistant", client, StringComparison.Ordinal),
+            destructive ? DialogTone.Danger : DialogTone.Question, title, NameClient(message, client),
             allow, "Decline", cancellationToken)).Task.Unwrap();
         cancellationToken.ThrowIfCancellationRequested();
         return choice == allow;
     }
+
+    /// <summary>
+    /// An approval message with the client named: messages start with "An AI assistant", and only that start is
+    /// replaced, never the same words in a name further on.
+    /// </summary>
+    internal static string NameClient(string message, string client)
+        => message.StartsWith(McpServer.UnnamedClient, StringComparison.Ordinal) ? client + message[McpServer.UnnamedClient.Length..] : message;
 
     // ----- MCP over stdio -----
 
@@ -193,7 +201,8 @@ public static class AssistantHost
                 ["params"] = new JsonObject
                 {
                     ["protocolVersion"] = McpServer.SupportedVersions[0],
-                    ["clientInfo"] = new JsonObject { ["name"] = "An AI assistant (command line)" }
+                    // Shown as: An AI assistant ("command line").
+                    ["clientInfo"] = new JsonObject { ["name"] = "command line" }
                 }
             }.ToJsonString());
             var answer = await link.SendAsync(new JsonObject
