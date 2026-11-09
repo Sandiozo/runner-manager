@@ -78,10 +78,7 @@ public partial class MainWindow
                 MachineInfo.LatestAppVersion = latest;
                 foreach (var machine in Machines) machine.Refresh();
             }
-            var showBanner = latest.Length > 0 && AppUpdater.IsNewer(latest, AppUpdater.CurrentVersion)
-                && latest != _settings.DismissedUpdateVersion;
-            UpdateBanner.Visibility = showBanner ? Visibility.Visible : Visibility.Collapsed;
-            if (showBanner) UpdateBannerText.Text = $"Runner Manager v{latest} is available. Current version: v{AppUpdater.CurrentVersion}.";
+            ShowUpdateBanner(latest);
 
             // Not while this dashboard restarts the agent itself; the agent counts as down from the next check after that.
             if (IsAgentWorkBusy) UpdateGuard.ForgetAgentDown();
@@ -331,7 +328,40 @@ public partial class MainWindow
         await RefreshAsync(forceAuthCheck: true);
     }
 
-    private async void InstallUpdate_Click(object sender, RoutedEventArgs e) => await InstallUpdateAsync();
+    /// <summary>The version the update banner shows, or null while it is hidden.</summary>
+    private string? _bannerVersion;
+
+    /// <summary>
+    /// Shows a newer release, or, once a newer version is installed (after "Later", or by the fleet agent), that only a
+    /// restart is left. Offering to install it again would download the same version.
+    /// </summary>
+    private void ShowUpdateBanner(string latest)
+    {
+        var installed = InstalledUpdate();
+        var version = installed ?? (latest.Length > 0 && AppUpdater.IsNewer(latest, AppUpdater.CurrentVersion) ? latest : null);
+        _bannerVersion = version != null && version != _settings.DismissedUpdateVersion ? version : null;
+        UpdateBanner.Visibility = _bannerVersion != null ? Visibility.Visible : Visibility.Collapsed;
+        if (_bannerVersion == null) return;
+        UpdateBannerText.Text = installed != null
+            ? $"Runner Manager v{installed} is installed. Restart Runner Manager to finish the update."
+            : $"Runner Manager v{latest} is available. Current version: v{AppUpdater.CurrentVersion}.";
+        UpdateBannerButton.Content = installed != null ? "Restart now" : "Install update";
+    }
+
+    /// <summary>The installed version when it is newer than this dashboard, which then only needs a restart; otherwise null.</summary>
+    private static string? InstalledUpdate()
+        => AppUpdater.InstalledVersion is { } installed && AppUpdater.IsNewer(installed, AppUpdater.CurrentVersion) ? installed : null;
+
+    private async void InstallUpdate_Click(object sender, RoutedEventArgs e)
+    {
+        if (InstalledUpdate() == null)
+        {
+            await InstallUpdateAsync();
+            return;
+        }
+        if (IsOperationRunning("Restart Runner Manager")) return;
+        ((App)Application.Current).RestartDashboard();
+    }
 
     /// <summary>Installs the newest release on this PC, then offers to restart the dashboard with it.</summary>
     private async Task InstallUpdateAsync()
@@ -353,15 +383,15 @@ public partial class MainWindow
             async log => restartAgent = await AppUpdater.InstallReleaseAsync(release, log));
         if (!installed) return;
         if (restartAgent) RestartLocalAgentInBackground();
-        UpdateBanner.Visibility = Visibility.Collapsed;
         if (DialogWindow.Show(this, DialogTone.Question, $"Runner Manager {release.Tag} is installed",
                 "Restart Runner Manager now to use the new version?", "Restart now", cancel: "Later") == "Restart now")
             ((App)Application.Current).RestartDashboard();
+        else ShowUpdateBanner(MachineInfo.LatestAppVersion);
     }
 
     private void DismissUpdateBanner_Click(object sender, RoutedEventArgs e)
     {
-        _settings.DismissedUpdateVersion = MachineInfo.LatestAppVersion;
+        _settings.DismissedUpdateVersion = _bannerVersion ?? MachineInfo.LatestAppVersion;
         _settings.Save();
         UpdateBanner.Visibility = Visibility.Collapsed;
     }
