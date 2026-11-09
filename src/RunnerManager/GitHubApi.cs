@@ -41,8 +41,10 @@ public static class GitHubApi
 
         var current = state.Jobs.FirstOrDefault(j =>
             j.Status.Equals("in_progress", StringComparison.OrdinalIgnoreCase) && j.RunnerId == runnerId);
+        // Longest wait first, so the job named as next is the one that waited longest.
         var queued = state.Jobs.Where(j =>
-            j.Status.Equals("queued", StringComparison.OrdinalIgnoreCase) && RunnerLabels.CanRun(j.Labels, labels)).ToList();
+                j.Status.Equals("queued", StringComparison.OrdinalIgnoreCase) && RunnerLabels.CanRun(j.Labels, labels))
+            .OrderBy(j => j.CreatedUtc ?? DateTime.MaxValue).ToList();
 
         return new RunnerWorkState
         {
@@ -184,15 +186,46 @@ public static class GitHubApi
         lock (CacheLock)
         {
             // Job lists are per run, so old runs' entries are dropped now and then.
-            if (PolledBodies.Count > 500) PolledBodies.Clear();
+            if (PolledBodies.Count > MaxPolledBodies) PolledBodies.Clear();
             PolledBodies[endpoint] = (response.ETag, response.Body);
         }
         return response.Body;
     }
 
+    /// <summary>Room for the run and job lists of several busy repositories, so their ETags are not dropped at every refresh.</summary>
+    private const int MaxPolledBodies = 1000;
+    /// <summary>
+    /// How many queued and how many running runs of a repository are read. Every run costs one more request for its
+    /// jobs at every refresh, so this is not "all of them". With more runs, the oldest are kept.
+    /// </summary>
+    internal const int RunPageSize = 50;
+    /// <summary>GitHub lists at most 1000 runs for a status.</summary>
+    private const int MaxRunPages = 1000 / RunPageSize;
+    private const int JobPageSize = 100;
+    /// <summary>A matrix has at most 256 jobs, so three pages hold the jobs of any run.</summary>
+    private const int MaxJobPages = 3;
+
+    /// <summary>
+    /// The runs of a repository with this status, or null when a request failed. GitHub lists the newest first; with
+    /// more than <see cref="RunPageSize"/> the oldest are read from the last pages, because those matter most: the
+    /// queued runs that waited longest, and the running ones that may be stuck.
+    /// </summary>
     private static async Task<List<WorkflowRunState>?> GetRunsAsync(string repositoryPath, string status)
     {
-        var body = await GetPolledAsync($"repos/{repositoryPath}/actions/runs?status={status}&per_page=20");
+        if (await GetRunPageAsync(repositoryPath, status, 1) is not { } first) return null;
+        var lastPage = Math.Clamp((first.Total + RunPageSize - 1) / RunPageSize, 1, MaxRunPages);
+        if (lastPage == 1) return first.Runs;
+
+        if (await GetRunPageAsync(repositoryPath, status, lastPage) is not { } last) return null;
+        if (last.Runs.Count >= RunPageSize) return last.Runs;
+        // The last page is not full: the other oldest runs are at the end of the page before it.
+        if ((lastPage == 2 ? first : await GetRunPageAsync(repositoryPath, status, lastPage - 1)) is not { } before) return null;
+        return before.Runs.TakeLast(RunPageSize - last.Runs.Count).Concat(last.Runs).ToList();
+    }
+
+    private static async Task<(int Total, List<WorkflowRunState> Runs)?> GetRunPageAsync(string repositoryPath, string status, int page)
+    {
+        var body = await GetPolledAsync($"repos/{repositoryPath}/actions/runs?status={status}&per_page={RunPageSize}{PageParameter(page)}");
         if (body == null) return null;
         try
         {
@@ -200,10 +233,17 @@ public static class GitHubApi
             var list = new List<WorkflowRunState>();
             foreach (var run in json.RootElement.GetProperty("workflow_runs").EnumerateArray())
                 list.Add(ReadRun(run));
-            return list;
+            return (TotalCount(json.RootElement, list.Count), list);
         }
         catch { return null; }
     }
+
+    /// <summary>Empty for the first page, which needs no page number.</summary>
+    private static string PageParameter(int page) => page <= 1 ? string.Empty : $"&page={GitHubNames.Id(page)}";
+
+    private static int TotalCount(JsonElement root, int fallback)
+        => root.TryGetProperty("total_count", out var count) && count.ValueKind == JsonValueKind.Number && count.TryGetInt32(out var total)
+            ? total : fallback;
     private static WorkflowRunState ReadRun(JsonElement run)
     {
         return new WorkflowRunState
@@ -215,19 +255,26 @@ public static class GitHubApi
         };
     }
 
+    /// <summary>The jobs of a run, read page by page, or null when a request failed.</summary>
     private static async Task<List<GitHubJobState>?> GetJobsAsync(string repositoryPath, WorkflowRunState run)
     {
-        var body = await GetPolledAsync($"repos/{repositoryPath}/actions/runs/{GitHubNames.Id(run.Id)}/jobs?filter=latest&per_page=100");
-        if (body == null) return null;
-        try
+        var list = new List<GitHubJobState>();
+        for (var page = 1; page <= MaxJobPages; page++)
         {
-            using var json = JsonDocument.Parse(body);
-            var list = new List<GitHubJobState>();
-            foreach (var job in json.RootElement.GetProperty("jobs").EnumerateArray())
-                list.Add(ReadJob(job, run));
-            return list;
+            var body = await GetPolledAsync(
+                $"repos/{repositoryPath}/actions/runs/{GitHubNames.Id(run.Id)}/jobs?filter=latest&per_page={JobPageSize}{PageParameter(page)}");
+            if (body == null) return null;
+            try
+            {
+                using var json = JsonDocument.Parse(body);
+                var jobs = json.RootElement.GetProperty("jobs");
+                foreach (var job in jobs.EnumerateArray())
+                    list.Add(ReadJob(job, run));
+                if (jobs.GetArrayLength() < JobPageSize || list.Count >= TotalCount(json.RootElement, list.Count)) break;
+            }
+            catch { return null; }
         }
-        catch { return null; }
+        return list;
     }
     private static DateTime? ReadTime(JsonElement element, string property)
         => element.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.String && value.TryGetDateTime(out var time)

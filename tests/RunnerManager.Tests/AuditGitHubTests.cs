@@ -853,3 +853,131 @@ public class GitHubBackOffTests
         Assert.Equal(GitHubFailures.FailureScope.Endpoint, Describe(500, Failure("gh: HTTP 500")).Scope);
     }
 }
+
+[Collection(GitHubCliCollection.Name)]
+public class GitHubPagingTests
+{
+    private static string NewRepository() => $"octo/p-{Guid.NewGuid():N}";
+    private static readonly DateTime Start = new(2026, 11, 9, 8, 0, 0, DateTimeKind.Utc);
+
+    /// <summary>
+    /// A repository with queued runs 1 (oldest) to <paramref name="queuedRuns"/> (newest), each with one waiting job
+    /// named after its run, and one running run (1000) with <paramref name="runningJobs"/> jobs.
+    /// </summary>
+    private static FakeGh Repository(int queuedRuns, int runningJobs = 1, Func<string, bool>? fails = null) => new(arguments =>
+    {
+        var endpoint = arguments[1];
+        if (fails?.Invoke(endpoint) == true) return FakeGh.Http(502);
+        var query = endpoint[(endpoint.IndexOf('?') + 1)..].Split('&').Select(p => p.Split('=')).ToDictionary(p => p[0], p => p[1]);
+        var size = int.Parse(query["per_page"]);
+        var skip = (int.Parse(query.GetValueOrDefault("page", "1")) - 1) * size;
+        if (endpoint.Contains("/jobs?", StringComparison.Ordinal))
+        {
+            var run = long.Parse(endpoint.Split('/')[5]);
+            var jobs = run == 1000
+                ? Enumerable.Range(1, runningJobs).Select(n =>
+                    $$"""{"id":{{2000 + n}},"name":"shard-{{n}}","status":"in_progress","runner_id":{{n}},"labels":["self-hosted"]}""")
+                : new[]
+                {
+                    $$"""{"id":{{run}},"name":"job-{{run}}","status":"queued","labels":["self-hosted"],"created_at":"{{Start.AddMinutes(run):O}}"}"""
+                };
+            return FakeGh.Http(200, $$"""{"total_count":{{jobs.Count()}},"jobs":[{{string.Join(',', jobs.Skip(skip).Take(size))}}]}""");
+        }
+        // GitHub lists the newest runs first.
+        var runs = query["status"] == "queued" ? Enumerable.Range(1, queuedRuns).Reverse().Select(n => (long)n) : new long[] { 1000 };
+        var page = runs.Skip(skip).Take(size).Select(n => $$"""{"id":{{n}},"name":"CI","run_number":{{n}}}""");
+        return FakeGh.Http(200, $$"""{"total_count":{{runs.Count()}},"workflow_runs":[{{string.Join(',', page)}}]}""");
+    });
+
+    private static IEnumerable<int> QueuedRunNumbers(RepositoryWorkState state)
+        => state.Jobs.Where(j => j.Status == "queued").Select(j => j.RunNumber).Order();
+
+    [Fact]
+    public async Task QueuedRuns_BeyondTheLimit_KeepTheOnesThatWaitedLongest()
+    {
+        var repository = NewRepository();
+        using var gh = Repository(queuedRuns: 120);
+
+        var state = await GitHubApi.GetRepositoryJobsAsync(repository);
+
+        Assert.Equal(Enumerable.Range(1, GitHubApi.RunPageSize), QueuedRunNumbers(state!));
+        // The newest page says how many there are; the oldest runs are on the last page and the end of the one before.
+        Assert.Equal(new[]
+        {
+            $"repos/{repository}/actions/runs?status=queued&per_page=50",
+            $"repos/{repository}/actions/runs?status=queued&per_page=50&page=3",
+            $"repos/{repository}/actions/runs?status=queued&per_page=50&page=2"
+        }, gh.Endpoints.Where(e => e.Contains("status=queued", StringComparison.Ordinal)));
+
+        var work = await GitHubApi.GetRunnerWorkAsync(repository, 99, Array.Empty<string>());
+        Assert.Equal(50, work!.QueueCount);
+        Assert.Equal("50 waiting  ·  next: CI → job-1", work.QueueText);
+    }
+
+    [Fact]
+    public async Task QueuedRuns_OnTwoPages_NeedNoThirdRequest()
+    {
+        var repository = NewRepository();
+        using var gh = Repository(queuedRuns: 70);
+
+        var state = await GitHubApi.GetRepositoryJobsAsync(repository);
+
+        Assert.Equal(Enumerable.Range(1, 50), QueuedRunNumbers(state!));
+        Assert.Equal(2, gh.Endpoints.Count(e => e.Contains("status=queued", StringComparison.Ordinal)));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(7)]
+    [InlineData(50)]
+    public async Task QueuedRuns_WithinTheLimit_AreReadWithOneRequest(int queuedRuns)
+    {
+        var repository = NewRepository();
+        using var gh = Repository(queuedRuns);
+
+        var state = await GitHubApi.GetRepositoryJobsAsync(repository);
+
+        Assert.Equal(Enumerable.Range(1, queuedRuns), QueuedRunNumbers(state!));
+        Assert.Equal(new[] { $"repos/{repository}/actions/runs?status=queued&per_page=50" },
+            gh.Endpoints.Where(e => e.Contains("status=queued", StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public async Task JobsOfARun_BeyondOnePage_AreAllRead()
+    {
+        var repository = NewRepository();
+        using var gh = Repository(queuedRuns: 0, runningJobs: 230);
+
+        var (read, job) = await GitHubApi.GetCurrentJobAsync(repository, 230);
+
+        Assert.True(read);
+        Assert.Equal("shard-230", job!.Name);
+        Assert.Equal(new[]
+        {
+            $"repos/{repository}/actions/runs/1000/jobs?filter=latest&per_page=100",
+            $"repos/{repository}/actions/runs/1000/jobs?filter=latest&per_page=100&page=2",
+            $"repos/{repository}/actions/runs/1000/jobs?filter=latest&per_page=100&page=3"
+        }, gh.Endpoints.Where(e => e.Contains("/jobs?", StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public async Task JobsOfARun_ThatFillOnePageExactly_NeedOneRequest()
+    {
+        var repository = NewRepository();
+        using var gh = Repository(queuedRuns: 0, runningJobs: 100);
+
+        var state = await GitHubApi.GetRepositoryJobsAsync(repository);
+
+        Assert.Equal(100, state!.Jobs.Count);
+        Assert.Single(gh.Endpoints, e => e.Contains("/jobs?", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task FailedPage_FailsTheRead_InsteadOfShowingPartOfTheQueue()
+    {
+        var repository = NewRepository();
+        using var gh = Repository(queuedRuns: 120, fails: endpoint => endpoint.EndsWith("&page=2", StringComparison.Ordinal));
+
+        Assert.Null(await GitHubApi.GetRepositoryJobsAsync(repository));
+    }
+}
