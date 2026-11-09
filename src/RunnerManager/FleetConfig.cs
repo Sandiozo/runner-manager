@@ -428,7 +428,7 @@ public sealed class FleetConfig
     public static void SetFleetKey(byte[]? key) => Update(c =>
     {
         c.ProtectedFleetKey = Protect(key);
-        c.ProtectedPendingFleetKey = string.Empty;
+        c.ClearPendingFleetKey();
         c.ManagedBy = string.Empty;
     });
 
@@ -440,11 +440,31 @@ public sealed class FleetConfig
     /// accepts it next to the current code until the first request that uses it; then it replaces the current code.
     /// </summary>
     public string ProtectedPendingFleetKey { get; set; } = string.Empty;
+    /// <summary>
+    /// When the pending code arrived. It is used for <see cref="PendingCodeLifetime"/> only, so a code sent by a PC that
+    /// has left the fleet since can't switch this PC later. Missing from files that older versions saved: then the code is not used.
+    /// </summary>
+    public DateTime PendingFleetKeyUtc { get; set; }
+
+    /// <summary>How long a new code from Change fleet code waits for its first use. The fleet's PCs use it within seconds.</summary>
+    internal static readonly TimeSpan PendingCodeLifetime = TimeSpan.FromMinutes(10);
 
     [JsonIgnore]
-    public byte[]? PendingFleetKey => Unprotect(ProtectedPendingFleetKey);
+    public byte[]? PendingFleetKey => IsPendingFresh(PendingFleetKeyUtc, DateTime.UtcNow) ? Unprotect(ProtectedPendingFleetKey) : null;
 
-    public static void SetPendingFleetKey(byte[] key) => Update(c => c.ProtectedPendingFleetKey = Protect(key));
+    internal static bool IsPendingFresh(DateTime receivedUtc, DateTime nowUtc) => (nowUtc - receivedUtc).Duration() < PendingCodeLifetime;
+
+    public static void SetPendingFleetKey(byte[] key) => Update(c =>
+    {
+        c.ProtectedPendingFleetKey = Protect(key);
+        c.PendingFleetKeyUtc = DateTime.UtcNow;
+    });
+
+    private void ClearPendingFleetKey()
+    {
+        ProtectedPendingFleetKey = string.Empty;
+        PendingFleetKeyUtc = default;
+    }
 
     // ----- Managed PCs -----
 
@@ -459,7 +479,7 @@ public sealed class FleetConfig
     public static void StopBeingManaged() => Update(c =>
     {
         c.ProtectedFleetKey = Protect(CommandSigner.NewKey());
-        c.ProtectedPendingFleetKey = string.Empty;
+        c.ClearPendingFleetKey();
         c.ManagedBy = string.Empty;
         c.KnownPeers.Clear();
     });
@@ -468,7 +488,7 @@ public sealed class FleetConfig
     public static void BecomeManaged(byte[] key, string managedBy) => Update(c =>
     {
         c.ProtectedFleetKey = Protect(key);
-        c.ProtectedPendingFleetKey = string.Empty;
+        c.ClearPendingFleetKey();
         c.ManagedBy = managedBy.Length > 0 ? managedBy : "another fleet";
     });
 
@@ -573,7 +593,7 @@ public sealed class FleetConfig
         var pending = c.PendingFleetKey ?? remembered;
         if (pending == null || !CryptographicOperations.FixedTimeEquals(pending, key)) return;
         c.ProtectedFleetKey = Protect(key);
-        c.ProtectedPendingFleetKey = string.Empty;
+        c.ClearPendingFleetKey();
     });
 }
 

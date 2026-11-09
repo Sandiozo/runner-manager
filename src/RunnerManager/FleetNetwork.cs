@@ -69,21 +69,43 @@ public interface IAgentKeys
 /// The agent's codes in fleet.json, so this PC's dashboard follows when the agent switches. The pending code is also
 /// kept in memory: a Runner Manager before 2.4 that saves fleet.json meanwhile drops it from the file.
 /// </summary>
-internal sealed class ConfigAgentKeys : IAgentKeys
+/// <param name="clock">This PC's clock (tests move it on).</param>
+internal sealed class ConfigAgentKeys(Func<DateTime>? clock = null) : IAgentKeys
 {
-    private volatile byte[]? _pending;
+    private readonly Func<DateTime> _clock = clock ?? (() => DateTime.UtcNow);
+    private volatile KeptCode? _pending;
+
+    /// <param name="Replaces">The fingerprint of the code that was in use when it arrived.</param>
+    private sealed record KeptCode(byte[] Key, string Replaces, DateTime ReceivedUtc);
+
     public byte[]? Current => FleetConfig.Current.FleetKey;
-    public byte[]? Pending => FleetConfig.Current.PendingFleetKey ?? _pending;
+
+    public byte[]? Pending
+    {
+        get
+        {
+            var config = FleetConfig.Current;
+            return config.PendingFleetKey ?? Kept(config);
+        }
+    }
+
+    /// <summary>
+    /// The copy in memory, while it is fresh and the code it replaces is still in use: Replace code or Enter pairing code
+    /// on this PC ends it, so a code sent earlier by a PC that has left the fleet since can't switch this PC.
+    /// </summary>
+    private byte[]? Kept(FleetConfig config)
+        => _pending is { } kept && FleetConfig.IsPendingFresh(kept.ReceivedUtc, _clock())
+           && kept.Replaces == CommandSigner.KeyId(config.FleetKey) ? kept.Key : null;
 
     public void SetPending(byte[] key)
     {
-        _pending = key;
+        _pending = new KeptCode(key, CommandSigner.KeyId(Current), _clock());
         FleetConfig.SetPendingFleetKey(key);
     }
 
     public void UsePending(byte[] key)
     {
-        FleetConfig.UsePendingFleetKey(key, _pending);
+        FleetConfig.UsePendingFleetKey(key, Kept(FleetConfig.Current));
         _pending = null;
     }
 

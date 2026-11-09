@@ -288,6 +288,78 @@ public class SalvagedSettingsTests
     }
 }
 
+[Collection(FleetSettingsCollection.Name)]
+public class PendingCodeTests
+{
+    [Fact]
+    public async Task APendingCode_IsForgotten_WhenThisPcGetsAnotherCode()
+    {
+        await AuditFleetConfig.WithConfigAsync(() =>
+        {
+            var (old, sent, replaced) = (CommandSigner.NewKey(), CommandSigner.NewKey(), CommandSigner.NewKey());
+            FleetConfig.SetFleetKey(old);
+            var keys = new ConfigAgentKeys();
+            keys.SetPending(sent);
+            Assert.Equal(sent, keys.Pending);
+            // A Runner Manager before 2.4 saved fleet.json and dropped it there: the copy in memory still counts.
+            FleetConfig.Update(c => c.ProtectedPendingFleetKey = string.Empty);
+            Assert.Equal(sent, keys.Pending);
+
+            // Replace code, or Enter pairing code, on this PC.
+            FleetConfig.SetFleetKey(replaced);
+            Assert.Null(keys.Pending);
+            keys.UsePending(sent);
+            Assert.Equal(replaced, FleetConfig.Current.FleetKey);
+            return Task.CompletedTask;
+        });
+    }
+
+    [Fact]
+    public async Task APendingCode_Expires()
+    {
+        await AuditFleetConfig.WithConfigAsync(() =>
+        {
+            var (old, sent) = (CommandSigner.NewKey(), CommandSigner.NewKey());
+            var now = DateTime.UtcNow;
+            FleetConfig.SetFleetKey(old);
+            var keys = new ConfigAgentKeys(() => now);
+            keys.SetPending(sent);
+
+            FleetConfig.Update(c => c.PendingFleetKeyUtc = DateTime.UtcNow - FleetConfig.PendingCodeLifetime - TimeSpan.FromMinutes(1));
+            Assert.Null(FleetConfig.Current.PendingFleetKey);
+            Assert.Equal(sent, keys.Pending);
+            now += FleetConfig.PendingCodeLifetime + TimeSpan.FromMinutes(1);
+            Assert.Null(keys.Pending);
+
+            keys.UsePending(sent);
+            Assert.Equal(old, FleetConfig.Current.FleetKey);
+            return Task.CompletedTask;
+        });
+    }
+
+    [Fact]
+    public async Task ACodeSentBeforeReplaceCode_CannotSwitchThePcLater()
+    {
+        await AuditFleetConfig.WithConfigAsync(async () =>
+        {
+            var (old, sent, replaced) = (CommandSigner.NewKey(), CommandSigner.NewKey(), CommandSigner.NewKey());
+            FleetConfig.SetFleetKey(old);
+            var keys = new ConfigAgentKeys();
+            var port = TestPorts.FreeRange(2);
+            using var server = new AgentServer(() => Task.FromResult(new MachineStatusPayload { MachineName = "PENDINGPC" }), c => c.Id,
+                _ => Task.FromResult(new LogPayload()), prefix: $"http://localhost:{port}/rw/", discoveryPort: port + 1, machineKey: "PENDINGPC", keys: keys);
+            server.Start();
+            // A fleet member sent a new code with Change fleet code, and left the fleet before using it.
+            keys.SetPending(sent);
+            FleetConfig.SetFleetKey(replaced);
+
+            await Assert.ThrowsAsync<PairingMismatchException>(() =>
+                FleetNetwork.CallAsync($"localhost:{port}", "PENDINGPC", new FleetRequest { Op = "status" }, pairingKey: sent));
+            Assert.Equal(replaced, FleetConfig.Current.FleetKey);
+            await FleetNetwork.CallAsync($"localhost:{port}", "PENDINGPC", new FleetRequest { Op = "status" }, pairingKey: replaced);
+        });
+    }
+}
 
 /// <summary>Runs a test with its own fleet.json in the test state folder, and puts back the one before it.</summary>
 internal static class AuditFleetConfig
