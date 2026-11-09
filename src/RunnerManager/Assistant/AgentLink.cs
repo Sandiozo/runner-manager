@@ -40,6 +40,8 @@ public sealed class AgentLink : IDisposable
     /// <summary>Only one request signs in again or starts a new session after the agent forgot this one.</summary>
     private readonly SemaphoreSlim _recoverGate = new(1, 1);
     private readonly string _url;
+    /// <summary>The port this process connects to; part of what both sides sign in with.</summary>
+    private readonly int _port;
     private volatile string? _token;
     private volatile string? _sessionId;
     private volatile string? _initialize;
@@ -47,7 +49,10 @@ public sealed class AgentLink : IDisposable
     private (DateTime Until, string Message)? _unreachable;
 
     public AgentLink(string? url = null)
-        => _url = (url ?? Environment.GetEnvironmentVariable(UrlVariable) ?? AssistantHttpServer.Url).TrimEnd('/');
+    {
+        _url = (url ?? Environment.GetEnvironmentVariable(UrlVariable) ?? AssistantHttpServer.Url).TrimEnd('/');
+        _port = Uri.TryCreate(_url, UriKind.Absolute, out var uri) ? uri.Port : AssistantHttpServer.Port;
+    }
 
     /// <summary>Sends one JSON-RPC message (or batch). Returns the answer, or null when there is none (a notification).</summary>
     /// <param name="onNotification">Gets each notification (progress) the agent sends while it works on the request.</param>
@@ -188,8 +193,10 @@ public sealed class AgentLink : IDisposable
             agentUnavailable: false);
 
     /// <summary>
-    /// Proves to the agent that this process runs as the same Windows user: it encrypts a challenge with DPAPI. The
-    /// agent proves the same back, so a program of another user that took the agent's port is not trusted.
+    /// Signs in to the agent (see <see cref="LocalSignIn"/>). This process shows that it runs as the agent's Windows
+    /// user by opening the secret the agent sealed. The agent shows the same back for a secret this process sealed,
+    /// so a program of another user that took the agent's port is not trusted, and nothing of the session is sent to it.
+    /// The session token comes from both secrets and is not sent during the sign-in.
     /// </summary>
     private async Task<string> SignInAsync(CancellationToken cancellationToken)
     {
@@ -210,43 +217,58 @@ public sealed class AgentLink : IDisposable
                         HttpStatusCode.TooManyRequests => "The fleet agent is busy with other sign-ins (HTTP 429). Try again in a minute.",
                         var status => $"The fleet agent could not sign in this program (HTTP {(int)status}). See the fleet agent log."
                     });
-                var nonce = ReadString(await challenge.Content.ReadAsStringAsync(cancellationToken), "nonce");
-                // A challenge is 32 random bytes; anything else could be a request to encrypt something chosen by someone else.
-                if (nonce == null || !IsBase64OfLength(nonce, AssistantHttpServer.ChallengeBytes))
+                var challengeText = await challenge.Content.ReadAsStringAsync(cancellationToken);
+                if (!LocalSignIn.TryDecode(ReadString(challengeText, "nonce"), LocalSignIn.NonceBytes, out var agentNonce))
                     throw new AgentLinkException("The fleet agent sent an invalid sign-in challenge.");
-                var proof = Convert.ToBase64String(ProtectedData.Protect(Convert.FromBase64String(nonce), AssistantHttpServer.ProofEntropy,
-                    DataProtectionScope.CurrentUser));
-                var clientNonce = RandomNumberGenerator.GetBytes(AssistantHttpServer.ChallengeBytes);
-                var body = new JsonObject { ["nonce"] = nonce, ["proof"] = proof, ["client_nonce"] = Convert.ToBase64String(clientNonce) }.ToJsonString();
-                using var session = await Send(new HttpRequestMessage(HttpMethod.Post, $"{_url}/local/session")
+                // Up to 2.8.2 the agent sent only the random value and took it back encrypted, which every Windows
+                // account can do in a way that decrypts there. This program does not sign in that way any more.
+                if (ReadString(challengeText, "challenge") is not { } sealedText) throw new AgentLinkException(OlderAgent);
+                if (!LocalSignIn.TryDecodeSealed(sealedText, out var agentSealed))
+                    throw new AgentLinkException("The fleet agent sent an invalid sign-in challenge.");
+                // Opens only a secret sealed for this purpose, and never sends it on: see LocalSignIn.
+                var agentSecret = LocalSignIn.Open(agentSealed, LocalSignIn.AgentChallenge) ?? throw new AgentLinkException(
+                    "The fleet agent on this PC runs as another Windows user, or another program answers on Runner Manager's port, so it is not used. " +
+                    "Start the AI tool as the Windows user that runs Runner Manager, or check which program uses port " + _port + ".");
+
+                var clientNonce = RandomNumberGenerator.GetBytes(LocalSignIn.NonceBytes);
+                var clientSecret = RandomNumberGenerator.GetBytes(LocalSignIn.SecretBytes);
+                try
                 {
-                    Content = new StringContent(body, Encoding.UTF8, "application/json")
-                }, cancellationToken);
-                var text = await session.Content.ReadAsStringAsync(cancellationToken);
-                // Many sign-ins at once can push a challenge out before it is used: ask for another.
-                if (session.StatusCode == HttpStatusCode.Forbidden && attempt < 2) continue;
-                if (!session.IsSuccessStatusCode)
-                    throw new AgentLinkException(ErrorText(text) is { Length: > 0 } error ? error : $"Sign-in failed (HTTP {(int)session.StatusCode}).");
-                var token = ReadString(text, "token") ?? throw new AgentLinkException("The fleet agent sent no session token.");
-                if (ReadString(text, "agent_proof") is not { } agentProof) throw new AgentLinkException(OlderAgent);
-                if (!AgentProofMatches(clientNonce, agentProof))
-                    throw new AgentLinkException("The program answering on Runner Manager's port could not prove that it is your fleet agent, so it is not used. " +
-                                                 "Restart this PC, or check which program uses port " + AssistantHttpServer.Port + ".");
-                return _token = token;
+                    byte[] clientSealed;
+                    try { clientSealed = LocalSignIn.Seal(clientSecret, LocalSignIn.ClientChallenge); }
+                    catch (CryptographicException ex) { throw new AgentLinkException($"Windows could not prepare the sign-in to the fleet agent for this user: {ex.Message}"); }
+                    var body = new JsonObject
+                    {
+                        ["nonce"] = Convert.ToBase64String(agentNonce),
+                        ["client_nonce"] = Convert.ToBase64String(clientNonce),
+                        ["client_challenge"] = Convert.ToBase64String(clientSealed),
+                        ["proof"] = Convert.ToBase64String(LocalSignIn.Proof(agentSecret, byAgent: false, _port, agentNonce, clientNonce, agentSealed, clientSealed))
+                    }.ToJsonString();
+                    using var session = await Send(new HttpRequestMessage(HttpMethod.Post, $"{_url}/local/session")
+                    {
+                        Content = new StringContent(body, Encoding.UTF8, "application/json")
+                    }, cancellationToken);
+                    var text = await session.Content.ReadAsStringAsync(cancellationToken);
+                    // Many sign-ins at once can push a challenge out before it is used: ask for another.
+                    if (session.StatusCode == HttpStatusCode.Forbidden && attempt < 2) continue;
+                    if (!session.IsSuccessStatusCode)
+                        throw new AgentLinkException(ErrorText(text) is { Length: > 0 } error ? error : $"Sign-in failed (HTTP {(int)session.StatusCode}).");
+                    // Only this user's agent could open the secret sealed above. Without that nothing more is sent.
+                    var expected = LocalSignIn.Proof(clientSecret, byAgent: true, _port, agentNonce, clientNonce, agentSealed, clientSealed);
+                    if (!LocalSignIn.TryDecode(ReadString(text, "agent_proof"), LocalSignIn.ProofBytes, out var agentProof) || !LocalSignIn.Matches(expected, agentProof))
+                        throw new AgentLinkException("The program answering on Runner Manager's port could not prove that it is your fleet agent, so it is not used. " +
+                                                     "Restart this PC, or check which program uses port " + _port + ".");
+                    // The agent works out the same token; it was not sent. So a program that passed this sign-in on has none.
+                    return _token = LocalSignIn.Token(agentSecret, clientSecret, _port, agentNonce, clientNonce, agentSealed, clientSealed);
+                }
+                finally
+                {
+                    CryptographicOperations.ZeroMemory(agentSecret);
+                    CryptographicOperations.ZeroMemory(clientSecret);
+                }
             }
         }
         finally { _signInGate.Release(); }
-    }
-
-    /// <summary>Whether the agent's proof decrypts, with this Windows user's key, to the random value this process sent.</summary>
-    internal static bool AgentProofMatches(byte[] clientNonce, string proof)
-    {
-        try
-        {
-            var plain = ProtectedData.Unprotect(Convert.FromBase64String(proof), AssistantHttpServer.AgentProofEntropy, DataProtectionScope.CurrentUser);
-            return CryptographicOperations.FixedTimeEquals(plain, AssistantHttpServer.AgentProofText(clientNonce));
-        }
-        catch { return false; }
     }
 
     private async Task<HttpResponseMessage> Send(HttpRequestMessage request, CancellationToken cancellationToken)
@@ -308,12 +330,6 @@ public sealed class AgentLink : IDisposable
                    || (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("jsonrpc", out _) && root.TryGetProperty("id", out _));
         }
         catch (JsonException) { return false; }
-    }
-
-    private static bool IsBase64OfLength(string text, int length)
-    {
-        var bytes = new byte[length + 3];
-        return Convert.TryFromBase64String(text, bytes, out var written) && written == length;
     }
 
     private static string? ReadString(string json, string name)

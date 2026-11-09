@@ -12,9 +12,9 @@ namespace RunnerManager;
 /// The fleet agent's MCP endpoint on 127.0.0.1 ("Streamable HTTP"). All assistant tools run here, in the agent, with
 /// Runner Manager's real settings and administrator rights:
 /// <list type="bullet">
-/// <item><c>RunnerManager.exe --mcp</c> and <c>ai</c>, started by AI tools, forward to it after proving with DPAPI that
-/// they run as the same Windows user. This also works when an AI tool runs them in a sandbox with its own copy of
-/// %LOCALAPPDATA%.</item>
+/// <item><c>RunnerManager.exe --mcp</c> and <c>ai</c>, started by AI tools, forward to it after showing with DPAPI that
+/// they run as the same Windows user (see <see cref="LocalSignIn"/>). This also works when an AI tool runs them in a
+/// sandbox with its own copy of %LOCALAPPDATA%.</item>
 /// <item>AI tools that connect by URL use the access token from Settings → AI assistants, while that is turned on.</item>
 /// </list>
 /// Most answers are plain JSON. A tool call is answered as an event stream when the client accepts one: progress
@@ -25,7 +25,6 @@ public sealed class AssistantHttpServer : IDisposable
     public const int Port = 47830;
     public static string Url => $"http://127.0.0.1:{Port}/mcp";
     public const int MaxRequestBytes = 256 * 1024;
-    internal const int ChallengeBytes = 32;
     private const int MaxSessions = 50;
     private const int MaxChallenges = 100;
     private static readonly TimeSpan ChallengeLifetime = TimeSpan.FromSeconds(30);
@@ -34,17 +33,19 @@ public sealed class AssistantHttpServer : IDisposable
     private static readonly TimeSpan RetryInterval = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan KeepAliveInterval = TimeSpan.FromSeconds(10);
 
-    /// <summary>Mixed into the proof, so a DPAPI blob made for something else is never accepted.</summary>
-    internal static readonly byte[] ProofEntropy = Encoding.UTF8.GetBytes("RunnerManager.LocalAssistant.v1");
-
-    /// <summary>For the agent's proof back to the client; different from the client's, so one can never stand in for the other.</summary>
-    internal static readonly byte[] AgentProofEntropy = Encoding.UTF8.GetBytes("RunnerManager.LocalAssistant.Agent.v1");
+    /// <summary>
+    /// The answer to a <c>--mcp</c> or <c>ai</c> process from before the sign-in changed (2.8.2 and older), which an AI
+    /// tool started before an update and still runs. Plain characters only: the older <c>ai</c> prints others wrongly.
+    /// </summary>
+    internal const string OlderProgram =
+        "Runner Manager was updated, but this AI tool still runs the older program that it started before the update. " +
+        "Restart the AI tool, then try again. If that does not help, copy the setup again from the AI assistants page in Runner Manager's Settings.";
 
     private readonly int _port;
     private readonly string _host;
     private readonly Func<McpServer> _newServer;
     private readonly ConcurrentDictionary<string, Session> _sessions = new();
-    private readonly ConcurrentDictionary<string, DateTime> _challenges = new();
+    private readonly ConcurrentDictionary<string, Challenge> _challenges = new();
     private readonly ConcurrentDictionary<string, DateTime> _localTokens = new();
     private readonly CancellationTokenSource _cts = new();
     private HttpListener? _http;
@@ -54,6 +55,9 @@ public sealed class AssistantHttpServer : IDisposable
         public McpServer Server { get; } = server;
         public DateTime LastUsedUtc { get; set; } = DateTime.UtcNow;
     }
+
+    /// <summary>A sign-in the agent started: its random value, and the secret only this Windows user can open.</summary>
+    private sealed record Challenge(DateTime IssuedUtc, byte[] Nonce, byte[] Secret, byte[] Sealed);
 
     /// <param name="port">Another port, for tests.</param>
     /// <param name="host">"localhost" for tests, which run without administrator rights.</param>
@@ -260,81 +264,82 @@ public sealed class AssistantHttpServer : IDisposable
         try { response.Close(); } catch { }
     }
 
-    // ----- Local sign-in: --mcp and ai prove they run as this Windows user -----
+    // ----- Local sign-in: --mcp and ai show that they run as this Windows user (see LocalSignIn) -----
 
     /// <summary>
-    /// Hands out a one-time random value for the caller to encrypt with DPAPI. Anyone on this PC can ask for one, so
-    /// when there are too many the oldest is dropped: a flood can delay a sign-in (the client asks again), never block it.
+    /// Starts a sign-in: hands out a one-time random value and a fresh secret, sealed so that only this Windows user
+    /// can open it. Anyone on this PC can ask, so this route opens nothing a caller sent, and when there are too many
+    /// open sign-ins the oldest is dropped: a flood can delay a sign-in (the client asks again), never block it.
     /// </summary>
     private async Task ChallengeAsync(HttpListenerRequest request, HttpListenerResponse response)
     {
         if (request.HttpMethod != "POST") { await ReplyAsync(response, 405, null); return; }
         var now = DateTime.UtcNow;
-        foreach (var old in _challenges.Where(c => now - c.Value > ChallengeLifetime).Select(c => c.Key).ToList()) _challenges.TryRemove(old, out _);
-        while (_challenges.Count >= MaxChallenges && OldestKey(_challenges) is { } oldest) _challenges.TryRemove(oldest, out _);
-        var nonce = Convert.ToBase64String(RandomNumberGenerator.GetBytes(ChallengeBytes));
-        _challenges[nonce] = now;
-        await ReplyAsync(response, 200, new JsonObject { ["nonce"] = nonce });
+        foreach (var old in _challenges.Where(c => now - c.Value.IssuedUtc > ChallengeLifetime).Select(c => c.Key).ToList()) _challenges.TryRemove(old, out _);
+        while (_challenges.Count >= MaxChallenges && _challenges.MinBy(c => c.Value.IssuedUtc) is { Key: { } oldest }) _challenges.TryRemove(oldest, out _);
+        var nonce = RandomNumberGenerator.GetBytes(LocalSignIn.NonceBytes);
+        var secret = RandomNumberGenerator.GetBytes(LocalSignIn.SecretBytes);
+        var sealedSecret = LocalSignIn.Seal(secret, LocalSignIn.AgentChallenge);
+        var id = Convert.ToBase64String(nonce);
+        _challenges[id] = new Challenge(now, nonce, secret, sealedSecret);
+        await ReplyAsync(response, 200, new JsonObject { ["nonce"] = id, ["challenge"] = Convert.ToBase64String(sealedSecret) });
     }
 
     /// <summary>
-    /// Exchanges a DPAPI-encrypted challenge for a session token. Only a process of the same Windows user can encrypt
-    /// with that user's DPAPI key, which is the same trust as reading the pairing code from fleet.json. The answer
-    /// carries the agent's own proof, made from the caller's random value, so the caller knows it is talking to its
-    /// own user's agent.
+    /// Finishes a sign-in and starts its session. The caller must show that it opened this sign-in's secret, which
+    /// only a process of the same Windows user can: the same trust as reading the pairing code from fleet.json. The
+    /// answer shows the same about the agent, for the secret the caller sealed, so the caller knows it is talking to
+    /// its own user's agent. The session's token is not in the answer: both sides work it out from the two secrets.
     /// </summary>
     private async Task LocalSessionAsync(HttpListenerRequest request, HttpListenerResponse response)
     {
         if (request.HttpMethod != "POST") { await ReplyAsync(response, 405, null); return; }
         var body = await ReadBodyAsync(request);
-        string? nonce = null, proof = null, clientNonce = null;
+        string? nonce = null, clientNonce = null, clientChallenge = null, proof = null;
         try
         {
             using var document = JsonDocument.Parse(body ?? Array.Empty<byte>());
-            nonce = document.RootElement.GetProperty("nonce").GetString();
-            proof = document.RootElement.GetProperty("proof").GetString();
-            if (document.RootElement.TryGetProperty("client_nonce", out var c) && c.ValueKind == JsonValueKind.String) clientNonce = c.GetString();
+            nonce = Text(document.RootElement, "nonce");
+            clientNonce = Text(document.RootElement, "client_nonce");
+            clientChallenge = Text(document.RootElement, "client_challenge");
+            proof = Text(document.RootElement, "proof");
         }
-        catch { }
-        if (nonce == null || proof == null || !_challenges.TryRemove(nonce, out var issued) || DateTime.UtcNow - issued > ChallengeLifetime
-            || !ProofMatches(nonce, proof))
+        catch (JsonException) { }
+        // A sign-in gets one answer, right or wrong.
+        Challenge? challenge = null;
+        if (nonce != null) _challenges.TryRemove(nonce, out challenge);
+        // Up to 2.8.2 the caller sent the random value back encrypted with DPAPI, which every Windows account can do
+        // in a way that decrypts here. That is not accepted any more: the program is told how to get the current one.
+        if (proof != null && clientChallenge == null)
+        {
+            await ReplyAsync(response, 400, McpServer.Error(null, -32001, OlderProgram));
+            return;
+        }
+        if (challenge == null || DateTime.UtcNow - challenge.IssuedUtc > ChallengeLifetime
+            || !LocalSignIn.TryDecode(clientNonce, LocalSignIn.NonceBytes, out var clientNonceBytes)
+            || !LocalSignIn.TryDecodeSealed(clientChallenge, out var clientSealed)
+            || !LocalSignIn.TryDecode(proof, LocalSignIn.ProofBytes, out var proofBytes)
+            || !LocalSignIn.Matches(LocalSignIn.Proof(challenge.Secret, byAgent: false, _port, challenge.Nonce, clientNonceBytes, challenge.Sealed, clientSealed), proofBytes)
+            // Opened only now that the caller has shown that it runs as this user.
+            || LocalSignIn.Open(clientSealed, LocalSignIn.ClientChallenge) is not { } clientSecret)
         {
             await ReplyAsync(response, 403, McpServer.Error(null, -32001, "Runner Manager could not confirm that this program runs as your Windows user."));
             return;
         }
-        var token = NewToken();
+        var agentProof = LocalSignIn.Proof(clientSecret, byAgent: true, _port, challenge.Nonce, clientNonceBytes, challenge.Sealed, clientSealed);
+        // The caller works out the same token, so the answer does not carry it: see LocalSignIn.Token.
+        var token = LocalSignIn.Token(challenge.Secret, clientSecret, _port, challenge.Nonce, clientNonceBytes, challenge.Sealed, clientSealed);
+        CryptographicOperations.ZeroMemory(clientSecret);
+        CryptographicOperations.ZeroMemory(challenge.Secret);
         RemoveIdle(_localTokens);
         while (_localTokens.Count >= MaxSessions && OldestKey(_localTokens) is { } oldest) _localTokens.TryRemove(oldest, out _);
         _localTokens[token] = DateTime.UtcNow;
-        var answer = new JsonObject { ["token"] = token };
-        if (clientNonce != null && TryFromBase64(clientNonce, out var clientBytes)) answer["agent_proof"] = AgentProof(clientBytes);
-        await ReplyAsync(response, 200, answer);
+        await ReplyAsync(response, 200, new JsonObject { ["agent_proof"] = Convert.ToBase64String(agentProof) });
     }
 
-    internal static bool ProofMatches(string nonce, string proof)
-    {
-        try
-        {
-            var plain = ProtectedData.Unprotect(Convert.FromBase64String(proof), ProofEntropy, DataProtectionScope.CurrentUser);
-            return CryptographicOperations.FixedTimeEquals(plain, Convert.FromBase64String(nonce));
-        }
-        catch { return false; }
-    }
-
-    /// <summary>What the agent encrypts to prove itself: the client's random value and a fixed label.</summary>
-    internal static byte[] AgentProofText(byte[] clientNonce)
-        => clientNonce.Concat(Encoding.UTF8.GetBytes("Runner Manager fleet agent")).ToArray();
-
-    internal static string AgentProof(byte[] clientNonce)
-        => Convert.ToBase64String(ProtectedData.Protect(AgentProofText(clientNonce), AgentProofEntropy, DataProtectionScope.CurrentUser));
-
-    private static bool TryFromBase64(string text, out byte[] bytes)
-    {
-        var buffer = new byte[ChallengeBytes + 3];
-        var ok = Convert.TryFromBase64String(text, buffer, out var written) && written == ChallengeBytes;
-        bytes = ok ? buffer[..written] : Array.Empty<byte>();
-        return ok;
-    }
+    private static string? Text(JsonElement root, string name)
+        => root.ValueKind == JsonValueKind.Object && root.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
+            ? value.GetString() : null;
 
     /// <summary>
     /// One MCP server per client session, so each approval names the right AI tool. Null for a session id this
