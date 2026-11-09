@@ -414,8 +414,16 @@ public partial class MainWindow
             $"{machine.MachineName}: update to v{MachineInfo.LatestAppVersion} queued.");
     }
 
+    /// <summary>
+    /// A checkable menu item turns its check on or off when clicked. Puts the bound state back, so the check shows what
+    /// is true until the change has really happened.
+    /// </summary>
+    internal static void KeepBoundCheck(object sender)
+        => (sender as MenuItem)?.GetBindingExpression(MenuItem.IsCheckedProperty)?.UpdateTarget();
+
     private async void MachineWatchdog_Click(object sender, RoutedEventArgs e)
     {
+        KeepBoundCheck(sender);
         if (ItemFrom<MachineInfo>(sender) is not { } machine) return;
         var enable = !machine.WatchdogEnabled;
         if (machine.IsLocal)
@@ -573,6 +581,7 @@ public partial class MainWindow
 
     private async void RunnerStartup_Click(object sender, RoutedEventArgs e)
     {
+        KeepBoundCheck(sender);
         if (ItemFrom<MachineRunnerStatus>(sender) is not { CanChangeStartup: true } runner) return;
         var start = !runner.StartsAutomatically;
         await RunRunnerActionAsync(runner, "Startup", $"{(start ? "Turn on" : "Turn off")} automatic start for {runner.TitleText}",

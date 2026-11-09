@@ -495,7 +495,7 @@
                                                                                     <MenuItem Header="Restart" Tag="&#xE72C;" Click="RunnerRestart_Click" IsEnabled="{Binding CanControl}"/>
                                                                                     <MenuItem Header="Repair Windows service…" Tag="&#xE90F;" Click="RunnerRepair_Click" Visibility="{Binding RepairVisibility}"/>
                                                                                     <MenuItem Header="Run as Windows service…" Tag="&#xE90F;" Click="RunnerConvert_Click" Visibility="{Binding ConvertVisibility}" IsEnabled="{Binding CanConvert}"/>
-                                                                                    <MenuItem Header="{Binding StartupHeader}" IsChecked="{Binding StartsAutomatically, Mode=OneWay}"
+                                                                                    <MenuItem Header="{Binding StartupHeader}" IsCheckable="True" IsChecked="{Binding StartsAutomatically, Mode=OneWay}"
                                                                                               IsEnabled="{Binding CanChangeStartup}" ToolTip="{Binding StartupTip}" Click="RunnerStartup_Click"/>
                                                                                     <MenuItem Header="Move to another PC…" Tag="&#xE8AB;" Click="RunnerMove_Click" IsEnabled="{Binding CanMove}"/>
                                                                                     <MenuItem Header="Clean work folder…" Tag="&#xE74D;" Click="RunnerCleanWork_Click" IsEnabled="{Binding CanCleanWork}"/>

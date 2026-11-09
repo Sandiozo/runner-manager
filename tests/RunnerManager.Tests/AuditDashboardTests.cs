@@ -138,6 +138,47 @@ public class AuditDashboardTests
         });
     }
 
+    /// <summary>The app's source folder, for checks of the XAML text.</summary>
+    private static string SourceDir
+    {
+        get
+        {
+            for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir != null; dir = dir.Parent)
+                if (File.Exists(Path.Combine(dir.FullName, "RunnerManager.sln"))) return Path.Combine(dir.FullName, "src", "RunnerManager");
+            throw new DirectoryNotFoundException("The repository folder was not found.");
+        }
+    }
+
+    private static string Xaml(string name) => File.ReadAllText(Path.Combine(SourceDir, name));
+
+    // ================= Menu check marks =================
+
+    [Fact]
+    public void MenuItemsWithABoundCheck_AreCheckable()
+    {
+        // The menu template shows the check only for checkable items.
+        var items = Regex.Matches(Xaml("MainWindow.xaml"), @"<MenuItem\b[^>]*IsChecked=""\{Binding[^>]*>").Select(m => m.Value).ToList();
+        Assert.NotEmpty(items);
+        Assert.All(items, item => Assert.Contains(@"IsCheckable=""True""", item));
+    }
+
+    private sealed class Flag { public bool Value { get; set; } = true; }
+
+    [Fact]
+    public void ClickingACheckableItem_KeepsTheBoundState()
+        => WpfTestApp.Run(() =>
+        {
+            var item = new MenuItem { Header = "Start with Windows", IsCheckable = true, DataContext = new Flag() };
+            item.SetBinding(MenuItem.IsCheckedProperty, new System.Windows.Data.Binding(nameof(Flag.Value)) { Mode = System.Windows.Data.BindingMode.OneWay });
+            var check = WpfTestApp.Descendants<TextBlock>(WpfTestApp.Layout(new Border { Child = item })).First(t => t.Text == "");
+            Assert.Equal(Visibility.Visible, check.Visibility);
+            // What a click does before the Click handler runs.
+            item.SetCurrentValue(MenuItem.IsCheckedProperty, false);
+            MainWindow.KeepBoundCheck(item);
+            Assert.True(item.IsChecked);
+            Assert.NotNull(item.GetBindingExpression(MenuItem.IsCheckedProperty));
+        });
+
     // ================= Theme: control text colors =================
 
     private static TextBlock TextIn(FrameworkElement control, string text)
