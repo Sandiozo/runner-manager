@@ -433,10 +433,29 @@ public static class AssistantTools
         (machine, runner) = await RecheckAsync(machine, runner, mustBeIdle: false);
         if (!runner.IsBusy) throw new AssistantException($"{runner.TitleText} finished its job while the approval was open, so nothing was changed.");
         call.CancellationToken.ThrowIfCancellationRequested();
-        var stopped = new List<string>();
-        await Actions.RunOnMachineAsync(machine, "runner", runner.CommandKey, "StopJob", call.Log,
-            async () => stopped = await RunnerActivity.StopJobProcessesAsync(runner.CommandKey), TimeSpan.FromMinutes(2));
-        return new { done = true, pc = machine.MachineName, runner = runner.TitleText, target = TargetOf(runner), stopped = stopped.Count > 0 ? stopped : null };
+        // The PC's fleet agent does it and says what it did, also on this PC: which processes it stopped, or that
+        // the job had none. That answer comes back as the last progress line, after the PC's name.
+        string? result = null;
+        var prefix = $"{machine.MachineName}: ";
+        await Actions.RunOnMachineAsync(machine, "runner", runner.CommandKey, "StopJob",
+            message =>
+            {
+                if (message.StartsWith(prefix, StringComparison.Ordinal)) result = message[prefix.Length..];
+                call.Log(message);
+            },
+            async () =>
+            {
+                var stopped = await RunnerActivity.StopJobProcessesAsync(runner.CommandKey);
+                result = stopped.Count == 0 ? "The job had no processes to stop" : $"Stopped the job's processes: {string.Join(", ", stopped)}";
+            },
+            TimeSpan.FromMinutes(2));
+        return new
+        {
+            pc = machine.MachineName,
+            runner = runner.TitleText,
+            target = TargetOf(runner),
+            result = Bounded(result ?? $"{machine.MachineName} did not say what it stopped.", 1000)
+        };
     }
 
     private static async Task<object> CreateRunnerAsync(AssistantCall call)
