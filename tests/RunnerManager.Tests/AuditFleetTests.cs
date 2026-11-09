@@ -549,6 +549,56 @@ public class PcNameHeaderTests
     }
 }
 
+public class ListenerRestartTests
+{
+    private static AgentServer StartAgent(byte[] key, int port)
+    {
+        var server = new AgentServer(() => Task.FromResult(new MachineStatusPayload { MachineName = "RESTARTPC" }), c => c.Id,
+            _ => Task.FromResult(new LogPayload()), () => key, $"http://localhost:{port}/rw/", port + 1, "RESTARTPC")
+        { RetryInterval = TimeSpan.FromMilliseconds(200) };
+        server.Start();
+        return server;
+    }
+
+    private static T Listener<T>(AgentServer server, string field)
+        => (T)typeof(AgentServer).GetField(field, System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(server)!;
+
+    [Fact]
+    public async Task AnHttpListenerThatStops_IsStartedAgain()
+    {
+        var key = CommandSigner.NewKey();
+        var port = TestPorts.FreeRange(2);
+        using var server = StartAgent(key, port);
+
+        // As when http.sys drops it: the listener stops while the agent runs.
+        Listener<System.Net.HttpListener>(server, "_http").Close();
+
+        FleetResponse? answer = null;
+        for (var i = 0; i < 50 && answer == null; i++)
+        {
+            try { answer = await FleetNetwork.CallAsync($"localhost:{port}", "RESTARTPC", new FleetRequest { Op = "status" }, TimeSpan.FromSeconds(2), pairingKey: key); }
+            catch { await Task.Delay(100); }
+        }
+        Assert.Equal("RESTARTPC", answer?.Status?.MachineName);
+        Assert.True(server.IsListening);
+    }
+
+    [Fact]
+    public async Task ADiscoveryListenerThatStops_IsStartedAgain()
+    {
+        var key = CommandSigner.NewKey();
+        var port = TestPorts.FreeRange(2);
+        using var server = StartAgent(key, port);
+
+        Listener<System.Net.Sockets.UdpClient>(server, "_udp").Dispose();
+
+        var found = new List<DiscoveredPeer>();
+        for (var i = 0; i < 10 && found.Count == 0; i++)
+            found = (await FleetNetwork.DiscoverAsync(new[] { "127.0.0.1" }, TimeSpan.FromMilliseconds(500), port + 1, key)).ToList();
+        Assert.Contains(found, p => p.Name == "RESTARTPC");
+    }
+}
+
 internal static class AuditFleetConfig
 {
     private static readonly string ConfigPath = Path.Combine(FleetConfig.StateDir, "fleet.json");

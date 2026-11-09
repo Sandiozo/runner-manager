@@ -574,8 +574,12 @@ public sealed class AgentServer : IDisposable
     private const int MaxUnauthenticatedRequests = 16;
     private static readonly TimeSpan BodyTimeout = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan SlotWait = TimeSpan.FromSeconds(2);
-    /// <summary>How often a listener that could not start is tried again.</summary>
+    /// <summary>How often a listener that could not start, or stopped, is tried again.</summary>
     internal static TimeSpan ListenRetryInterval { get; set; } = TimeSpan.FromSeconds(30);
+    /// <summary>This agent's <see cref="ListenRetryInterval"/>, read when it is created (tests set it per agent).</summary>
+    internal TimeSpan RetryInterval { get; init; } = ListenRetryInterval;
+    /// <summary>Waiting for a request failed this many times in a row: the listener is broken (http.sys restarted, for example).</summary>
+    private const int MaxListenFailures = 3;
 
     private int Port => new Uri(_prefix.Replace("+", "localhost")).Port;
 
@@ -584,22 +588,28 @@ public sealed class AgentServer : IDisposable
 
     /// <summary>
     /// Starts both listeners. One that can't start (its port is taken, for example) is logged once and tried again
-    /// every <see cref="ListenRetryInterval"/>; the first such error is also thrown.
+    /// every <see cref="RetryInterval"/>; the first such error is also thrown.
     /// </summary>
     public void Start()
     {
         var httpError = TryStartHttp();
         var udpError = TryStartUdp();
-        var retry = $"Trying again every {(int)ListenRetryInterval.TotalSeconds} seconds.";
+        var retry = $"Trying again every {(int)RetryInterval.TotalSeconds} seconds.";
         if (httpError != null) MachineRelay.AppendAgentLog($"Could not listen on TCP port {Port}: {httpError.Message} {retry}");
         if (udpError != null) MachineRelay.AppendAgentLog($"Could not listen for discovery on UDP port {_discoveryPort}: {udpError.Message} {retry}");
         if (httpError == null && udpError == null) return;
+        EnsureRetrying();
+        throw httpError ?? udpError!;
+    }
+
+    private void EnsureRetrying()
+    {
         lock (_listenGate)
         {
-            if (!_retrying) _ = Task.Run(RetryListenersAsync);
+            if (_retrying || _cts.IsCancellationRequested) return;
             _retrying = true;
         }
-        throw httpError ?? udpError!;
+        _ = Task.Run(RetryListenersAsync);
     }
 
     private Exception? TryStartHttp()
@@ -622,8 +632,13 @@ public sealed class AgentServer : IDisposable
             http.TimeoutManager.HeaderWait = BodyTimeout;
         }
         catch { }
-        _http = http;
-        _ = Task.Run(AcceptLoopAsync);
+        lock (_listenGate)
+        {
+            // Disposed meanwhile: the port is not held.
+            if (_cts.IsCancellationRequested) { try { http.Close(); } catch { } return null; }
+            _http = http;
+        }
+        _ = Task.Run(() => AcceptLoopAsync(http));
         return null;
     }
 
@@ -633,35 +648,71 @@ public sealed class AgentServer : IDisposable
         {
             var udp = new UdpClient(new IPEndPoint(IPAddress.Any, _discoveryPort)) { EnableBroadcast = true };
             FleetNetwork.IgnoreConnectionResets(udp);
-            _udp = udp;
+            lock (_listenGate)
+            {
+                if (_cts.IsCancellationRequested) { udp.Dispose(); return null; }
+                _udp = udp;
+            }
+            _ = Task.Run(() => DiscoveryLoopAsync(udp));
         }
         catch (Exception ex) { return ex; }
-        _ = Task.Run(DiscoveryLoopAsync);
         return null;
     }
 
     private async Task RetryListenersAsync()
     {
-        while (!_cts.IsCancellationRequested && !IsListening)
+        while (true)
         {
-            try { await Task.Delay(ListenRetryInterval, _cts.Token); }
-            catch (OperationCanceledException) { return; }
+            // Checked under the lock, so a listener that stops just as this loop ends still gets a new one.
+            lock (_listenGate)
+            {
+                if (_cts.IsCancellationRequested || IsListening) { _retrying = false; return; }
+            }
+            try { await Task.Delay(RetryInterval, _cts.Token); }
+            catch (OperationCanceledException) { lock (_listenGate) _retrying = false; return; }
             // Failures were logged once already; only the recovery is.
             if (_http == null && TryStartHttp() == null) MachineRelay.AppendAgentLog($"Listening on TCP port {Port} now.");
             if (_udp == null && TryStartUdp() == null) MachineRelay.AppendAgentLog($"Listening for discovery on UDP port {_discoveryPort} now.");
         }
-        lock (_listenGate) _retrying = false;
     }
 
-    private async Task AcceptLoopAsync()
+    /// <summary>A listener stopped after it started: it is closed, and a new one is tried every <see cref="RetryInterval"/>.</summary>
+    private void ListenerStopped(IDisposable listener, Exception? error)
     {
-        while (!_cts.IsCancellationRequested && _http is { IsListening: true } http)
+        lock (_listenGate)
+        {
+            if (_cts.IsCancellationRequested) return;
+            if (ReferenceEquals(listener, _http)) _http = null;
+            else if (ReferenceEquals(listener, _udp)) _udp = null;
+            else return;
+        }
+        try { listener.Dispose(); } catch { }
+        var what = listener is HttpListener ? $"on TCP port {Port}" : $"for discovery on UDP port {_discoveryPort}";
+        var why = error != null ? $": {error.Message}" : string.Empty;
+        MachineRelay.AppendAgentLog($"Stopped listening {what}{why}. Trying again every {(int)RetryInterval.TotalSeconds} seconds.");
+        EnsureRetrying();
+    }
+
+    private async Task AcceptLoopAsync(HttpListener http)
+    {
+        var failures = 0;
+        Exception? error = null;
+        while (!_cts.IsCancellationRequested && http.IsListening && failures < MaxListenFailures)
         {
             HttpListenerContext context;
             try { context = await http.GetContextAsync(); }
-            catch { if (_cts.IsCancellationRequested) return; await Task.Delay(500); continue; }
+            catch (Exception ex)
+            {
+                if (_cts.IsCancellationRequested) return;
+                failures++;
+                error = ex;
+                await Task.Delay(500);
+                continue;
+            }
+            failures = 0;
             _ = Task.Run(() => HandleAsync(context));
         }
+        ListenerStopped(http, error);
     }
 
     private async Task HandleAsync(HttpListenerContext context)
@@ -858,13 +909,27 @@ public sealed class AgentServer : IDisposable
         response.Close();
     }
 
-    private async Task DiscoveryLoopAsync()
+    private async Task DiscoveryLoopAsync(UdpClient udp)
     {
-        while (!_cts.IsCancellationRequested && _udp is { } udp)
+        var failures = 0;
+        Exception? error = null;
+        while (!_cts.IsCancellationRequested && failures < MaxListenFailures)
         {
+            UdpReceiveResult packet;
+            try { packet = await udp.ReceiveAsync(_cts.Token); }
+            catch (OperationCanceledException) { return; }
+            catch (Exception ex)
+            {
+                if (_cts.IsCancellationRequested) return;
+                failures++;
+                error = ex;
+                await Task.Delay(200);
+                continue;
+            }
+            failures = 0;
+            // Answering one sender can fail (its address is unreachable, for example); the listener still works.
             try
             {
-                var packet = await udp.ReceiveAsync(_cts.Token);
                 var pairingKey = _keys.Current;
                 if (pairingKey == null) continue;
                 var discoveryKey = FleetNetwork.KeysFor(pairingKey).Discovery;
@@ -879,10 +944,10 @@ public sealed class AgentServer : IDisposable
                 var answer = FleetCrypto.Answer(discoveryKey, nonce, _discoveryBody);
                 await udp.SendAsync(answer, answer.Length, packet.RemoteEndPoint);
             }
-            catch (OperationCanceledException) { return; }
             catch (ObjectDisposedException) { return; }
-            catch { await Task.Delay(200); }
+            catch { }
         }
+        ListenerStopped(udp, error);
     }
 
     public void Dispose()
@@ -893,8 +958,11 @@ public sealed class AgentServer : IDisposable
             foreach (var offer in _rekeyOffers.Values) offer.Key.Dispose();
             _rekeyOffers.Clear();
         }
+        HttpListener? http;
+        UdpClient? udp;
+        lock (_listenGate) (http, udp) = (_http, _udp);
         // Close also releases the URL, so a new listener on the same port can start right away.
-        try { _http?.Close(); } catch { }
-        try { _udp?.Dispose(); } catch { }
+        try { http?.Close(); } catch { }
+        try { udp?.Dispose(); } catch { }
     }
 }
