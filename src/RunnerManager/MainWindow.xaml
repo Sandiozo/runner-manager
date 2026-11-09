@@ -749,11 +749,11 @@
                                                                                 <TextBlock Text="{Binding WorkFolderText}" Style="{StaticResource ValueText}" Foreground="{Binding WorkFolderBrush}"
                                                                                            ToolTip="Contains checkouts, tool caches and build output. Clean it from the ⋯ menu."/>
                                                                             </DockPanel>
+                                                                            <DockPanel Style="{StaticResource KeyRow}" Visibility="{Binding LabelsVisibility}">
+                                                                                <TextBlock Text="Labels" Style="{StaticResource KeyText}"/>
+                                                                                <TextBlock Text="{Binding LabelsText}" Style="{StaticResource ValueText}"/>
+                                                                            </DockPanel>
                                                                             <StackPanel Visibility="{Binding LocalDetailsVisibility}">
-                                                                                <DockPanel Style="{StaticResource KeyRow}">
-                                                                                    <TextBlock Text="Labels" Style="{StaticResource KeyText}"/>
-                                                                                    <TextBlock Text="{Binding LabelsText}" Style="{StaticResource ValueText}"/>
-                                                                                </DockPanel>
                                                                                 <DockPanel Style="{StaticResource KeyRow}">
                                                                                     <TextBlock Text="GitHub status" Style="{StaticResource KeyText}"/>
                                                                                     <TextBlock Text="{Binding LocalRunner.GitHubText}" Style="{StaticResource ValueText}"/>

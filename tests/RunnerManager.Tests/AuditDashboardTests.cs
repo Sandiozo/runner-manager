@@ -408,4 +408,23 @@ public class AuditDashboardTests
         }
         finally { Directory.Delete(Path.GetDirectoryName(path)!, recursive: true); }
     }
+
+    // ----- Bug 8: labels of runners on other PCs -----
+
+    [Fact]
+    public void RunnerOnAnotherPc_ShowsAndMatchesItsLabels()
+    {
+        var runner = new MachineRunnerStatus { ServiceName = "actions.runner.app.build-01", DisplayName = "build-01", CustomLabels = new[] { "gpu", "cuda-12" } };
+        Assert.Equal("gpu  ·  cuda-12", runner.LabelsText);
+        Assert.Equal(Visibility.Visible, runner.LabelsVisibility);
+        Assert.True(runner.Matches("CUDA"));
+        Assert.False(runner.Matches("arm64"));
+    }
+
+    [Fact]
+    public void RunnerOnAnotherPc_WithoutReportedLabels_HidesTheLabelsRow()
+    {
+        var runner = new MachineRunnerStatus { ServiceName = "actions.runner.app.build-01", DisplayName = "build-01" };
+        Assert.Equal(Visibility.Collapsed, runner.LabelsVisibility);
+    }
 }

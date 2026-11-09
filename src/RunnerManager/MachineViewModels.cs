@@ -165,8 +165,13 @@ public sealed class MachineRunnerStatus : INotifyPropertyChanged
     [JsonIgnore] public Visibility LocalDetailsVisibility => IsExpanded && LocalRunner != null ? Visibility.Visible : Visibility.Collapsed;
     [JsonIgnore] public Visibility ManuallyStoppedVisibility => ManuallyStopped && !IsRunning ? Visibility.Visible : Visibility.Collapsed;
     [JsonIgnore] public string ExpandGlyph => IsExpanded ? "" : "";
-    [JsonIgnore] public string LabelsText => LocalRunner is { CustomLabels.Length: > 0 } local
-        ? string.Join("  ·  ", local.CustomLabels) : $"self-hosted, Windows, {(IsLocalMachine ? RunnerService.ArchitectureLabel : "X64")}";
+    /// <summary>This PC's own reading of the labels when it has one, otherwise what the runner's agent reports.</summary>
+    [JsonIgnore] private string[] EffectiveCustomLabels => LocalRunner is { CustomLabels.Length: > 0 } local ? local.CustomLabels : CustomLabels;
+    [JsonIgnore] public string LabelsText => EffectiveCustomLabels is { Length: > 0 } labels
+        ? string.Join("  ·  ", labels) : $"self-hosted, Windows, {(IsLocalMachine ? RunnerService.ArchitectureLabel : "X64")}";
+    // Another PC's agent sends no labels when it is older or has not read them from GitHub yet, so the defaults are only
+    // shown for runners on this PC.
+    [JsonIgnore] public Visibility LabelsVisibility => LocalRunner != null || CustomLabels.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
     [JsonIgnore] public bool HasCurrentJob => !string.IsNullOrWhiteSpace(LocalRunner?.CurrentJobUrl);
     // Runners on this PC use the dashboard's own readings, so the details are complete even before the agent is updated.
     [JsonIgnore] private long? EffectiveWorkFolderBytes => LocalRunner?.WorkFolderBytes ?? WorkFolderBytes;
@@ -329,7 +334,7 @@ public sealed class MachineRunnerStatus : INotifyPropertyChanged
            || RepositoryText.Contains(filter, StringComparison.OrdinalIgnoreCase)
            || ServiceName.Contains(filter, StringComparison.OrdinalIgnoreCase)
            || StatusText.Contains(filter, StringComparison.OrdinalIgnoreCase)
-           || (LocalRunner?.CustomLabels.Any(l => l.Contains(filter, StringComparison.OrdinalIgnoreCase)) ?? false);
+           || EffectiveCustomLabels.Any(l => l.Contains(filter, StringComparison.OrdinalIgnoreCase));
 
     private void Notify(string? name = null)
         => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name ?? string.Empty));
