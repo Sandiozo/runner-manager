@@ -66,6 +66,7 @@ public static class GitHubApi
     /// </summary>
     public static async Task<TimeSpan?> GetUsualJobDurationAsync(string repositoryPath, string workflowName, string jobName)
     {
+        if (!GitHubNames.IsRepositoryPath(repositoryPath)) return null;
         var key = $"{repositoryPath}|{workflowName}|{jobName}";
         lock (CacheLock)
             if (UsualDurations.TryGetValue(key, out var known) && DateTime.UtcNow < known.Until) return known.Usual;
@@ -107,6 +108,9 @@ public static class GitHubApi
 
     private static Task<RepositoryWorkState?> GetRepositoryWorkAsync(string repositoryPath)
     {
+        // Other PCs report the repository of their runners. A name GitHub would not allow is answered like a failed
+        // read, before anything is cached or started.
+        if (!GitHubNames.IsRepositoryPath(repositoryPath)) return Task.FromResult<RepositoryWorkState?>(null);
         lock (CacheLock)
         {
             if (WorkCache.TryGetValue(repositoryPath, out var cached)
@@ -185,7 +189,7 @@ public static class GitHubApi
 
     private static async Task<List<GitHubJobState>?> GetJobsAsync(string repositoryPath, WorkflowRunState run)
     {
-        var body = await GetPolledAsync($"repos/{repositoryPath}/actions/runs/{run.Id}/jobs?filter=latest&per_page=100");
+        var body = await GetPolledAsync($"repos/{repositoryPath}/actions/runs/{GitHubNames.Id(run.Id)}/jobs?filter=latest&per_page=100");
         if (body == null) return null;
         try
         {
@@ -252,6 +256,7 @@ public static class GitHubApi
     /// </summary>
     public static async Task<List<WorkflowRunSummary>?> GetRecentRunsAsync(string repositoryPath)
     {
+        if (!GitHubNames.IsRepositoryPath(repositoryPath)) return null;
         (string ETag, List<WorkflowRunSummary> Runs) cached;
         lock (CacheLock)
             cached = RecentRunsCache.TryGetValue(repositoryPath, out var entry) ? entry : (string.Empty, new List<WorkflowRunSummary>());
@@ -289,7 +294,9 @@ public static class GitHubApi
 
     public static async Task RerunFailedJobsAsync(string repositoryPath, long runId)
     {
-        var result = await GitHubCli.RunAsync($"api --method POST repos/{repositoryPath}/actions/runs/{runId}/rerun-failed-jobs");
+        if (!GitHubNames.IsRepositoryPath(repositoryPath)) throw new InvalidOperationException(GitHubCli.InvalidNameMessage);
+        if (runId <= 0) throw new InvalidOperationException("The workflow run is not known, so GitHub was not asked to run it again.");
+        var result = await GitHubCli.ApiAsync($"repos/{repositoryPath}/actions/runs/{GitHubNames.Id(runId)}/rerun-failed-jobs", "--method", "POST");
         if (result.ExitCode != 0)
             throw new InvalidOperationException(string.IsNullOrWhiteSpace(result.Error) ? "GitHub did not accept the re-run request." : result.Error.Trim());
     }
@@ -303,7 +310,8 @@ public static class GitHubApi
     /// </summary>
     public static async Task<WorkflowFileList> GetWorkflowFilesAsync(string repositoryPath)
     {
-        var result = await GitHubCli.RunAsync($"api repos/{repositoryPath}/contents/.github/workflows");
+        if (!GitHubNames.IsRepositoryPath(repositoryPath)) throw new InvalidOperationException(GitHubCli.InvalidNameMessage);
+        var result = await GitHubCli.ApiAsync($"repos/{repositoryPath}/contents/.github/workflows");
         if (result.ExitCode != 0)
         {
             if (GitHubCli.IsNotFound(result.Error)) return new WorkflowFileList();
@@ -343,8 +351,9 @@ public static class GitHubApi
 
     private static async Task<RepositoryFile?> GetRepositoryFileAsync(string repositoryPath, string path)
     {
-        var endpoint = $"repos/{repositoryPath}/contents/{EscapePath(path)}";
-        var result = await GitHubCli.RunAsync($"api {endpoint}");
+        if (!GitHubNames.IsRepositoryPath(repositoryPath)) return null;
+        // A path with "." or ".." segments is refused by the endpoint check, and the file is then listed as skipped.
+        var result = await GitHubCli.ApiAsync($"repos/{repositoryPath}/contents/{EscapePath(path)}");
         if (result.ExitCode != 0) return null;
         using var json = JsonDocument.Parse(result.Output);
         var root = json.RootElement;
@@ -359,6 +368,7 @@ public static class GitHubApi
     public static async Task UpdateRepositoryFileAsync(
         string repositoryPath, RepositoryFile file, string newContent, string commitMessage)
     {
+        if (!GitHubNames.IsRepositoryPath(repositoryPath)) throw new InvalidOperationException(GitHubCli.InvalidNameMessage);
         var endpoint = $"repos/{repositoryPath}/contents/{EscapePath(file.Path)}";
         // Sent on stdin: a base64 workflow file can easily exceed Windows' 32K command-line limit.
         var body = JsonSerializer.Serialize(new
@@ -367,7 +377,7 @@ public static class GitHubApi
             content = Convert.ToBase64String(Encoding.UTF8.GetBytes(newContent)),
             sha = file.Sha
         });
-        var result = await GitHubCli.RunAsync($"api --method PUT {endpoint} --input -", body);
+        var result = await GitHubCli.ApiAsync(endpoint, new[] { "--method", "PUT", "--input", "-" }, standardInput: body);
         if (result.ExitCode != 0)
             throw new InvalidOperationException(string.IsNullOrWhiteSpace(result.Error)
                 ? $"Could not update {file.Path}."

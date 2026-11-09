@@ -39,16 +39,18 @@ public static class GitHubCli
     public static async Task<bool> IsAuthenticatedAsync()
     {
         lock (TokenChoiceGate) _tokenChoice ??= Task.CompletedTask;
-        var stored = await RunAsync("auth status --hostname github.com", environmentToken: false);
+        var stored = await RunAsync(AuthStatus, environmentToken: false);
         if (stored.ExitCode == 0 || EnvironmentTokenName() == null)
         {
             _useEnvironmentToken = false;
             return stored.ExitCode == 0;
         }
-        var token = await RunAsync("auth status --hostname github.com", environmentToken: true);
+        var token = await RunAsync(AuthStatus, environmentToken: true);
         _useEnvironmentToken = token.ExitCode == 0;
         return token.ExitCode == 0;
     }
+
+    private static readonly string[] AuthStatus = { "auth", "status", "--hostname", "github.com" };
 
     /// <summary>GH_TOKEN or GITHUB_TOKEN when one is set, otherwise null.</summary>
     public static string? EnvironmentTokenName()
@@ -106,28 +108,36 @@ public static class GitHubCli
 
     public static async Task DisconnectAsync()
     {
-        var user = await RunAsync("api user --jq .login");
-        if (user.ExitCode != 0 || string.IsNullOrWhiteSpace(user.Output))
+        var user = await ApiAsync("user", "--jq", ".login");
+        var login = user.Output.Trim();
+        if (user.ExitCode != 0 || !GitHubNames.IsOwner(login))
             throw new InvalidOperationException("Could not determine the active GitHub account.");
-        var logout = await RunAsync($"auth logout --hostname github.com --user {user.Output.Trim()}");
+        var logout = await RunAsync(new[] { "auth", "logout", "--hostname", "github.com", "--user", login });
         if (logout.ExitCode != 0)
             throw new InvalidOperationException(string.IsNullOrWhiteSpace(logout.Error)
                 ? "Could not disconnect the GitHub account." : logout.Error.Trim());
     }
 
+    /// <summary>What a request says when its repository or organization name failed <see cref="GitHubNames"/>.</summary>
+    internal const string InvalidNameMessage =
+        "The request was not sent to GitHub, because the repository or organization name is not a valid GitHub name.";
+    private const string InvalidEndpointMessage =
+        "The request was not sent to GitHub, because its address is not one that Runner Manager uses.";
+
     /// <param name="scope">"repos/owner/repo" or "orgs/name" (see RunnerService.ApiScope).</param>
     public static async Task<string> GetRunnerTokenAsync(string scope, bool removal)
     {
+        if (!GitHubNames.IsScope(scope)) throw new InvalidOperationException(InvalidNameMessage);
         var endpoint = removal
             ? $"{scope}/actions/runners/remove-token"
             : $"{scope}/actions/runners/registration-token";
-        var result = await RunAsync($"api --method POST {endpoint} --jq .token");
+        var result = await ApiAsync(endpoint, "--method", "POST", "--jq", ".token");
         // A classic token without admin:org gets 403 or 404 from the organization endpoints. A 404 would otherwise look
         // like a deleted organization, so this is checked first.
         if (result.ExitCode != 0 && scope.StartsWith("orgs/", StringComparison.OrdinalIgnoreCase)
             && (IsNotFound(result.Error) || result.Error.Contains("(HTTP 403)", StringComparison.Ordinal)))
         {
-            var status = await RunAsync("auth status --hostname github.com");
+            var status = await RunAsync(AuthStatus);
             if (LacksOrgScope(status.Output + "\n" + status.Error)) throw new GitHubPermissionException(OrgScopeMessage);
         }
         if (result.ExitCode != 0 || string.IsNullOrWhiteSpace(result.Output))
@@ -144,7 +154,7 @@ public static class GitHubCli
     /// </summary>
     public static async Task<RemoteRunnerState?> GetRunnerStateAsync(string scope, long agentId)
     {
-        if (agentId <= 0 || string.IsNullOrWhiteSpace(scope)) return null;
+        if (agentId <= 0 || !GitHubNames.IsScope(scope)) return null;
         var list = await GetRunnerListAsync(scope);
         if (list != null && list.Runners.TryGetValue(agentId, out var state)) return state;
         // A complete list without this runner means GitHub has no such registration, as a 404 from the lookup would.
@@ -215,8 +225,8 @@ public static class GitHubCli
     /// </summary>
     public static async Task<RunnerLookup> LookUpRunnerAsync(string scope, long agentId)
     {
-        if (agentId <= 0 || string.IsNullOrWhiteSpace(scope)) return new RunnerLookup(null, NotFound: false);
-        var result = await RunPollAsync($"api {scope}/actions/runners/{agentId}");
+        if (agentId <= 0 || !GitHubNames.IsScope(scope)) return new RunnerLookup(null, NotFound: false);
+        var result = await ApiAsync($"{scope}/actions/runners/{GitHubNames.Id(agentId)}", Array.Empty<string>(), poll: true);
         if (result.ExitCode != 0) return new RunnerLookup(null, IsNotFound(result.Error));
         try
         {
@@ -241,7 +251,8 @@ public static class GitHubCli
     /// </summary>
     public static async Task<long[]?> FindRunnerIdsByNameAsync(string scope, string name)
     {
-        var result = await RunAsync($"api {scope}/actions/runners?name={Uri.EscapeDataString(name)}&per_page=100");
+        if (!GitHubNames.IsScope(scope) || string.IsNullOrWhiteSpace(name)) return null;
+        var result = await ApiAsync($"{scope}/actions/runners?name={Uri.EscapeDataString(name)}&per_page=100");
         if (result.ExitCode != 0) return null;
         try
         {
@@ -289,8 +300,15 @@ public static class GitHubCli
     /// </summary>
     public static async Task<ConditionalResult> GetConditionalAsync(string endpoint, string? etag)
     {
-        var header = string.IsNullOrWhiteSpace(etag) ? string.Empty : $" -H \"If-None-Match: {etag.Replace("\"", "\\\"")}\"";
-        var result = await RunPollAsync($"api -i{header} {endpoint}");
+        var known = GitHubNames.IsETag(etag) ? etag! : string.Empty;
+        var options = new List<string> { "-i" };
+        if (known.Length > 0)
+        {
+            // One argument, so the quotes and spaces of the ETag stay inside the header.
+            options.Add("-H");
+            options.Add($"If-None-Match: {known}");
+        }
+        var result = await ApiAsync(endpoint, options, poll: true);
         var text = result.Output.Replace("\r\n", "\n");
         var split = text.IndexOf("\n\n", StringComparison.Ordinal);
         var headers = split >= 0 ? text[..split] : text;
@@ -308,18 +326,47 @@ public static class GitHubCli
             else if (line.StartsWith("ETag:", StringComparison.OrdinalIgnoreCase))
                 newEtag = line[5..].Trim();
         }
-        return new ConditionalResult(status, string.IsNullOrEmpty(newEtag) ? etag ?? string.Empty : newEtag, body);
+        return new ConditionalResult(status, string.IsNullOrEmpty(newEtag) ? known : newEtag, body);
     }
 
-    /// <summary>Runs a status poll through the shared gate (at most four gh processes at a time).</summary>
-    internal static async Task<CommandResult> RunPollAsync(string arguments)
+    /// <summary>
+    /// Runs gh api for an endpoint, with each option as its own argument. The endpoint is checked here once more, so a
+    /// caller that forgot a name check still cannot pass a flag or reach another part of the API.
+    /// </summary>
+    internal static Task<CommandResult> ApiAsync(string endpoint, params string[] options)
+        => ApiAsync(endpoint, options, poll: false);
+
+    /// <param name="poll">A status poll: it waits for the shared gate (at most four gh processes at a time).</param>
+    /// <param name="standardInput">The request body, for options that end with "--input", "-".</param>
+    internal static async Task<CommandResult> ApiAsync(string endpoint, IReadOnlyList<string> options, bool poll = false,
+        string? standardInput = null)
     {
+        if (!GitHubNames.IsApiEndpoint(endpoint)) return new CommandResult(-1, string.Empty, InvalidEndpointMessage);
+        var arguments = new List<string>(options.Count + 2) { "api", endpoint };
+        arguments.AddRange(options);
+        if (!poll) return await RunAsync(arguments, standardInput);
         await PollGate.WaitAsync();
-        try { return await RunAsync(arguments); }
+        try { return await RunAsync(arguments, standardInput); }
         finally { PollGate.Release(); }
     }
 
+    /// <summary>
+    /// Runs gh with one command line. Only for text this code wrote itself: a value from anywhere else (another PC,
+    /// GitHub, a file, the user) could add arguments here, so it goes through the overload that takes a list.
+    /// </summary>
     public static async Task<CommandResult> RunAsync(string arguments, string? standardInput = null, TimeSpan? timeout = null)
+    {
+        await ChooseTokenOnceAsync();
+        var startInfo = new ProcessStartInfo { FileName = ExecutablePath, Arguments = arguments };
+        return await StartAsync(startInfo, FirstWords(arguments.Split(' ', StringSplitOptions.RemoveEmptyEntries), 4),
+            _useEnvironmentToken, standardInput, timeout);
+    }
+
+    /// <summary>
+    /// Runs gh with each argument passed on its own. Whatever an argument contains (spaces, quotes, dashes), it stays
+    /// that one argument, so a value cannot add a flag or a second endpoint.
+    /// </summary>
+    internal static async Task<CommandResult> RunAsync(IReadOnlyList<string> arguments, string? standardInput = null, TimeSpan? timeout = null)
     {
         await ChooseTokenOnceAsync();
         return await RunAsync(arguments, _useEnvironmentToken, standardInput, timeout);
@@ -332,14 +379,29 @@ public static class GitHubCli
         lock (TokenChoiceGate) return _tokenChoice ??= IsAuthenticatedAsync();
     }
 
-    private static async Task<CommandResult> RunAsync(string arguments, bool environmentToken, string? standardInput = null, TimeSpan? timeout = null)
+    private static Task<CommandResult> RunAsync(IReadOnlyList<string> arguments, bool environmentToken, string? standardInput = null,
+        TimeSpan? timeout = null)
+    {
+        // Windows ends a command line at the first NUL, which would drop the arguments after it.
+        if (arguments.Any(argument => argument.Contains('\0')))
+            return Task.FromResult(new CommandResult(-1, string.Empty, "GitHub CLI (gh) was not started, because a value cannot be passed to it."));
+        var startInfo = new ProcessStartInfo { FileName = ExecutablePath };
+        foreach (var argument in arguments) startInfo.ArgumentList.Add(argument);
+        return StartAsync(startInfo, FirstWords(arguments, 2), environmentToken, standardInput, timeout);
+    }
+
+    /// <summary>Starts gh. Tests replace it to see the arguments without starting a process.</summary>
+    internal static Func<ProcessStartInfo, TimeSpan, string?, Task<CommandResult?>> StartProcess { get; set; } = ProcessRunner.RunAsync;
+
+    /// <param name="what">The start of the command, for the message when gh does not finish in time.</param>
+    private static async Task<CommandResult> StartAsync(ProcessStartInfo startInfo, string what, bool environmentToken,
+        string? standardInput, TimeSpan? timeout)
     {
         CommandResult? result;
         try
         {
-            var startInfo = new ProcessStartInfo { FileName = ExecutablePath, Arguments = arguments };
             PrepareEnvironment(startInfo, environmentToken);
-            result = await ProcessRunner.RunAsync(startInfo, timeout ?? DefaultTimeout, standardInput);
+            result = await StartProcess(startInfo, timeout ?? DefaultTimeout, standardInput);
         }
         catch (Win32Exception)
         {
@@ -347,14 +409,10 @@ public static class GitHubCli
                 "GitHub CLI (gh) was not found. Install it from https://cli.github.com/ and restart Runner Manager.");
         }
         return result ?? new CommandResult(-1, string.Empty,
-            $"GitHub CLI timed out (gh {FirstWords(arguments)}). Check the internet connection and try again.");
+            $"GitHub CLI timed out (gh {what}). Check the internet connection and try again.");
     }
 
-    private static string FirstWords(string arguments)
-    {
-        var parts = arguments.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-        return string.Join(' ', parts.Take(4));
-    }
+    private static string FirstWords(IEnumerable<string> arguments, int count) => string.Join(' ', arguments.Take(count));
 }
 
 /// <summary>Runs a console process with redirected output and a time limit.</summary>
