@@ -43,12 +43,28 @@ public static class GitHubCli
         if (stored || EnvironmentTokenName() == null)
         {
             _useEnvironmentToken = false;
+            if (stored) GitHubFailures.SignInWorks();
             return stored;
         }
         var token = await HasWorkingSignInAsync(environmentToken: true);
         _useEnvironmentToken = token;
+        if (token) GitHubFailures.SignInWorks();
         return token;
     }
+
+    /// <summary>
+    /// Why GitHub could not be read for a runner's scope ("repos/owner/repo" or "orgs/name"), or null when its last
+    /// status polls worked. The dashboard asks GitHub every few seconds; after a failure it waits (see
+    /// <see cref="GitHubFailures"/>), and this says why and until when.
+    /// </summary>
+    public static GitHubProblem? ProblemFor(string? scope)
+        => GitHubNames.IsScope(scope) ? GitHubFailures.Current(scope) : GitHubFailures.CurrentPause();
+
+    /// <summary>Why GitHub could not be read just now, whatever was asked, or null when the last status polls worked.</summary>
+    public static GitHubProblem? CurrentProblem => GitHubFailures.Current(null);
+
+    /// <summary>Forgets the failures, so GitHub is asked again at once (after the user connects GitHub or asks for a refresh).</summary>
+    public static void ForgetProblems() => GitHubFailures.Forget();
 
     private static readonly string[] ActiveAuthStatus = { "auth", "status", "--active", "--hostname", "github.com" };
     private static readonly string[] AuthStatus = { "auth", "status", "--hostname", "github.com" };
@@ -152,6 +168,8 @@ public static class GitHubCli
         if (logout.ExitCode != 0)
             throw new InvalidOperationException(string.IsNullOrWhiteSpace(logout.Error)
                 ? "Could not disconnect the GitHub account." : logout.Error.Trim());
+        // The remembered failures were that account's: its rate limit, what it may read.
+        GitHubFailures.Forget();
     }
 
     /// <summary>What a request says when its repository or organization name failed <see cref="GitHubNames"/>.</summary>
@@ -196,7 +214,23 @@ public static class GitHubCli
         if (list != null && list.Runners.TryGetValue(agentId, out var state)) return state;
         // A complete list without this runner means GitHub has no such registration, as a 404 from the lookup would.
         if (list is { Complete: true }) return null;
-        return (await LookUpRunnerAsync(scope, agentId)).State;
+        return await PollRunnerAsync(scope, agentId);
+    }
+
+    /// <summary>
+    /// One runner, for the dashboard. Read as a poll: when the list failed, every runner of the scope comes here on
+    /// every refresh, and a failed poll is not sent again right away.
+    /// </summary>
+    private static async Task<RemoteRunnerState?> PollRunnerAsync(string scope, long agentId)
+    {
+        var response = await GetConditionalAsync($"{scope}/actions/runners/{GitHubNames.Id(agentId)}", null);
+        if (!response.Ok) return null;
+        try
+        {
+            using var json = JsonDocument.Parse(response.Body);
+            return ReadRunnerState(json.RootElement);
+        }
+        catch { return null; }
     }
 
     private sealed record RunnerList(Dictionary<long, RemoteRunnerState> Runners, bool Complete);
@@ -258,7 +292,8 @@ public static class GitHubCli
 
     /// <summary>
     /// The runner's registration on GitHub. State is null when it could not be read; NotFound tells a confirmed
-    /// 404 (the runner or repository is gone) apart from timeouts, rate limits and other failures.
+    /// 404 (the runner or repository is gone) apart from timeouts, rate limits and other failures. For changes the
+    /// user starts: it always asks GitHub, also while failed polls are paused.
     /// </summary>
     public static async Task<RunnerLookup> LookUpRunnerAsync(string scope, long agentId)
     {
@@ -332,12 +367,15 @@ public static class GitHubCli
     }
 
     /// <summary>
-    /// GET with an ETag. GitHub does not count 304 Not Modified responses against the rate limit,
-    /// so polling the same resource this way is effectively free while nothing changes.
+    /// GET with an ETag, for status polls. GitHub does not count 304 Not Modified responses against the rate limit,
+    /// so polling the same resource this way is effectively free while nothing changes. A poll that failed is not
+    /// sent again for a while (see <see cref="GitHubFailures"/>): it is then answered as failed (status 0) at once.
     /// </summary>
     public static async Task<ConditionalResult> GetConditionalAsync(string endpoint, string? etag)
     {
         var known = GitHubNames.IsETag(etag) ? etag! : string.Empty;
+        var notSent = new ConditionalResult(0, known, string.Empty);
+        if (!GitHubNames.IsApiEndpoint(endpoint) || GitHubFailures.Blocking(endpoint) != null) return notSent;
         var options = new List<string> { "-i" };
         if (known.Length > 0)
         {
@@ -345,7 +383,17 @@ public static class GitHubCli
             options.Add("-H");
             options.Add($"If-None-Match: {known}");
         }
-        var result = await ApiAsync(endpoint, options, poll: true);
+
+        CommandResult result;
+        await PollGate.WaitAsync();
+        try
+        {
+            // Polls that waited here while another one found GitHub unreachable or rate-limited do not start gh either.
+            if (GitHubFailures.Blocking(endpoint) != null) return notSent;
+            result = await ApiAsync(endpoint, options);
+        }
+        finally { PollGate.Release(); }
+
         var text = result.Output.Replace("\r\n", "\n");
         var split = text.IndexOf("\n\n", StringComparison.Ordinal);
         var headers = split >= 0 ? text[..split] : text;
@@ -353,6 +401,7 @@ public static class GitHubCli
 
         var status = 0;
         var newEtag = string.Empty;
+        string? remaining = null, reset = null, retryAfter = null;
         foreach (var line in headers.Split('\n'))
         {
             if (line.StartsWith("HTTP/", StringComparison.OrdinalIgnoreCase))
@@ -360,11 +409,21 @@ public static class GitHubCli
                 var parts = line.Split(' ', 3);
                 if (parts.Length >= 2) int.TryParse(parts[1], out status);
             }
-            else if (line.StartsWith("ETag:", StringComparison.OrdinalIgnoreCase))
-                newEtag = line[5..].Trim();
+            else if (HeaderValue(line, "ETag") is { } tag) newEtag = tag;
+            else if (HeaderValue(line, "X-RateLimit-Remaining") is { } left) remaining = left;
+            else if (HeaderValue(line, "X-RateLimit-Reset") is { } at) reset = at;
+            else if (HeaderValue(line, "Retry-After") is { } wait) retryAfter = wait;
         }
-        return new ConditionalResult(status, string.IsNullOrEmpty(newEtag) ? known : newEtag, body);
+        var response = new ConditionalResult(status, string.IsNullOrEmpty(newEtag) ? known : newEtag, body);
+        if (response.Ok || response.NotModified) GitHubFailures.Succeeded(endpoint);
+        else GitHubFailures.Failed(endpoint, status, remaining, reset, retryAfter, result);
+        return response;
     }
+
+    /// <summary>The value of a response header line with this name (gh prints "Etag", "X-Ratelimit-Reset"), otherwise null.</summary>
+    private static string? HeaderValue(string line, string name)
+        => line.Length > name.Length && line[name.Length] == ':' && line.StartsWith(name, StringComparison.OrdinalIgnoreCase)
+            ? line[(name.Length + 1)..].Trim() : null;
 
     /// <summary>
     /// Runs gh api for an endpoint, with each option as its own argument. The endpoint is checked here once more, so a
@@ -442,11 +501,10 @@ public static class GitHubCli
         }
         catch (Win32Exception)
         {
-            return new CommandResult(-1, string.Empty,
-                "GitHub CLI (gh) was not found. Install it from https://cli.github.com/ and restart Runner Manager.");
+            return new CommandResult(-1, string.Empty, GitHubFailures.GhMissingMessage);
         }
         return result ?? new CommandResult(-1, string.Empty,
-            $"GitHub CLI timed out (gh {what}). Check the internet connection and try again.");
+            $"{GitHubFailures.TimedOutStart} (gh {what}). Check the internet connection and try again.");
     }
 
     private static string FirstWords(IEnumerable<string> arguments, int count) => string.Join(' ', arguments.Take(count));

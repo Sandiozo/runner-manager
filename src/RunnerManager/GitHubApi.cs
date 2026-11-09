@@ -7,13 +7,29 @@ public static class GitHubApi
 {
     private const int RecentRunCount = 6;
     private static readonly TimeSpan WorkCacheLifetime = TimeSpan.FromSeconds(8);
-    private static readonly object CacheLock = new();
     /// <summary>
-    /// One request per repository and refresh: runners of the same repository share the same task.
-    /// A task that failed (null) is not reused.
+    /// How long a failed read is not tried again. The job view asks every 3 seconds for every busy runner; without
+    /// this, one request that keeps failing would start all the others of its repository again on every tick.
     /// </summary>
-    private static readonly Dictionary<string, (DateTime Time, Task<RepositoryWorkState?> State)> WorkCache
-        = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly TimeSpan FailedWorkLifetime = TimeSpan.FromSeconds(30);
+    private static readonly object CacheLock = new();
+
+    /// <summary>A read of a repository's jobs, and when its answer was known (until then, when it started).</summary>
+    private sealed class WorkRead
+    {
+        public DateTime Time;
+        public Task<RepositoryWorkState?> State = Task.FromResult<RepositoryWorkState?>(null);
+    }
+
+    /// <summary>One request per repository and refresh: runners of the same repository share the same task.</summary>
+    private static readonly Dictionary<string, WorkRead> WorkCache = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Why the jobs and runs of a repository ("owner/repo") could not be read, or null when the last reads worked.
+    /// For the UI, which otherwise only knows that they are unavailable. See <see cref="GitHubCli.ProblemFor"/>.
+    /// </summary>
+    public static GitHubProblem? ProblemFor(string? repositoryPath)
+        => GitHubCli.ProblemFor(GitHubNames.IsRepositoryPath(repositoryPath) ? $"repos/{repositoryPath}" : null);
 
     /// <returns>The runner's current job and queue, or null when GitHub could not be read.</returns>
     public static async Task<RunnerWorkState?> GetRunnerWorkAsync(
@@ -113,18 +129,30 @@ public static class GitHubApi
         if (!GitHubNames.IsRepositoryPath(repositoryPath)) return Task.FromResult<RepositoryWorkState?>(null);
         lock (CacheLock)
         {
-            if (WorkCache.TryGetValue(repositoryPath, out var cached)
-                && DateTime.UtcNow - cached.Time < WorkCacheLifetime
-                && !HasFailed(cached.State))
-                return cached.State;
-            var task = Task.Run(() => ReadRepositoryWorkAsync(repositoryPath));
-            WorkCache[repositoryPath] = (DateTime.UtcNow, task);
-            return task;
+            var now = GitHubFailures.UtcNow();
+            if (WorkCache.TryGetValue(repositoryPath, out var cached) && IsUsable(cached, now)) return cached.State;
+            var read = new WorkRead { Time = now };
+            read.State = Task.Run(async () =>
+            {
+                try { return await ReadRepositoryWorkAsync(repositoryPath); }
+                // The lifetime counts from when the answer was known: gh can take long to give up.
+                finally { lock (CacheLock) read.Time = GitHubFailures.UtcNow(); }
+            });
+            WorkCache[repositoryPath] = read;
+            return read.State;
         }
     }
 
-    private static bool HasFailed(Task<RepositoryWorkState?> task)
-        => task.IsFaulted || task.IsCanceled || (task.IsCompletedSuccessfully && task.Result == null);
+    /// <summary>
+    /// A read is shared while it runs and for a few seconds after it worked. One that failed (null) is kept longer, so
+    /// GitHub is not asked again on every tick; one that threw is not kept.
+    /// </summary>
+    private static bool IsUsable(WorkRead read, DateTime now)
+    {
+        if (!read.State.IsCompleted) return true;
+        if (!read.State.IsCompletedSuccessfully) return false;
+        return now - read.Time < (read.State.Result == null ? FailedWorkLifetime : WorkCacheLifetime);
+    }
 
     /// <returns>All jobs of the repository's active runs, or null when any request failed.</returns>
     private static async Task<RepositoryWorkState?> ReadRepositoryWorkAsync(string repositoryPath)

@@ -172,6 +172,8 @@ internal sealed class FakeGh : IDisposable
         // With a token variable set, the first gh call of a process checks the sign-in first, which no test here counts.
         foreach (var name in TokenVariables) Environment.SetEnvironmentVariable(name, null);
         GitHubCli.ForgetGhFeatures();
+        GitHubCli.ForgetProblems();
+        GitHubFailures.UtcNow = () => Now;
         GitHubCli.StartProcess = (startInfo, _, input) =>
         {
             var arguments = startInfo.ArgumentList.ToArray();
@@ -179,6 +181,9 @@ internal sealed class FakeGh : IDisposable
             return Task.FromResult(answer(arguments));
         };
     }
+
+    /// <summary>The time the failure memory and the job cache see. It only moves when a test moves it.</summary>
+    internal DateTime Now { get; set; } = new(2026, 11, 9, 12, 0, 0, DateTimeKind.Utc);
 
     /// <summary>The arguments of each start, in order.</summary>
     internal string[][] Calls => _starts.Select(s => s.Arguments).ToArray();
@@ -188,7 +193,7 @@ internal sealed class FakeGh : IDisposable
     internal string[] CommandLines => _starts.Select(s => s.CommandLine).Where(c => c.Length > 0).ToArray();
     internal string?[] Inputs => _starts.Select(s => s.Input).ToArray();
 
-    /// <summary>What gh api -i prints for a response.</summary>
+    /// <summary>What gh api -i prints for a response. Each of the <paramref name="headers"/> ends with "\r\n".</summary>
     internal static CommandResult Http(int status, string body = "{}", string headers = "", string error = "")
         => new(status is >= 200 and < 300 ? 0 : 1,
             $"HTTP/2.0 {status} Status\r\nEtag: W/\"etag-{status}\"\r\n{headers}\r\n{body}",
@@ -198,6 +203,8 @@ internal sealed class FakeGh : IDisposable
     {
         GitHubCli.StartProcess = _previous;
         GitHubCli.ForgetGhFeatures();
+        GitHubCli.ForgetProblems();
+        GitHubFailures.UtcNow = () => DateTime.UtcNow;
         for (var i = 0; i < TokenVariables.Length; i++) Environment.SetEnvironmentVariable(TokenVariables[i], _tokens[i]);
     }
 }
@@ -584,5 +591,265 @@ public class GitHubArgumentTests
 
         Assert.NotEqual(0, result.ExitCode);
         Assert.Empty(gh.Calls);
+    }
+}
+
+[Collection(GitHubCliCollection.Name)]
+public class GitHubBackOffTests
+{
+    private static string NewRepository() => $"octo/b-{Guid.NewGuid():N}";
+    private static readonly DateTime Noon = new(2026, 11, 9, 12, 0, 0, DateTimeKind.Utc);
+    private static CommandResult Failure(string error, int exitCode = 1) => new(exitCode, string.Empty, error);
+
+    [Fact]
+    public async Task FailedEndpoint_IsNotAskedAgain_UntilItsPauseEnds()
+    {
+        var scope = $"repos/{NewRepository()}";
+        using var gh = new FakeGh(_ => FakeGh.Http(502, error: "gh: Bad Gateway (HTTP 502)"));
+
+        Assert.Equal(502, (await GitHubCli.GetConditionalAsync($"{scope}/actions/runs?per_page=6", null)).StatusCode);
+        var again = await GitHubCli.GetConditionalAsync($"{scope}/actions/runs?per_page=6", "W/\"abc\"");
+        Assert.False(again.Ok);
+        Assert.False(again.NotModified);
+        Assert.Single(gh.Calls);
+
+        // An error of one endpoint says nothing about another one.
+        await GitHubCli.GetConditionalAsync($"{scope}/actions/runners?per_page=100", null);
+        Assert.Equal(2, gh.Calls.Length);
+
+        gh.Now += TimeSpan.FromSeconds(44);
+        await GitHubCli.GetConditionalAsync($"{scope}/actions/runs?per_page=6", null);
+        Assert.Equal(2, gh.Calls.Length);
+        gh.Now += TimeSpan.FromSeconds(2);
+        await GitHubCli.GetConditionalAsync($"{scope}/actions/runs?per_page=6", null);
+        Assert.Equal(3, gh.Calls.Length);
+    }
+
+    [Fact]
+    public async Task Problem_SaysWhyAndUntilWhen_ForItsScopeOnly()
+    {
+        var repository = NewRepository();
+        using var gh = new FakeGh(_ => FakeGh.Http(404, error: "gh: Not Found (HTTP 404)\n"));
+        Assert.Null(GitHubCli.CurrentProblem);
+
+        await GitHubCli.GetConditionalAsync($"repos/{repository}/actions/runs?per_page=6", null);
+
+        var problem = GitHubApi.ProblemFor(repository);
+        Assert.NotNull(problem);
+        Assert.Equal("GitHub did not find this, or the sign-in has no access to it.", problem.Reason);
+        Assert.Equal("gh: Not Found (HTTP 404)", problem.Detail);
+        Assert.Equal(Noon.AddSeconds(45), problem.RetryUtc);
+        Assert.False(problem.RateLimited);
+        Assert.Same(problem, GitHubCli.ProblemFor($"repos/{repository}"));
+        Assert.Same(problem, GitHubCli.CurrentProblem);
+        Assert.Null(GitHubApi.ProblemFor(repository + "x"));
+        Assert.Null(GitHubCli.ProblemFor("orgs/octo"));
+        Assert.Null(GitHubCli.ProblemFor(null));
+        Assert.Null(GitHubCli.ProblemFor("not a scope"));
+
+        // It stays readable while GitHub is asked again, and is forgotten when nothing asks any more.
+        gh.Now += TimeSpan.FromSeconds(60);
+        Assert.Same(problem, GitHubApi.ProblemFor(repository));
+        gh.Now += TimeSpan.FromMinutes(2);
+        Assert.Null(GitHubApi.ProblemFor(repository));
+    }
+
+    [Fact]
+    public async Task AnswerAfterAFailure_ClearsTheProblem()
+    {
+        var repository = NewRepository();
+        var status = 500;
+        using var gh = new FakeGh(_ => FakeGh.Http(status));
+
+        await GitHubCli.GetConditionalAsync($"repos/{repository}/actions/runs?per_page=6", null);
+        Assert.NotNull(GitHubApi.ProblemFor(repository));
+
+        status = 200;
+        gh.Now += TimeSpan.FromSeconds(46);
+        Assert.True((await GitHubCli.GetConditionalAsync($"repos/{repository}/actions/runs?per_page=6", null)).Ok);
+        Assert.Null(GitHubApi.ProblemFor(repository));
+        Assert.Null(GitHubCli.CurrentProblem);
+    }
+
+    [Fact]
+    public async Task RateLimit_PausesEveryPoll_UntilItResets()
+    {
+        var first = $"repos/{NewRepository()}";
+        var second = $"repos/{NewRepository()}";
+        var reset = new DateTimeOffset(Noon.AddMinutes(20)).ToUnixTimeSeconds();
+        var limited = true;
+        using var gh = new FakeGh(arguments => !limited || !arguments.Contains("-i") ? FakeGh.Http(200)
+            : FakeGh.Http(403, headers: $"X-Ratelimit-Remaining: 0\r\nX-Ratelimit-Reset: {reset}\r\n",
+                error: "gh: API rate limit exceeded for user ID 1. (HTTP 403)"));
+
+        Assert.Equal(403, (await GitHubCli.GetConditionalAsync($"{first}/actions/runs?per_page=6", null)).StatusCode);
+        Assert.Equal(0, (await GitHubCli.GetConditionalAsync($"{second}/actions/runs?per_page=6", null)).StatusCode);
+        Assert.Null(await GitHubCli.GetRunnerStateAsync(second, 7));
+        Assert.Null(await GitHubApi.GetRecentRunsAsync(second["repos/".Length..]));
+        Assert.Single(gh.Calls);
+
+        var problem = GitHubCli.ProblemFor(second);
+        Assert.NotNull(problem);
+        Assert.True(problem.RateLimited);
+        Assert.Equal("GitHub's request limit is reached.", problem.Reason);
+        Assert.Equal(Noon.AddMinutes(20).AddSeconds(2), problem.RetryUtc);
+        Assert.Same(problem, GitHubCli.ProblemFor(null));
+
+        // What the user starts is still sent: GitHub's own answer is better than a remembered one.
+        await GitHubCli.LookUpRunnerAsync(second, 7);
+        Assert.Equal(2, gh.Calls.Length);
+
+        gh.Now = Noon.AddMinutes(20);
+        await GitHubCli.GetConditionalAsync($"{second}/actions/runs?per_page=6", null);
+        Assert.Equal(2, gh.Calls.Length);
+
+        limited = false;
+        gh.Now = Noon.AddMinutes(20).AddSeconds(3);
+        Assert.True((await GitHubCli.GetConditionalAsync($"{second}/actions/runs?per_page=6", null)).Ok);
+        Assert.Equal(3, gh.Calls.Length);
+        Assert.Null(GitHubCli.CurrentProblem);
+    }
+
+    [Fact]
+    public async Task LostConnection_PausesEveryPoll_ForHalfAMinute()
+    {
+        var first = $"repos/{NewRepository()}";
+        var second = $"repos/{NewRepository()}";
+        using var gh = new FakeGh(_ => Failure("error connecting to api.github.com\ncheck your internet connection or https://githubstatus.com\n"));
+
+        await GitHubCli.GetConditionalAsync($"{first}/actions/runs?per_page=6", null);
+        await GitHubCli.GetConditionalAsync($"{second}/actions/runs?per_page=6", null);
+        Assert.Single(gh.Calls);
+        Assert.Equal("GitHub could not be reached. Check the internet connection.", GitHubCli.CurrentProblem!.Reason);
+        Assert.Equal("error connecting to api.github.com", GitHubCli.CurrentProblem.Detail);
+
+        gh.Now += TimeSpan.FromSeconds(31);
+        await GitHubCli.GetConditionalAsync($"{second}/actions/runs?per_page=6", null);
+        Assert.Equal(2, gh.Calls.Length);
+    }
+
+    [Fact]
+    public async Task SignInProblem_EndsWhenTheSignInWorksAgain()
+    {
+        var scope = $"repos/{NewRepository()}";
+        using var gh = new FakeGh(arguments => arguments[0] == "auth" ? new CommandResult(0, string.Empty, string.Empty)
+            : FakeGh.Http(401, error: "gh: Bad credentials (HTTP 401)"));
+
+        await GitHubCli.GetConditionalAsync($"{scope}/actions/runs?per_page=6", null);
+        await GitHubCli.GetConditionalAsync($"{scope}/actions/runners?per_page=100", null);
+        Assert.Single(gh.Calls);
+        Assert.Equal("GitHub did not accept the sign-in. Connect GitHub again.", GitHubCli.CurrentProblem!.Reason);
+
+        Assert.True(await GitHubCli.IsAuthenticatedAsync());
+        Assert.Null(GitHubCli.CurrentProblem);
+        await GitHubCli.GetConditionalAsync($"{scope}/actions/runners?per_page=100", null);
+        Assert.Equal(3, gh.Calls.Length);
+    }
+
+    [Fact]
+    public async Task JobView_DoesNotStartGhOnEveryTick_WhileOneRequestKeepsFailing()
+    {
+        var repository = NewRepository();
+        using var gh = new FakeGh(arguments => arguments[1].Contains("/jobs?", StringComparison.Ordinal)
+            ? FakeGh.Http(502, error: "gh: Bad Gateway (HTTP 502)")
+            : arguments[1].Contains("status=in_progress", StringComparison.Ordinal)
+                ? FakeGh.Http(200, """{"total_count":1,"workflow_runs":[{"id":11,"name":"CI","run_number":3}]}""")
+                : FakeGh.Http(200, """{"total_count":0,"workflow_runs":[]}"""));
+
+        // The job view asks every 3 seconds for every busy runner.
+        for (var tick = 0; tick < 5; tick++)
+        {
+            var (read, job) = await GitHubApi.GetCurrentJobAsync(repository, 7);
+            Assert.False(read);
+            Assert.Null(job);
+            gh.Now += TimeSpan.FromSeconds(3);
+        }
+        Assert.Equal(3, gh.Calls.Length);
+        Assert.Equal("GitHub has a problem at the moment (HTTP 502).", GitHubApi.ProblemFor(repository)!.Reason);
+
+        // After half a minute the repository is read again, but not the request whose own pause still runs.
+        gh.Now = Noon.AddSeconds(31);
+        await GitHubApi.GetCurrentJobAsync(repository, 7);
+        Assert.Equal(5, gh.Calls.Length);
+        Assert.Equal(1, gh.Endpoints.Count(e => e.Contains("/jobs?", StringComparison.Ordinal)));
+
+        gh.Now = Noon.AddSeconds(62);
+        await GitHubApi.GetCurrentJobAsync(repository, 7);
+        Assert.Equal(2, gh.Endpoints.Count(e => e.Contains("/jobs?", StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public async Task FailedRunnerList_AsksOncePerRunner_NotOnEveryRefresh()
+    {
+        var scope = $"repos/{NewRepository()}";
+        using var gh = new FakeGh(_ => FakeGh.Http(503));
+
+        for (var refresh = 0; refresh < 4; refresh++)
+            foreach (var runner in new long[] { 1, 2, 3 })
+                Assert.Null(await GitHubCli.GetRunnerStateAsync(scope, runner));
+
+        // The list once, then each runner's own lookup once.
+        Assert.Equal(new[]
+        {
+            $"{scope}/actions/runners?per_page=100", $"{scope}/actions/runners/1", $"{scope}/actions/runners/2", $"{scope}/actions/runners/3"
+        }, gh.Endpoints);
+    }
+
+    [Fact]
+    public async Task RateLimitedRunnerList_DoesNotFallBackToALookupPerRunner()
+    {
+        var scope = $"orgs/b{Guid.NewGuid():N}";
+        using var gh = new FakeGh(_ => FakeGh.Http(429, headers: "Retry-After: 120\r\n"));
+
+        foreach (var runner in new long[] { 1, 2, 3 })
+            Assert.Null(await GitHubCli.GetRunnerStateAsync(scope, runner));
+
+        Assert.Equal(new[] { $"{scope}/actions/runners?per_page=100" }, gh.Endpoints);
+        Assert.Equal(Noon.AddSeconds(122), GitHubCli.ProblemFor(scope)!.RetryUtc);
+    }
+
+    [Fact]
+    public void Failures_AreDescribedInTheAppsWords()
+    {
+        (GitHubProblem Problem, GitHubFailures.FailureScope Scope) Describe(int status, CommandResult result,
+            string? remaining = null, string? reset = null, string? retryAfter = null)
+            => GitHubFailures.Describe(status, remaining, reset, retryAfter, result, Noon);
+        static string Epoch(DateTime time) => new DateTimeOffset(time).ToUnixTimeSeconds().ToString();
+
+        var missing = Describe(0, Failure(GitHubFailures.GhMissingMessage, -1));
+        Assert.Equal((GitHubFailures.GhMissingMessage, GitHubFailures.FailureScope.Everything), (missing.Problem.Reason, missing.Scope));
+
+        var slow = Describe(0, Failure("GitHub CLI timed out (gh api repos/octo/app). Check the internet connection and try again.", -1));
+        Assert.Equal(("GitHub did not answer in time. Check the internet connection.", GitHubFailures.FailureScope.Everything),
+            (slow.Problem.Reason, slow.Scope));
+        Assert.Equal(Noon.AddSeconds(30), slow.Problem.RetryUtc);
+
+        var signedOut = Describe(0, Failure("To get started with GitHub CLI, please run:  gh auth login\n", 4));
+        Assert.Equal(("GitHub is not connected.", GitHubFailures.FailureScope.SignIn), (signedOut.Problem.Reason, signedOut.Scope));
+
+        Assert.Equal(GitHubFailures.FailureScope.Endpoint, Describe(0, new CommandResult(0, "not an answer", string.Empty)).Scope);
+        Assert.Equal(GitHubFailures.FailureScope.SignIn, Describe(401, Failure("gh: Bad credentials (HTTP 401)")).Scope);
+
+        // Until the reset, never shorter than another failure, and never longer than GitHub's limits last.
+        var limit = Failure("gh: API rate limit exceeded for user ID 1. (HTTP 403)");
+        Assert.Equal(Noon.AddMinutes(10).AddSeconds(2), Describe(403, limit, "0", Epoch(Noon.AddMinutes(10))).Problem.RetryUtc);
+        Assert.Equal(Noon.AddSeconds(45), Describe(403, limit, "0", Epoch(Noon.AddMinutes(-1))).Problem.RetryUtc);
+        Assert.Equal(Noon.AddMinutes(61), Describe(403, limit, "0", Epoch(Noon.AddHours(5))).Problem.RetryUtc);
+        Assert.Equal(Noon.AddSeconds(62), Describe(403, limit, "0", "99999999999999999999").Problem.RetryUtc);
+        Assert.Equal(Noon.AddSeconds(122), Describe(429, Failure("gh: HTTP 429"), retryAfter: "120").Problem.RetryUtc);
+
+        var secondary = Describe(403, Failure("gh: You have exceeded a secondary rate limit. Please wait a few minutes. (HTTP 403)"), "4990");
+        Assert.True(secondary.Problem.RateLimited);
+        Assert.Equal(GitHubFailures.FailureScope.Everything, secondary.Scope);
+        Assert.Equal(Noon.AddSeconds(62), secondary.Problem.RetryUtc);
+
+        var refused = Describe(403, Failure("gh: Resource not accessible by personal access token (HTTP 403)\n"), "4990");
+        Assert.False(refused.Problem.RateLimited);
+        Assert.Equal(GitHubFailures.FailureScope.Endpoint, refused.Scope);
+        Assert.Equal("The GitHub sign-in is not allowed to read this.", refused.Problem.Reason);
+        Assert.Equal("gh: Resource not accessible by personal access token (HTTP 403)", refused.Problem.Detail);
+
+        Assert.Equal("GitHub answered with an error (HTTP 422).", Describe(422, Failure("gh: HTTP 422")).Problem.Reason);
+        Assert.Equal(GitHubFailures.FailureScope.Endpoint, Describe(500, Failure("gh: HTTP 500")).Scope);
     }
 }
