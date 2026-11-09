@@ -145,14 +145,35 @@ public static class WindowPlacement
     [DllImport("user32.dll")]
     private static extern bool GetWindowRect(IntPtr hwnd, out Rect rect);
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MonitorInfo { public int Size; public Rect Monitor; public Rect Work; public uint Flags; }
+
     [DllImport("user32.dll")]
     private static extern IntPtr MonitorFromPoint(Point point, uint flags);
 
+    [DllImport("user32.dll")]
+    private static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint flags);
+
+    [DllImport("user32.dll")]
+    private static extern bool GetMonitorInfo(IntPtr monitor, ref MonitorInfo info);
+
+    [DllImport("user32.dll")]
+    private static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int width, int height, uint flags);
+
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmGetWindowAttribute(IntPtr hwnd, int attribute, out Rect value, int size);
+
     private const uint MonitorDefaultToNull = 0;
+    private const uint MonitorDefaultToPrimary = 1;
+    private const uint MonitorDefaultToNearest = 2;
+    private const uint SwpNoZOrder = 0x0004;
+    private const uint SwpNoActivate = 0x0010;
+    private const int DwmwaExtendedFrameBounds = 9;
 
     /// <summary>
-    /// Moves a window whose title bar is on no screen (for example after a monitor was unplugged while it was hidden in
-    /// the notification area) to the middle of the main screen.
+    /// Fits a window on a screen: one whose title bar is on no screen (for example after a monitor was unplugged while
+    /// it was hidden in the notification area) moves to the middle of a screen, and one larger than its screen's work
+    /// area (a small or highly scaled screen) shrinks to fit it.
     /// </summary>
     public static void EnsureOnScreen(Window window)
     {
@@ -163,15 +184,66 @@ public static class WindowPlacement
             if (hwnd == IntPtr.Zero || !GetWindowRect(hwnd, out var rect)) return;
             // A point in the title bar, which is what the user needs to reach to move the window.
             var titleBar = new Point { X = rect.Left + (rect.Right - rect.Left) / 2, Y = rect.Top + 12 };
-            if (MonitorFromPoint(titleBar, MonitorDefaultToNull) != IntPtr.Zero) return;
-            var area = SystemParameters.WorkArea;
-            var width = Math.Min(window.ActualWidth > 0 ? window.ActualWidth : window.Width, area.Width);
-            var height = Math.Min(window.ActualHeight > 0 ? window.ActualHeight : window.Height, area.Height);
-            window.Left = area.Left + (area.Width - width) / 2;
-            window.Top = area.Top + (area.Height - height) / 2;
+            var onScreen = MonitorFromPoint(titleBar, MonitorDefaultToNull) != IntPtr.Zero;
+            var info = new MonitorInfo { Size = Marshal.SizeOf<MonitorInfo>() };
+            if (!GetMonitorInfo(MonitorFromWindow(hwnd, onScreen ? MonitorDefaultToNearest : MonitorDefaultToPrimary), ref info)) return;
+            // The window rectangle includes invisible resize borders; fit the visible frame.
+            if (DwmGetWindowAttribute(hwnd, DwmwaExtendedFrameBounds, out var frame, Marshal.SizeOf<Rect>()) != 0) frame = rect;
+            var (x, y, width, height) = FitFrame(
+                (frame.Left, frame.Top, frame.Right - frame.Left, frame.Bottom - frame.Top),
+                (info.Work.Left, info.Work.Top, info.Work.Right - info.Work.Left, info.Work.Bottom - info.Work.Top), onScreen);
+            if (x == frame.Left && y == frame.Top && width == frame.Right - frame.Left && height == frame.Bottom - frame.Top) return;
+            SetWindowPos(hwnd, IntPtr.Zero,
+                x - (frame.Left - rect.Left), y - (frame.Top - rect.Top),
+                width + (rect.Right - rect.Left) - (frame.Right - frame.Left), height + (rect.Bottom - rect.Top) - (frame.Bottom - frame.Top),
+                SwpNoZOrder | SwpNoActivate);
         }
         catch { }
     }
+
+    /// <summary>
+    /// Where a window's visible frame goes on a work area, in pixels: no larger than the work area, and inside it
+    /// when it had to shrink. A frame that is not <paramref name="onScreen"/> moves to the middle.
+    /// </summary>
+    internal static (int X, int Y, int Width, int Height) FitFrame(
+        (int X, int Y, int Width, int Height) frame, (int X, int Y, int Width, int Height) work, bool onScreen)
+    {
+        var width = Math.Min(frame.Width, work.Width);
+        var height = Math.Min(frame.Height, work.Height);
+        if (!onScreen) return (work.X + (work.Width - width) / 2, work.Y + (work.Height - height) / 2, width, height);
+        if (width == frame.Width && height == frame.Height) return frame;
+        return (Math.Clamp(frame.X, work.X, work.X + work.Width - width), Math.Clamp(frame.Y, work.Y, work.Y + work.Height - height), width, height);
+    }
+
+    /// <summary>
+    /// Sets a window to its saved place and size before it is first shown. Without one, the window keeps its default
+    /// size where that fits <paramref name="workArea"/>: 1920 × 1080 at 150 % scale leaves only about 1280 × 690.
+    /// </summary>
+    public static void Restore(Window window, SavedWindowPlacement? saved, System.Windows.Rect workArea)
+    {
+        if (saved is { Width: > 0, Height: > 0 } && double.IsFinite(saved.Left) && double.IsFinite(saved.Top))
+        {
+            window.WindowStartupLocation = WindowStartupLocation.Manual;
+            window.Left = saved.Left;
+            window.Top = saved.Top;
+            window.Width = saved.Width;
+            window.Height = saved.Height;
+            if (saved.Maximized) window.WindowState = WindowState.Maximized;
+            return;
+        }
+        if (workArea.Width > 0 && window.Width > workArea.Width) window.Width = workArea.Width;
+        if (workArea.Height > 0 && window.Height > workArea.Height) window.Height = workArea.Height;
+    }
+}
+
+/// <summary>Where the dashboard window was, in WPF units, so it opens there again.</summary>
+public sealed class SavedWindowPlacement
+{
+    public double Left { get; set; }
+    public double Top { get; set; }
+    public double Width { get; set; }
+    public double Height { get; set; }
+    public bool Maximized { get; set; }
 }
 
 /// <summary>Gives standard window chrome a title bar matching the app theme (Windows 10 20H1+/11).</summary>
@@ -233,6 +305,8 @@ public sealed class AppSettings
     public AppTheme Theme { get; set; } = AppTheme.Dark;
     public int RefreshSeconds { get; set; } = 5;
     public string DismissedUpdateVersion { get; set; } = string.Empty;
+    /// <summary>Where the dashboard window was when it was last closed or hidden; null until then.</summary>
+    public SavedWindowPlacement? MainWindowPlacement { get; set; }
 
     /// <summary>Why settings.json could not be used as it was, or null. The dashboard shows it once.</summary>
     public static string? LoadProblem { get; private set; }

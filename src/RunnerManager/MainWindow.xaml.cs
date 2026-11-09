@@ -67,6 +67,9 @@ public partial class MainWindow : Window
         InitializeComponent();
         WindowTheme.Apply(this);
         DataContext = this;
+        WindowPlacement.Restore(this, _settings.MainWindowPlacement, SystemParameters.WorkArea);
+        _shownState = WindowState;
+        TrackPlacement();
 
         NavItems.Add(_allMachines);
         MachineNav.SelectedIndex = 0;
@@ -1290,10 +1293,46 @@ public partial class MainWindow : Window
     public void ShowFromTray()
     {
         Show();
-        if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
+        // Back to how it was before it was minimized, which may be maximized.
+        if (WindowState == WindowState.Minimized) WindowState = _shownState;
         // A screen may have been unplugged while the window was hidden.
         WindowPlacement.EnsureOnScreen(this);
         Activate();
+    }
+
+    /// <summary>The window's state when it was last not minimized.</summary>
+    private WindowState _shownState;
+    /// <summary>The window's place and size when it was last neither minimized nor maximized.</summary>
+    private Rect _normalBounds = Rect.Empty;
+
+    private void TrackPlacement()
+    {
+        StateChanged += (_, _) =>
+        {
+            if (WindowState != WindowState.Minimized) _shownState = WindowState;
+        };
+        SizeChanged += (_, _) => NoteNormalBounds();
+        LocationChanged += (_, _) => NoteNormalBounds();
+        // Fit the window on its screen when it first shows (from the tray, ShowFromTray does it).
+        ContentRendered += (_, _) => WindowPlacement.EnsureOnScreen(this);
+    }
+
+    private void NoteNormalBounds()
+    {
+        if (WindowState == WindowState.Normal && IsVisible) _normalBounds = new Rect(Left, Top, ActualWidth, ActualHeight);
+    }
+
+    private void SaveWindowPlacement()
+    {
+        if (_normalBounds.IsEmpty || _normalBounds.Width <= 0 || _normalBounds.Height <= 0) return;
+        _settings.MainWindowPlacement = new SavedWindowPlacement
+        {
+            Left = _normalBounds.Left,
+            Top = _normalBounds.Top,
+            Width = _normalBounds.Width,
+            Height = _normalBounds.Height,
+            Maximized = (WindowState == WindowState.Minimized ? _shownState : WindowState) == WindowState.Maximized
+        };
     }
 
     private void OnClosing(object? sender, CancelEventArgs e)
@@ -1301,6 +1340,8 @@ public partial class MainWindow : Window
         if (_settings.CloseToTray && !_exiting)
         {
             e.Cancel = true;
+            SaveWindowPlacement();
+            _settings.Save();
             Hide();
             if (!_trayHintShown)
             {
@@ -1317,6 +1358,7 @@ public partial class MainWindow : Window
         _refreshTimer.Stop();
         ThemeManager.Changed -= OnThemeChanged;
         SaveActivityPanelHeight();
+        SaveWindowPlacement();
         _settings.Save();
         _tray?.Dispose();
         _tray = null;

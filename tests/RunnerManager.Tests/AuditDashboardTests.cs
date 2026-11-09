@@ -356,4 +356,56 @@ public class AuditDashboardTests
         WpfTestApp.Run(window.WatchGitHubSignIn);
         Assert.Equal("Waiting for sign-in", WpfTestApp.Run(() => window.GitHubStatusText.Text));
     }
+
+    // ----- Bug 7: the window fits its screen and opens where it was -----
+
+    [Fact]
+    public void FirstStart_FitsTheWindowOnAScaledScreen()
+        => WpfTestApp.Run(() =>
+        {
+            // 1920 x 1080 at 150 % scale, with the taskbar.
+            var window = new Window { Width = 1180, Height = 780 };
+            WindowPlacement.Restore(window, null, new Rect(0, 0, 1280, 688));
+            Assert.Equal(1180, window.Width);
+            Assert.Equal(688, window.Height);
+        });
+
+    [Fact]
+    public void SavedPlacement_IsRestored()
+        => WpfTestApp.Run(() =>
+        {
+            var window = new Window { Width = 1180, Height = 780, WindowStartupLocation = WindowStartupLocation.CenterScreen };
+            WindowPlacement.Restore(window, new SavedWindowPlacement { Left = -1500, Top = 40, Width = 1400, Height = 900, Maximized = true },
+                new Rect(0, 0, 1280, 688));
+            Assert.Equal(WindowStartupLocation.Manual, window.WindowStartupLocation);
+            Assert.Equal((-1500d, 40d, 1400d, 900d), (window.Left, window.Top, window.Width, window.Height));
+            Assert.Equal(WindowState.Maximized, window.WindowState);
+        });
+
+    [Fact]
+    public void FitFrame_ShrinksAndMovesOnlyWhatDoesNotFit()
+    {
+        var work = (0, 0, 1920, 1032);
+        Assert.Equal((100, 50, 1770, 900), WindowPlacement.FitFrame((100, 50, 1770, 900), work, onScreen: true));
+        Assert.Equal((100, 0, 1770, 1032), WindowPlacement.FitFrame((100, -40, 1770, 1170), work, onScreen: true));
+        Assert.Equal((150, 0, 1770, 1032), WindowPlacement.FitFrame((400, -40, 1770, 1170), work, onScreen: true));
+        Assert.Equal((75, 66, 1770, 900), WindowPlacement.FitFrame((-3000, 50, 1770, 900), work, onScreen: false));
+        // A second screen to the left of the main one.
+        Assert.Equal((-1280, 0, 1280, 688), WindowPlacement.FitFrame((-1300, -20, 1770, 1170), (-1280, 0, 1280, 688), onScreen: true));
+    }
+
+    [Fact]
+    public void WindowPlacement_IsSavedWithTheSettings()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"rm-settings-{Guid.NewGuid():N}", "settings.json");
+        try
+        {
+            new AppSettings { MainWindowPlacement = new SavedWindowPlacement { Left = 10, Top = 20, Width = 1000, Height = 600, Maximized = true } }.Save(path);
+            var loaded = AppSettings.Load(path).MainWindowPlacement;
+            Assert.NotNull(loaded);
+            Assert.Equal((10d, 20d, 1000d, 600d, true), (loaded.Left, loaded.Top, loaded.Width, loaded.Height, loaded.Maximized));
+            Assert.Null(AppSettings.Load(Path.Combine(Path.GetDirectoryName(path)!, "none.json")).MainWindowPlacement);
+        }
+        finally { Directory.Delete(Path.GetDirectoryName(path)!, recursive: true); }
+    }
 }
