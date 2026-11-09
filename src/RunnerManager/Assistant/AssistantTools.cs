@@ -79,12 +79,25 @@ public sealed class AssistantCall
         };
     }
 
+    /// <summary>How often a call that waits for an approval says so to the client (tests shorten it).</summary>
+    internal TimeSpan ApprovalProgressInterval { get; init; } = TimeSpan.FromSeconds(20);
+
     /// <summary>Asks the user when the rules in Settings → AI assistants require it. Throws when the user declines.</summary>
     public async Task ConfirmAsync(AssistantToolKind kind, string title, string message)
     {
         var ask = kind == AssistantToolKind.Destructive || (kind == AssistantToolKind.Change && FleetConfig.Current.Assistant.AskBeforeChanges);
         if (!ask) return;
-        if (!await _approve(title, message))
+        // The user may take minutes to answer. Progress now and then keeps a client with a short timeout for tool
+        // calls from giving up while the user reads the window.
+        Log("Waiting for the user to answer in a Runner Manager window.");
+        var answer = _approve(title, message);
+        using (var waiting = CancellationTokenSource.CreateLinkedTokenSource(CancellationToken))
+        {
+            while (await Task.WhenAny(answer, Task.Delay(ApprovalProgressInterval, waiting.Token)) != answer && !waiting.IsCancellationRequested)
+                Log("Still waiting for the user to answer in Runner Manager.");
+            waiting.Cancel();
+        }
+        if (!await answer)
             throw new AssistantException("The user declined this action in Runner Manager.");
         CancellationToken.ThrowIfCancellationRequested();
     }

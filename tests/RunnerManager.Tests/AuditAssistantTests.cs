@@ -563,6 +563,37 @@ public class AuditAssistantTests
         Assert.Equal(4, calls);
     }
 
+    [Fact]
+    public async Task Approval_SaysThatItWaits_WhileTheUserHasNotAnswered()
+    {
+        var progress = new List<string>();
+        var answer = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var document = JsonDocument.Parse("{}");
+        var call = new AssistantCall(document.RootElement, (_, _) => answer.Task, message => { lock (progress) progress.Add(message); })
+        {
+            ApprovalProgressInterval = TimeSpan.FromMilliseconds(50)
+        };
+
+        var confirm = call.ConfirmAsync(AssistantToolKind.Destructive, "Delete a runner?", "message");
+        for (var i = 0; i < 200 && Count() < 3; i++) await Task.Delay(50);
+        Assert.False(confirm.IsCompleted);
+        lock (progress)
+        {
+            Assert.True(progress.Count >= 3, $"{progress.Count} progress messages");
+            Assert.StartsWith("Waiting for the user", progress[0]);
+            Assert.All(progress.Skip(1), message => Assert.StartsWith("Still waiting", message));
+        }
+
+        answer.SetResult(true);
+        await confirm.WaitAsync(TimeSpan.FromSeconds(10));
+        // Nothing more once it is answered.
+        var after = Count();
+        await Task.Delay(300);
+        Assert.Equal(after, Count());
+
+        int Count() { lock (progress) return progress.Count; }
+    }
+
     // ----- Names and the action log -----
 
     [Fact]
