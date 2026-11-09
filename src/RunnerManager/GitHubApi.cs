@@ -202,7 +202,10 @@ public static class GitHubApi
     /// <summary>GitHub lists at most 1000 runs for a status.</summary>
     private const int MaxRunPages = 1000 / RunPageSize;
     private const int JobPageSize = 100;
-    /// <summary>A matrix has at most 256 jobs, so three pages hold the jobs of any run.</summary>
+    /// <summary>
+    /// One matrix has at most 256 jobs, so three pages hold the jobs of nearly every run. A run with more (several
+    /// large matrices) is read up to here, because every page is one more request at every refresh.
+    /// </summary>
     private const int MaxJobPages = 3;
 
     /// <summary>
