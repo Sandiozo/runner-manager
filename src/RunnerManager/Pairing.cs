@@ -202,9 +202,11 @@ public static class Pairing
         private readonly CancellationTokenSource _cts = new();
         private readonly HashSet<JoinRequest> _open = new();
         private readonly HashSet<Task> _handlers = new();
+        private readonly object _gate = new();
         private int _connections;
         private TcpListener? _tcp;
         private UdpClient? _udp;
+        private bool _stopped;
 
         /// <summary>Raised on a background thread; call Allow() or Deny() on the request.</summary>
         public event Action<JoinRequest>? JoinRequested;
@@ -219,14 +221,34 @@ public static class Pairing
             _announcePort = announcePort;
         }
 
+        /// <summary>Starts listening. Throws once the host has been stopped: nothing would be left to free the ports.</summary>
         public void Start()
         {
-            _tcp = new TcpListener(IPAddress.Any, _pairingPort);
-            _tcp.Start();
+            lock (_gate)
+            {
+                ObjectDisposedException.ThrowIf(_stopped, this);
+                try
+                {
+                    _tcp = new TcpListener(IPAddress.Any, _pairingPort);
+                    _tcp.Start();
+                    _udp = new UdpClient(new IPEndPoint(IPAddress.Any, _announcePort)) { EnableBroadcast = true };
+                    FleetNetwork.IgnoreConnectionResets(_udp);
+                }
+                catch
+                {
+                    // One port is taken: do not keep the other.
+                    CloseSockets();
+                    throw;
+                }
+            }
             _ = Task.Run(AcceptLoopAsync);
-            _udp = new UdpClient(new IPEndPoint(IPAddress.Any, _announcePort)) { EnableBroadcast = true };
-            FleetNetwork.IgnoreConnectionResets(_udp);
             _ = Task.Run(AnnounceLoopAsync);
+        }
+
+        private void CloseSockets()
+        {
+            try { _tcp?.Stop(); } catch { }
+            try { _udp?.Dispose(); } catch { }
         }
 
         private async Task AnnounceLoopAsync()
@@ -362,9 +384,7 @@ public static class Pairing
         /// </summary>
         public async Task StopAsync()
         {
-            _listen.Cancel();
-            try { _tcp?.Stop(); } catch { }
-            try { _udp?.Dispose(); } catch { }
+            StopListening();
             lock (_open) foreach (var request in _open) request.Deny();
             Task[] handlers;
             lock (_handlers) handlers = _handlers.ToArray();
@@ -374,10 +394,18 @@ public static class Pairing
 
         public void Dispose()
         {
-            _listen.Cancel();
+            StopListening();
             _cts.Cancel();
-            try { _tcp?.Stop(); } catch { }
-            try { _udp?.Dispose(); } catch { }
+        }
+
+        private void StopListening()
+        {
+            lock (_gate)
+            {
+                _stopped = true;
+                _listen.Cancel();
+                CloseSockets();
+            }
         }
     }
 

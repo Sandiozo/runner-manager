@@ -11,6 +11,7 @@ public partial class PairingHostWindow : Window
     private readonly Queue<Pairing.JoinRequest> _pending = new();
     private readonly DispatcherTimer _expiry = new() { Interval = TimeSpan.FromMinutes(10) };
     private Pairing.JoinRequest? _current;
+    private bool _closed;
     private readonly List<string> _joined = new();
     private readonly List<string> _managed = new();
 
@@ -48,17 +49,21 @@ public partial class PairingHostWindow : Window
             try
             {
                 await FleetNetwork.EnsureFirewallRulesAsync();
+                // Closed while the firewall rules were checked: the host is stopped, and must not take the ports now.
+                if (_closed) return;
                 _host.Start();
                 _expiry.Start();
             }
             catch (Exception ex)
             {
+                if (_closed) return;
                 DialogWindow.Error(this, "Could not start pairing", $"{ex.Message}\n\nCheck that no other Runner Manager window is already waiting for a PC.");
                 Close();
             }
         };
         Closed += (_, _) =>
         {
+            _closed = true;
             _expiry.Stop();
             // Denies the open requests and lets the other PCs hear it before the connections close.
             _ = _host.StopAsync();
