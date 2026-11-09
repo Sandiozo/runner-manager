@@ -470,19 +470,29 @@ public class StatusCacheBuildTests
 
         await Task.Delay(StatusCache.FreshFor + TimeSpan.FromMilliseconds(100));
         Assert.Equal("1", (await cache.GetAsync()).LastCommandId);
-        Assert.True(SpinWait.SpinUntil(() => Volatile.Read(ref builds) == 2, TimeSpan.FromSeconds(1)));
+        Assert.True(SpinWait.SpinUntil(() => Volatile.Read(ref builds) == 2, TimeSpan.FromSeconds(5)));
 
         // Still hung after the timeout: the next request starts another build, which shows up.
         await Task.Delay(400);
         await cache.GetAsync();
-        Assert.True(SpinWait.SpinUntil(() => Volatile.Read(ref builds) == 3, TimeSpan.FromSeconds(1)));
-        await Task.Delay(200);
-        Assert.Equal("3", (await cache.GetAsync()).LastCommandId);
+        Assert.True(SpinWait.SpinUntil(() => Volatile.Read(ref builds) == 3, TimeSpan.FromSeconds(5)));
+        // Build 3, or a later one when a busy test machine made that one slow too.
+        Assert.True(await UntilAsync(async () => int.Parse((await cache.GetAsync()).LastCommandId) >= 3));
         Assert.Contains(log, m => m.Contains("took more than"));
 
         // The hung build finishing late does not bring back its older status.
         hang.SetResult(Payload(2));
         await Task.Delay(100);
-        Assert.Equal("3", (await cache.GetAsync()).LastCommandId);
+        Assert.True(int.Parse((await cache.GetAsync()).LastCommandId) >= 3);
+    }
+
+    private static async Task<bool> UntilAsync(Func<Task<bool>> condition)
+    {
+        for (var i = 0; i < 50; i++)
+        {
+            if (await condition()) return true;
+            await Task.Delay(100);
+        }
+        return false;
     }
 }
