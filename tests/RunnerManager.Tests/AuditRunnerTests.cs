@@ -424,4 +424,12 @@ public class AuditRunnerTests
         Assert.True(JobWatch.MadeProgress(cpu, cpu, string.Empty, "a_1.log|10|5", elapsed));
         Assert.True(JobWatch.MadeProgress(cpu, cpu, "a_1.log|10|5", "a_1.log|20|6", elapsed));
     }
+
+    [Fact]
+    public void StartWithWindows_IsTheDelayedStart_ThatConfigCmdSets_AndStillReadsAsStartsWithWindows()
+    {
+        Assert.Equal("delayed-auto", ServiceStart.Automatic);
+        // WMI reports a delayed automatic start as Auto.
+        Assert.Equal(RunnerStart.WithWindows, RunnerService.ServiceStartsAt("Auto"));
+    }
 }
