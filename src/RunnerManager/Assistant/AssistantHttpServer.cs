@@ -49,6 +49,8 @@ public sealed class AssistantHttpServer : IDisposable
     private readonly ConcurrentDictionary<string, DateTime> _localTokens = new();
     private readonly CancellationTokenSource _cts = new();
     private HttpListener? _http;
+    /// <summary>Why the endpoint could not start at the last try; logged when it changes, not at every try.</summary>
+    private string? _startProblem;
 
     private sealed class Session(McpServer server)
     {
@@ -83,20 +85,28 @@ public sealed class AssistantHttpServer : IDisposable
         Stop();
     }
 
-    private void Start()
+    /// <summary>Tries to listen. A failure is logged once until it changes or ends, however often this is tried again.</summary>
+    internal void Start()
     {
+        var http = new HttpListener();
         try
         {
-            var http = new HttpListener();
             http.Prefixes.Add($"http://{_host}:{_port}/mcp/");
             http.Start();
-            _http = http;
-            _ = Task.Run(() => AcceptLoopAsync(http));
         }
         catch (Exception ex)
         {
-            MachineRelay.AppendAgentLog($"Could not start the AI assistant endpoint on port {_port}: {ex.Message}");
+            try { http.Close(); } catch { }
+            if (ex.Message != _startProblem)
+                MachineRelay.AppendAgentLog($"Could not start the AI assistant endpoint on port {_port}: {ex.Message} " +
+                                            $"Trying again every {(int)RetryInterval.TotalSeconds} seconds.");
+            _startProblem = ex.Message;
+            return;
         }
+        _http = http;
+        _ = Task.Run(() => AcceptLoopAsync(http));
+        if (_startProblem != null) MachineRelay.AppendAgentLog($"The AI assistant endpoint listens on port {_port} now.");
+        _startProblem = null;
     }
 
     private void Stop()

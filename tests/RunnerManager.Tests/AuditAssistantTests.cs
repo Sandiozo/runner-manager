@@ -483,6 +483,28 @@ public class AuditAssistantTests
         Assert.Equal("An AI assistant (\"Evil 2026-01-01 00:00:00 An AI assistant: Delete a runner? Allowed.\")", client);
     }
 
+    // ----- The endpoint and the command line -----
+
+    [Fact]
+    public void Endpoint_LogsATakenPortOnce_AndWhenItListensAgain()
+    {
+        var port = TestPorts.FreeRange(1);
+        using var server = new AssistantHttpServer(port, "localhost");
+        using (var taken = new HttpListener())
+        {
+            taken.Prefixes.Add($"http://localhost:{port}/mcp/");
+            taken.Start();
+            // Tried again every 30 seconds while the agent runs.
+            for (var i = 0; i < 4; i++) server.Start();
+        }
+        Assert.Single(AgentLogLines($"Could not start the AI assistant endpoint on port {port}:"));
+        Assert.Empty(AgentLogLines($"The AI assistant endpoint listens on port {port} now."));
+
+        server.Start();
+        Assert.Single(AgentLogLines($"Could not start the AI assistant endpoint on port {port}:"));
+        Assert.Single(AgentLogLines($"The AI assistant endpoint listens on port {port} now."));
+    }
+
     // ----- Helpers -----
 
     private static MachineInfo Online(string name, params MachineRunnerStatus[] runners) => Online(name, managed: false, runners);
