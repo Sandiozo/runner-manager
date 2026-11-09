@@ -492,13 +492,33 @@ public sealed class FleetConfig
         c.ManagedBy = managedBy.Length > 0 ? managedBy : "another fleet";
     });
 
-    /// <summary>A PC paired one way from this PC. Replaces an earlier pairing of a PC with the same name.</summary>
+    /// <summary>
+    /// A PC paired one way from this PC. Replaces an earlier pairing of a PC with the same name, either way: a fleet member
+    /// with the name is forgotten here, so the PC isn't known both ways (commands to it would be refused).
+    /// </summary>
     public static void AddManagedPc(string name, string address, byte[] key) => Update(c =>
     {
         foreach (var old in c.ManagedPcs.Where(p => MachineRelay.Sanitize(p.Name) == MachineRelay.Sanitize(name)).ToList())
             c.ForgetManaged(old);
+        c.KnownPeers.RemoveAll(p => MachineRelay.Sanitize(p.Name) == MachineRelay.Sanitize(name));
         c.ManagedPcs.Add(ManagedPcRecord.Create(name, address, key, DateTime.UtcNow));
     });
+
+    /// <summary>Forgets the managed PCs that match; the fleet PCs this PC syncs with forget them too. Returns how many.</summary>
+    internal int ForgetManagedWhere(Func<ManagedPcRecord, bool> match)
+    {
+        var gone = ManagedPcs.Where(match).ToList();
+        foreach (var pc in gone) ForgetManaged(pc);
+        return gone.Count;
+    }
+
+    /// <summary>
+    /// Forgets a fleet member that was paired again one way as <paramref name="pc"/>: same name and machine ID, and last
+    /// heard from with the fleet's code before that pairing. Returns whether it did.
+    /// </summary>
+    private bool ForgetPeerManagedSince(ManagedPcRecord pc)
+        => pc.MachineId.Length > 0 && KnownPeers.RemoveAll(p => MachineRelay.Sanitize(p.Name) == MachineRelay.Sanitize(pc.Name)
+            && p.MachineId.Equals(pc.MachineId, StringComparison.OrdinalIgnoreCase) && p.LastSeenUtc < pc.AddedUtc) > 0;
 
     /// <summary>Removes a managed PC here; the fleet PCs this PC syncs with remove it too.</summary>
     public static void RemoveManagedPc(string keyId) => Update(c =>
@@ -546,7 +566,8 @@ public sealed class FleetConfig
 
     /// <summary>
     /// Takes in another fleet PC's managed PCs: removals first, then PCs not known here. Of two pairings of the same PC
-    /// (by machine ID, or by name while the ID is unknown), the newer one is kept. Returns whether anything changed.
+    /// (by machine ID, or by name while the ID is unknown), the newer one is kept. A managed PC that was a fleet member
+    /// before is forgotten as a member (see <see cref="ForgetPeerManagedSince"/>). Returns whether anything changed.
     /// </summary>
     internal bool MergeManaged(IEnumerable<ManagedPcShare> pcs, IEnumerable<RemovedManagedPc> removed)
     {
@@ -565,7 +586,16 @@ public sealed class FleetConfig
             catch (FormatException) { continue; }
             if (key.Length != 32) continue;
             var keyId = CommandSigner.KeyId(key);
-            if (ManagedPcs.Any(p => p.KeyId == keyId) || RemovedManagedPcs.Any(r => r.KeyId == keyId)) continue;
+            if (ManagedPcs.FirstOrDefault(p => p.KeyId == keyId) is { } known)
+            {
+                // Shared before the PC first answered there: its ID comes with a later share.
+                if (known.MachineId.Length > 0 || string.IsNullOrEmpty(share.MachineId)) continue;
+                known.MachineId = share.MachineId;
+                ForgetPeerManagedSince(known);
+                changed = true;
+                continue;
+            }
+            if (RemovedManagedPcs.Any(r => r.KeyId == keyId)) continue;
             var same = ManagedPcs.Where(p => share.MachineId?.Length > 0 && p.MachineId.Length > 0
                     ? p.MachineId.Equals(share.MachineId, StringComparison.OrdinalIgnoreCase)
                     : MachineRelay.Sanitize(p.Name) == MachineRelay.Sanitize(share.Name)).ToList();
@@ -579,6 +609,7 @@ public sealed class FleetConfig
             var record = ManagedPcRecord.Create(share.Name, share.Address ?? string.Empty, key, share.AddedUtc);
             record.MachineId = share.MachineId ?? string.Empty;
             ManagedPcs.Add(record);
+            ForgetPeerManagedSince(record);
             changed = true;
         }
         return changed;

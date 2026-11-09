@@ -327,16 +327,20 @@ public static class MachineRelay
         // The same PC under its old name: it was renamed.
         var renamed = machineId.Length == 0 ? new List<PeerRecord>()
             : config.KnownPeers.Where(p => p.MachineId.Equals(machineId, StringComparison.OrdinalIgnoreCase) && Sanitize(p.Name) != Sanitize(name)).ToList();
+        // It answered with the fleet's code, so it is a fleet member now: an earlier one-way pairing of it is out of date.
+        var wasManaged = machineId.Length > 0 && config.ManagedPcs.Any(p => p.MachineId.Equals(machineId, StringComparison.OrdinalIgnoreCase));
         // Only write when something meaningful changed, not on every poll.
         var duplicates = config.KnownPeers.Count(p => Sanitize(p.Name) == Sanitize(name)) > 1;
-        if (!duplicates && renamed.Count == 0 && existing != null && existing.Name == name && existing.Address == address
+        if (!duplicates && renamed.Count == 0 && !wasManaged && existing != null && existing.Name == name && existing.Address == address
             && existing.Version == version && existing.MachineId == machineId
             && DateTime.UtcNow - existing.LastSeenUtc < TimeSpan.FromMinutes(10)) return;
         FleetConfig.Update(c =>
         {
             c.KnownPeers.RemoveAll(p => Sanitize(p.Name) == Sanitize(name) || renamed.Any(r => Sanitize(r.Name) == Sanitize(p.Name)));
             c.KnownPeers.Add(new PeerRecord { Name = name, Address = address, Version = version, MachineId = machineId, LastSeenUtc = DateTime.UtcNow });
+            if (wasManaged) c.ForgetManagedWhere(p => p.MachineId.Equals(machineId, StringComparison.OrdinalIgnoreCase));
         });
+        if (wasManaged) AppendAgentLog($"{name} joined the fleet, so it is no longer managed one way.");
         foreach (var old in renamed)
         {
             lock (LastStatus) LastStatus.Remove(Sanitize(old.Name));
@@ -359,6 +363,11 @@ public static class MachineRelay
     internal static string ManagedNameProblem(string name)
         => $"{name} is managed one way, and a PC in the fleet has the same name. Rename one of them in Windows Settings → System → About. " +
            $"Until then, commands to {name} are refused.";
+
+    /// <summary>Why a managed PC that was renamed isn't listed under its new name: another managed PC has that name.</summary>
+    internal static string ManagedNameTakenProblem(string name)
+        => $"{name} is managed one way, and another PC managed one way has the same name. Rename one of them in Windows Settings → System → About. " +
+           "Until then, its runners are not shown.";
 
     /// <summary>Finds managed PCs that moved to another address on the local network, by key fingerprint.</summary>
     private static async Task<Dictionary<string, List<DiscoveredPeer>>> DiscoverManagedAsync(IReadOnlyList<ManagedPcRecord> pcs)
@@ -432,6 +441,10 @@ public static class MachineRelay
         var machineKey = Sanitize(payload.MachineName);
         if (machineKey != Sanitize(pc.Name) && (machineKey == LocalMachineKey || FleetConfig.Current.KnownPeers.Any(p => Sanitize(p.Name) == machineKey)))
             return MachineInfo.Placeholder("MANAGED_" + machineKey, payload.MachineName, DateTime.UtcNow, address, ManagedNameProblem(payload.MachineName), managed: true);
+        // Nor another managed PC's place: its status and record would be mixed up with this one's. The same PC paired twice is let through.
+        if (machineKey != Sanitize(pc.Name) && FleetConfig.Current.ManagedPcs.Any(p => p.KeyId != pc.KeyId && Sanitize(p.Name) == machineKey
+                && !(p.MachineId.Length > 0 && p.MachineId.Equals(payload.MachineId, StringComparison.OrdinalIgnoreCase))))
+            return MachineInfo.Placeholder("MANAGED_" + machineKey, payload.MachineName, DateTime.UtcNow, address, ManagedNameTakenProblem(payload.MachineName), managed: true);
         payload = ByLocalClock(machineKey, payload, DateTime.UtcNow);
         NoteAnswer(machineKey, payload);
         NoteSighting(payload.MachineName, payload.MachineId, address);

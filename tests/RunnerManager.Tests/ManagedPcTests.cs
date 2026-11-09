@@ -254,8 +254,9 @@ public class ManagedFleetTests
             var own = CommandSigner.NewKey();
             using var friend = new TestAgent("LAPTOPX", key: own);
             FleetConfig.SetFleetKey(CommandSigner.NewKey());
-            FleetConfig.Update(c => c.KnownPeers.Add(new PeerRecord { Name = "LAPTOPX", Address = "127.0.0.1:1", LastSeenUtc = DateTime.UtcNow }));
             FleetConfig.AddManagedPc("LAPTOPX", friend.Address, own);
+            // A fleet PC with the same name, learned after the pairing (pairing one way forgets one learned before).
+            FleetConfig.Update(c => c.KnownPeers.Add(new PeerRecord { Name = "LAPTOPX", Address = "127.0.0.1:1", LastSeenUtc = DateTime.UtcNow }));
 
             var machines = await MachineRelay.ReadFleetAsync(forceDiscovery: true);
             Assert.Contains(machines, m => m.MachineKey == "MANAGED_LAPTOPX" && m.ConnectionProblem.Contains("same name"));

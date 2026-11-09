@@ -407,6 +407,102 @@ public class ConsoleRunnerCommandTests
 }
 
 /// <summary>Runs a test with its own fleet.json in the test state folder, and puts back the one before it.</summary>
+[Collection(FleetSettingsCollection.Name)]
+public class ManagedNameTests
+{
+    [Fact]
+    public async Task AManagedPcRenamedToAnotherManagedPcsName_IsNotMixedUpWithIt()
+    {
+        await AuditFleetConfig.WithConfigAsync(async () =>
+        {
+            FleetConfig.SetFleetKey(CommandSigner.NewKey());
+            var keyA = CommandSigner.NewKey();
+            var keyB = CommandSigner.NewKey();
+            // PCA2 was renamed PCB2 in Windows, and another managed PC is called PCB2.
+            using var renamed = new TestAgent("PCB2", machineId: "id-a", key: keyA);
+            FleetConfig.AddManagedPc("PCA2", renamed.Address, keyA);
+            FleetConfig.NoteManagedPc(CommandSigner.KeyId(keyA), "PCA2", renamed.Address, "id-a", "");
+            FleetConfig.AddManagedPc("PCB2", "127.0.0.1:1", keyB);
+            FleetConfig.NoteManagedPc(CommandSigner.KeyId(keyB), "PCB2", "127.0.0.1:1", "id-b", "");
+
+            var machines = await MachineRelay.ReadFleetAsync();
+
+            Assert.Contains(machines, m => m.MachineKey == "MANAGED_PCB2" && m.ConnectionProblem.Contains("another PC managed one way"));
+            Assert.DoesNotContain(machines, m => m.MachineKey == "PCB2" && m.IsOnline);
+            Assert.Equal("PCA2", FleetConfig.Current.ManagedPcs.Single(p => p.KeyId == CommandSigner.KeyId(keyA)).Name);
+            Assert.Equal("127.0.0.1:1", FleetConfig.Current.ManagedPc("PCB2")!.Address);
+        });
+    }
+
+    [Fact]
+    public async Task APcPairedAgainAsAFleetMember_IsNoLongerManagedOneWay()
+    {
+        await AuditFleetConfig.WithConfigAsync(async () =>
+        {
+            var fleetKey = CommandSigner.NewKey();
+            var oneWay = CommandSigner.NewKey();
+            FleetConfig.SetFleetKey(fleetKey);
+            FleetConfig.AddManagedPc("JOINPC", "127.0.0.1:1", oneWay);
+            FleetConfig.NoteManagedPc(CommandSigner.KeyId(oneWay), "JOINPC", "127.0.0.1:1", "id-join", "");
+            using var member = new TestAgent("JOINPC", machineId: "id-join", key: fleetKey);
+            MachineRelay.AddKnownPeer("JOINPC", member.Address);
+
+            await MachineRelay.ReadFleetAsync();
+            var machines = await MachineRelay.ReadFleetAsync();
+
+            Assert.Empty(FleetConfig.Current.ManagedPcs);
+            Assert.Contains(FleetConfig.Current.RemovedManagedPcs, r => r.KeyId == CommandSigner.KeyId(oneWay));
+            var listed = Assert.Single(machines, m => m.MachineKey.EndsWith("JOINPC"));
+            Assert.False(listed.IsManaged);
+            Assert.Empty(listed.ConnectionProblem);
+            await MachineRelay.SendCommandAsync("JOINPC", "runner", "r1", "Start");
+            Assert.Single(member.Commands);
+        });
+    }
+
+    [Fact]
+    public async Task PairingOneWay_ForgetsTheFleetMemberWithTheName()
+    {
+        await AuditFleetConfig.WithConfigAsync(() =>
+        {
+            FleetConfig.SetFleetKey(CommandSigner.NewKey());
+            FleetConfig.Update(c => c.KnownPeers.Add(new PeerRecord { Name = "WASMEMBER", Address = "127.0.0.1:1", LastSeenUtc = DateTime.UtcNow }));
+
+            FleetConfig.AddManagedPc("WASMEMBER", "127.0.0.1:2", CommandSigner.NewKey());
+
+            Assert.Empty(FleetConfig.Current.KnownPeers);
+            Assert.Equal("127.0.0.1:2", FleetConfig.Current.ManagedPc("WASMEMBER")!.Address);
+            return Task.CompletedTask;
+        });
+    }
+
+    private static ManagedPcShare Share(string name, byte[] key, DateTime added, string machineId = "") => new()
+    {
+        Name = name, Address = "100.64.0.5:47821", MachineId = machineId, AddedUtc = added, Key = Convert.ToBase64String(key)
+    };
+
+    [Fact]
+    public void AManagedPcSharedByAnotherFleetPc_ReplacesItsMemberRecord_OnceItsIdIsKnown()
+    {
+        var config = new FleetConfig();
+        var now = DateTime.UtcNow;
+        config.KnownPeers.Add(new PeerRecord { Name = "MEMBERA", MachineId = "id-a", LastSeenUtc = now.AddHours(-1) });
+        config.KnownPeers.Add(new PeerRecord { Name = "MEMBERB", MachineId = "id-b", LastSeenUtc = now });
+        var keyA = CommandSigner.NewKey();
+
+        // Shared before it first answered there: no ID yet, so the member record can't be matched.
+        config.MergeManaged(new[] { Share("MEMBERA", keyA, now.AddMinutes(-10)) }, Array.Empty<RemovedManagedPc>());
+        Assert.Contains(config.KnownPeers, p => p.Name == "MEMBERA");
+        Assert.True(config.MergeManaged(new[] { Share("MEMBERA", keyA, now.AddMinutes(-10), "id-a") }, Array.Empty<RemovedManagedPc>()));
+        Assert.DoesNotContain(config.KnownPeers, p => p.Name == "MEMBERA");
+        Assert.Equal("id-a", Assert.Single(config.ManagedPcs).MachineId);
+
+        // MEMBERB answered with the fleet's code after it was paired one way: the member record is the newer one.
+        config.MergeManaged(new[] { Share("MEMBERB", CommandSigner.NewKey(), now.AddHours(-2), "id-b") }, Array.Empty<RemovedManagedPc>());
+        Assert.Contains(config.KnownPeers, p => p.Name == "MEMBERB");
+    }
+}
+
 internal static class AuditFleetConfig
 {
     private static readonly string ConfigPath = Path.Combine(FleetConfig.StateDir, "fleet.json");
