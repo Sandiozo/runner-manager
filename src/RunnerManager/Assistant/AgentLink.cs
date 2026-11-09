@@ -79,6 +79,9 @@ public sealed class AgentLink : IDisposable
         for (var attempt = 0; ; attempt++)
         {
             var token = await SignInAsync(cancellationToken);
+            // The client's initialize did not reach the agent (it was not running yet): start the session now, so
+            // the agent knows which client asks and a cancellation finds the call it is meant for.
+            if (!isInitialize && _sessionId == null && _initialize != null) await StartSessionAsync(cancellationToken);
             var session = _sessionId;
             using var response = await PostAsync(message, token, session, cancellationToken);
             var last = attempt >= 2;
@@ -136,6 +139,18 @@ public sealed class AgentLink : IDisposable
             {
                 using var again = await PostAsync(initialize, await SignInAsync(cancellationToken), null, cancellationToken);
             }
+        }
+        finally { _recoverGate.Release(); }
+    }
+
+    /// <summary>Sends the client's initialize again when there is no session, unless another request already did.</summary>
+    private async Task StartSessionAsync(CancellationToken cancellationToken)
+    {
+        await _recoverGate.WaitAsync(cancellationToken);
+        try
+        {
+            if (_sessionId != null || _initialize is not { } initialize) return;
+            using var again = await PostAsync(initialize, await SignInAsync(cancellationToken), null, cancellationToken);
         }
         finally { _recoverGate.Release(); }
     }

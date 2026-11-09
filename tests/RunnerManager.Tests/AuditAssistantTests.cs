@@ -377,6 +377,75 @@ public class AuditAssistantTests
         Assert.Equal(HttpStatusCode.OK, (await SignInByHandAsync(http, url, port)).Status);
     }
 
+    // ----- Sessions -----
+
+    [Fact]
+    public async Task AgentLink_StartsTheSessionLater_WhenInitializeDidNotReachTheAgent()
+    {
+        var port = TestPorts.FreeRange(1);
+        var url = $"http://localhost:{port}/mcp";
+        using var link = new AgentLink(url);
+        // The agent is not there for the client's initialize: something else answers on the port.
+        using (var busy = new HttpListener())
+        {
+            busy.Prefixes.Add($"http://localhost:{port}/mcp/");
+            busy.Start();
+            _ = Task.Run(async () =>
+            {
+                while (busy.IsListening)
+                {
+                    try
+                    {
+                        var context = await busy.GetContextAsync();
+                        context.Response.StatusCode = 503;
+                        context.Response.Close();
+                    }
+                    catch { return; }
+                }
+            });
+            await Assert.ThrowsAsync<AgentLinkException>(() => link.SendAsync(Initialize));
+        }
+
+        var clients = new List<string>();
+        var servers = 0;
+        var shown = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var closed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var server = new AssistantHttpServer(port, "localhost", () =>
+        {
+            Interlocked.Increment(ref servers);
+            return new McpServer(async (client, title, _, cancellationToken) =>
+            {
+                lock (clients) clients.Add(client);
+                if (title != "Wait") return true;
+                shown.TrySetResult();
+                try { await Task.Delay(Timeout.Infinite, cancellationToken); }
+                finally { closed.TrySetResult(); }
+                return true;
+            }, _ => Task.CompletedTask, async (_, arguments, approve, _, cancellationToken) =>
+            {
+                var wait = arguments.ValueKind == JsonValueKind.Object && arguments.TryGetProperty("wait", out _);
+                if (!await approve(wait ? "Wait" : "Go", "An AI assistant wants to do something.")) throw new AssistantException("Declined.");
+                cancellationToken.ThrowIfCancellationRequested();
+                return new { done = true };
+            });
+        });
+        _ = server.RunAsync();
+
+        // The first request after that starts the session with the client's own initialize.
+        var answer = await WithRetry(() => link.SendAsync(ToolCall(2)));
+        Assert.False(JsonNode.Parse(answer!)!["result"]!["isError"]!.GetValue<bool>());
+        lock (clients) Assert.Equal(new[] { TestClient }, clients);
+
+        // So a cancellation reaches the call it is meant for, and its approval closes.
+        var waiting = link.SendAsync(ToolCall(3, wait: true));
+        await shown.Task.WaitAsync(TimeSpan.FromSeconds(30));
+        await link.SendAsync("""{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":3,"reason":"timeout"}}""");
+        await closed.Task.WaitAsync(TimeSpan.FromSeconds(30));
+        Assert.Equal(McpServer.RequestCancelled, JsonNode.Parse((await waiting.WaitAsync(TimeSpan.FromSeconds(30)))!)!["error"]!["code"]!.GetValue<int>());
+        // One session for all of it.
+        Assert.Equal(1, servers);
+    }
+
     // ----- Names and the action log -----
 
     [Fact]
