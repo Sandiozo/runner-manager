@@ -102,6 +102,8 @@ public partial class App : Application
         // A task an older version registered starts the agent and the dashboard below normal priority.
         if (ProcessPriority.RaiseToNormal())
             MachineRelay.AppendAgentLog("Runner Manager was started below normal priority. It now runs at normal priority.");
+        if (AppUpdater.RepairMissingExe() is { } repaired)
+            MachineRelay.AppendAgentLog($"{AppPaths.ExeName} was missing after an interrupted update. Put {repaired} in its place.");
 
         if (e.Args.Any(a => a.Equals("--install-agent", StringComparison.OrdinalIgnoreCase)))
         {

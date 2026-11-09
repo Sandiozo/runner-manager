@@ -220,6 +220,9 @@ public static class UpdateGuard
     /// <summary>Checks a pending update from the dashboard (see <see cref="DecideForDashboard"/>). Returns a message to show, if any.</summary>
     public static async Task<string?> CheckFromDashboardAsync(bool agentInstalled)
     {
+        // A swap cut off by a crash of the agent leaves no exe for the tasks to start; this dashboard still runs.
+        if (await Task.Run(AppUpdater.RepairMissingExe) is { } repaired)
+            MachineRelay.AppendAgentLog($"{AppPaths.ExeName} was missing after an interrupted update. Put {repaired} in its place.");
         var state = Load();
         if (state.Pending == null) return null;
         var running = !agentInstalled || await MachineRelay.IsAgentRunningAsync();

@@ -175,6 +175,162 @@ public class AuditSetupTests
         Assert.True(process.WaitForExit(30_000), "The script did not finish within 30 seconds.");
     }
 
+    // ================= Exe swap =================
+
+    [Fact]
+    public void AnExeSwap_KeepsThePreviousVersion_AndLeavesNoTemporaryFiles()
+    {
+        var folder = Path.Combine(Path.GetTempPath(), $"rm-swap-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(folder);
+        try
+        {
+            var source = Path.Combine(folder, "download.exe");
+            var exe = Path.Combine(folder, "RunnerManager.exe");
+            File.WriteAllText(source, "new");
+            File.WriteAllText(exe, "old");
+
+            AppUpdater.ReplaceFile(source, exe, keepPrevious: true);
+
+            Assert.Equal("new", File.ReadAllText(exe));
+            Assert.Equal("old", File.ReadAllText(exe + ".previous"));
+            Assert.False(File.Exists(exe + ".new"));
+            Assert.False(File.Exists(exe + ".new.partial"));
+            Assert.True(File.Exists(source));
+        }
+        finally { Directory.Delete(folder, recursive: true); }
+    }
+
+    [Fact]
+    public void AMissingExe_IsPutBackFromTheCompleteNewFile_OrElseFromThePreviousOne()
+    {
+        var folder = Path.Combine(Path.GetTempPath(), $"rm-repair-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(folder);
+        try
+        {
+            var exe = Path.Combine(folder, "RunnerManager.exe");
+            // Nothing to repair, or no install there.
+            Assert.Null(AppUpdater.RepairMissingExe(exe, () => true));
+            File.WriteAllText(exe + ".new", "new");
+            Assert.Null(AppUpdater.RepairMissingExe(exe, () => false));
+
+            // Cut off between the renames of an update: the new file goes in.
+            File.WriteAllText(exe + ".previous", "old");
+            Assert.Equal("RunnerManager.exe.new", AppUpdater.RepairMissingExe(exe, () => true));
+            Assert.Equal("new", File.ReadAllText(exe));
+            Assert.Equal("old", File.ReadAllText(exe + ".previous"));
+            Assert.Null(AppUpdater.RepairMissingExe(exe, () => true));
+
+            // Cut off in a rollback: the previous version goes in.
+            File.Delete(exe);
+            Assert.Equal("RunnerManager.exe.previous", AppUpdater.RepairMissingExe(exe, () => true));
+            Assert.Equal("old", File.ReadAllText(exe));
+        }
+        finally { Directory.Delete(folder, recursive: true); }
+    }
+
+    [Fact]
+    public async Task ASwap_WaitsWhileAnotherProgramHoldsTheNewFile()
+    {
+        var file = Path.Combine(Path.GetTempPath(), $"rm-held-{Guid.NewGuid():N}.exe");
+        File.WriteAllText(file, "new");
+        try
+        {
+            Assert.True(AppUpdater.WaitUntilUnused(file, TimeSpan.FromSeconds(1)));
+            using (new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                Assert.False(AppUpdater.WaitUntilUnused(file, TimeSpan.FromMilliseconds(500)));
+
+            var scanner = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            var letGo = Task.Run(async () =>
+            {
+                await Task.Delay(400);
+                scanner.Dispose();
+            });
+            Assert.True(AppUpdater.WaitUntilUnused(file, TimeSpan.FromSeconds(10)));
+            await letGo;
+        }
+        finally { File.Delete(file); }
+    }
+
+    // ================= Old files =================
+
+    [Theory]
+    [InlineData("RunnerManager.638662000000000000.old.exe", true, true)]
+    [InlineData("RUNNERMANAGER.638662000000000000.OLD.EXE", true, true)]
+    [InlineData("RunnerManager.Core.dll.638662000000000000.old.dll", false, true)]
+    [InlineData("Microsoft.Foo.638662000000000000.old.dll", false, true)]
+    [InlineData("MyTool.old.exe", false, false)]
+    [InlineData("notes.old.txt", false, false)]
+    [InlineData("RunnerManager.backup.old.exe", false, false)]
+    [InlineData("RunnerManager.exe.previous", false, false)]
+    public void OldFileCleanup_TouchesOnlyRunnerManagersOwnNames(string name, bool inAnyFolder, bool inDefaultFolder)
+    {
+        Assert.Equal(inAnyFolder, AppUpdater.IsOldFile(name, anyAppFile: false));
+        Assert.Equal(inDefaultFolder, AppUpdater.IsOldFile(name, anyAppFile: true));
+    }
+
+    // ================= Downloads =================
+
+    [Fact]
+    public async Task ADownload_IsCopiedWhole()
+    {
+        var data = Enumerable.Range(0, 300_000).Select(i => (byte)i).ToArray();
+        using var source = new MemoryStream(data);
+        using var destination = new MemoryStream();
+        await AppUpdater.CopyDownloadAsync(source, destination, TimeSpan.FromSeconds(5), CancellationToken.None);
+        Assert.Equal(data, destination.ToArray());
+    }
+
+    [Fact]
+    public async Task ADownloadThatStops_FailsAfterTheStallLimit()
+    {
+        using var source = new StallingStream(new byte[1000]);
+        using var destination = new MemoryStream();
+        var watch = Stopwatch.StartNew();
+        var error = await Assert.ThrowsAsync<TimeoutException>(() =>
+            AppUpdater.CopyDownloadAsync(source, destination, TimeSpan.FromMilliseconds(300), CancellationToken.None));
+        Assert.Contains("no data", error.Message);
+        Assert.Equal(1000, destination.Length);
+        Assert.True(watch.Elapsed < TimeSpan.FromSeconds(10));
+    }
+
+    [Fact]
+    public async Task ADownloadOverItsOverallLimit_IsCancelled()
+    {
+        using var source = new StallingStream(new byte[10]);
+        using var destination = new MemoryStream();
+        using var overall = new CancellationTokenSource(TimeSpan.FromMilliseconds(200));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            AppUpdater.CopyDownloadAsync(source, destination, TimeSpan.FromMinutes(1), overall.Token));
+    }
+
+    /// <summary>Sends its data, then nothing more until cancelled (a connection that stopped).</summary>
+    private sealed class StallingStream(byte[] data) : Stream
+    {
+        private bool _sent;
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            if (!_sent)
+            {
+                _sent = true;
+                data.CopyTo(buffer);
+                return data.Length;
+            }
+            await Task.Delay(Timeout.Infinite, cancellationToken);
+            return 0;
+        }
+    }
+
     // ================= Update health =================
 
     [Fact]
