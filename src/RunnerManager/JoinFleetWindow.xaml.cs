@@ -1,5 +1,7 @@
+using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Windows;
+using System.Windows.Input;
 using System.Windows.Threading;
 
 namespace RunnerManager;
@@ -7,7 +9,12 @@ namespace RunnerManager;
 /// <summary>"Set up a fleet": start a new fleet, or find a PC that is hosting pairing and join it.</summary>
 public partial class JoinFleetWindow : Window
 {
+    /// <summary>How long the search finds nothing before the window says what to check: about three searches.</summary>
+    private static readonly TimeSpan NothingFoundAfter = TimeSpan.FromSeconds(9);
+
     private readonly DispatcherTimer _search = new() { Interval = TimeSpan.FromSeconds(3) };
+    private readonly FoundHosts _hosts = new();
+    private readonly Stopwatch _nothingFound = new();
     private CancellationTokenSource? _joinCts;
     private TaskCompletionSource<bool>? _codesMatch;
     private bool _searching;
@@ -23,6 +30,7 @@ public partial class JoinFleetWindow : Window
     {
         InitializeComponent();
         WindowTheme.Apply(this);
+        HostList.ItemsSource = _hosts.Items;
         if (openJoinPage) Loaded += (_, _) => ChooseJoin_Click(this, new RoutedEventArgs());
         _search.Tick += async (_, _) => await SearchAsync();
         Closed += (_, _) =>
@@ -44,6 +52,9 @@ public partial class JoinFleetWindow : Window
         ChoicePanel.Visibility = Visibility.Collapsed;
         FindPanel.Visibility = Visibility.Visible;
         BackButton.Visibility = Visibility.Visible;
+        _hosts.Clear();
+        _nothingFound.Restart();
+        ShowSearchState();
         _search.Start();
         await SearchAsync();
     }
@@ -54,12 +65,21 @@ public partial class JoinFleetWindow : Window
         _searching = true;
         try
         {
-            var hosts = await Pairing.FindHostsAsync(TimeSpan.FromSeconds(1.5));
-            HostList.ItemsSource = hosts;
-            SearchingPanel.Visibility = hosts.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+            var found = await Pairing.FindHostsAsync(TimeSpan.FromSeconds(1.5));
+            // The list takes in what differs and keeps the rest, so a row keeps its focus and a click on it is not lost.
+            if (FindPanel.Visibility == Visibility.Visible) _hosts.Update(found);
         }
         catch { }
         finally { _searching = false; }
+        if (FindPanel.Visibility == Visibility.Visible) ShowSearchState();
+    }
+
+    private void ShowSearchState()
+    {
+        var none = _hosts.Items.Count == 0;
+        if (!none) _nothingFound.Restart();
+        SearchingPanel.Visibility = none ? Visibility.Visible : Visibility.Collapsed;
+        NothingFoundPanel.Visibility = none && _nothingFound.Elapsed >= NothingFoundAfter ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private async void Host_Click(object sender, RoutedEventArgs e)
@@ -68,7 +88,7 @@ public partial class JoinFleetWindow : Window
         if (host.IsOutdated)
         {
             DialogWindow.Info(this, "Update Runner Manager first",
-                $"{host.Name} runs an older Runner Manager that can't pair with this one. Update Runner Manager on {host.Name}, then try again.");
+                $"{host.Name} runs an older Runner Manager that cannot pair with this one. Update Runner Manager on {host.Name}, then try again.");
             return;
         }
         await JoinAsync(host.Address, host.Name);
@@ -79,6 +99,20 @@ public partial class JoinFleetWindow : Window
         var address = AddressBox.Text.Trim();
         if (address.Length == 0) return;
         await JoinAsync(address, address);
+    }
+
+    private void AddressBox_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.Enter) return;
+        e.Handled = true;
+        ConnectAddress_Click(sender, e);
+    }
+
+    private void CodeBox_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.Enter) return;
+        e.Handled = true;
+        PasteCode_Click(sender, e);
     }
 
     private void PasteCode_Click(object sender, RoutedEventArgs e)

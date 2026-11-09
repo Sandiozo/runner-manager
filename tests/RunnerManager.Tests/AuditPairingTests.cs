@@ -1,3 +1,4 @@
+using System.Collections.Specialized;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
@@ -374,5 +375,110 @@ public class PairingHostLifetimeTests
         var tcp = new TcpListener(IPAddress.Any, port);
         tcp.Start();
         tcp.Stop();
+    }
+}
+
+/// <summary>The list of PCs in the join window changes only where a search differs from it.</summary>
+public class FoundHostsTests
+{
+    private static Pairing.Host Host(string name, string address = "10.0.0.5:47823") => new(name, address);
+
+    private static List<NotifyCollectionChangedEventArgs> Changes(FoundHosts hosts)
+    {
+        var changes = new List<NotifyCollectionChangedEventArgs>();
+        hosts.Items.CollectionChanged += (_, e) => changes.Add(e);
+        return changes;
+    }
+
+    [Fact]
+    public void TheSameAnswers_ChangeNothing()
+    {
+        var hosts = new FoundHosts();
+        hosts.Update(new[] { Host("B"), Host("A") });
+        var rows = hosts.Items.ToList();
+        var changes = Changes(hosts);
+
+        hosts.Update(new[] { Host("A"), Host("B") });
+
+        Assert.Empty(changes);
+        Assert.Equal(new[] { "A", "B" }, hosts.Items.Select(h => h.Name));
+        // The same rows, so a button keeps its keyboard focus and a click that began before the search still counts.
+        Assert.All(rows, row => Assert.Contains(hosts.Items, item => ReferenceEquals(item, row)));
+    }
+
+    [Fact]
+    public void AHost_StaysThroughMissedAnswers_AndLeavesAfterOneMore()
+    {
+        var hosts = new FoundHosts();
+        hosts.Update(new[] { Host("A"), Host("B") });
+        var changes = Changes(hosts);
+
+        for (var search = 0; search < FoundHosts.MissesAllowed; search++) hosts.Update(new[] { Host("B") });
+        Assert.Empty(changes);
+        Assert.Equal(new[] { "A", "B" }, hosts.Items.Select(h => h.Name));
+
+        hosts.Update(new[] { Host("B") });
+        Assert.Equal(NotifyCollectionChangedAction.Remove, Assert.Single(changes).Action);
+        Assert.Equal(new[] { "B" }, hosts.Items.Select(h => h.Name));
+    }
+
+    [Fact]
+    public void AnAnswer_StartsTheCountOfMissedAnswersAgain()
+    {
+        var hosts = new FoundHosts();
+        hosts.Update(new[] { Host("A") });
+        for (var round = 0; round < 3; round++)
+        {
+            for (var search = 0; search < FoundHosts.MissesAllowed; search++) hosts.Update(Array.Empty<Pairing.Host>());
+            hosts.Update(new[] { Host("A") });
+        }
+        Assert.Single(hosts.Items);
+
+        for (var search = 0; search <= FoundHosts.MissesAllowed; search++) hosts.Update(Array.Empty<Pairing.Host>());
+        Assert.Empty(hosts.Items);
+    }
+
+    [Fact]
+    public void ANewHost_IsAddedInNameOrder_AndTheOtherRowsStay()
+    {
+        var hosts = new FoundHosts();
+        hosts.Update(new[] { Host("A"), Host("C") });
+        var changes = Changes(hosts);
+
+        hosts.Update(new[] { Host("C"), Host("b"), Host("A") });
+
+        var change = Assert.Single(changes);
+        Assert.Equal((NotifyCollectionChangedAction.Add, 1), (change.Action, change.NewStartingIndex));
+        Assert.Equal(new[] { "A", "b", "C" }, hosts.Items.Select(h => h.Name));
+    }
+
+    [Fact]
+    public void AHostThatAnswersFromAnotherAddress_ChangesOnlyItsRow()
+    {
+        var hosts = new FoundHosts();
+        hosts.Update(new[] { Host("A"), Host("B") });
+        var changes = Changes(hosts);
+
+        hosts.Update(new[] { Host("A", "10.0.0.9:47823"), Host("B") });
+
+        var change = Assert.Single(changes);
+        Assert.Equal((NotifyCollectionChangedAction.Replace, 0), (change.Action, change.NewStartingIndex));
+        Assert.Equal("10.0.0.9:47823", hosts.Items[0].Address);
+    }
+
+    [Fact]
+    public void Clear_EmptiesTheList_AndForgetsTheMissedAnswers()
+    {
+        var hosts = new FoundHosts();
+        hosts.Update(new[] { Host("A") });
+        for (var search = 0; search < FoundHosts.MissesAllowed; search++) hosts.Update(Array.Empty<Pairing.Host>());
+
+        hosts.Clear();
+        Assert.Empty(hosts.Items);
+
+        // Found again later, it gets the full count again.
+        hosts.Update(new[] { Host("A") });
+        hosts.Update(Array.Empty<Pairing.Host>());
+        Assert.Single(hosts.Items);
     }
 }
