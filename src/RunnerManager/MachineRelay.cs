@@ -40,8 +40,7 @@ public static class MachineRelay
 
     // Agent-process state
     private static readonly List<AgentEvent> RecentEvents = new();
-    private static readonly HashSet<string> WantRunning = new(StringComparer.OrdinalIgnoreCase);
-    private static readonly Dictionary<string, List<DateTime>> RecoveryAttempts = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly RunnerRecovery Recovery = new();
     private static StatusCache? _status;
     private static volatile bool _restartAgentAfterUpdate;
     /// <summary>How long an update waits for the agent's work to finish before it restarts the agent anyway.</summary>
@@ -855,7 +854,7 @@ public static class MachineRelay
                 case "Stop" when command.Value == "disable":
                     // Step 1 of a move: the runner leaves this PC.
                     await FleetActions.StopForMoveAsync(command.TargetKey);
-                    WantRunning.Remove(command.TargetKey);
+                    Recovery.Forget(command.TargetKey);
                     return "Runner stopped for the move";
                 case "Start" when command.Value == "enable":
                     // The move failed: this copy keeps the runner.
@@ -870,7 +869,7 @@ public static class MachineRelay
                 case "Start" or "Stop" or "Restart":
                     await RunnerService.ControlServiceAsync(command.TargetKey, command.Action);
                     FleetConfig.SetManuallyStopped(command.TargetKey, command.Action == "Stop");
-                    if (command.Action == "Stop") WantRunning.Remove(command.TargetKey);
+                    if (command.Action == "Stop") Recovery.Forget(command.TargetKey);
                     return $"Runner {command.Action.ToLowerInvariant()} completed";
                 default:
                     throw new InvalidOperationException($"Unsupported runner action: {command.Action}");
@@ -938,20 +937,13 @@ public static class MachineRelay
         var acted = false;
         foreach (var runner in local.Runners.Where(r => r.ServiceInstalled))
         {
-            // It runs from a console window: when that closes (sign-out), starting the service would run it twice
-            // at the next sign-in.
-            if (runner.IsInteractive)
-            {
-                WantRunning.Remove(runner.Name);
-                continue;
-            }
-            if (runner.IsRunning)
-            {
-                WantRunning.Add(runner.Name);
-                continue;
-            }
-            if (!config.Watchdog || !WantRunning.Contains(runner.Name) || IsManuallyStopped(runner.Name)) continue;
-            if (!TryUseRecoveryAttempt(runner.Name, $"runner {runner.AgentName}")) continue;
+            // A runner that runs from a console window is left alone: when that closes (sign-out), starting the
+            // service would run it twice at the next sign-in.
+            var step = Recovery.Check(runner.Name, runner.IsInteractive, runner.IsRunning, IsPending(runner),
+                config.Watchdog && !IsManuallyStopped(runner.Name), DateTime.UtcNow);
+            if (step == RunnerRecovery.Step.GiveUp)
+                AddEvent($"Auto-recovery stopped for runner {runner.AgentName} after {RunnerRecovery.MaxAttempts} attempts in one hour", warning: true);
+            if (step != RunnerRecovery.Step.Start) continue;
             try
             {
                 await RunnerService.ControlServiceAsync(runner.Name, "Start");
@@ -964,22 +956,9 @@ public static class MachineRelay
         return acted;
     }
 
-    private static bool TryUseRecoveryAttempt(string key, string label)
-    {
-        if (!RecoveryAttempts.TryGetValue(key, out var attempts)) RecoveryAttempts[key] = attempts = new List<DateTime>();
-        attempts.RemoveAll(t => DateTime.UtcNow - t > TimeSpan.FromHours(1));
-        if (attempts.Count >= 3)
-        {
-            if (attempts.Count == 3)
-            {
-                AddEvent($"Auto-recovery stopped for {label} after 3 attempts in one hour", warning: true);
-                attempts.Add(DateTime.UtcNow); // remember that we already reported it
-            }
-            return false;
-        }
-        attempts.Add(DateTime.UtcNow);
-        return true;
-    }
+    /// <summary>Its service is starting or stopping (Win32_Service.State "Start Pending", "Stop Pending" and so on).</summary>
+    internal static bool IsPending(RunnerInfo runner)
+        => runner.StatusText.EndsWith("Pending", StringComparison.OrdinalIgnoreCase);
 
     private static bool IsManuallyStopped(string key)
         => FleetConfig.Current.ManuallyStopped.Contains(key, StringComparer.OrdinalIgnoreCase);
