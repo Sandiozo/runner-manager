@@ -64,25 +64,56 @@ public static class RunnerActivity
 
     /// <summary>
     /// The file the runner writes the running step's output to. The runner keeps it in _diag\pages until it uploads it
-    /// to GitHub, so it only exists while a step runs.
+    /// to GitHub, so it only exists while a step runs. A hung step's file can be hours old, so there is no age limit.
     /// </summary>
-    internal static string? CurrentOutputFile(string root)
+    /// <param name="notBeforeUtc">When the job's Runner.Worker started: older files are left over from an earlier job.</param>
+    internal static OutputFile? CurrentOutputFile(string root, DateTime? notBeforeUtc = null)
     {
         var folder = Path.Combine(root, "_diag", "pages");
-        if (!Directory.Exists(folder)) return null;
-        return new DirectoryInfo(folder).EnumerateFiles("*.log")
-            .Where(f => DateTime.UtcNow - f.LastWriteTimeUtc < TimeSpan.FromMinutes(30))
-            .OrderByDescending(f => f.LastWriteTimeUtc)
-            .FirstOrDefault()?.FullName;
+        List<string> paths;
+        try { paths = Directory.Exists(folder) ? Directory.EnumerateFiles(folder, "*.log").ToList() : new List<string>(); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return null; }
+        OutputFile? newest = null;
+        foreach (var path in paths)
+        {
+            if (ReadOutputFile(path) is not { } file || (notBeforeUtc is { } notBefore && file.ChangedUtc < notBefore)) continue;
+            if (newest == null || file.ChangedUtc > newest.ChangedUtc) newest = file;
+        }
+        return newest;
+    }
+
+    /// <summary>
+    /// The file's size and times, asked from the file itself: while the runner holds it open, the folder listing keeps
+    /// the size and time it had when it was opened.
+    /// </summary>
+    private static OutputFile? ReadOutputFile(string path)
+    {
+        try
+        {
+            using var handle = File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            var created = File.GetCreationTimeUtc(handle);
+            var written = File.GetLastWriteTimeUtc(handle);
+            return new OutputFile(path, RandomAccess.GetLength(handle), written > created ? written : created);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return null; }
+    }
+
+    /// <param name="ChangedUtc">When the file was last written, or created when that is later (a new page).</param>
+    internal sealed record OutputFile(string Path, long Length, DateTime ChangedUtc)
+    {
+        /// <summary>Changes whenever the runner writes to the file.</summary>
+        public string State => $"{System.IO.Path.GetFileName(Path)}|{Length}|{ChangedUtc.Ticks}";
     }
 
     /// <summary>The last lines of the running step's output, without timestamps and color codes.</summary>
-    internal static string[] ReadOutput(string root, int lines)
+    internal static string[] ReadOutput(string root, int lines) => ReadOutput(root, lines, null);
+
+    private static string[] ReadOutput(string root, int lines, DateTime? notBeforeUtc)
     {
-        var file = CurrentOutputFile(root);
+        var file = CurrentOutputFile(root, notBeforeUtc);
         if (file == null) return Array.Empty<string>();
-        try { return CleanLines(ReadTail(file, 64 * 1024)).TakeLast(lines).ToArray(); }
-        catch (IOException) { return Array.Empty<string>(); }
+        try { return CleanLines(ReadTail(file.Path, 64 * 1024)).TakeLast(lines).ToArray(); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return Array.Empty<string>(); }
     }
 
     private static IEnumerable<string> ReadTail(string path, int maxBytes)
@@ -197,19 +228,11 @@ public static class RunnerActivity
         var job = ReadJobRows(root);
         var worker = job.FirstOrDefault(p => p.Name.Equals("Runner.Worker.exe", StringComparison.OrdinalIgnoreCase));
         if (worker == null) return null;
-        var outputState = string.Empty;
-        if (CurrentOutputFile(root) is { } output)
-        {
-            try
-            {
-                var file = new FileInfo(output);
-                outputState = $"{file.Name}|{file.Length}|{file.LastWriteTimeUtc.Ticks}";
-            }
-            catch (IOException) { }
-        }
+        var workerStarted = ParseStarted(worker.Started);
+        var outputState = CurrentOutputFile(root, OutputNotBefore(workerStarted))?.State ?? string.Empty;
         var times = new Dictionary<string, ulong>();
         foreach (var process in job) times[$"{process.Id}|{process.Started}"] = process.Cpu;
-        return new JobSample(ParseStarted(worker.Started) ?? DateTime.UtcNow, times, outputState);
+        return new JobSample(workerStarted ?? DateTime.UtcNow, times, outputState);
     }
 
     /// <summary>
@@ -284,6 +307,9 @@ public static class RunnerActivity
         var joined = string.Join(' ', parts);
         return joined.Length > 60 ? joined[..57] + "…" : joined;
     }
+
+    /// <summary>Output files written before the job's worker started belong to an earlier job (a minute of slack for clocks).</summary>
+    private static DateTime? OutputNotBefore(DateTime? workerStartedUtc) => workerStartedUtc?.AddMinutes(-1);
 
     private static DateTime? ParseStarted(string dmtf)
     {

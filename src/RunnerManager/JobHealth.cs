@@ -245,11 +245,14 @@ public static class JobWatch
         }
     }
 
-    /// <summary>Progress between two readings: a new process, new output, or CPU use of at least 5% of one core.</summary>
+    /// <summary>
+    /// Progress between two readings: a new process, new output, or CPU use of at least 5% of one core. An output file
+    /// that went away is no progress: it may only have become unreadable.
+    /// </summary>
     internal static bool MadeProgress(IReadOnlyDictionary<string, ulong> before, IReadOnlyDictionary<string, ulong> now,
         string outputBefore, string outputNow, TimeSpan elapsed)
     {
-        if (outputNow != outputBefore) return true;
+        if (outputNow.Length > 0 && outputNow != outputBefore) return true;
         if (now.Keys.Any(k => !before.ContainsKey(k))) return true;
         if (elapsed <= TimeSpan.Zero) return false;
         var used = now.Where(p => before.ContainsKey(p.Key)).Sum(p => (double)(p.Value - Math.Min(p.Value, before[p.Key])));
