@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.IO;
 using System.Windows;
 using System.Windows.Input;
@@ -17,11 +18,14 @@ public partial class PairingHostWindow : Window
     private Pairing.JoinRequest? _current;
     private bool _listening;
     private bool _closed;
-    // Allowed requests whose code is on its way; a PC allowed one way has its own code here until it is saved.
+    // Allowed requests that are not added yet: the code is on its way, or the other PC's user has not confirmed it.
+    // A PC allowed one way has its own code here until it is saved.
     private readonly Dictionary<Pairing.JoinRequest, byte[]?> _sending = new();
+    // Those of them that have their code and ask their user whether the codes match.
+    private readonly List<Pairing.JoinRequest> _confirming = new();
     private readonly List<string> _joined = new();
     private readonly List<string> _managed = new();
-    private readonly List<string> _allowed = new();
+    private readonly List<string> _added = new();
     private readonly List<string> _notAdded = new();
 
     /// <summary>Names of the PCs that joined while the window was open.</summary>
@@ -40,6 +44,8 @@ public partial class PairingHostWindow : Window
 
         _host = new Pairing.PairingHost(pairingKey, Environment.MachineName);
         _host.JoinRequested += request => Dispatcher.Invoke(() => Enqueue(request));
+        _host.Confirming += request => Dispatcher.Invoke(() => OnConfirming(request));
+        // Not posted: a PC that confirms waits until it is saved here, and is told when that fails.
         _host.Joined += request => Dispatcher.Invoke(() => OnJoined(request));
         _expiry.Tick += (_, _) => Close();
         Loaded += async (_, _) =>
@@ -80,10 +86,14 @@ public partial class PairingHostWindow : Window
 
     private void Remove(Pairing.JoinRequest request)
     {
-        // Allowed, but it ended before its code was sent: the other PC left, or the connection broke.
+        _confirming.Remove(request);
+        // Allowed, but it ended before it was added: the other PC left or the connection broke, or its user did not
+        // confirm the codes there.
         if (_sending.Remove(request))
         {
-            _notAdded.Add($"{request.Name} left before it got its code. It was not added.");
+            _notAdded.Add(request.CodeSent
+                ? $"{request.Name} did not confirm the codes. It was not added."
+                : $"{request.Name} left before it got its code. It was not added.");
             ShowResults();
         }
         if (_current == request)
@@ -128,8 +138,17 @@ public partial class PairingHostWindow : Window
         RequestPanel.Visibility = Visibility.Collapsed;
         AllowButton.Visibility = DenyButton.Visibility = Visibility.Collapsed;
         CloseButton.Visibility = CopyCodeButton.Visibility = Visibility.Visible;
+        RestartExpiry();
+    }
+
+    /// <summary>
+    /// The window closes by itself only while nothing goes on. A request on screen keeps it open, and so does a PC
+    /// whose user has not confirmed the codes yet. The time starts again when the last of them is done.
+    /// </summary>
+    private void RestartExpiry()
+    {
         _expiry.Stop();
-        if (_listening && !_closed) _expiry.Start();
+        if (_listening && !_closed && _current == null && _confirming.Count == 0) _expiry.Start();
     }
 
     private void AccessOption_Checked(object sender, RoutedEventArgs e)
@@ -147,9 +166,9 @@ public partial class PairingHostWindow : Window
         if (ManagedAccessOption.IsChecked == true)
         {
             if (!request.CanBeManaged) return;
-            // The PC is saved once it has its code (see OnJoined). Saving replaces a pairing of the same name across
-            // the fleet, so saving first would lose a working pairing whenever the new code does not arrive. Check
-            // now that the settings can be read, so that the PC does not get a code that cannot be saved.
+            // The PC is saved once it has joined (see OnJoined). Saving replaces a pairing of the same name across
+            // the fleet, so saving first would lose a working pairing whenever the new code does not arrive or is not
+            // confirmed. Check now that the settings can be read, so that the PC does not get a code that cannot be saved.
             try { FleetConfig.UpdateIf(_ => false); }
             catch (Exception ex)
             {
@@ -169,21 +188,45 @@ public partial class PairingHostWindow : Window
         Next();
     }
 
-    /// <summary>The PC has its code.</summary>
+    /// <summary>The PC has its code, and asks its user whether the codes match.</summary>
+    private void OnConfirming(Pairing.JoinRequest request)
+    {
+        if (_closed || !_sending.ContainsKey(request)) return;
+        _confirming.Add(request);
+        ShowResults();
+    }
+
+    /// <summary>The PC has its code, and its user has confirmed the codes when the PC can say so.</summary>
     private void OnJoined(Pairing.JoinRequest request)
     {
+        // The window closed with the warning that this PC is not added. The PC waits for the answer, and gets a no.
+        if (_closed && request.Confirms) throw new InvalidOperationException("“Add a PC” is closed.");
+        _confirming.Remove(request);
         if (_sending.Remove(request, out var ownCode) && ownCode != null)
         {
             try { FleetConfig.AddManagedPc(request.Name, FleetNetwork.WithPort(request.Address), ownCode); }
+            catch (Exception ex) when (request.Confirms)
+            {
+                // The PC is told, and drops its code. The dialog comes after that, so that the PC does not wait for it.
+                Dispatcher.BeginInvoke(() =>
+                {
+                    if (!_closed) DialogWindow.Error(this, "Could not save the PC", $"This PC could not save {request.Name}, so it was not added.\n\n{ex.Message}\n\nTry again.");
+                });
+                _notAdded.Add($"{request.Name} was not added. This PC could not save it.");
+                ShowResults();
+                throw;
+            }
             catch (Exception ex)
             {
+                // An older PC has kept its code already.
                 DialogWindow.Error(this, "Could not save the PC",
                     $"{request.Name} has its code, but this PC could not save it, so the fleet cannot manage {request.Name}.\n\n{ex.Message}\n\n" +
                     $"On {request.Name}, open Settings → Fleet and click Disconnect. Then add it again.");
+                ShowResults();
                 return;
             }
             _managed.Add(request.Name);
-            _allowed.Add($"✓  {request.Name} was allowed, managed one way. Its code was {request.Code}.");
+            _added.Add($"✓  {request.Name} is managed one way.");
         }
         else
         {
@@ -191,18 +234,34 @@ public partial class PairingHostWindow : Window
             // Discovery finds it only on the local network, so remember where it joined from (over Tailscale, for example).
             try { MachineRelay.AddKnownPeer(request.Name, request.Address); }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
-            _allowed.Add($"✓  {request.Name} was allowed to join. Its code was {request.Code}.");
+            _added.Add($"✓  {request.Name} joined the fleet.");
         }
         ShowResults();
     }
 
     private void ShowResults()
     {
-        // The codes stay on screen: the other PC asks its user whether the codes match before it accepts its code.
-        JoinedText.Text = string.Join("\n", _allowed);
-        JoinedText.Visibility = JoinedNoteText.Visibility = _allowed.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        // The code stays on screen while the other PC asks its user whether the codes match.
+        ConfirmingText.Text = string.Join("\n", _confirming.Select(r =>
+            $"Waiting for {r.Name} to confirm. On {r.Name}, check that it shows the code {r.Code}, then click “The codes match”. Keep this window open until then."));
+        ConfirmingText.Visibility = _confirming.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        JoinedText.Text = string.Join("\n", _added);
+        JoinedText.Visibility = JoinedNoteText.Visibility = _added.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
         NotAddedText.Text = string.Join("\n", _notAdded);
         NotAddedText.Visibility = _notAdded.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        RestartExpiry();
+    }
+
+    /// <summary>Closing ends the wait for a PC whose user has not confirmed the codes yet, so ask first.</summary>
+    protected override void OnClosing(CancelEventArgs e)
+    {
+        base.OnClosing(e);
+        if (e.Cancel || _confirming.Count == 0) return;
+        var names = string.Join(", ", _confirming.Select(r => r.Name));
+        var message = _confirming.Count == 1
+            ? $"{names} has not confirmed the codes yet. If this window closes now, {names} is not added."
+            : $"These PCs have not confirmed the codes yet: {names}. If this window closes now, they are not added.";
+        if (!DialogWindow.Confirm(this, "Close “Add a PC” now?", message, "Close anyway")) e.Cancel = true;
     }
 
     private void Deny_Click(object sender, RoutedEventArgs e)

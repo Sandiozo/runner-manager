@@ -140,6 +140,7 @@ public partial class JoinFleetWindow : Window
         MismatchText.Visibility = Visibility.Collapsed;
         // Hidden keeps its place: Back and Cancel must not move under the pointer when the button appears.
         ConfirmButton.Visibility = Visibility.Hidden;
+        ConfirmButton.IsEnabled = true;
         var cts = _joinCts = new CancellationTokenSource();
         try
         {
@@ -196,7 +197,12 @@ public partial class JoinFleetWindow : Window
         return answer.Task;
     }
 
-    private void CodesMatch_Click(object sender, RoutedEventArgs e) => _codesMatch?.TrySetResult(true);
+    private void CodesMatch_Click(object sender, RoutedEventArgs e)
+    {
+        // The other PC is told now, and answers before the code is used. One click is enough.
+        ConfirmButton.IsEnabled = false;
+        _codesMatch?.TrySetResult(true);
+    }
 
     private void Back_Click(object sender, RoutedEventArgs e)
     {

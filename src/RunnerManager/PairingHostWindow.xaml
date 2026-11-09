@@ -36,9 +36,11 @@
                 <TextBlock x:Name="ExpiryText" Style="{StaticResource Caption}" FontSize="11" TextWrapping="Wrap" Margin="0,6,0,0"/>
                 <TextBlock x:Name="CopyNoteText" Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,12,0,0" Visibility="Collapsed"
                            Text="The pairing code is copied. A PC that gets this code joins the fleet with full access. To manage a PC one way, let it join through this window instead. Keep the code private, like a password."/>
+                <!-- A PC that has its code and asks its user whether the codes match. -->
+                <TextBlock x:Name="ConfirmingText" TextWrapping="Wrap" Margin="0,12,0,0" LineHeight="20" Visibility="Collapsed"/>
                 <TextBlock x:Name="JoinedText" Foreground="{DynamicResource SuccessBrush}" TextWrapping="Wrap" Margin="0,12,0,0" Visibility="Collapsed"/>
                 <TextBlock x:Name="JoinedNoteText" Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,4,0,0" Visibility="Collapsed"
-                           Text="If the other PC asks whether the codes match, confirm it there. It then appears in the sidebar. Add more PCs, or click Done."/>
+                           Text="A PC that joined appears in the sidebar within a few seconds. Add more PCs, or click Done."/>
                 <TextBlock x:Name="NotAddedText" Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,8,0,0" Visibility="Collapsed"/>
             </StackPanel>
 

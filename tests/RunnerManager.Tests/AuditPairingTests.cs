@@ -27,7 +27,7 @@ public class JoinConfirmationTests
         var key = CommandSigner.NewKey();
         using var host = StartHost(key, request => request.Allow(), out var address);
         var sent = new TaskCompletionSource();
-        host.Joined += _ => sent.TrySetResult();
+        host.Confirming += _ => sent.TrySetResult();
 
         var asked = new TaskCompletionSource<Pairing.JoinOffer>();
         var codesMatch = new TaskCompletionSource<bool>();
@@ -146,8 +146,8 @@ public class SealedAllowTests
                 await hostSide.ConnectAsync(IPAddress.Loopback, hostPort);
                 var joiner = joinerSide.GetStream();
                 var host = hostSide.GetStream();
-                // commit and hello, then reveal and the host's answer.
-                for (var round = 0; round < 2; round++)
+                // commit and hello, then reveal and the host's answer, then confirmed and done.
+                for (var round = 0; round < 3; round++)
                 {
                     await Pairing.WriteAsync(host, change(await Pairing.ReadAsync(joiner, CancellationToken.None, Step)), CancellationToken.None);
                     await Pairing.WriteAsync(joiner, change(await Pairing.ReadAsync(host, CancellationToken.None, Step)), CancellationToken.None);
@@ -240,6 +240,8 @@ public class SealedAllowTests
         var ownKey = CommandSigner.NewKey();
         var seen = new TaskCompletionSource<Pairing.JoinRequest>();
         using var host = StartHost(CommandSigner.NewKey(), request => { seen.TrySetResult(request); request.AllowManaged(ownKey); }, out var port);
+        var joined = new TaskCompletionSource();
+        host.Joined += _ => joined.TrySetResult();
 
         using var client = new TcpClient();
         await client.ConnectAsync(IPAddress.Loopback, port);
@@ -265,6 +267,9 @@ public class SealedAllowTests
         // It opens the code the only way it knows.
         var transferKey = Pairing.TransferKey(SharedSecret(ecdh, Convert.FromBase64String(hello.PublicKey)));
         Assert.Equal(ownKey, FleetCrypto.Open(transferKey, Convert.FromBase64String(allow.Payload), "rw-pair-transfer"));
+        // It keeps the code at once and says nothing more, so the host adds it without waiting.
+        await joined.Task.WaitAsync(Step);
+        Assert.False((await seen.Task).Confirms);
     }
 
     [Fact]
@@ -295,6 +300,8 @@ public class SealedAllowTests
                 {
                     Type = "allow", Name = "OLDHOST", Payload = Convert.ToBase64String(payload), Managed = true
                 }, CancellationToken.None);
+                // It does not wait for "confirmed", and the joiner sends none: the next thing is the end of the connection.
+                Assert.Equal(0, await stream.ReadAsync(new byte[1]).AsTask().WaitAsync(Step));
             });
 
             var result = await Pairing.JoinAsync($"127.0.0.1:{port}", "NEWPC", _ => { }, CancellationToken.None);
@@ -303,6 +310,242 @@ public class SealedAllowTests
             Assert.Equal(ownKey, result.PairingKey);
             Assert.Equal("OLDHOST", result.HostName);
             Assert.True(result.Managed);
+        }
+        finally { listener.Stop(); }
+    }
+}
+
+/// <summary>
+/// The host adds a PC only once that PC says that its user confirmed the codes, and the PC keeps its code only once the
+/// host has answered: both have the pairing, or neither.
+/// </summary>
+public class ConfirmedMessageTests
+{
+    private static readonly TimeSpan Step = TimeSpan.FromSeconds(5);
+    private const Pairing.JoinerFeatures Current =
+        Pairing.JoinerFeatures.SealedAllow | Pairing.JoinerFeatures.CanBeManaged | Pairing.JoinerFeatures.Confirms;
+
+    private static Pairing.PairingHost StartHost(Action<Pairing.JoinRequest> answer, out int port, TimeSpan? confirmTimeout = null)
+    {
+        port = TestPorts.FreeRange(2);
+        var host = new Pairing.PairingHost(CommandSigner.NewKey(), "HOSTPC", port, port + 1) { ConfirmTimeout = confirmTimeout ?? Pairing.ConfirmTimeout };
+        host.JoinRequested += answer;
+        host.Start();
+        return host;
+    }
+
+    /// <summary>A joiner by hand, up to the host's answer: that answer, and the key that both PCs derived.</summary>
+    private static async Task<(Pairing.PairMessage Answer, byte[] TransferKey)> JoinByHandAsync(NetworkStream stream, Pairing.JoinerFeatures features)
+    {
+        using var ecdh = ECDiffieHellman.Create(ECCurve.NamedCurves.nistP256);
+        var myPublic = ecdh.PublicKey.ExportSubjectPublicKeyInfo();
+        var nonce = Pairing.NewNonce(features);
+        await Pairing.WriteAsync(stream, new Pairing.PairMessage
+        {
+            Type = "commit", Version = Pairing.Version, Name = "NEWPC", Commit = Convert.ToBase64String(Pairing.Commitment(myPublic, nonce)), CanBeManaged = true
+        }, CancellationToken.None);
+        var hello = await Pairing.ReadAsync(stream, CancellationToken.None, Step);
+        await Pairing.WriteAsync(stream, new Pairing.PairMessage
+        {
+            Type = "reveal", PublicKey = Convert.ToBase64String(myPublic), Nonce = Convert.ToBase64String(nonce)
+        }, CancellationToken.None);
+        var answer = await Pairing.ReadAsync(stream, CancellationToken.None, Step);
+        return (answer, TransferKey(ecdh, Convert.FromBase64String(hello.PublicKey)));
+    }
+
+    private static byte[] TransferKey(ECDiffieHellman mine, byte[] otherPublic)
+    {
+        using var other = ECDiffieHellman.Create();
+        other.ImportSubjectPublicKeyInfo(otherPublic, out _);
+        return Pairing.TransferKey(mine.DeriveKeyFromHash(other.PublicKey, HashAlgorithmName.SHA256));
+    }
+
+    [Fact]
+    public async Task TheHost_AddsThePc_OnlyAfterItsUserConfirmed()
+    {
+        using var host = StartHost(request => request.Allow(), out var port);
+        var confirming = new TaskCompletionSource<Pairing.JoinRequest>();
+        var joined = new TaskCompletionSource();
+        host.Confirming += request => confirming.TrySetResult(request);
+        host.Joined += _ => joined.TrySetResult();
+        var codesMatch = new TaskCompletionSource<bool>();
+
+        var join = Pairing.JoinAsync($"127.0.0.1:{port}", "NEWPC", _ => { }, _ => codesMatch.Task, CancellationToken.None);
+
+        // The PC has its code and asks its user. The host has not added it.
+        var request = await confirming.Task.WaitAsync(Step);
+        Assert.True(request.Confirms);
+        Assert.True(request.CodeSent);
+        await Task.Delay(200);
+        Assert.False(joined.Task.IsCompleted);
+        Assert.False(request.Ended.IsCompleted);
+
+        codesMatch.SetResult(true);
+        await join.WaitAsync(Step);
+        // The PC got its answer only after the host had added it.
+        Assert.True(joined.Task.IsCompleted);
+        await request.Ended.WaitAsync(Step);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task APcWhoseUserDoesNotConfirm_IsNotAdded(bool leaves)
+    {
+        using var host = StartHost(request => request.Allow(), out var port);
+        var confirming = new TaskCompletionSource<Pairing.JoinRequest>();
+        var joined = false;
+        host.Confirming += request => confirming.TrySetResult(request);
+        host.Joined += _ => joined = true;
+        using var cancel = new CancellationTokenSource();
+        var asked = new TaskCompletionSource();
+        var answer = new TaskCompletionSource<bool>();
+
+        var join = Pairing.JoinAsync($"127.0.0.1:{port}", "NEWPC", _ => { }, _ => { asked.TrySetResult(); return answer.Task; }, cancel.Token);
+        await asked.Task.WaitAsync(Step);
+        // Back, Cancel or a closed window end the join; the question can also be answered with no.
+        if (leaves) cancel.Cancel(); else answer.SetResult(false);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => join.WaitAsync(Step));
+
+        var request = await confirming.Task.WaitAsync(Step);
+        await request.Ended.WaitAsync(Step);
+        Assert.True(request.CodeSent);
+        Assert.False(joined);
+    }
+
+    [Fact]
+    public async Task WhenTheHostStops_TheQuestionEnds_AndTheCodeIsNotUsed()
+    {
+        var host = StartHost(request => request.Allow(), out var port);
+        var joined = false;
+        host.Joined += _ => joined = true;
+        var asked = new TaskCompletionSource();
+        var never = new TaskCompletionSource<bool>();
+
+        var join = Pairing.JoinAsync($"127.0.0.1:{port}", "NEWPC", _ => { }, _ => { asked.TrySetResult(); return never.Task; }, CancellationToken.None);
+        await asked.Task.WaitAsync(Step);
+        // "Add a PC" is closed while the other PC still asks its user.
+        await host.StopAsync();
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => join.WaitAsync(Step));
+        Assert.Contains("HOSTPC closed “Add a PC”", error.Message);
+        Assert.False(joined);
+    }
+
+    [Fact]
+    public async Task WhenTheUserTakesTooLong_TheHostStopsWaiting()
+    {
+        using var host = StartHost(request => request.Allow(), out var port, confirmTimeout: TimeSpan.FromMilliseconds(300));
+        var joined = false;
+        host.Joined += _ => joined = true;
+        var never = new TaskCompletionSource<bool>();
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            Pairing.JoinAsync($"127.0.0.1:{port}", "NEWPC", _ => { }, _ => never.Task, CancellationToken.None).WaitAsync(Step));
+
+        Assert.Contains("did not get the confirmation in time", error.Message);
+        Assert.False(joined);
+    }
+
+    [Fact]
+    public async Task WhenTheHostCannotSaveThePc_ThePcIsTold_AndDropsItsCode()
+    {
+        using var host = StartHost(request => request.Allow(), out var port);
+        host.Joined += _ => throw new IOException("The disk is full.");
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            Pairing.JoinAsync($"127.0.0.1:{port}", "NEWPC", _ => { }, CancellationToken.None).WaitAsync(Step));
+
+        Assert.Contains("HOSTPC could not save this PC", error.Message);
+    }
+
+    [Fact]
+    public async Task ADeviceOnThePath_CannotConfirmForThePc()
+    {
+        using var host = StartHost(request => request.Allow(), out var port);
+        var joined = false;
+        host.Joined += _ => joined = true;
+        using var client = new TcpClient();
+        await client.ConnectAsync(IPAddress.Loopback, port);
+        var stream = client.GetStream();
+
+        var (allow, transferKey) = await JoinByHandAsync(stream, Current);
+        Assert.Equal("allow", allow.Type);
+        // The seal says that the host waits.
+        Assert.NotNull(FleetCrypto.Open(transferKey, Convert.FromBase64String(allow.Payload), Pairing.AllowContext("HOSTPC", managed: false, confirms: true)));
+
+        // The device has seen every message, but not the key that the two PCs derived.
+        await Pairing.WriteAsync(stream, new Pairing.PairMessage
+        {
+            Type = "confirmed", Payload = Pairing.Proof(CommandSigner.NewKey(), Pairing.ConfirmedContext)
+        }, CancellationToken.None);
+
+        var answer = await Pairing.ReadAsync(stream, CancellationToken.None, Step);
+        Assert.Equal("deny", answer.Type);
+        Assert.Contains("pairing check failed", answer.Error);
+        Assert.False(joined);
+    }
+
+    [Fact]
+    public async Task AJoinerThatDoesNotConfirm_IsNotToldThatTheHostWaits()
+    {
+        // A joiner that knows the seal but not "confirmed": the host adds it when it has its code, as before.
+        using var host = StartHost(request => request.Allow(), out var port);
+        var joined = new TaskCompletionSource<Pairing.JoinRequest>();
+        host.Joined += request => joined.TrySetResult(request);
+        using var client = new TcpClient();
+        await client.ConnectAsync(IPAddress.Loopback, port);
+
+        var (allow, transferKey) = await JoinByHandAsync(client.GetStream(), Pairing.JoinerFeatures.SealedAllow | Pairing.JoinerFeatures.CanBeManaged);
+
+        Assert.NotNull(FleetCrypto.Open(transferKey, Convert.FromBase64String(allow.Payload), Pairing.AllowContext("HOSTPC", managed: false)));
+        Assert.False((await joined.Task.WaitAsync(Step)).Confirms);
+    }
+
+    [Theory]
+    [InlineData("done")]
+    [InlineData("forged")]
+    [InlineData("silent")]
+    public async Task ThePc_KeepsItsCode_OnlyWhenTheHostItselfAnswersDone(string answer)
+    {
+        var key = CommandSigner.NewKey();
+        var port = TestPorts.FreeRange(1);
+        var listener = new TcpListener(IPAddress.Loopback, port);
+        listener.Start();
+        try
+        {
+            // A host that waits for "confirmed", by hand.
+            var host = Task.Run(async () =>
+            {
+                using var client = await listener.AcceptTcpClientAsync();
+                var stream = client.GetStream();
+                await Pairing.ReadAsync(stream, CancellationToken.None, Step);
+                using var ecdh = ECDiffieHellman.Create(ECCurve.NamedCurves.nistP256);
+                await Pairing.WriteAsync(stream, new Pairing.PairMessage
+                {
+                    Type = "hello", Version = Pairing.Version, Name = "HOSTPC", PublicKey = Convert.ToBase64String(ecdh.PublicKey.ExportSubjectPublicKeyInfo())
+                }, CancellationToken.None);
+                var reveal = await Pairing.ReadAsync(stream, CancellationToken.None, Step);
+                var transferKey = TransferKey(ecdh, Convert.FromBase64String(reveal.PublicKey));
+                var payload = FleetCrypto.Seal(transferKey, key, Pairing.AllowContext("HOSTPC", managed: false, confirms: true));
+                await Pairing.WriteAsync(stream, new Pairing.PairMessage { Type = "allow", Name = "HOSTPC", Payload = Convert.ToBase64String(payload) }, CancellationToken.None);
+
+                var confirmed = await Pairing.ReadAsync(stream, CancellationToken.None, Step);
+                Assert.Equal("confirmed", confirmed.Type);
+                Assert.NotNull(FleetCrypto.Open(transferKey, Convert.FromBase64String(confirmed.Payload), Pairing.ConfirmedContext));
+                if (answer == "silent") return;
+                // "forged": from a device that has not made the exchange.
+                var proof = Pairing.Proof(answer == "done" ? transferKey : CommandSigner.NewKey(), Pairing.DoneContext);
+                await Pairing.WriteAsync(stream, new Pairing.PairMessage { Type = "done", Payload = proof }, CancellationToken.None);
+                try { await stream.ReadAsync(new byte[1]).AsTask().WaitAsync(Step); }
+                catch (IOException) { }
+            });
+
+            var join = Pairing.JoinAsync($"127.0.0.1:{port}", "NEWPC", _ => { }, CancellationToken.None).WaitAsync(Step);
+            if (answer == "done") Assert.Equal(key, (await join).PairingKey);
+            else if (answer == "forged") await Assert.ThrowsAsync<CryptographicException>(() => join);
+            else Assert.Contains("stopped waiting", (await Assert.ThrowsAsync<InvalidOperationException>(() => join)).Message);
+            await host.WaitAsync(Step);
         }
         finally { listener.Stop(); }
     }
