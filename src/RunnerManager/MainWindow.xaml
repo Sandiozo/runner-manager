@@ -34,7 +34,7 @@
             <Setter Property="Cursor" Value="Hand"/>
             <Setter Property="HorizontalAlignment" Value="Left"/>
             <Setter Property="Foreground" Value="{DynamicResource TextFaintBrush}"/>
-            <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+            <Setter Property="FocusVisualStyle" Value="{StaticResource SubtleFocus}"/>
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="Button">
@@ -89,6 +89,8 @@
         </Style>
         <Style x:Key="RunRow" TargetType="Border">
             <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Focusable" Value="True"/>
+            <Setter Property="FocusVisualStyle" Value="{StaticResource SubtleFocus}"/>
             <Setter Property="CornerRadius" Value="6"/>
             <Setter Property="Padding" Value="6,4"/>
             <Setter Property="Margin" Value="-6,0,0,0"/>
@@ -101,6 +103,8 @@
         </Style>
         <Style x:Key="RunnerRow" TargetType="Border">
             <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Focusable" Value="True"/>
+            <Setter Property="FocusVisualStyle" Value="{StaticResource SubtleFocus}"/>
             <Setter Property="CornerRadius" Value="8"/>
             <Setter Property="Padding" Value="8,5"/>
             <Setter Property="Margin" Value="0,1"/>
@@ -337,6 +341,7 @@
 
                                         <!-- Machine header: click it to collapse or expand the card -->
                                         <Grid Margin="12,9,12,9" Background="Transparent" Cursor="Hand" MouseLeftButtonUp="MachineHeader_Click"
+                                              Focusable="True" FocusVisualStyle="{StaticResource SubtleFocus}" KeyDown="MachineHeader_KeyDown"
                                               ToolTip="Click to show or hide this PC's runners">
                                             <Grid.ColumnDefinitions>
                                                 <ColumnDefinition Width="Auto"/>
@@ -441,7 +446,7 @@
                                                     <ItemsControl ItemsSource="{Binding Runners}">
                                                         <ItemsControl.ItemTemplate>
                                                             <DataTemplate DataType="{x:Type local:MachineRunnerStatus}">
-                                                                <Border Style="{StaticResource RunnerRow}" Visibility="{Binding RowVisibility}" MouseLeftButtonUp="RunnerRow_Click">
+                                                                <Border Style="{StaticResource RunnerRow}" Visibility="{Binding RowVisibility}" MouseLeftButtonUp="RunnerRow_Click" KeyDown="RunnerRow_KeyDown">
                                                                     <Grid>
                                                                         <Grid.RowDefinitions>
                                                                             <RowDefinition Height="Auto"/>
@@ -548,7 +553,8 @@
                                                                                         <TextBlock DockPanel.Dock="Right" Text="{Binding LiveJob.ElapsedText}" Style="{StaticResource Caption}" FontSize="11" VerticalAlignment="Center"/>
                                                                                         <TextBlock Text="CURRENT JOB" Style="{StaticResource SectionLabel}" VerticalAlignment="Center"/>
                                                                                     </DockPanel>
-                                                                                    <TextBlock Text="{Binding LiveJob.Title}" Tag="{Binding LiveJob.Url}" MouseLeftButtonUp="Link_Click" FontWeight="SemiBold"
+                                                                                    <TextBlock Text="{Binding LiveJob.Title}" Tag="{Binding LiveJob.Url}" MouseLeftButtonUp="Link_Click" KeyDown="Link_KeyDown"
+                                                                                               Focusable="True" FocusVisualStyle="{StaticResource SubtleFocus}" FontWeight="SemiBold"
                                                                                                Margin="0,4,0,0" TextTrimming="CharacterEllipsis" Cursor="Hand" ToolTip="Open the job on GitHub"/>
                                                                                     <TextBlock Text="{Binding LiveJob.Note}" Visibility="{Binding LiveJob.NoteVisibility}" Style="{StaticResource Caption}"
                                                                                                FontSize="12" TextWrapping="Wrap" Margin="0,4,0,0"/>
@@ -646,7 +652,7 @@
                                                                                 <ItemsControl ItemsSource="{Binding Queue}" Visibility="{Binding QueueListVisibility}">
                                                                                     <ItemsControl.ItemTemplate>
                                                                                         <DataTemplate DataType="{x:Type local:QueueEntry}">
-                                                                                            <Border Style="{StaticResource RunRow}" Tag="{Binding Url}" MouseLeftButtonUp="Link_Click" ToolTip="Open the job on GitHub">
+                                                                                            <Border Style="{StaticResource RunRow}" Tag="{Binding Url}" MouseLeftButtonUp="Link_Click" KeyDown="Link_KeyDown" ToolTip="Open the job on GitHub">
                                                                                                 <DockPanel>
                                                                                                     <TextBlock FontSize="11" Margin="0,0,10,0" VerticalAlignment="Center">
                                                                                                         <TextBlock.Style>
@@ -682,7 +688,7 @@
                                                                                 <ItemsControl ItemsSource="{Binding RecentRuns}" Visibility="{Binding RecentRunsListVisibility}">
                                                                                     <ItemsControl.ItemTemplate>
                                                                                         <DataTemplate DataType="{x:Type local:WorkflowRunSummary}">
-                                                                                            <Border Style="{StaticResource RunRow}" Tag="{Binding HtmlUrl}" MouseLeftButtonUp="Link_Click" ToolTip="{Binding Title}">
+                                                                                            <Border Style="{StaticResource RunRow}" Tag="{Binding HtmlUrl}" MouseLeftButtonUp="Link_Click" KeyDown="Link_KeyDown" ToolTip="{Binding Title}">
                                                                                                 <DockPanel>
                                                                                                     <!-- Colors come from the theme resources, so they follow theme changes. -->
                                                                                                     <TextBlock Text="{Binding Glyph}" FontSize="11" Margin="0,0,10,0">
@@ -726,7 +732,8 @@
                                                                             <DockPanel Style="{StaticResource KeyRow}">
                                                                                 <TextBlock Text="Repository" Style="{StaticResource KeyText}"/>
                                                                                 <TextBlock Text="{Binding RepositoryText}" Style="{StaticResource Hyperlink}" FontSize="12" HorizontalAlignment="Left"
-                                                                                           Tag="{Binding RepositoryUrl}" MouseLeftButtonUp="Link_Click"/>
+                                                                                           Tag="{Binding RepositoryUrl}" MouseLeftButtonUp="Link_Click" KeyDown="Link_KeyDown"
+                                                                                           Focusable="True" FocusVisualStyle="{StaticResource SubtleFocus}"/>
                                                                             </DockPanel>
                                                                             <DockPanel Style="{StaticResource KeyRow}">
                                                                                 <TextBlock Text="Windows service" Style="{StaticResource KeyText}"/>
@@ -761,13 +768,15 @@
                                                                                 <DockPanel Style="{StaticResource KeyRow}">
                                                                                     <TextBlock Text="Current job" Style="{StaticResource KeyText}"/>
                                                                                     <TextBlock Text="{Binding LocalRunner.CurrentWorkText}" HorizontalAlignment="Left" FontSize="12"
-                                                                                               Tag="{Binding LocalRunner.CurrentJobUrl}" MouseLeftButtonUp="Link_Click">
+                                                                                               Tag="{Binding LocalRunner.CurrentJobUrl}" MouseLeftButtonUp="Link_Click" KeyDown="Link_KeyDown"
+                                                                                               FocusVisualStyle="{StaticResource SubtleFocus}">
                                                                                         <TextBlock.Style>
                                                                                             <Style TargetType="TextBlock" BasedOn="{StaticResource ValueText}">
                                                                                                 <Style.Triggers>
                                                                                                     <DataTrigger Binding="{Binding HasCurrentJob}" Value="True">
                                                                                                         <Setter Property="Foreground" Value="{DynamicResource AccentBrush}"/>
                                                                                                         <Setter Property="Cursor" Value="Hand"/>
+                                                                                                        <Setter Property="Focusable" Value="True"/>
                                                                                                         <Setter Property="TextDecorations" Value="Underline"/>
                                                                                                     </DataTrigger>
                                                                                                 </Style.Triggers>

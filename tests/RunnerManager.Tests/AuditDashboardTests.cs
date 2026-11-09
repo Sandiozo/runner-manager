@@ -554,6 +554,19 @@ public class AuditDashboardTests
         });
     }
 
+    // ----- Item 16: keyboard access -----
+
+    [Fact]
+    public void ClickableElements_CanBeUsedFromTheKeyboard()
+    {
+        var xaml = Xaml("MainWindow.xaml");
+        var clickable = Regex.Matches(xaml, @"<\w+\b[^>]*MouseLeftButtonUp=""[^""]+""[^>]*>");
+        Assert.NotEmpty(clickable);
+        Assert.All(clickable, m => Assert.Contains("KeyDown=", m.Value));
+        // Keyboard focus is always visible.
+        Assert.DoesNotContain(@"<Setter Property=""FocusVisualStyle"" Value=""{x:Null}""/>", xaml);
+    }
+
     // ----- Bug 10: keyboard shortcuts -----
 
     [Theory]

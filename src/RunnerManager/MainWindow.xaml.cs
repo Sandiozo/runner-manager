@@ -1086,7 +1086,36 @@ public partial class MainWindow : Window
                 ? VisualTreeHelper.GetParent(current)
                 : LogicalTreeHelper.GetParent(current);
         }
-        if (ItemFrom<MachineRunnerStatus>(sender) is not { } runner) return;
+        if (ItemFrom<MachineRunnerStatus>(sender) is { } runner) ToggleRunner(runner);
+    }
+
+    // Enter or Space on a focused card header, runner row or link does what a click does.
+    private static bool IsActivation(object sender, KeyEventArgs e)
+        => e.Key is Key.Enter or Key.Space && Keyboard.Modifiers == ModifierKeys.None && ReferenceEquals(e.OriginalSource, sender);
+
+    private void RunnerRow_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (!IsActivation(sender, e) || ItemFrom<MachineRunnerStatus>(sender) is not { } runner) return;
+        ToggleRunner(runner);
+        e.Handled = true;
+    }
+
+    private void MachineHeader_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (!IsActivation(sender, e) || ItemFrom<MachineInfo>(sender) is not { } machine) return;
+        ToggleCollapsed(machine);
+        e.Handled = true;
+    }
+
+    private void Link_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (!IsActivation(sender, e) || sender is not FrameworkElement { Tag: string { Length: > 0 } url }) return;
+        OpenUrl(url);
+        e.Handled = true;
+    }
+
+    private void ToggleRunner(MachineRunnerStatus runner)
+    {
         runner.IsExpanded = !runner.IsExpanded;
         _machineRunnerExpansionStates[RunnerKey(runner)] = runner.IsExpanded;
         // Opening a runner that is running a job shows its output in the bottom panel once it arrives.
@@ -1118,7 +1147,11 @@ public partial class MainWindow : Window
             // The update badge, the ⋯ menu and other buttons keep working without collapsing the card.
             if (current is ButtonBase) return;
         }
-        if (ItemFrom<MachineInfo>(sender) is not { } machine) return;
+        if (ItemFrom<MachineInfo>(sender) is { } machine) ToggleCollapsed(machine);
+    }
+
+    private void ToggleCollapsed(MachineInfo machine)
+    {
         var collapsed = machine.ToggleCollapsed();
         _settings.CollapsedPcs.RemoveAll(n => n.Equals(machine.MachineName, StringComparison.OrdinalIgnoreCase));
         if (collapsed) _settings.CollapsedPcs.Add(machine.MachineName);
