@@ -164,7 +164,13 @@ public static class FleetNetwork
     private const string FirewallRulePrefix = "Runner Manager agent";
     // Local network plus Tailscale's address range, so the agent isn't reachable from the internet at large.
     private const string AllowedRemotes = "localsubnet,100.64.0.0/10";
-    private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(60) };
+    /// <summary>
+    /// How long connecting to a PC may take. A PC that is off then fails sooner than the request's timeout, while there is
+    /// room for a slow first connection over a Tailscale relay and for one lost connection attempt (Windows tries again
+    /// after 3 seconds). Declared before <see cref="Http"/>, which uses it.
+    /// </summary>
+    internal static readonly TimeSpan ConnectTimeout = TimeSpan.FromSeconds(4);
+    private static readonly HttpClient Http = new(CreateHandler()) { Timeout = TimeSpan.FromSeconds(60) };
     private static readonly JsonSerializerOptions Json = new() { PropertyNameCaseInsensitive = true };
     private static readonly TimeSpan HostLookupTimeout = TimeSpan.FromSeconds(1.5);
     private const int MaxRefusalLength = 200;
@@ -189,6 +195,18 @@ public static class FleetNetwork
     }
 
     // ================= Client (dashboard) =================
+
+    /// <summary>
+    /// Requests go straight to the agents, on the local network or Tailscale: a proxy set up in Windows can't reach those
+    /// addresses, and an agent never redirects.
+    /// </summary>
+    internal static SocketsHttpHandler CreateHandler() => new()
+    {
+        UseProxy = false,
+        AllowAutoRedirect = false,
+        UseCookies = false,
+        ConnectTimeout = ConnectTimeout
+    };
 
     public static async Task<FleetResponse> CallAsync(string address, string targetMachineKey, FleetRequest request,
         TimeSpan? timeout = null, CancellationToken cancellationToken = default, byte[]? pairingKey = null)

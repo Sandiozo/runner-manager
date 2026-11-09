@@ -361,6 +361,28 @@ public class PendingCodeTests
     }
 }
 
+public class FleetConnectionTests
+{
+    [Fact]
+    public void Requests_GoStraightToThePc_WithoutAProxyOrRedirects()
+    {
+        using var handler = FleetNetwork.CreateHandler();
+        Assert.False(handler.UseProxy);
+        Assert.False(handler.AllowAutoRedirect);
+        Assert.InRange(handler.ConnectTimeout, TimeSpan.FromSeconds(3.5), TimeSpan.FromSeconds(10));
+    }
+
+    [Fact]
+    public async Task APcThatIsOff_FailsAtTheConnectTimeout_NotAtTheRequestTimeout()
+    {
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        // TEST-NET-1: nothing answers there.
+        await Assert.ThrowsAnyAsync<Exception>(() => FleetNetwork.CallAsync("192.0.2.1:47821", "OFFPC",
+            new FleetRequest { Op = "status" }, TimeSpan.FromSeconds(30), pairingKey: CommandSigner.NewKey()));
+        Assert.True(watch.Elapsed < FleetNetwork.ConnectTimeout + TimeSpan.FromSeconds(4), $"took {watch.Elapsed.TotalSeconds:0.0} s");
+    }
+}
+
 /// <summary>Runs a test with its own fleet.json in the test state folder, and puts back the one before it.</summary>
 internal static class AuditFleetConfig
 {
