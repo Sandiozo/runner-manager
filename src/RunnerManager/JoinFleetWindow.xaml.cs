@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Windows;
 using System.Windows.Threading;
 
@@ -8,6 +9,7 @@ public partial class JoinFleetWindow : Window
 {
     private readonly DispatcherTimer _search = new() { Interval = TimeSpan.FromSeconds(3) };
     private CancellationTokenSource? _joinCts;
+    private TaskCompletionSource<bool>? _codesMatch;
     private bool _searching;
 
     public bool StartNewFleet { get; private set; }
@@ -100,6 +102,10 @@ public partial class JoinFleetWindow : Window
         ConfirmText.Text = $"Connecting to {label}…";
         CodeText.Text = "··· ···";
         WaitText.Text = string.Empty;
+        JoinProgress.Visibility = WaitText.Visibility = Visibility.Visible;
+        MismatchText.Visibility = Visibility.Collapsed;
+        // Hidden keeps its place: Back and Cancel must not move under the pointer when the button appears.
+        ConfirmButton.Visibility = Visibility.Hidden;
         var cts = _joinCts = new CancellationTokenSource();
         try
         {
@@ -108,7 +114,13 @@ public partial class JoinFleetWindow : Window
                 CodeText.Text = code;
                 ConfirmText.Text = $"Check that {label} shows the same 6-digit code. Then click Allow on {label}.";
                 WaitText.Text = $"Waiting for {label}…";
-            }), cts.Token);
+            }), offer => Dispatcher.Invoke(() => AskCodesMatch(label, offer, cts)), cts.Token);
+            // Closed or left in the moment the answer arrived: the code is not used.
+            if (cts.IsCancellationRequested)
+            {
+                CryptographicOperations.ZeroMemory(result.PairingKey);
+                return;
+            }
             PairingKey = result.PairingKey;
             HostName = result.HostName;
             HostAddress = result.HostAddress;
@@ -129,14 +141,39 @@ public partial class JoinFleetWindow : Window
         }
     }
 
+    /// <summary>
+    /// The other PC has allowed this PC and sent a code. Whoever answered under that PC's name could do that by itself,
+    /// so the code is used only once the user says here that both PCs showed the same number.
+    /// </summary>
+    private Task<bool> AskCodesMatch(string label, Pairing.JoinOffer offer, CancellationTokenSource cts)
+    {
+        // Back was clicked in the moment the answer arrived: the page has already changed.
+        if (cts.IsCancellationRequested) return Task.FromResult(false);
+        var answer = _codesMatch = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        HeadingText.Text = "Do the codes match?";
+        var allowed = offer.Managed
+            ? $"{label} allowed this PC and will manage it one way. The fleet can view and control this PC. This PC cannot see the PCs of the fleet."
+            : $"{label} allowed this PC to join the fleet.";
+        ConfirmText.Text = $"{allowed} Click “The codes match” only if {label} showed the same code.";
+        MismatchText.Text = $"If {label} showed another code, or did not ask about this PC, click Cancel. Another device may have answered in its place.";
+        JoinProgress.Visibility = WaitText.Visibility = Visibility.Collapsed;
+        MismatchText.Visibility = Visibility.Visible;
+        ConfirmButton.Visibility = Visibility.Visible;
+        return answer.Task;
+    }
+
+    private void CodesMatch_Click(object sender, RoutedEventArgs e) => _codesMatch?.TrySetResult(true);
+
     private void Back_Click(object sender, RoutedEventArgs e)
     {
+        // Also discards a code that waits for "The codes match".
         _joinCts?.Cancel();
+        _codesMatch = null;
         _search.Stop();
         HeadingText.Text = "Set up a fleet";
         ChoicePanel.Visibility = Visibility.Visible;
         FindPanel.Visibility = ConfirmPanel.Visibility = Visibility.Collapsed;
-        BackButton.Visibility = Visibility.Collapsed;
+        BackButton.Visibility = ConfirmButton.Visibility = Visibility.Collapsed;
     }
 
     private void OtherWays_Click(object sender, RoutedEventArgs e)

@@ -34,6 +34,8 @@
                 </TextBlock>
                 <TextBlock x:Name="AddressText" Style="{StaticResource Caption}" FontSize="11" TextWrapping="Wrap" Margin="0,10,0,0"/>
                 <TextBlock x:Name="JoinedText" Foreground="{DynamicResource SuccessBrush}" TextWrapping="Wrap" Margin="0,12,0,0" Visibility="Collapsed"/>
+                <TextBlock x:Name="JoinedNoteText" Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,4,0,0" Visibility="Collapsed"
+                           Text="If the other PC asks whether the codes match, confirm it there. It then appears in the sidebar. Add more PCs, or click Done."/>
             </StackPanel>
 
             <!-- Request -->

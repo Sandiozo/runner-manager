@@ -122,14 +122,19 @@
                         CornerRadius="10" Padding="16,14" Margin="0,14,0,0">
                     <TextBlock x:Name="CodeText" Text="··· ···" FontSize="36" FontWeight="SemiBold" FontFamily="{StaticResource MonoFont}" HorizontalAlignment="Center"/>
                 </Border>
-                <ProgressBar Style="{StaticResource ThinProgress}" IsIndeterminate="True" Margin="0,14,0,0"/>
+                <ProgressBar x:Name="JoinProgress" Style="{StaticResource ThinProgress}" IsIndeterminate="True" Margin="0,14,0,0"/>
                 <TextBlock x:Name="WaitText" Style="{StaticResource Caption}" Margin="0,8,0,0" TextWrapping="Wrap"/>
+                <!-- Shown once the other PC has allowed: what to do when the codes differ. -->
+                <TextBlock x:Name="MismatchText" TextWrapping="Wrap" Margin="0,14,0,0" LineHeight="20" Visibility="Collapsed"/>
             </StackPanel>
         </StackPanel>
         <Border Grid.Row="1" Background="{DynamicResource Bg0Brush}" BorderBrush="{DynamicResource BorderSubtleBrush}" BorderThickness="0,1,0,0" Padding="28,14">
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
                 <Button x:Name="BackButton" Content="Back" Style="{StaticResource GhostButton}" Click="Back_Click" MinWidth="80" Visibility="Collapsed"/>
                 <Button Content="Cancel" Style="{StaticResource GhostButton}" IsCancel="True" MinWidth="88" Margin="8,0,0,0"/>
+                <!-- Not the default button, and never focused by code: a stray Enter must not accept a code. -->
+                <Button x:Name="ConfirmButton" Content="The codes match" Style="{StaticResource PrimaryButton}" Click="CodesMatch_Click"
+                        MinWidth="130" Margin="8,0,0,0" Visibility="Collapsed"/>
             </StackPanel>
         </Border>
     </Grid>

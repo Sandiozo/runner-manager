@@ -10,8 +10,9 @@ namespace RunnerManager;
 /// <summary>
 /// Bluetooth-style pairing. A PC already in the fleet "hosts" pairing for a few minutes; a new PC finds it on the
 /// network, both run an ECDH key exchange and show the same 6-digit number, and once the user clicks Allow on the host
-/// the fleet pairing code is sent across encrypted with the exchanged key. A passive listener learns nothing, and a
-/// man in the middle would show different numbers on the two screens.
+/// the fleet pairing code is sent across encrypted with the exchanged key. The new PC accepts the code only after its
+/// user has confirmed the number too. A passive listener learns nothing, and a man in the middle would show different
+/// numbers on the two screens.
 /// </summary>
 /// <remarks>
 /// As in Bluetooth numeric comparison, the joiner first sends only a hash of its public key and a random nonce, then
@@ -46,6 +47,9 @@ public static class Pairing
     /// can be managed by the fleet but can't reach its PCs.
     /// </param>
     public sealed record JoinResult(byte[] PairingKey, string HostName, string HostAddress, bool Managed = false);
+
+    /// <summary>What a host has allowed, shown to the user of this PC before the code is accepted. It does not hold the code.</summary>
+    public sealed record JoinOffer(string HostName, bool Managed);
 
     /// <summary>The 6-digit number both PCs show; derived from the exchanged secret and both public keys.</summary>
     public static string ComparisonCode(byte[] sharedSecret, byte[] hostPublicKey, byte[] joinerPublicKey)
@@ -112,9 +116,38 @@ public static class Pairing
 
     /// <summary>
     /// Connects to a hosting PC, shows the comparison code through <paramref name="showCode"/>, and waits for the
-    /// user to allow the join on the host. Returns the fleet's pairing code.
+    /// user to allow the join on the host and then for <paramref name="confirm"/>: the user of this PC saying that both
+    /// PCs show the same code. Returns the fleet's pairing code, or this PC's own code when it is managed one way.
     /// </summary>
-    public static async Task<JoinResult> JoinAsync(string address, string myName, Action<string> showCode, CancellationToken cancellationToken)
+    /// <remarks>
+    /// Hosts are found by unauthenticated UDP, so the PC that answered may not be the one the user means, and that PC
+    /// alone decides when to allow. Without the confirmation here, any device on the network could hand this PC a code
+    /// of its choice.
+    /// </remarks>
+    public static async Task<JoinResult> JoinAsync(string address, string myName, Action<string> showCode,
+        Func<JoinOffer, Task<bool>> confirm, CancellationToken cancellationToken)
+    {
+        var result = await ExchangeAsync(address, myName, showCode, cancellationToken);
+        try
+        {
+            if (!await confirm(new JoinOffer(result.HostName, result.Managed)).WaitAsync(cancellationToken))
+                throw new OperationCanceledException("The codes were not confirmed on this PC.");
+            cancellationToken.ThrowIfCancellationRequested();
+            return result;
+        }
+        catch
+        {
+            // Not confirmed: the code must not stay around.
+            CryptographicOperations.ZeroMemory(result.PairingKey);
+            throw;
+        }
+    }
+
+    /// <summary>The exchange without the confirmation on this PC, for tests of the exchange itself.</summary>
+    internal static Task<JoinResult> JoinAsync(string address, string myName, Action<string> showCode, CancellationToken cancellationToken)
+        => ExchangeAsync(address, myName, showCode, cancellationToken);
+
+    private static async Task<JoinResult> ExchangeAsync(string address, string myName, Action<string> showCode, CancellationToken cancellationToken)
     {
         var (host, typedPort) = FleetNetwork.SplitHostPort(address);
         using var tcp = new TcpClient();

@@ -14,6 +14,7 @@ public partial class PairingHostWindow : Window
     private bool _closed;
     private readonly List<string> _joined = new();
     private readonly List<string> _managed = new();
+    private readonly List<string> _allowed = new();
 
     /// <summary>Names of the PCs that joined while the window was open.</summary>
     public IReadOnlyList<string> JoinedPcs => _joined;
@@ -39,9 +40,12 @@ public partial class PairingHostWindow : Window
                 try { MachineRelay.AddKnownPeer(request.Name, request.Address); }
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
             }
-            var added = _joined.Select(n => $"{n} joined").Concat(_managed.Select(n => $"{n} is managed one way"));
-            JoinedText.Text = $"✓  {string.Join(". ", added)}. It appears in the sidebar within a few seconds. Add more PCs, or click Done.";
-            JoinedText.Visibility = Visibility.Visible;
+            // The code stays on screen: the other PC asks its user whether the codes match before it accepts the code.
+            _allowed.Add(_managed.Contains(request.Name)
+                ? $"✓  {request.Name} was allowed, managed one way. Its code was {request.Code}."
+                : $"✓  {request.Name} was allowed to join. Its code was {request.Code}.");
+            JoinedText.Text = string.Join("\n", _allowed);
+            JoinedText.Visibility = JoinedNoteText.Visibility = Visibility.Visible;
         });
         _expiry.Tick += (_, _) => Close();
         Loaded += async (_, _) =>
