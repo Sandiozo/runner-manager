@@ -94,6 +94,11 @@ public partial class MainWindow : Window
 
     public void ReportError(string message)
     {
+        if (!Dispatcher.CheckAccess())
+        {
+            Dispatcher.BeginInvoke(() => ReportError(message));
+            return;
+        }
         AddActivity($"Error: {message}");
         DialogWindow.Error(this, "An error occurred", message);
     }
@@ -728,16 +733,13 @@ public partial class MainWindow : Window
         }
         _operationRunning = true;
         _operationTitle = title;
+        var operationId = ++_operationId;
         SetStatus($"{title}…", StatusKind.Busy);
         var succeeded = false;
         try
         {
             AddActivity($"{title} started.");
-            await operation(message =>
-            {
-                AddActivity(message);
-                SetStatus($"{title}: {message}", StatusKind.Busy);
-            });
+            await operation(OperationLog(title, operationId));
             succeeded = true;
             AddActivity($"{title} completed.");
             if (!IsActive && _settings.Notifications) _tray?.Notify("Runner Manager", $"{title} completed.");
@@ -754,6 +756,27 @@ public partial class MainWindow : Window
             await RefreshAsync(forceAuthCheck: true);
         }
         return succeeded;
+    }
+
+    private int _operationId;
+
+    /// <summary>
+    /// What an operation logs to: the activity list and the status bar. Operations log from background threads
+    /// (Task.Run), where touching the window throws and would stop the operation halfway, for example after a runner was
+    /// unregistered but before its files were deleted. So the messages go to the window's thread.
+    /// </summary>
+    internal Action<string> OperationLog(string title, int operationId) => message => OnUiThread(() =>
+    {
+        AddActivity(message);
+        // A late message must not turn the status bar back to busy after the operation ended.
+        if (_operationRunning && _operationId == operationId) SetStatus($"{title}: {message}", StatusKind.Busy);
+    });
+
+    /// <summary>Runs window work now when on the window's thread, or queues it there from any other thread.</summary>
+    private void OnUiThread(Action action)
+    {
+        if (Dispatcher.CheckAccess()) action();
+        else Dispatcher.BeginInvoke(action);
     }
 
     private enum StatusKind { Ok, Busy, Warning, Error }
@@ -1232,7 +1255,8 @@ public partial class MainWindow : Window
     {
         if (!Dispatcher.CheckAccess())
         {
-            Dispatcher.Invoke(() => AddActivity(message));
+            // Queued, not waited for: a background step must not wait for a busy window.
+            Dispatcher.BeginInvoke(() => AddActivity(message));
             return;
         }
         ActivityLog.Insert(0, new ActivityEntry { Message = message, Kind = ActivityEntry.Classify(message) });

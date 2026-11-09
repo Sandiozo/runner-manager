@@ -35,6 +35,12 @@ internal static class WpfTestApp
         return result;
     }
 
+    /// <summary>Lets the app thread run what was queued on it (Run itself would go first, at Send priority).</summary>
+    public static void Flush() => AppDispatcher.Value.Invoke(() => { }, DispatcherPriority.ContextIdle);
+
+    /// <summary>The last exception that escaped work queued on the app thread (it is caught, so the test run goes on).</summary>
+    public static Exception? UnhandledError { get; set; }
+
     public static ResourceDictionary Load(string name)
         => new() { Source = new Uri($"pack://application:,,,/RunnerManager;component/Themes/{name}") };
 
@@ -74,6 +80,11 @@ internal static class WpfTestApp
 
     private static void AddTheme(Application app)
     {
+        app.Dispatcher.UnhandledException += (_, e) =>
+        {
+            UnhandledError = e.Exception;
+            e.Handled = true;
+        };
         if (app.Resources.MergedDictionaries.Count > 0) return;
         app.Resources.MergedDictionaries.Add(Load("Colors.Dark.xaml"));
         app.Resources.MergedDictionaries.Add(Load("Theme.xaml"));
@@ -105,6 +116,28 @@ internal static class WpfTestApp
 
 public class AuditDashboardTests
 {
+    // ================= The dashboard window =================
+
+    /// <summary>A dashboard that is not shown: it loads its XAML (every StaticResource must exist) but starts nothing.</summary>
+    private static MainWindow NewDashboard() => WpfTestApp.Run(() => new MainWindow());
+
+    [Fact]
+    public async Task OperationLog_WorksFromABackgroundThread()
+    {
+        var window = NewDashboard();
+        WpfTestApp.UnhandledError = null;
+        var log = WpfTestApp.Run(() => window.OperationLog("Delete runner", operationId: 1));
+        await Task.Run(() => log("Deleting the runner's files…"));
+        WpfTestApp.Flush();
+        Assert.Null(WpfTestApp.UnhandledError);
+        WpfTestApp.Run(() =>
+        {
+            Assert.Equal("Deleting the runner's files…", window.ActivityLog[0].Message);
+            // No operation runs any more, so a late message leaves the status bar alone.
+            Assert.DoesNotContain("Deleting", window.StatusText.Text);
+        });
+    }
+
     // ================= Theme: control text colors =================
 
     private static TextBlock TextIn(FrameworkElement control, string text)
