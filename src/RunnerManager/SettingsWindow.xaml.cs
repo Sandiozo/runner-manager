@@ -14,12 +14,14 @@ public partial class SettingsWindow : Window
     private readonly AppSettings _settings;
     private readonly Action _settingsChanged;
     private readonly Func<Task> _fleetChanged;
-    private readonly Func<string, Func<Action<string>, Task>, Task> _runOperation;
+    /// <summary>The dashboard's RunOperationAsync: false when the operation failed (it shows the error) or was skipped.</summary>
+    private readonly Func<string, Func<Action<string>, Task>, Task<bool>> _runOperation;
+    /// <summary>Set while the constructor sets the controls, so their events do not save what was just read.</summary>
     private bool _loading = true;
     private ReleaseInfo? _release;
 
     public SettingsWindow(AppSettings settings, Action settingsChanged, Func<Task> fleetChanged,
-        Func<string, Func<Action<string>, Task>, Task> runOperation)
+        Func<string, Func<Action<string>, Task>, Task<bool>> runOperation)
     {
         InitializeComponent();
         WindowTheme.Apply(this);
@@ -46,12 +48,48 @@ public partial class SettingsWindow : Window
         BuildAssistantClients();
         UpdateAssistants();
         ShowPage(_lastPage);
+        // Only the controls set above are read; Start with Windows waits for schtasks below, so the others work meanwhile.
+        _loading = false;
+        StartupToggle.IsEnabled = false;
         Loaded += async (_, _) =>
         {
-            StartupToggle.IsChecked = await ScheduledTasks.ExistsAsync(ScheduledTasks.DashboardTaskName);
-            _loading = false;
+            await ReadStartupTaskAsync();
             await CheckForUpdatesAsync(force: false);
         };
+    }
+
+    private async Task ReadStartupTaskAsync()
+    {
+        try
+        {
+            StartupToggle.IsChecked = await ScheduledTasks.ExistsAsync(ScheduledTasks.DashboardTaskName);
+            StartupRow.Description = StartupDescription;
+        }
+        catch (Exception ex)
+        {
+            StartupRow.Description = $"Could not read the startup task: {ex.Message}";
+        }
+        finally { StartupToggle.IsEnabled = true; }
+    }
+
+    private const string StartupDescription = "Opens in the notification area when you sign in.";
+
+    /// <summary>
+    /// Runs an operation through the dashboard, one at a time on this PC. The dashboard shows a failure itself; an
+    /// operation skipped because another one is running is reported here, or the click would seem to do nothing.
+    /// </summary>
+    private async Task<bool> RunOperationAsync(string title, Func<Action<string>, Task> operation)
+    {
+        var started = false;
+        var succeeded = await _runOperation(title, log =>
+        {
+            started = true;
+            return operation(log);
+        });
+        if (!started)
+            DialogWindow.Info(this, "Another operation is running",
+                $"“{title}” did not start. Try again when the current operation is done. Its progress is shown in the activity list.");
+        return succeeded;
     }
 
     // ----- Navigation -----
@@ -276,9 +314,16 @@ public partial class SettingsWindow : Window
         await _fleetChanged();
     }
 
-    private sealed record PeerRow(string Name, string Detail, bool Managed)
+    private sealed record PeerRow(string Name, string Address, string Detail, bool Managed)
     {
         public string Action => Managed ? "Stop managing" : "Forget";
+        public string ActionName => $"{Action} {Name}";
+    }
+
+    /// <summary>An address added in Settings, with what the last fleet refresh found there.</summary>
+    private sealed record AddressRow(string Address, string Status)
+    {
+        public string RemoveName => $"Remove {Address}";
     }
 
     private static string LastSeen(DateTime utc) => utc == DateTime.MinValue ? "never" : utc.ToLocalTime().ToString("g");
@@ -286,12 +331,17 @@ public partial class SettingsWindow : Window
     private void RefreshPeers()
     {
         var config = FleetConfig.Current;
-        var peers = config.KnownPeers.Select(p => new PeerRow(p.Name, $"{p.Address}  ·  last seen {LastSeen(p.LastSeenUtc)}", false))
-            .Concat(config.ManagedPcs.Select(p => new PeerRow(p.Name, $"Managed one way  ·  {p.Address}  ·  last seen {LastSeen(p.LastSeenUtc)}", true)))
+        var peers = config.KnownPeers.Select(p => new PeerRow(p.Name, p.Address, $"{p.Address}  ·  last seen {LastSeen(p.LastSeenUtc)}", false))
+            .Concat(config.ManagedPcs.Select(p => new PeerRow(p.Name, p.Address, $"Managed one way  ·  {p.Address}  ·  last seen {LastSeen(p.LastSeenUtc)}", true)))
             .OrderBy(p => p.Name, StringComparer.OrdinalIgnoreCase).ToList();
         PeersList.ItemsSource = peers;
         PeersEmptyPanel.Visibility = peers.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-        AddressList.ItemsSource = config.ManualAddresses.ToList();
+        // The dashboard lists an address where no PC answered as a placeholder, with the reason.
+        var machines = (Owner as MainWindow)?.Machines.ToList() ?? new List<MachineInfo>();
+        AddressList.ItemsSource = config.ManualAddresses
+            .Select(a => new AddressRow(a, FleetAddressRules.Status(a, config.KnownPeers,
+                machines.FirstOrDefault(m => m.MachineKey == "ADDR_" + MachineRelay.Sanitize(a))?.ConnectionProblem, LastSeen)))
+            .ToList();
         ThisPcAddressText.Text = $"This PC: {Environment.MachineName}  ·  {string.Join(", ", FleetNetwork.LocalAddresses())}  ·  port {FleetNetwork.AgentPort}";
     }
 
@@ -314,24 +364,34 @@ public partial class SettingsWindow : Window
     private async void AddAddress_Click(object sender, RoutedEventArgs e)
     {
         var address = AddressBox.Text.Trim();
-        if (address.Length == 0 || address.Contains(' ') || address.Contains('/'))
+        if (FleetAddressRules.Problem(address, Environment.MachineName, FleetNetwork.LocalAddresses()) is { } problem)
         {
-            DialogWindow.Info(this, "Invalid address", "Enter a PC name, Tailscale name or IP address, with an optional :port.");
+            DialogWindow.Info(this, "Check the address", problem);
+            AddressBox.Focus();
             return;
         }
-        FleetConfig.Update(c =>
+        if (FleetConfig.Current.ManualAddresses.Contains(address, StringComparer.OrdinalIgnoreCase))
         {
-            if (!c.ManualAddresses.Contains(address, StringComparer.OrdinalIgnoreCase)) c.ManualAddresses.Add(address);
-        });
+            DialogWindow.Info(this, "Address already added", $"{address} is already in the list below.");
+            return;
+        }
+        FleetConfig.Update(c => c.ManualAddresses.Add(address));
         AddressBox.Clear();
         RefreshPeers();
         await _fleetChanged();
         RefreshPeers();
     }
 
+    private void AddressBox_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.Enter) return;
+        e.Handled = true;
+        AddAddress_Click(sender, e);
+    }
+
     private async void RemoveAddress_Click(object sender, RoutedEventArgs e)
     {
-        if (sender is not FrameworkElement { Tag: string address }) return;
+        if (sender is not FrameworkElement { Tag: AddressRow { Address: var address } }) return;
         FleetConfig.Update(c => c.ManualAddresses.RemoveAll(a => a.Equals(address, StringComparison.OrdinalIgnoreCase)));
         RefreshPeers();
         await _fleetChanged();
@@ -346,7 +406,11 @@ public partial class SettingsWindow : Window
         }
         else
         {
-            MachineRelay.ForgetPeer(peer.Name);
+            // As on the dashboard: ask first, and drop the address the PC was added by, or the next refresh finds it again.
+            var machine = (Owner as MainWindow)?.Machines.FirstOrDefault(m => !m.IsLocal && m.MachineKey == MachineRelay.Sanitize(peer.Name));
+            if (!DialogWindow.Confirm(this, ForgetPc.Heading(peer.Name), ForgetPc.Message(peer.Name, machine?.IsOnline == true), "Forget")) return;
+            ForgetPc.Forget(peer.Name, peer.Address, machine?.Address ?? string.Empty);
+            RefreshPeers();
             await _fleetChanged();
         }
         RefreshPeers();
@@ -395,21 +459,12 @@ public partial class SettingsWindow : Window
         }
         if (ChooseFleetCodePcs(pcs) is not { } choice) return;
 
+        // A failure is shown by the dashboard, with the operation's title.
         MachineRelay.FleetCodeChange? result = null;
-        Exception? failure = null;
-        await _runOperation("Change fleet code", async log =>
-        {
-            try { result = await MachineRelay.ChangeFleetCodeAsync(choice.Keep, choice.LeaveOut, log); }
-            catch (Exception ex)
-            {
-                failure = ex;
-                throw;
-            }
-        });
+        await RunOperationAsync("Change fleet code", async log => result = await MachineRelay.ChangeFleetCodeAsync(choice.Keep, choice.LeaveOut, log));
         UpdateKeyStatus();
         RefreshPeers();
         await _fleetChanged();
-        if (failure != null) DialogWindow.Error(this, "Could not change the fleet code", failure.Message);
         if (result == null) return;
 
         var lines = new List<string>();
@@ -559,14 +614,12 @@ public partial class SettingsWindow : Window
         if (enable && (FleetConfig.Current.FleetKey == null || !await MachineRelay.IsAgentRunningAsync()))
         {
             // Assistants hand their changes to this PC's fleet agent, which needs a pairing code even with only this PC.
-            var ready = false;
-            await _runOperation("Turn on AI assistants", async log =>
+            var ready = await RunOperationAsync("Turn on AI assistants", async log =>
             {
                 if (FleetConfig.Current.FleetKey == null) FleetConfig.SetFleetKey(CommandSigner.NewKey());
                 await AppUpdater.InstallCurrentBuildAsync(log);
                 log("Starting the fleet agent…");
                 await MachineRelay.InstallAndStartAgentTaskAsync();
-                ready = true;
             });
             UpdateKeyStatus();
             if (!ready)
@@ -649,14 +702,9 @@ public partial class SettingsWindow : Window
             DialogWindow.Info(this, "The fleet agent is being updated", "Try again when it is done. Progress is shown in the activity list.");
             return;
         }
-        var installed = false;
         var restartAgent = false;
-        await _runOperation($"Install Runner Manager {release.Tag}", async log =>
-        {
-            restartAgent = await AppUpdater.InstallReleaseAsync(release, log);
-            installed = true;
-        });
-        if (!installed) return;
+        if (!await RunOperationAsync($"Install Runner Manager {release.Tag}", async log => restartAgent = await AppUpdater.InstallReleaseAsync(release, log)))
+            return;
         if (restartAgent)
         {
             if (Owner is MainWindow main) main.RestartLocalAgentInBackground();

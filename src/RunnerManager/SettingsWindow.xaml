@@ -141,7 +141,7 @@
                     <TextBlock Text="STARTUP" Style="{StaticResource GroupLabel}"/>
                     <Border Style="{StaticResource Group}">
                         <StackPanel>
-                            <local:SettingRow Glyph="&#xE7E8;" Title="Start with Windows" Description="Opens in the notification area when you sign in.">
+                            <local:SettingRow x:Name="StartupRow" Glyph="&#xE7E8;" Title="Start with Windows" Description="Opens in the notification area when you sign in.">
                                 <CheckBox x:Name="StartupToggle" Style="{StaticResource ToggleSwitch}" AutomationProperties.Name="Start with Windows" Click="StartupToggle_Click"/>
                             </local:SettingRow>
                             <Border Style="{StaticResource Divider}"/>
@@ -241,18 +241,19 @@
                                         <StackPanel>
                                             <local:SettingRow Glyph="&#xE7F8;" Title="{Binding Name}" Description="{Binding Detail}">
                                                 <Button Content="{Binding Action}" Style="{StaticResource GhostButton}" Padding="8,2" FontSize="12"
-                                                        Tag="{Binding}" Click="ForgetPeer_Click"/>
+                                                        AutomationProperties.Name="{Binding ActionName}" Tag="{Binding}" Click="ForgetPeer_Click"/>
                                             </local:SettingRow>
                                             <Border Style="{StaticResource Divider}"/>
                                         </StackPanel>
                                     </DataTemplate>
                                 </ItemsControl.ItemTemplate>
                             </ItemsControl>
-                            <local:SettingRow Glyph="&#xE774;" Title="Add a PC by address"
-                                              Description="For PCs on another network.">
+                            <local:SettingRow Glyph="&#xE774;" Title="Look for a paired PC at an address"
+                                              Description="For a PC in this fleet on another network, for example over Tailscale. This does not pair a PC: to add a new one, use “Add a PC” on the dashboard.">
                                 <StackPanel Orientation="Horizontal">
-                                    <TextBox x:Name="AddressBox" Tag="Tailscale name or IP" Width="180"/>
-                                    <Button Content="Add" Margin="6,0,0,0" Click="AddAddress_Click"/>
+                                    <TextBox x:Name="AddressBox" Tag="Tailscale name or IPv4" Width="180" KeyDown="AddressBox_KeyDown"
+                                             AutomationProperties.Name="Address of a paired PC" AutomationProperties.HelpText="Tailscale name or IPv4 address, with an optional :port"/>
+                                    <Button Content="Add" Margin="6,0,0,0" Click="AddAddress_Click" AutomationProperties.Name="Add address"/>
                                 </StackPanel>
                             </local:SettingRow>
                             <ItemsControl x:Name="AddressList" Margin="46,0,14,0">
@@ -260,8 +261,11 @@
                                     <DataTemplate>
                                         <DockPanel Margin="0,0,0,8">
                                             <Button DockPanel.Dock="Right" Content="Remove" Style="{StaticResource GhostButton}" Padding="8,2" FontSize="12"
-                                                    Tag="{Binding}" Click="RemoveAddress_Click"/>
-                                            <TextBlock Text="{Binding}" FontFamily="{StaticResource MonoFont}" FontSize="12" VerticalAlignment="Center"/>
+                                                    VerticalAlignment="Center" AutomationProperties.Name="{Binding RemoveName}" Tag="{Binding}" Click="RemoveAddress_Click"/>
+                                            <StackPanel VerticalAlignment="Center">
+                                                <TextBlock Text="{Binding Address}" FontFamily="{StaticResource MonoFont}" FontSize="12"/>
+                                                <TextBlock Text="{Binding Status}" Style="{StaticResource Hint}" Margin="0,2,0,0"/>
+                                            </StackPanel>
                                         </DockPanel>
                                     </DataTemplate>
                                 </ItemsControl.ItemTemplate>
