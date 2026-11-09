@@ -1617,14 +1617,67 @@ public static partial class RunnerService
     /// <summary>The architecture label runners on this PC get from GitHub: "ARM64" on ARM64 Windows, otherwise "X64".</summary>
     public static string ArchitectureLabel => IsArm64 ? "ARM64" : "X64";
 
-    private static async Task DownloadFileAsync(string url, string destination)
+    /// <summary>The whole runner download may take this long (the package is about 100 MB).</summary>
+    private static readonly TimeSpan DownloadLimit = TimeSpan.FromMinutes(10);
+    /// <summary>The download stops when no data arrives for this long.</summary>
+    private static readonly TimeSpan DownloadStallLimit = TimeSpan.FromSeconds(60);
+
+    private static Task DownloadFileAsync(string url, string destination) => DownloadFileAsync(url, destination, DownloadLimit, DownloadStallLimit);
+
+    /// <summary>
+    /// Downloads a file with a limit for the whole download and one for a stall. HttpClient's own timeout ends when the
+    /// headers arrive, and the fleet agent runs one command at a time, so a connection that dies during the download
+    /// would block every later command.
+    /// </summary>
+    internal static async Task DownloadFileAsync(string url, string destination, TimeSpan limit, TimeSpan stallLimit)
     {
         using var client = CreateHttpClient();
-        using var response = await client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead);
-        response.EnsureSuccessStatusCode();
-        await using var source = await response.Content.ReadAsStreamAsync();
-        await using var target = File.Create(destination);
-        await source.CopyToAsync(target);
+        client.Timeout = Timeout.InfiniteTimeSpan;
+        using var overall = new CancellationTokenSource(limit);
+        try
+        {
+            HttpResponseMessage response;
+            using (var headers = CancellationTokenSource.CreateLinkedTokenSource(overall.Token))
+            {
+                headers.CancelAfter(stallLimit);
+                response = await client.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, headers.Token);
+            }
+            using (response)
+            {
+                response.EnsureSuccessStatusCode();
+                await using var source = await response.Content.ReadAsStreamAsync(overall.Token);
+                await using var target = File.Create(destination);
+                await CopyWithStallLimitAsync(source, target, stallLimit, overall.Token);
+            }
+        }
+        catch (Exception ex) when (overall.IsCancellationRequested && ex is OperationCanceledException or IOException or System.TimeoutException)
+        {
+            throw new InvalidOperationException($"The runner download did not finish within {ProcessRunner.Describe(limit)}. Check the internet connection and try again.");
+        }
+        catch (Exception ex) when (ex is OperationCanceledException or System.TimeoutException)
+        {
+            throw new InvalidOperationException($"The runner download stopped: no data arrived for {ProcessRunner.Describe(stallLimit)}. Check the internet connection and try again.");
+        }
+    }
+
+    /// <summary>Copies a stream, and throws a System.TimeoutException when a read brings no data within <paramref name="stallLimit"/>.</summary>
+    private static async Task CopyWithStallLimitAsync(Stream source, Stream target, TimeSpan stallLimit, CancellationToken token)
+    {
+        var buffer = new byte[81920];
+        using var stall = CancellationTokenSource.CreateLinkedTokenSource(token);
+        while (true)
+        {
+            // Started again for every read.
+            stall.CancelAfter(stallLimit);
+            int read;
+            try { read = await source.ReadAsync(buffer, stall.Token); }
+            catch (Exception ex) when (stall.IsCancellationRequested && !token.IsCancellationRequested && ex is OperationCanceledException or IOException)
+            {
+                throw new System.TimeoutException();
+            }
+            if (read == 0) return;
+            await target.WriteAsync(buffer.AsMemory(0, read), token);
+        }
     }
 
     private static async Task VerifySha256Async(string path, string expected)

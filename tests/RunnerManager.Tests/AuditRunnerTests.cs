@@ -204,6 +204,75 @@ public class AuditRunnerTests
     public void ProcessArguments_LeaveOutCommonPasswordForms(string commandLine, string expected)
         => Assert.Equal(expected, RunnerActivity.ShortArguments(commandLine));
 
+    /// <summary>
+    /// A web server on this PC that answers one request with headers for a large file and then sends a byte every
+    /// <paramref name="byteEvery"/>, or nothing more when it is null.
+    /// </summary>
+    private static (string Url, Task Server, CancellationTokenSource Stop) SlowServer(TimeSpan? byteEvery)
+    {
+        var listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((System.Net.IPEndPoint)listener.LocalEndpoint).Port;
+        var stop = new CancellationTokenSource();
+        var server = Task.Run(async () =>
+        {
+            try
+            {
+                using var client = await listener.AcceptTcpClientAsync(stop.Token);
+                var stream = client.GetStream();
+                if (await stream.ReadAsync(new byte[8192], stop.Token) == 0) return;
+                await stream.WriteAsync("HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\nConnection: close\r\n\r\n"u8.ToArray(), stop.Token);
+                await stream.WriteAsync(new byte[10], stop.Token);
+                while (!stop.IsCancellationRequested)
+                {
+                    await Task.Delay(byteEvery ?? Timeout.InfiniteTimeSpan, stop.Token);
+                    await stream.WriteAsync(new byte[1], stop.Token);
+                }
+            }
+            catch (Exception ex) when (ex is OperationCanceledException or IOException or System.Net.Sockets.SocketException) { }
+            finally { listener.Stop(); }
+        });
+        return ($"http://127.0.0.1:{port}/actions-runner.zip", server, stop);
+    }
+
+    [Fact]
+    public async Task RunnerDownload_ThatStalls_StopsWithAClearMessage()
+    {
+        var (url, server, stop) = SlowServer(null);
+        var file = Path.Combine(Path.GetTempPath(), $"rm-audit-{Guid.NewGuid():N}.zip");
+        try
+        {
+            var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                RunnerService.DownloadFileAsync(url, file, TimeSpan.FromSeconds(30), TimeSpan.FromMilliseconds(700)));
+            Assert.Contains("no data arrived", error.Message);
+        }
+        finally
+        {
+            stop.Cancel();
+            await server;
+            File.Delete(file);
+        }
+    }
+
+    [Fact]
+    public async Task RunnerDownload_ThatTrickles_StopsAtTheOverallLimit()
+    {
+        var (url, server, stop) = SlowServer(TimeSpan.FromMilliseconds(100));
+        var file = Path.Combine(Path.GetTempPath(), $"rm-audit-{Guid.NewGuid():N}.zip");
+        try
+        {
+            var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                RunnerService.DownloadFileAsync(url, file, TimeSpan.FromSeconds(1.5), TimeSpan.FromSeconds(1)));
+            Assert.Contains("did not finish within", error.Message);
+        }
+        finally
+        {
+            stop.Cancel();
+            await server;
+            File.Delete(file);
+        }
+    }
+
     [Fact]
     public void OutputFile_ThatWentAway_IsNoProgress()
     {
