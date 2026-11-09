@@ -16,6 +16,7 @@ public partial class SetupWindow : Window
     private bool _installing;
     private string _installedExe = string.Empty;
     private string _installFolder = AppUpdater.InstallDir;
+    private readonly Task _presetDone;
 
     public SetupWindow()
     {
@@ -23,6 +24,7 @@ public partial class SetupWindow : Window
         WindowTheme.Apply(this);
         VersionText.Text = $"Setup · version {AppUpdater.CurrentVersion}";
         ShowInstallFolder();
+        _presetDone = PresetFromInstallAsync();
         if (Installer.IsInstalled)
         {
             ExistingText.Text = AppUpdater.InstalledVersion is { } installed && AppUpdater.IsOlder(AppUpdater.CurrentVersion, installed)
@@ -40,6 +42,20 @@ public partial class SetupWindow : Window
         Closing += (_, e) => { if (_installing) e.Cancel = true; };
     }
 
+    /// <summary>
+    /// Setup over an existing install keeps its desktop shortcut and "Start with Windows": both are turned on here when
+    /// they exist, because setup removes what is turned off.
+    /// </summary>
+    private async Task PresetFromInstallAsync()
+    {
+        DesktopShortcutToggle.IsChecked = Installer.HasDesktopShortcut;
+        // Not changeable until the scheduled tasks are read, so the answer never overrides the user's choice.
+        StartupToggle.IsEnabled = false;
+        try { StartupToggle.IsChecked = await Installer.StartsWithWindowsAsync(); }
+        catch (Exception ex) { MachineRelay.AppendAgentLog($"Setup could not read the startup task: {ex.Message}"); }
+        finally { StartupToggle.IsEnabled = true; }
+    }
+
     private void ShowPage(int page)
     {
         _page = page;
@@ -48,8 +64,10 @@ public partial class SetupWindow : Window
         var dots = new[] { Dot1, Dot2, Dot3 };
         for (var i = 0; i < dots.Length; i++)
             dots[i].Background = (System.Windows.Media.Brush)FindResource(i <= page ? "AccentBrush" : "BorderBrush");
+        StepText.Text = $"Step {page + 1} of {dots.Length}";
         BackButton.Visibility = page == 1 ? Visibility.Visible : Visibility.Collapsed;
         NextButton.Content = page switch { 1 => "Install", 2 => "Finish", _ => "Next" };
+        NextButton.IsEnabled = page != 2 || _installed;
         CancelButton.Visibility = page == 2 ? Visibility.Collapsed : Visibility.Visible;
     }
 
@@ -68,6 +86,8 @@ public partial class SetupWindow : Window
     private void Back_Click(object sender, RoutedEventArgs e)
     {
         if (_page == 1) ShowPage(0);
+        // After a failed install: back to the options, to change them and install again.
+        else if (_page == 2 && !_installed && !_installing) ShowPage(1);
     }
 
     private SetupChoices Choices => new(
@@ -77,10 +97,12 @@ public partial class SetupWindow : Window
 
     private async Task InstallAsync()
     {
-        var choices = Choices;
-        ShowPage(2);
-        NextButton.IsEnabled = false;
         _installing = true;
+        NextButton.IsEnabled = false;
+        await _presetDone;
+        var choices = Choices;
+        ResetInstallPage();
+        ShowPage(2);
         try
         {
             AppUpdater.UseInstallDir(_installFolder);
@@ -109,7 +131,6 @@ public partial class SetupWindow : Window
             InstallStatus.Text = ex.Message;
             CancelButton.Visibility = Visibility.Visible;
             BackButton.Visibility = Visibility.Visible;
-            _page = 2;
         }
         finally
         {
@@ -117,6 +138,19 @@ public partial class SetupWindow : Window
             InstallProgress.Visibility = Visibility.Collapsed;
             NextButton.IsEnabled = _installed;
         }
+    }
+
+    /// <summary>The last page as it is before an install, also after a failed one.</summary>
+    private void ResetInstallPage()
+    {
+        InstallTitle.Text = "Installing…";
+        DoneGlyph.Text = "";
+        DoneGlyph.SetResourceReference(TextBlock.ForegroundProperty, "AccentBrush");
+        DoneBadge.SetResourceReference(Border.BackgroundProperty, "SelectedBrush");
+        InstallStatus.Text = string.Empty;
+        InstallProgress.Visibility = Visibility.Visible;
+        NextStepsText.Visibility = Visibility.Collapsed;
+        LaunchToggle.Visibility = Visibility.Collapsed;
     }
 
     private void Finish()
@@ -165,9 +199,6 @@ public partial class SetupWindow : Window
         ShowInstallFolder();
     }
 
-    private void Cancel_Click(object sender, RoutedEventArgs e)
-    {
-        if (_page == 2 && !_installed && BackButton.Visibility == Visibility.Visible) { ShowPage(1); return; }
-        Close();
-    }
+    // Also Esc. During the install the window stays open (see the constructor).
+    private void Cancel_Click(object sender, RoutedEventArgs e) => Close();
 }

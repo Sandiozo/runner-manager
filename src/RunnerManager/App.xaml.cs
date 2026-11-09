@@ -305,11 +305,8 @@ public partial class App : Application
                 using (item)
                 {
                     var id = Convert.ToInt32(item["ProcessId"]);
-                    // Split loosely: only whole flags are compared, so a path with spaces does no harm.
-                    var arguments = (item["CommandLine"]?.ToString() ?? string.Empty).Split(' ', StringSplitOptions.RemoveEmptyEntries)
-                        .Select(a => a.Trim('"').ToLowerInvariant()).ToArray();
                     if (id == Environment.ProcessId || Convert.ToInt32(item["SessionId"]) != session) continue;
-                    if (arguments.Any(a => a is "--agent" or "--setup" or "--uninstall" or "--install-agent" or AssistantHost.McpArgument or AssistantHost.CliArgument)) continue;
+                    if (RunningCopies.RoleOf(item["CommandLine"]?.ToString()) != CopyRole.Dashboard) continue;
                     try { found.Add(Process.GetProcessById(id)); } catch (ArgumentException) { }
                 }
             }

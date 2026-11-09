@@ -25,13 +25,19 @@ public static class Installer
         => args.Any(a => a.Equals("--setup", StringComparison.OrdinalIgnoreCase))
            || Path.GetFileName(Environment.ProcessPath ?? string.Empty).StartsWith("RunnerManagerSetup", StringComparison.OrdinalIgnoreCase);
 
-    public static bool IsInstalled
+    public static bool IsInstalled => File.Exists(AppUpdater.InstalledExe) && HasUninstallEntry;
+
+    /// <summary>Whether this user has Runner Manager's entry in Settings → Apps.</summary>
+    internal static bool HasUninstallEntry
     {
         get
         {
-            if (!File.Exists(AppUpdater.InstalledExe)) return false;
-            using var key = Registry.CurrentUser.OpenSubKey(UninstallKey);
-            return key != null;
+            try
+            {
+                using var key = Registry.CurrentUser.OpenSubKey(UninstallKey);
+                return key != null;
+            }
+            catch { return false; }
         }
     }
 
@@ -76,7 +82,8 @@ public static class Installer
         var previous = RegisteredInstallDir()
                        ?? (File.Exists(Path.Combine(AppUpdater.DefaultInstallDir, AppPaths.ExeName)) ? AppUpdater.DefaultInstallDir : null);
         var moving = previous != null && !AppUpdater.SameFolder(previous, AppUpdater.InstallDir);
-        CloseRunningDashboards(log, moving ? new[] { AppUpdater.InstallDir, previous! } : new[] { AppUpdater.InstallDir });
+        // An AI tool's host keeps running the replaced exe and needs nothing from setup; only a move takes its exe away.
+        CloseRunningDashboards(log, moving ? new[] { AppUpdater.InstallDir, previous! } : new[] { AppUpdater.InstallDir }, endAssistants: moving);
         var replacing = File.Exists(AppUpdater.InstalledExe) && !AppUpdater.IsRunningInstalledCopy;
         // Setup warns on its first page when it is older than the installed copy, so going ahead is the user's choice.
         var exe = await AppUpdater.InstallCurrentBuildAsync(log, createShortcut: false, allowOlder: true);
@@ -128,7 +135,7 @@ public static class Installer
         {
             // The old copy may still be in use until this process exits (its agent was just switched over).
             log($"Removing the copy in {previous}...");
-            AppUpdater.RunAfterExit(RemoveProgramFilesScript(previous!), TimeSpan.FromMinutes(5), TimeSpan.FromSeconds(3));
+            AppUpdater.RunAfterExit(UnlessInstalledIn(previous!, RemoveProgramFilesScript(previous!)), TimeSpan.FromMinutes(5), TimeSpan.FromSeconds(3));
         }
 
         var settings = AppSettings.Load();
@@ -158,10 +165,33 @@ public static class Installer
             AppUpdater.UseInstallDir(previousFolder);
             await RefreshShortcutsAsync(oldExe);
             await ScheduledTasks.RegisterLaunchTaskAsync(oldExe);
-            AppUpdater.RunAfterExit(RemoveProgramFilesScript(newFolder), TimeSpan.FromMinutes(5), TimeSpan.FromSeconds(3));
+            // Kept when setup is tried again and installs there after all.
+            AppUpdater.RunAfterExit(UnlessInstalledIn(newFolder, RemoveProgramFilesScript(newFolder)), TimeSpan.FromMinutes(5), TimeSpan.FromSeconds(3));
         }
         catch (Exception ex) { log($"Could not point Runner Manager back to {previousFolder}: {ex.Message}"); }
     }
+
+    /// <summary>
+    /// PowerShell that runs <paramref name="script"/> unless the Settings → Apps entry points at <paramref name="folder"/>
+    /// by then: a setup that is tried again in the same window may have installed there after all.
+    /// </summary>
+    internal static string UnlessInstalledIn(string folder, string script)
+    {
+        var path = Path.TrimEndingDirectorySeparator(folder).Replace("'", "''");
+        return $"$at = (Get-ItemProperty -LiteralPath 'HKCU:\\{UninstallKey}' -Name InstallLocation -ErrorAction SilentlyContinue).InstallLocation; " +
+               $"if (-not $at -or $at.TrimEnd([char]92) -ne '{path}') {{ {script} }}";
+    }
+
+    internal static bool HasDesktopShortcut => File.Exists(DesktopShortcut);
+
+    /// <summary>
+    /// Whether Runner Manager starts with Windows for this user: by its own startup task, or by one of an older version
+    /// that setup moves over (the shared task of 2.3 and earlier when it is this user's, or RunnerWidget's).
+    /// </summary>
+    internal static async Task<bool> StartsWithWindowsAsync()
+        => await ScheduledTasks.ExistsAsync(ScheduledTasks.DashboardTaskName)
+           || await IsOwnTaskAsync(ScheduledTasks.SharedDashboardTaskName)
+           || await ScheduledTasks.ExistsAsync(ScheduledTasks.LegacyDashboardTaskName);
 
     public static Task RegisterStartupTaskAsync(string exe) => ScheduledTasks.RegisterLogonTaskAsync(
         ScheduledTasks.DashboardTaskName, exe, "--minimized",
@@ -249,11 +279,11 @@ public static class Installer
 
     /// <summary>
     /// Closes every dashboard that runs from the install folder, including one hidden in the notification area, so it
-    /// can be replaced or removed and its single-instance lock is freed. The fleet agent (--agent) is handled separately.
+    /// can be replaced or removed and its single-instance lock is freed. AI tools' hosts (--mcp, ai) are ended too when
+    /// <paramref name="endAssistants"/> is set. The fleet agent (--agent) is handled separately, and setup, uninstall and
+    /// agent installs are left to finish.
     /// </summary>
-    private static void CloseRunningDashboards(Action<string> log) => CloseRunningDashboards(log, new[] { AppUpdater.InstallDir });
-
-    private static void CloseRunningDashboards(Action<string> log, IEnumerable<string> folders)
+    private static void CloseRunningDashboards(Action<string> log, IEnumerable<string> folders, bool endAssistants)
     {
         var installDirs = folders.Select(f => Path.TrimEndingDirectorySeparator(Path.GetFullPath(f)) + Path.DirectorySeparatorChar).ToList();
         var dashboards = new List<Process>();
@@ -267,8 +297,7 @@ public static class Installer
                 {
                     var id = Convert.ToInt32(item["ProcessId"]);
                     var path = item["ExecutablePath"]?.ToString() ?? string.Empty;
-                    var commandLine = item["CommandLine"]?.ToString() ?? string.Empty;
-                    if (id == Environment.ProcessId || IsAgentCommandLine(commandLine)) continue;
+                    if (id == Environment.ProcessId || !IsClosedBySetup(item["CommandLine"]?.ToString(), endAssistants)) continue;
                     if (!installDirs.Any(dir => path.StartsWith(dir, StringComparison.OrdinalIgnoreCase))) continue;
                     try { dashboards.Add(Process.GetProcessById(id)); } catch (ArgumentException) { }
                 }
@@ -307,9 +336,13 @@ public static class Installer
 
     private static readonly TimeSpan DashboardExitTimeout = TimeSpan.FromSeconds(5);
 
-    private static bool IsAgentCommandLine(string commandLine)
-        => commandLine.Split(' ', StringSplitOptions.RemoveEmptyEntries)
-            .Any(part => part.Trim('"').Equals("--agent", StringComparison.OrdinalIgnoreCase));
+    /// <summary>Whether setup or uninstall ends a Runner Manager process with this command line before it replaces the exe.</summary>
+    internal static bool IsClosedBySetup(string? commandLine, bool endAssistants) => RunningCopies.RoleOf(commandLine) switch
+    {
+        CopyRole.Dashboard => true,
+        CopyRole.Assistant => endAssistants,
+        _ => false
+    };
 
     private static void RegisterUninstallEntry(string exe)
     {
@@ -341,7 +374,7 @@ public static class Installer
     {
         // Read before the Settings → Apps entry that records a chosen folder is deleted below.
         var installDir = AppUpdater.InstallDir;
-        CloseRunningDashboards(log);
+        CloseRunningDashboards(log, new[] { installDir }, endAssistants: true);
         // Another Windows user's agent stays: it is their fleet membership, not this user's.
         if (await AgentOwnership.OtherUserAsync() is { } other)
             log($"The fleet agent on this PC runs for {other}, so it was left alone.");
@@ -371,7 +404,8 @@ public static class Installer
             if (scripts.Folder != null)
                 note = $" Startup scripts that Runner Manager had turned off are {(scripts.Moved ? "now" : "kept")} in {scripts.Folder}.";
         }
-        AppUpdater.RunAfterExit(script, TimeSpan.FromSeconds(60), TimeSpan.FromSeconds(1));
+        // No time limit: the "uninstalled" message keeps this process (and so its exe) until it is closed.
+        AppUpdater.RunAfterExit(script, timeout: null, TimeSpan.FromSeconds(1));
         log("Runner Manager was removed.");
         return note;
     }

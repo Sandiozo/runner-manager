@@ -30,7 +30,9 @@
 
         <!-- Header -->
         <DockPanel Margin="28,22,28,0">
-            <StackPanel x:Name="StepDots" DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Top" Margin="0,8,0,0">
+            <StackPanel x:Name="StepDots" DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Top" Margin="0,2,0,0">
+                <!-- The dots alone say nothing to a screen reader. -->
+                <TextBlock x:Name="StepText" Style="{StaticResource Caption}" FontSize="11" VerticalAlignment="Center" Margin="0,0,8,0"/>
                 <Border x:Name="Dot1" Style="{StaticResource StepDot}"/>
                 <Border x:Name="Dot2" Style="{StaticResource StepDot}"/>
                 <Border x:Name="Dot3" Style="{StaticResource StepDot}" Margin="0"/>
@@ -62,10 +64,11 @@
                                    ToolTip="{Binding Text, RelativeSource={RelativeSource Self}}"/>
                     </Border>
                 </DockPanel>
-                <CheckBox x:Name="DesktopShortcutToggle" Style="{StaticResource ToggleSwitch}" Margin="0,4">
+                <CheckBox x:Name="DesktopShortcutToggle" Style="{StaticResource ToggleSwitch}" Margin="0,4" AutomationProperties.Name="Desktop shortcut">
                     <TextBlock Text="Desktop shortcut"/>
                 </CheckBox>
-                <CheckBox x:Name="StartupToggle" Style="{StaticResource ToggleSwitch}" Margin="0,4">
+                <CheckBox x:Name="StartupToggle" Style="{StaticResource ToggleSwitch}" Margin="0,4" AutomationProperties.Name="Start with Windows"
+                          AutomationProperties.HelpText="Opens minimized in the notification area and notifies you when a runner stops.">
                     <StackPanel>
                         <TextBlock Text="Start with Windows"/>
                         <TextBlock Text="Opens minimized in the notification area and notifies you when a runner stops." Style="{StaticResource OptionText}"/>
@@ -79,26 +82,33 @@
                 <TextBlock Text="How many PCs run your runners?" FontSize="20" FontWeight="SemiBold"/>
                 <TextBlock Style="{StaticResource OptionText}" FontSize="12.5" Margin="0,6,0,16"
                            Text="You can change this later from the sidebar."/>
-                <RadioButton x:Name="SinglePcOption" Style="{StaticResource OptionCard}" GroupName="Pcs" IsChecked="True" Checked="PcsOption_Checked">
+                <RadioButton x:Name="SinglePcOption" Style="{StaticResource OptionCard}" GroupName="Pcs" IsChecked="True" Checked="PcsOption_Checked"
+                             AutomationProperties.Name="This PC only" AutomationProperties.HelpText="Manage the runners on this PC.">
                     <StackPanel>
                         <TextBlock Text="This PC only" Style="{StaticResource OptionTitle}"/>
                         <TextBlock Text="Manage the runners on this PC." Style="{StaticResource OptionText}"/>
                     </StackPanel>
                 </RadioButton>
-                <RadioButton x:Name="SeveralPcsOption" Style="{StaticResource OptionCard}" GroupName="Pcs" Checked="PcsOption_Checked">
+                <RadioButton x:Name="SeveralPcsOption" Style="{StaticResource OptionCard}" GroupName="Pcs" Checked="PcsOption_Checked"
+                             AutomationProperties.Name="Several PCs"
+                             AutomationProperties.HelpText="View and control the runners on all your PCs from any one of them. The PCs connect directly over your network with encryption.">
                     <StackPanel>
                         <TextBlock Text="Several PCs" Style="{StaticResource OptionTitle}"/>
                         <TextBlock Text="View and control the runners on all your PCs from any one of them. The PCs connect directly over your network with encryption." Style="{StaticResource OptionText}"/>
                     </StackPanel>
                 </RadioButton>
                 <StackPanel x:Name="FleetOptions" Margin="22,4,0,0" Visibility="Collapsed">
-                    <RadioButton x:Name="NewFleetOption" Style="{StaticResource OptionCard}" GroupName="Fleet" IsChecked="True">
+                    <RadioButton x:Name="NewFleetOption" Style="{StaticResource OptionCard}" GroupName="Fleet" IsChecked="True"
+                                 AutomationProperties.Name="Start a new fleet"
+                                 AutomationProperties.HelpText="This is the first PC. Add the other PCs later with a 6-digit code.">
                         <StackPanel>
                             <TextBlock Text="Start a new fleet" Style="{StaticResource OptionTitle}" FontSize="12.5"/>
                             <TextBlock Text="This is the first PC. Add the other PCs later with a 6-digit code." Style="{StaticResource OptionText}"/>
                         </StackPanel>
                     </RadioButton>
-                    <RadioButton x:Name="JoinFleetOption" Style="{StaticResource OptionCard}" GroupName="Fleet">
+                    <RadioButton x:Name="JoinFleetOption" Style="{StaticResource OptionCard}" GroupName="Fleet"
+                                 AutomationProperties.Name="Join an existing fleet"
+                                 AutomationProperties.HelpText="Another PC already runs a fleet. On that PC, click “Add a PC” when asked.">
                         <StackPanel>
                             <TextBlock Text="Join an existing fleet" Style="{StaticResource OptionTitle}" FontSize="12.5"/>
                             <TextBlock Text="Another PC already runs a fleet. On that PC, click “Add a PC” when asked." Style="{StaticResource OptionText}"/>
@@ -116,7 +126,8 @@
                 <ProgressBar x:Name="InstallProgress" Style="{StaticResource ThinProgress}" IsIndeterminate="True" Margin="0,12,0,0"/>
                 <TextBlock x:Name="InstallStatus" Style="{StaticResource OptionText}" FontSize="12.5" Margin="0,12,0,0"/>
                 <TextBlock x:Name="NextStepsText" Style="{StaticResource OptionText}" FontSize="12.5" Margin="0,12,0,0" Visibility="Collapsed"/>
-                <CheckBox x:Name="LaunchToggle" Style="{StaticResource ToggleSwitch}" IsChecked="True" Margin="0,18,0,0" Visibility="Collapsed">
+                <CheckBox x:Name="LaunchToggle" Style="{StaticResource ToggleSwitch}" IsChecked="True" Margin="0,18,0,0" Visibility="Collapsed"
+                          AutomationProperties.Name="Open Runner Manager now">
                     <TextBlock Text="Open Runner Manager now"/>
                 </CheckBox>
             </StackPanel>
@@ -125,7 +136,7 @@
         <!-- Footer -->
         <Border Grid.Row="2" Background="{DynamicResource Bg0Brush}" BorderBrush="{DynamicResource BorderSubtleBrush}" BorderThickness="0,1,0,0" Padding="28,14">
             <DockPanel>
-                <Button x:Name="CancelButton" Content="Cancel" Style="{StaticResource GhostButton}" Click="Cancel_Click" MinWidth="80"/>
+                <Button x:Name="CancelButton" Content="Cancel" Style="{StaticResource GhostButton}" Click="Cancel_Click" MinWidth="80" IsCancel="True"/>
                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
                     <Button x:Name="BackButton" Content="Back" Style="{StaticResource GhostButton}" Click="Back_Click" MinWidth="80" Visibility="Collapsed"/>
                     <Button x:Name="NextButton" Content="Next" Style="{StaticResource PrimaryButton}" Click="Next_Click" MinWidth="110" Margin="8,0,0,0" IsDefault="True"/>

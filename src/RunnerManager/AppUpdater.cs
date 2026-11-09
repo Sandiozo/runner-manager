@@ -23,7 +23,12 @@ public static class AppUpdater
     /// <summary>Where Runner Manager is installed: the folder chosen in setup (kept in the Settings → Apps entry), or the default.</summary>
     public static string InstallDir => _installDir ??= Installer.RegisteredInstallDir() ?? DefaultInstallDir;
     /// <summary>Setup installs into the folder the user chose.</summary>
-    internal static void UseInstallDir(string folder) => _installDir = folder;
+    internal static void UseInstallDir(string folder)
+    {
+        // A setup tried again in another folder copies the build there too.
+        if (_installDir == null || !SameFolder(_installDir, folder)) _installedThisBuild = false;
+        _installDir = folder;
+    }
     internal static bool IsDefaultInstallDir(string folder) => SameFolder(folder, DefaultInstallDir);
     internal static bool SameFolder(string a, string b) => string.Equals(
         Path.TrimEndingDirectorySeparator(Path.GetFullPath(a)), Path.TrimEndingDirectorySeparator(Path.GetFullPath(b)), StringComparison.OrdinalIgnoreCase);
@@ -461,6 +466,8 @@ public static class AppUpdater
                 if (aside != null) PutBack(aside, InstalledExe, ex);
                 throw;
             }
+            // This build is no longer the installed one, so a setup tried again copies it again.
+            _installedThisBuild = false;
         });
     }
 
@@ -594,19 +601,23 @@ public static class AppUpdater
         => RunAfterExit($"schtasks.exe /Run /TN '{taskName.Replace("'", "''")}' | Out-Null", TimeSpan.FromSeconds(120), TimeSpan.FromSeconds(2));
 
     /// <summary>
-    /// Starts a hidden, detached PowerShell helper that waits for this process to exit (at most <paramref name="timeout"/>),
-    /// waits <paramref name="delay"/> more, then runs <paramref name="script"/>.
+    /// Starts a hidden, detached PowerShell helper that waits for this process to exit (at most <paramref name="timeout"/>,
+    /// or for as long as it runs when null), waits <paramref name="delay"/> more, then runs <paramref name="script"/>.
     /// </summary>
-    internal static void RunAfterExit(string script, TimeSpan timeout, TimeSpan delay)
+    internal static void RunAfterExit(string script, TimeSpan? timeout, TimeSpan delay)
     {
-        var wrapped = $"Wait-Process -Id {Environment.ProcessId} -Timeout {(int)timeout.TotalSeconds} -ErrorAction SilentlyContinue; " +
-                      $"Start-Sleep -Seconds {(int)delay.TotalSeconds}; {script}";
         using var process = Process.Start(new ProcessStartInfo("powershell.exe")
         {
-            ArgumentList = { "-NoLogo", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", wrapped },
+            ArgumentList = { "-NoLogo", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", AfterExitScript(script, Environment.ProcessId, timeout, delay) },
             UseShellExecute = false,
             CreateNoWindow = true
         });
+    }
+
+    internal static string AfterExitScript(string script, int processId, TimeSpan? timeout, TimeSpan delay)
+    {
+        var limit = timeout is { } wait ? $" -Timeout {(int)wait.TotalSeconds}" : string.Empty;
+        return $"Wait-Process -Id {processId}{limit} -ErrorAction SilentlyContinue; Start-Sleep -Seconds {(int)delay.TotalSeconds}; {script}";
     }
 
     /// <summary>
