@@ -95,6 +95,7 @@ public partial class MainWindow : Window
         ThemeManager.Changed += OnThemeChanged;
         Closing += OnClosing;
         PreviewKeyDown += OnPreviewKeyDown;
+        SizeChanged += ContentArea_SizeChanged;
     }
 
     public void ReportError(string message)
@@ -1497,6 +1498,21 @@ public partial class MainWindow : Window
         ActivitySplitter.IsEnabled = open;
         ActivityRow.Height = open ? new GridLength(Math.Clamp(_settings.ActivityPanelHeight, 90, 600)) : GridLength.Auto;
         ActivityChevron.Text = open ? "" : "";
+    }
+
+    /// <summary>
+    /// The bottom panel keeps the height it was given, but never takes more than leaves the cards their minimum height,
+    /// for example after the window was made smaller. Also called when the window or its header changes size.
+    /// </summary>
+    private void ContentArea_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        // The height the window gives the content. Rows that want more make the grid itself taller (and cut off), so
+        // its own height cannot be used.
+        if (ContentArea.Parent is not FrameworkElement root) return;
+        var height = LayoutInformation.GetLayoutSlot(root).Height;
+        if (height <= 0) return;
+        var others = ContentArea.RowDefinitions.Where(r => r != CardsRow && r != ActivityRow).Sum(r => r.ActualHeight);
+        ActivityRow.MaxHeight = Math.Max(ActivityRow.MinHeight, height - others - CardsRow.MinHeight);
     }
 
     private void SaveActivityPanelHeight()

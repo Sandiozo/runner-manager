@@ -498,6 +498,30 @@ public class AuditDashboardTests
         });
     }
 
+    // ----- Bug 14: the bottom panel leaves room for the cards -----
+
+    [Fact]
+    public void BottomPanel_NeverTakesTheCardsRoom()
+    {
+        var window = NewDashboard();
+        WpfTestApp.Run(() =>
+        {
+            // A panel dragged to 600 px, in a window made small afterwards.
+            window.ActivityRow.Height = new GridLength(600);
+            // A window that is not shown does not lay out its content, so it is laid out on its own.
+            var content = (UIElement)window.Content;
+            window.Content = null;
+            var host = new Border { Child = content };
+            host.Measure(new Size(1000, 560));
+            host.Arrange(new Rect(0, 0, 1000, 560));
+            host.UpdateLayout();
+            Assert.True(window.CardsRow.ActualHeight >= window.CardsRow.MinHeight, $"Cards row: {window.CardsRow.ActualHeight}");
+            var total = window.ContentArea.RowDefinitions.Sum(r => r.ActualHeight);
+            Assert.True(total <= 560.5, $"Rows: {total}");
+            Assert.True(window.ActivityRow.ActualHeight >= 90, $"Bottom panel: {window.ActivityRow.ActualHeight}");
+        });
+    }
+
     // ----- Bug 10: keyboard shortcuts -----
 
     [Theory]

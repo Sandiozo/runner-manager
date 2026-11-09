@@ -228,18 +228,18 @@
         </Border>
 
         <!-- ============ Content ============ -->
-        <Grid Grid.Column="1">
+        <Grid x:Name="ContentArea" Grid.Column="1" SizeChanged="ContentArea_SizeChanged">
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
-                <RowDefinition Height="*"/>
+                <RowDefinition x:Name="CardsRow" Height="*" MinHeight="120"/>
                 <RowDefinition Height="Auto"/>
                 <RowDefinition x:Name="ActivityRow" Height="130" MinHeight="32"/>
                 <RowDefinition Height="Auto"/>
             </Grid.RowDefinitions>
 
             <!-- Header (with the update banner above it) -->
-            <StackPanel>
+            <StackPanel SizeChanged="ContentArea_SizeChanged">
             <Border x:Name="UpdateBanner" Background="{DynamicResource BannerBgBrush}" BorderBrush="{DynamicResource BannerBorderBrush}"
                     BorderThickness="1" CornerRadius="8" Margin="20,12,20,0" Padding="12,6" Visibility="Collapsed">
                 <DockPanel>
