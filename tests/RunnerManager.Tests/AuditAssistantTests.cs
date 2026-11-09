@@ -653,6 +653,52 @@ public class AuditAssistantTests
         Assert.Single(AgentLogLines($"The AI assistant endpoint listens on port {port} now."));
     }
 
+    /// <summary>
+    /// <c>RunnerManager.exe ai</c> with its output read by another program, the way an AI tool runs it. The text has
+    /// characters outside ASCII ("→" here), which must arrive as UTF-8.
+    /// </summary>
+    [Fact]
+    public async Task CommandLine_WritesUtf8_WhenAnotherProgramReadsItsOutput()
+    {
+        var exe = Path.Combine(AppContext.BaseDirectory, AppPaths.ExeName);
+        Assert.True(File.Exists(exe), $"{exe} is missing");
+        var state = Path.Combine(Path.GetTempPath(), $"runner-manager-ai-test-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(state);
+        try
+        {
+            var start = new ProcessStartInfo(exe) { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
+            start.ArgumentList.Add(AssistantHost.CliArgument);
+            start.ArgumentList.Add("help");
+            start.Environment["RUNNER_MANAGER_STATE_DIR"] = state;
+            // Help asks the agent nothing; this keeps it away from a real one in any case.
+            start.Environment[AgentLink.UrlVariable] = $"http://localhost:{TestPorts.FreeRange(1)}/mcp";
+            using var process = Process.Start(start)!;
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+            using var output = new MemoryStream();
+            try
+            {
+                await process.StandardOutput.BaseStream.CopyToAsync(output, timeout.Token);
+                await process.WaitForExitAsync(timeout.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                try { process.Kill(); } catch { }
+                throw;
+            }
+
+            Assert.Equal(0, process.ExitCode);
+            var bytes = output.ToArray();
+            Assert.False(bytes.AsSpan().StartsWith(Encoding.UTF8.Preamble), "The output starts with a byte order mark.");
+            // Throws on bytes that are not UTF-8, which is what another code page gives for these characters.
+            var text = new UTF8Encoding(false, throwOnInvalidBytes: true).GetString(bytes);
+            Assert.Contains("Runner Manager → Settings → AI assistants", text);
+        }
+        finally
+        {
+            try { Directory.Delete(state, recursive: true); } catch { }
+        }
+    }
+
     // ----- Helpers -----
 
     private static MachineInfo Online(string name, params MachineRunnerStatus[] runners) => Online(name, managed: false, runners);

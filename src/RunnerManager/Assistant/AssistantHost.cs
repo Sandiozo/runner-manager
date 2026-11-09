@@ -172,7 +172,11 @@ public static class AssistantHost
     private static async Task<int> RunCliAsync(string[] args)
     {
         AttachToParentConsole();
-        var stdout = Console.Out;
+        // Read by another program, the output is UTF-8, as for --mcp. Console.Out would write the PC's own code page
+        // there, which has no "→" and loses names with letters outside it. A terminal gets Console.Out, which follows
+        // the terminal's code page.
+        var stdout = Console.IsOutputRedirected ? Utf8Writer(Console.OpenStandardOutput()) : Console.Out;
+        var stderr = Console.IsErrorRedirected ? Utf8Writer(Console.OpenStandardError()) : Console.Error;
         if (args.Length == 0 || args[0] is "help" or "--help" or "-h" or "/?")
         {
             stdout.WriteLine(Usage());
@@ -189,7 +193,7 @@ public static class AssistantHost
         try { arguments = ParseArguments(AssistantTools.Find(args[0]), args.Skip(1)); }
         catch (AssistantException ex)
         {
-            Console.Error.WriteLine(ex.Message);
+            stderr.WriteLine(ex.Message);
             return 2;
         }
         try
@@ -220,7 +224,7 @@ public static class AssistantHost
                 try
                 {
                     if (JsonNode.Parse(notification)?["params"]?["message"] is JsonValue progress && progress.TryGetValue<string>(out var text))
-                        Console.Error.WriteLine(text);
+                        stderr.WriteLine(text);
                 }
                 catch (JsonException) { }
                 return Task.CompletedTask;
@@ -332,6 +336,10 @@ public static class AssistantHost
         text.Append("Turn on access in Runner Manager → Settings → AI assistants first.");
         return text.ToString();
     }
+
+    /// <summary>UTF-8 without a byte order mark, written at once and from any thread, like <see cref="Console.Out"/>.</summary>
+    private static TextWriter Utf8Writer(Stream stream)
+        => TextWriter.Synchronized(new StreamWriter(stream, new UTF8Encoding(false)) { AutoFlush = true });
 
     private const int AttachParentProcess = -1;
     private const int StdOutputHandle = -11;
