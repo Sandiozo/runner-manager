@@ -729,7 +729,7 @@ public partial class SettingsWindow : Window
             // That changes this PC (a code, a scheduled task, firewall rules), so ask first.
             var installed = _agentInstalled ?? await MachineRelay.IsAgentInstalledAsync();
             var what = FleetConfig.Current.FleetKey == null
-                ? "Runner Manager gives this PC a pairing code of its own, installs the fleet agent and opens its ports in Windows Firewall for the local network and Tailscale. Other PCs can join later with the code."
+                ? "Runner Manager starts a fleet with only this PC: it creates a pairing code, installs the fleet agent and opens its ports in Windows Firewall for the local network and Tailscale. Other PCs can join later with the code."
                 : installed
                     ? "The fleet agent on this PC is not running. Runner Manager installs it again and starts it."
                     : "Runner Manager installs the fleet agent and opens its ports in Windows Firewall for the local network and Tailscale.";
