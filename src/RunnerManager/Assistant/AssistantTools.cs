@@ -134,7 +134,7 @@ public static class AssistantTools
                 ("even_if_exists", "boolean", "Create another runner even if the repository already has one.", false)),
             CreateRunnerAsync),
         new AssistantTool("control_runner",
-            "Starts, stops or restarts a runner's Windows service.",
+            "Starts, stops or restarts a runner's Windows service. Not for a runner that runs in a console window (list_runners: console).",
             AssistantToolKind.Change, Schema(
                 ("pc", "string", PcArgument, true),
                 ("runner", "string", RunnerArgument, true),
@@ -465,13 +465,31 @@ public static class AssistantTools
         };
         var (machine, runner) = await LocateRunnerAsync(call);
         RequireAgent(machine);
-        if (!runner.ServiceInstalled) throw new AssistantException($"{runner.TitleText} has no Windows service, so it cannot be controlled.");
+        RequireService(machine, runner, action);
         await call.ConfirmAsync(AssistantToolKind.Change, $"{action} a runner?",
             $"An AI assistant wants to {action.ToLowerInvariant()} the runner “{runner.TitleText}” for {TargetText(runner)} on {machine.MachineName}.");
         (machine, runner) = await RecheckAsync(machine, runner, mustBeIdle: false);
+        // It may have been opened in a console window while the approval waited.
+        RequireService(machine, runner, action);
         call.CancellationToken.ThrowIfCancellationRequested();
         await Actions.ControlRunnerAsync(machine, runner, action, call.Log);
         return new { done = true, pc = machine.MachineName, runner = runner.TitleText, target = TargetOf(runner), action = action.ToLowerInvariant() };
+    }
+
+    /// <summary>
+    /// control_runner works on the runner's Windows service, as the dashboard's Start, Stop and Restart do. A runner
+    /// that has a service but runs in a console window now is refused, as the dashboard does: starting the service
+    /// would run the runner twice, and stopping it would leave the console runner running.
+    /// </summary>
+    internal static void RequireService(MachineInfo machine, MachineRunnerStatus runner, string action)
+    {
+        if (!runner.ServiceInstalled || string.IsNullOrWhiteSpace(runner.ServiceName))
+            throw new AssistantException($"{runner.TitleText} has no Windows service, so it cannot be controlled.");
+        if (!runner.IsInteractive) return;
+        var where = $"{runner.TitleText} runs in a console window on {machine.MachineName} now, and its Windows service is not used.";
+        throw new AssistantException(action == "Stop"
+            ? $"{where} Stopping the service would not stop the runner. To stop it, close its console window on {machine.MachineName}. Nothing was changed."
+            : $"{where} Starting the service would run the runner twice. To run it as a service, close its console window on {machine.MachineName} first. Nothing was changed.");
     }
 
     private static async Task<object> MoveRunnerAsync(AssistantCall call)

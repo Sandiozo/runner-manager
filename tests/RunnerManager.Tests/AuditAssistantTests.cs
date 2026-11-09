@@ -446,6 +446,28 @@ public class AuditAssistantTests
         Assert.Equal(1, servers);
     }
 
+    // ----- Tools -----
+
+    [Fact]
+    public void ControlRunner_IsRefusedForARunnerThatRunsInAConsoleWindow()
+    {
+        var pc = Online("BUILD");
+        var service = new MachineRunnerStatus { AgentName = "web", ServiceName = "actions.runner.octocat-web.web", ServiceInstalled = true, IsRunning = true };
+        var console = new MachineRunnerStatus { AgentName = "web", ServiceName = "actions.runner.octocat-web.web", ServiceInstalled = true, IsInteractive = true, IsRunning = true };
+        var noService = new MachineRunnerStatus { AgentName = "web", InstallPath = @"C:\runners\web", IsInteractive = true, IsRunning = true };
+
+        foreach (var action in new[] { "Start", "Stop", "Restart" }) AssistantTools.RequireService(pc, service, action);
+
+        // Starting the service of a runner that runs in a console window would run the runner twice.
+        Assert.Contains("twice", Assert.Throws<AssistantException>(() => AssistantTools.RequireService(pc, console, "Start")).Message);
+        Assert.Contains("twice", Assert.Throws<AssistantException>(() => AssistantTools.RequireService(pc, console, "Restart")).Message);
+        // Stopping it would stop nothing, so it is not reported as done.
+        var stop = Assert.Throws<AssistantException>(() => AssistantTools.RequireService(pc, console, "Stop")).Message;
+        Assert.Contains("console window", stop);
+        Assert.Contains("Nothing was changed", stop);
+        Assert.Contains("no Windows service", Assert.Throws<AssistantException>(() => AssistantTools.RequireService(pc, noService, "Stop")).Message);
+    }
+
     // ----- Names and the action log -----
 
     [Fact]
