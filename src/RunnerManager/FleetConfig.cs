@@ -162,12 +162,11 @@ public sealed class FleetConfig
             }
             catch (JsonException) when (attempt >= ReadAttempts - 1)
             {
-                // Writes are atomic, so a file that stays invalid is damaged rather than half-written. Keep a copy for
-                // inspection and continue with what can still be read, instead of blocking every later save.
                 hasPlainKey = false;
-                try { File.Move(ConfigPath, $"{ConfigPath}.damaged-{DateTime.Now:yyyyMMdd-HHmmss}", overwrite: true); }
-                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
-                return Salvage(json);
+                if (SaveSalvage(json) is { } salvaged) return salvaged;
+                // Another process replaced the file meanwhile: read that one.
+                if (attempt >= ReadAttempts + 2)
+                    throw new IOException($"Could not read the fleet settings in {ConfigPath}: the file keeps changing.");
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
             {
@@ -283,6 +282,31 @@ public sealed class FleetConfig
         {
             if (owned) mutex!.ReleaseMutex();
         }
+    }
+
+    /// <summary>
+    /// Writes are atomic, so a file that stays invalid is damaged rather than half-written. Keeps a copy for inspection
+    /// and saves what can still be read in its place, so the pairing code is still there at the next read and later
+    /// saves aren't blocked. Returns null when the file changed meanwhile.
+    /// </summary>
+    private static FleetConfig? SaveSalvage(string? json)
+    {
+        FleetConfig? salvaged = null;
+        WithFileLock(() =>
+        {
+            // Reads don't take the lock: another process may have dealt with it already.
+            string? now;
+            try { now = File.Exists(ConfigPath) ? File.ReadAllText(ConfigPath) : null; }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { now = json; }
+            if (now != json) return;
+            salvaged = Salvage(json);
+            try { File.Copy(ConfigPath, $"{ConfigPath}.damaged-{DateTime.Now:yyyyMMdd-HHmmss}", overwrite: true); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+            // When this fails, the damaged file stays, and the next read salvages it again.
+            try { Write(salvaged); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        });
+        return salvaged;
     }
 
     /// <summary>A setting's string value, found in text that is not valid JSON.</summary>

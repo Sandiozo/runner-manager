@@ -1,4 +1,6 @@
 using System.IO;
+using System.Security.Cryptography;
+using System.Text.Json;
 
 namespace RunnerManager.Tests;
 
@@ -250,6 +252,42 @@ public class ClockOffsetFleetTests
         });
     }
 }
+
+[Collection(FleetSettingsCollection.Name)]
+public class SalvagedSettingsTests
+{
+    private static readonly string ConfigPath = Path.Combine(FleetConfig.StateDir, "fleet.json");
+
+    [Fact]
+    public async Task SettingsSalvagedFromADamagedFile_AreStillThereAtTheNextRead()
+    {
+        await AuditFleetConfig.WithConfigAsync(() =>
+        {
+            var key = CommandSigner.NewKey();
+            var protectedKey = Convert.ToBase64String(ProtectedData.Protect(key, null, DataProtectionScope.CurrentUser));
+            // Cut off, so not even valid JSON.
+            var damaged = $"{{\"ProtectedFleetKey\":\"{protectedKey}\",\"MachineId\":\"abc123\",\"ManualAddresses\":[";
+            File.WriteAllText(ConfigPath, damaged);
+            File.SetLastWriteTimeUtc(ConfigPath, DateTime.UtcNow.AddDays(-2).AddTicks(Random.Shared.Next()));
+            try
+            {
+                Assert.Equal(key, FleetConfig.Current.FleetKey);
+                Assert.Equal(key, FleetConfig.Current.FleetKey);
+                Assert.Equal("abc123", FleetConfig.Current.MachineId);
+                // What was salvaged replaced the damaged file, and a copy of that is kept.
+                using (JsonDocument.Parse(File.ReadAllText(ConfigPath))) { }
+                var backup = Assert.Single(Directory.GetFiles(FleetConfig.StateDir, "fleet.json.damaged-*"));
+                Assert.Equal(damaged, File.ReadAllText(backup));
+            }
+            finally
+            {
+                foreach (var file in Directory.GetFiles(FleetConfig.StateDir, "fleet.json.damaged-*")) File.Delete(file);
+            }
+            return Task.CompletedTask;
+        });
+    }
+}
+
 
 /// <summary>Runs a test with its own fleet.json in the test state folder, and puts back the one before it.</summary>
 internal static class AuditFleetConfig
