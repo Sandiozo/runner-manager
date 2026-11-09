@@ -19,9 +19,16 @@ public partial class SettingsWindow : Window
     /// <summary>Set while the constructor sets the controls, so their events do not save what was just read.</summary>
     private bool _loading = true;
     private ReleaseInfo? _release;
+    /// <summary>
+    /// Installs and starts this PC's fleet agent once a pairing code is set (the dashboard's own "join" flow). Null:
+    /// Settings does it itself, as it does for AI assistants.
+    /// </summary>
+    private readonly Func<Task>? _finishJoining;
+    /// <summary>Whether this PC's fleet agent task exists; null until schtasks has answered.</summary>
+    private bool? _agentInstalled;
 
     public SettingsWindow(AppSettings settings, Action settingsChanged, Func<Task> fleetChanged,
-        Func<string, Func<Action<string>, Task>, Task<bool>> runOperation)
+        Func<string, Func<Action<string>, Task>, Task<bool>> runOperation, Func<Task>? finishJoining = null)
     {
         InitializeComponent();
         WindowTheme.Apply(this);
@@ -29,6 +36,7 @@ public partial class SettingsWindow : Window
         _settingsChanged = settingsChanged;
         _fleetChanged = fleetChanged;
         _runOperation = runOperation;
+        _finishJoining = finishJoining;
 
         (settings.Theme switch { AppTheme.System => ThemeSystem, AppTheme.Light => ThemeLight, _ => ThemeDark }).IsChecked = true;
         (settings.RefreshSeconds switch { >= 30 => Refresh30, >= 10 => Refresh10, _ => Refresh5 }).IsChecked = true;
@@ -53,10 +61,30 @@ public partial class SettingsWindow : Window
         StartupToggle.IsEnabled = false;
         Loaded += async (_, _) =>
         {
-            await ReadStartupTaskAsync();
+            await Task.WhenAll(ReadStartupTaskAsync(), ReadAgentStateAsync());
             await CheckForUpdatesAsync(force: false);
         };
     }
+
+    /// <summary>A pairing code alone does not join a fleet: the fleet agent is what other PCs reach, and it runs auto-recovery.</summary>
+    private async Task ReadAgentStateAsync()
+    {
+        try { _agentInstalled = await MachineRelay.IsAgentInstalledAsync(); }
+        catch { _agentInstalled = null; }
+        UpdateKeyStatus();
+        UpdateWatchdog();
+    }
+
+    private void UpdateWatchdog()
+    {
+        var noAgent = _agentInstalled == false;
+        WatchdogToggle.IsEnabled = !noAgent;
+        WatchdogRow.Description = noAgent
+            ? "Needs the fleet agent, which is not installed on this PC. Start a fleet or join one first."
+            : WatchdogDescription;
+    }
+
+    private const string WatchdogDescription = "Restarts runners that stop unexpectedly, up to 3 times an hour.";
 
     private async Task ReadStartupTaskAsync()
     {
@@ -226,16 +254,22 @@ public partial class SettingsWindow : Window
         var managedBy = key == null ? string.Empty : config.ManagedBy;
         ManagedGroup.Visibility = managedBy.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
         ManagedRow.Description = $"By {managedBy}'s fleet. Its PCs and AI assistants can view and control this PC. This PC can't see or control theirs.";
+        // Set, but the fleet agent was never installed (the code was entered here, or installing it failed).
+        var notJoined = key != null && _agentInstalled == false;
         KeyRow.Description = key == null
             ? "Not set. Start a new fleet here, or enter the code from a PC that is already in one."
+            : notJoined
+                ? $"Set (fingerprint {CommandSigner.KeyId(key)}), but this PC has not joined yet: its fleet agent is not installed, so other PCs cannot reach it."
             : managedBy.Length > 0
                 ? $"This PC's own code (fingerprint {CommandSigner.KeyId(key)}), known only to the fleet that manages it."
                 : $"Set. Fingerprint {CommandSigner.KeyId(key)}, the same on every PC in the fleet.";
         GenerateKeyButton.Visibility = key == null ? Visibility.Visible : Visibility.Collapsed;
+        FinishJoiningButton.Visibility = notJoined ? Visibility.Visible : Visibility.Collapsed;
         CopyKeyButton.Visibility = key == null ? Visibility.Collapsed : Visibility.Visible;
         ReplaceKeyItem.Visibility = key == null ? Visibility.Collapsed : Visibility.Visible;
         RemoveKeyItem.Visibility = key == null ? Visibility.Collapsed : Visibility.Visible;
-        LeaveFleetButton.IsEnabled = key != null;
+        // Leaving removes the agent and tells the other PCs; without an agent there is nothing to leave.
+        LeaveFleetButton.IsEnabled = key != null && !notJoined;
     }
 
     private async void GenerateKey_Click(object sender, RoutedEventArgs e)
@@ -244,8 +278,62 @@ public partial class SettingsWindow : Window
                 "Your other PCs cannot connect to this PC until you enter the new code on them.", "Replace code", danger: true))
             return;
         FleetConfig.SetFleetKey(CommandSigner.NewKey());
+        await JoinWithCodeAsync();
+    }
+
+    /// <summary>After a code was set here: installs the fleet agent if it is missing, so this PC is in the fleet.</summary>
+    private async Task JoinWithCodeAsync()
+    {
         UpdateKeyStatus();
-        await _fleetChanged();
+        await ReadAgentStateAsync();
+        if (_agentInstalled == false) await FinishJoiningAsync();
+        else await _fleetChanged();
+        RefreshPeers();
+    }
+
+    private async void FinishJoining_Click(object sender, RoutedEventArgs e)
+    {
+        await FinishJoiningAsync();
+        RefreshPeers();
+    }
+
+    private async Task FinishJoiningAsync()
+    {
+        if (FleetConfig.Current.FleetKey == null) return;
+        FinishJoiningButton.IsEnabled = false;
+        try
+        {
+            if (_finishJoining != null) await _finishJoining();
+            else await InstallAgentAsync();
+        }
+        finally
+        {
+            FinishJoiningButton.IsEnabled = true;
+            await ReadAgentStateAsync();
+        }
+    }
+
+    /// <summary>The same steps as joining from the dashboard, for when it did not pass its own.</summary>
+    private async Task InstallAgentAsync()
+    {
+        if (await AgentOwnership.OtherUserAsync() is { } owner)
+        {
+            DialogWindow.Info(this, "Another Windows user runs the fleet agent", AgentOwnership.Describe(owner));
+            return;
+        }
+        if (Owner is MainWindow { IsAgentWorkBusy: true })
+        {
+            DialogWindow.Info(this, "The fleet agent is being updated", "Try again when it is done. Progress is shown in the activity list.");
+            return;
+        }
+        if (await RunOperationAsync("Join fleet", async log =>
+            {
+                await AppUpdater.InstallCurrentBuildAsync(log);
+                log("Starting the fleet agent and opening its ports for the local network and Tailscale…");
+                await MachineRelay.InstallAndStartAgentTaskAsync();
+                log($"{Environment.MachineName} joined the fleet.");
+            }))
+            await _fleetChanged();
     }
 
     private void CopyKey_Click(object sender, RoutedEventArgs e)
@@ -283,8 +371,7 @@ public partial class SettingsWindow : Window
         }
         FleetConfig.SetFleetKey(key);
         CancelPasteKey_Click(sender, e);
-        UpdateKeyStatus();
-        await _fleetChanged();
+        await JoinWithCodeAsync();
     }
 
     private async void RemoveKey_Click(object sender, RoutedEventArgs e)
@@ -306,6 +393,7 @@ public partial class SettingsWindow : Window
         UpdateKeyStatus();
         RefreshPeers();
         await _fleetChanged();
+        await ReadAgentStateAsync();
     }
 
     private async void WatchdogToggle_Click(object sender, RoutedEventArgs e)
@@ -420,7 +508,7 @@ public partial class SettingsWindow : Window
     {
         if (Owner is not MainWindow main) return;
         await main.LeaveFleetAsync();
-        UpdateKeyStatus();
+        await ReadAgentStateAsync();
         RefreshPeers();
     }
 
@@ -614,6 +702,19 @@ public partial class SettingsWindow : Window
         if (enable && (FleetConfig.Current.FleetKey == null || !await MachineRelay.IsAgentRunningAsync()))
         {
             // Assistants hand their changes to this PC's fleet agent, which needs a pairing code even with only this PC.
+            // That changes this PC (a code, a scheduled task, firewall rules), so ask first.
+            var installed = _agentInstalled ?? await MachineRelay.IsAgentInstalledAsync();
+            var what = FleetConfig.Current.FleetKey == null
+                ? "Runner Manager gives this PC a pairing code of its own, installs the fleet agent and opens its ports in Windows Firewall for the local network and Tailscale. Other PCs can join later with the code."
+                : installed
+                    ? "The fleet agent on this PC is not running. Runner Manager installs it again and starts it."
+                    : "Runner Manager installs the fleet agent and opens its ports in Windows Firewall for the local network and Tailscale.";
+            if (!DialogWindow.Confirm(this, "Turn on AI assistants?",
+                    $"Assistants work through this PC's fleet agent. {what}", "Turn on"))
+            {
+                AssistantToggle.IsChecked = false;
+                return;
+            }
             var ready = await RunOperationAsync("Turn on AI assistants", async log =>
             {
                 if (FleetConfig.Current.FleetKey == null) FleetConfig.SetFleetKey(CommandSigner.NewKey());
@@ -621,7 +722,7 @@ public partial class SettingsWindow : Window
                 log("Starting the fleet agent…");
                 await MachineRelay.InstallAndStartAgentTaskAsync();
             });
-            UpdateKeyStatus();
+            await ReadAgentStateAsync();
             if (!ready)
             {
                 AssistantToggle.IsChecked = false;
