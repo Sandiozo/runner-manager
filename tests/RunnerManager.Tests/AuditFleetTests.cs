@@ -503,6 +503,52 @@ public class ManagedNameTests
     }
 }
 
+public class PcNameHeaderTests
+{
+    [Theory]
+    [InlineData("PC_1", "PC_1")]
+    [InlineData("*", "*")]
+    [InlineData("ÖSTRA", "ÖSTRA")]
+    [InlineData("ĀBOLS", "%C4%80BOLS")]
+    public void TheHeader_KeepsAsciiAndLatin1Names_AndEncodesTheRest(string key, string header)
+    {
+        Assert.Equal(header, FleetNetwork.TargetHeader(key));
+        Assert.Equal(key, FleetNetwork.TargetFromHeader(header));
+    }
+
+    [Theory]
+    [InlineData("ÖSTRA")]
+    [InlineData("ĀBOLS")]
+    [InlineData("ДАЧА")]
+    public async Task APcWithLettersOutsideAToZ_CanBeReached(string name)
+    {
+        using var agent = new TestAgent(name);
+
+        var response = await FleetNetwork.CallAsync(agent.Address, name, new FleetRequest { Op = "status" }, pairingKey: agent.Key);
+
+        Assert.Equal(name, response.Status!.MachineName);
+    }
+
+    [Fact]
+    public async Task ARequestForAnotherPc_IsStillRefused()
+    {
+        using var agent = new TestAgent("ĀBOLS");
+
+        var refused = await Assert.ThrowsAsync<PairingMismatchException>(
+            () => FleetNetwork.CallAsync(agent.Address, "ĀBOLT", new FleetRequest { Op = "status" }, pairingKey: agent.Key));
+
+        Assert.Equal("wrong PC", refused.Reason);
+    }
+
+    [Fact]
+    public void AnOlderAgentsRefusal_MentionsTheName_OnlyWhenItWasEncoded()
+    {
+        Assert.Contains("older version", FleetNetwork.RefusalMessage("denied", "ĀBOLS"));
+        Assert.DoesNotContain("older version", FleetNetwork.RefusalMessage("denied", "ÖSTRA"));
+        Assert.DoesNotContain("older version", FleetNetwork.RefusalMessage("wrong PC", "ĀBOLS"));
+    }
+}
+
 internal static class AuditFleetConfig
 {
     private static readonly string ConfigPath = Path.Combine(FleetConfig.StateDir, "fleet.json");

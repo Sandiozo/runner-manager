@@ -198,15 +198,38 @@ public static class FleetNetwork
 
     /// <summary>
     /// Requests go straight to the agents, on the local network or Tailscale: a proxy set up in Windows can't reach those
-    /// addresses, and an agent never redirects.
+    /// addresses, and an agent never redirects. The PC name header is sent as Latin-1 (see <see cref="TargetHeader"/>).
     /// </summary>
     internal static SocketsHttpHandler CreateHandler() => new()
     {
         UseProxy = false,
         AllowAutoRedirect = false,
         UseCookies = false,
-        ConnectTimeout = ConnectTimeout
+        ConnectTimeout = ConnectTimeout,
+        RequestHeaderEncodingSelector = (name, _) => name.Equals(TargetHeaderName, StringComparison.OrdinalIgnoreCase) ? Encoding.Latin1 : null
     };
+
+    internal const string TargetHeaderName = "X-RW-To";
+
+    /// <summary>
+    /// The X-RW-To header for a PC name key, which can have letters outside A–Z. Header bytes are read as Latin-1, so a
+    /// name in Latin-1 (such as "ÖSTRA") is sent as it is and every agent reads it. Other names (such as "ĀBOLS") are
+    /// percent-encoded, which only newer agents decode; before, requests to them could not be sent at all.
+    /// </summary>
+    internal static string TargetHeader(string machineKey)
+        => machineKey.All(c => c <= (char)0xFF) ? machineKey : Uri.EscapeDataString(machineKey);
+
+    /// <summary>The PC name key in an X-RW-To header. A name key never has a '%', so one means it was percent-encoded.</summary>
+    internal static string TargetFromHeader(string header) => header.Contains('%') ? Uri.UnescapeDataString(header) : header;
+
+    /// <summary>A refusal of a request whose PC name was percent-encoded: an older agent can't read it.</summary>
+    internal static string RefusalMessage(string reason, string targetMachineKey)
+    {
+        var message = RefusalMessage(reason);
+        return TargetHeader(targetMachineKey) != targetMachineKey && (reason.Length == 0 || reason.Equals("denied", StringComparison.OrdinalIgnoreCase))
+            ? $"{message} Or {targetMachineKey} runs an older version of Runner Manager, which can't read some letters in its name. Update Runner Manager there."
+            : message;
+    }
 
     public static async Task<FleetResponse> CallAsync(string address, string targetMachineKey, FleetRequest request,
         TimeSpan? timeout = null, CancellationToken cancellationToken = default, byte[]? pairingKey = null)
@@ -223,7 +246,7 @@ public static class FleetNetwork
             Content = new ByteArrayContent(body)
         };
         message.Headers.Add("X-RW-Time", time.ToString());
-        message.Headers.Add("X-RW-To", targetMachineKey);
+        message.Headers.Add(TargetHeaderName, TargetHeader(targetMachineKey));
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         cts.CancelAfter(timeout ?? TimeSpan.FromSeconds(6));
         using var response = await Http.SendAsync(message, HttpCompletionOption.ResponseHeadersRead, cts.Token);
@@ -232,7 +255,7 @@ public static class FleetNetwork
             var error = await ReadLimitedAsync(await response.Content.ReadAsStreamAsync(cts.Token), MaxErrorBodyBytes, truncate: true, cts.Token);
             var reason = Encoding.UTF8.GetString(error!).Trim();
             if (response.StatusCode == HttpStatusCode.Forbidden)
-                throw new PairingMismatchException(RefusalMessage(reason), reason);
+                throw new PairingMismatchException(RefusalMessage(reason, targetMachineKey), reason);
             if (response.StatusCode == HttpStatusCode.ServiceUnavailable)
                 throw new PairingMismatchException("The fleet agent on that PC has no pairing code.", reason);
             if (reason.Length > MaxRefusalLength) reason = reason[..MaxRefusalLength];
@@ -671,7 +694,7 @@ public sealed class AgentServer : IDisposable
                 .WaitAsync(BodyTimeout, _cts.Token);
             if (body == null) { await Reply(response, 400, "bad request"); return; }
             var transportKey = FleetNetwork.KeysFor(pairingKey).Transport;
-            var target = context.Request.Headers["X-RW-To"] ?? string.Empty;
+            var target = FleetNetwork.TargetFromHeader(context.Request.Headers[FleetNetwork.TargetHeaderName] ?? string.Empty);
             var requestContext = FleetCrypto.RequestContext(target, time);
             // Authenticate before saying anything about the target, so strangers can't use the answer to guess PC names.
             var plain = FleetCrypto.Open(transportKey, body, requestContext);
