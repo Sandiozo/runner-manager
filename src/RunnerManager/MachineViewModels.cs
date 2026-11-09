@@ -468,7 +468,16 @@ public sealed class MachineInfo : INotifyPropertyChanged
     // ----- Collapsed to its header -----
     public bool IsCollapsed => CollapsedPcs.Contains(MachineName);
     public string CollapseGlyph => IsCollapsed ? "\uE76C" : "\uE70D";
-    public Visibility BodyVisibility => IsCollapsed ? Visibility.Collapsed : Visibility.Visible;
+    public Visibility BodyVisibility => IsCollapsed && !_openForSearch ? Visibility.Collapsed : Visibility.Visible;
+    private bool _openForSearch;
+
+    /// <summary>A search found runners on this PC: show them even when the card is collapsed, without changing that setting.</summary>
+    public void SetOpenForSearch(bool open)
+    {
+        if (_openForSearch == open) return;
+        _openForSearch = open;
+        Notify(new[] { nameof(BodyVisibility) });
+    }
 
     /// <summary>Collapses or expands the card; returns whether it is collapsed now.</summary>
     public bool ToggleCollapsed()

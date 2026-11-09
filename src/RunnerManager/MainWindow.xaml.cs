@@ -584,10 +584,13 @@ public partial class MainWindow : Window
     {
         if (item is not MachineInfo machine) return false;
         if (_selectedMachineKey != null && machine.MachineKey != _selectedMachineKey) return false;
-        if (string.IsNullOrWhiteSpace(_filter)) return true;
-        return machine.MachineName.Contains(_filter, StringComparison.OrdinalIgnoreCase)
-               || machine.Runners.Any(r => r.MatchesFilter);
+        return MatchesSearch(machine);
     }
+
+    private bool MatchesSearch(MachineInfo machine)
+        => string.IsNullOrWhiteSpace(_filter)
+           || machine.MachineName.Contains(_filter, StringComparison.OrdinalIgnoreCase)
+           || machine.Runners.Any(r => r.MatchesFilter);
 
     private void ApplyFilter()
     {
@@ -595,8 +598,15 @@ public partial class MainWindow : Window
         {
             var machineMatch = !string.IsNullOrWhiteSpace(_filter)
                 && machine.MachineName.Contains(_filter, StringComparison.OrdinalIgnoreCase);
+            var runnerMatch = false;
             foreach (var runner in machine.Runners)
-                runner.MatchesFilter = machineMatch || runner.Matches(_filter);
+            {
+                var match = runner.Matches(_filter);
+                runnerMatch |= match;
+                runner.MatchesFilter = machineMatch || match;
+            }
+            // A match in a runner's own details is otherwise hidden in a collapsed card.
+            machine.SetOpenForSearch(runnerMatch && !string.IsNullOrWhiteSpace(_filter));
         }
         // Refreshing the view rebuilds every card, so only do it when the visible set actually changes.
         var visible = MachinesView.Cast<MachineInfo>().Select(m => m.MachineKey);
@@ -604,7 +614,17 @@ public partial class MainWindow : Window
         if (!visible.SequenceEqual(wanted)) MachinesView.Refresh();
         var empty = MachinesView.IsEmpty && !string.IsNullOrWhiteSpace(_filter);
         NoResultsPanel.Visibility = empty ? Visibility.Visible : Visibility.Collapsed;
-        NoResultsText.Text = $"No runners or PCs match “{_filter}”.";
+        NoResultsText.Text = NoResultsMessage();
+    }
+
+    /// <summary>With one PC selected in the sidebar, the search covers only that PC: say so, and whether others match.</summary>
+    private string NoResultsMessage()
+    {
+        if (_selectedMachineKey == null || Machines.FirstOrDefault(m => m.MachineKey == _selectedMachineKey) is not { } selected)
+            return $"No runners or PCs match “{_filter}”.";
+        return Machines.Any(m => m != selected && MatchesSearch(m))
+            ? $"Nothing on {selected.MachineName} matches “{_filter}”. Other PCs have matches. Select All PCs to see them."
+            : $"Nothing on {selected.MachineName} matches “{_filter}”.";
     }
 
     private void SearchBox_TextChanged(object sender, TextChangedEventArgs e)

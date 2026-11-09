@@ -115,6 +115,17 @@ internal static class WpfTestApp
     public static Color Resource(string key) => ColorOf((Brush)Application.Current.FindResource(key));
 }
 
+/// <summary>
+/// A dashboard sets process-wide settings (collapsed PCs and lists) that other tests change too, so these tests run
+/// on their own, after the others.
+/// </summary>
+[CollectionDefinition(Name, DisableParallelization = true)]
+public class DashboardCollection
+{
+    public const string Name = "Dashboard";
+}
+
+[Collection(DashboardCollection.Name)]
 public class AuditDashboardTests
 {
     // ================= The dashboard window =================
@@ -427,6 +438,64 @@ public class AuditDashboardTests
     {
         var runner = new MachineRunnerStatus { ServiceName = "actions.runner.app.build-01", DisplayName = "build-01" };
         Assert.Equal(Visibility.Collapsed, runner.LabelsVisibility);
+    }
+
+    // ----- Bug 13: search -----
+
+    private static MachineInfo PcWith(string name, params MachineRunnerStatus[] runners)
+        => MachineInfo.FromPayload(name.ToLowerInvariant(), new MachineStatusPayload
+        {
+            MachineName = name, AgentProtocolVersion = 14, UpdatedUtc = DateTime.UtcNow, FleetAgentRunning = true, Runners = runners
+        });
+
+    private static MachineRunnerStatus RunnerWith(string name) => new() { ServiceName = $"actions.runner.{name}", DisplayName = name };
+
+    [Fact]
+    public void Search_ShowsAMatchInACollapsedCard()
+        => WpfTestApp.Run(() =>
+        {
+            var window = new MainWindow();
+            var pc = PcWith("BUILD-02", RunnerWith("gpu-box"));
+            MachineInfo.CollapsedPcs.Add("BUILD-02");
+            window.Machines.Add(pc);
+            Assert.Equal(Visibility.Collapsed, pc.BodyVisibility);
+            window.SearchBox.Text = "gpu";
+            Assert.Equal(Visibility.Visible, pc.BodyVisibility);
+            Assert.True(pc.IsCollapsed);
+            window.SearchBox.Text = string.Empty;
+            Assert.Equal(Visibility.Collapsed, pc.BodyVisibility);
+            MachineInfo.CollapsedPcs.Remove("BUILD-02");
+        });
+
+    [Fact]
+    public void Search_WithOnePcSelected_SaysWhereTheMatchesAre()
+    {
+        var window = NewDashboard();
+        var first = PcWith("BUILD-01", RunnerWith("api"));
+        var second = PcWith("BUILD-02", RunnerWith("gpu-box"));
+        WpfTestApp.Run(() =>
+        {
+            foreach (var pc in new[] { first, second })
+            {
+                window.Machines.Add(pc);
+                window.NavItems.Add(pc);
+            }
+        });
+        // The sidebar's binding takes the new entries from the dispatcher.
+        WpfTestApp.Flush();
+        WpfTestApp.Run(() =>
+        {
+            window.MachineNav.SelectedItem = first;
+            window.SearchBox.Text = "gpu";
+            Assert.Equal(Visibility.Visible, window.NoResultsPanel.Visibility);
+            Assert.Equal("Nothing on BUILD-01 matches “gpu”. Other PCs have matches. Select All PCs to see them.", window.NoResultsText.Text);
+            window.SearchBox.Text = "arm64";
+            Assert.Equal("Nothing on BUILD-01 matches “arm64”.", window.NoResultsText.Text);
+            window.MachineNav.SelectedIndex = 0;
+            Assert.Equal("No runners or PCs match “arm64”.", window.NoResultsText.Text);
+            window.SearchBox.Text = "gpu";
+            Assert.Equal(Visibility.Collapsed, window.NoResultsPanel.Visibility);
+        });
     }
 
     // ----- Bug 10: keyboard shortcuts -----
