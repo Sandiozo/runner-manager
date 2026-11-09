@@ -1,3 +1,5 @@
+using System.IO;
+
 namespace RunnerManager.Tests;
 
 public class RunnerRecoveryTests
@@ -113,4 +115,219 @@ public class RunnerRecoveryTests
     [InlineData("Running", false)]
     public void PendingServiceStates_AreRecognized(string state, bool pending)
         => Assert.Equal(pending, MachineRelay.IsPending(new RunnerInfo { StatusText = state }));
+}
+
+public class ClockOffsetTests
+{
+    private static readonly DateTime Received = new(2026, 11, 9, 12, 0, 0, DateTimeKind.Utc);
+
+    private static MachineStatusPayload Status(DateTime agentNow, DateTime? jobStarted = null, DateTime? answered = null, DateTime? updated = null) => new()
+    {
+        MachineName = "SLOWCLOCK",
+        FleetAgentRunning = true,
+        UpdatedUtc = updated ?? agentNow,
+        AnsweredUtc = answered ?? default,
+        BootUtc = agentNow.AddDays(-1),
+        Runners = new[]
+        {
+            new MachineRunnerStatus { ServiceName = "actions.runner.a", IsRunning = true, ActivityText = "Busy", JobStartedUtc = jobStarted, QuietSinceUtc = jobStarted },
+            new MachineRunnerStatus { ServiceName = "actions.runner.b", IsRunning = true, ActivityText = "Idle" }
+        }
+    };
+
+    private static string NewKey() => "PC_" + Guid.NewGuid().ToString("N");
+
+    [Fact]
+    public void AClockThatIsBehind_IsCorrected_AndThePcCountsAsJustUpdated()
+    {
+        var agentNow = Received.AddSeconds(-90);
+        var status = MachineRelay.ByLocalClock(NewKey(), Status(agentNow, jobStarted: agentNow.AddMinutes(-5)), Received);
+
+        Assert.Equal(Received, status.UpdatedUtc);
+        Assert.Equal(Received.AddMinutes(-5), status.Runners[0].JobStartedUtc);
+        Assert.Equal(Received.AddMinutes(-5), status.Runners[0].QuietSinceUtc);
+        Assert.Equal("actions.runner.a", status.Runners[0].ServiceName);
+        Assert.Equal(Received.AddDays(-1), status.BootUtc);
+        Assert.Null(status.Runners[1].JobStartedUtc);
+    }
+
+    [Fact]
+    public void TheCorrection_StaysTheSame_WhileTheClockStaysWhereItIs()
+    {
+        var key = NewKey();
+        var started = Received.AddSeconds(-90).AddMinutes(-5);
+        var first = MachineRelay.ByLocalClock(key, Status(Received.AddSeconds(-90), jobStarted: started), Received);
+        // The next answer took a little longer over the network.
+        var second = MachineRelay.ByLocalClock(key, Status(Received.AddSeconds(8 - 90), jobStarted: started), Received.AddSeconds(10));
+
+        Assert.Equal(first.Runners[0].JobStartedUtc, second.Runners[0].JobStartedUtc);
+        Assert.Equal(Received.AddSeconds(10), second.UpdatedUtc);
+    }
+
+    [Fact]
+    public void ClocksThatAreClose_AreNotCorrected()
+    {
+        var payload = Status(Received.AddSeconds(-2), jobStarted: Received.AddMinutes(-3));
+        var status = MachineRelay.ByLocalClock(NewKey(), payload, Received);
+
+        Assert.Equal(Received, status.UpdatedUtc);
+        Assert.Same(payload.Runners, status.Runners);
+        Assert.Equal(payload.BootUtc, status.BootUtc);
+    }
+
+    [Fact]
+    public void AnOldStatus_FromANewerAgent_KeepsItsAge_AndIsNotOnline()
+    {
+        var agentNow = Received.AddSeconds(-60);
+        var status = MachineRelay.ByLocalClock(NewKey(), Status(agentNow, answered: agentNow, updated: agentNow.AddSeconds(-45)), Received);
+
+        Assert.Equal(Received.AddSeconds(-45), status.UpdatedUtc);
+        // By this PC's clock, it is 45 seconds old now.
+        Assert.False(MachineInfo.FromPayload("PC", status with { UpdatedUtc = DateTime.UtcNow.AddSeconds(-45) }, address: "pc").IsOnline);
+    }
+
+    [Fact]
+    public void ATimeThatCannotBeAnAnswerTime_IsKeptAsItIs()
+    {
+        var empty = new MachineStatusPayload { MachineName = "PC" };
+        Assert.Same(empty, MachineRelay.ByLocalClock(NewKey(), empty, Received));
+        var old = Status(Received.AddHours(-3));
+        Assert.Same(old, MachineRelay.ByLocalClock(NewKey(), old, Received));
+    }
+
+    [Fact]
+    public void TheAnswerTime_DoesNotChangeTheFingerprint()
+    {
+        var payload = Status(Received);
+        Assert.Equal(payload.Fingerprint(), (payload with { AnsweredUtc = Received.AddSeconds(3), UpdatedUtc = Received.AddSeconds(3) }).Fingerprint());
+    }
+
+    /// <summary>What a dashboard from before the answer time reads.</summary>
+    private sealed record OlderPayload
+    {
+        public string MachineName { get; init; } = string.Empty;
+        public DateTime UpdatedUtc { get; init; }
+    }
+
+    [Fact]
+    public void OlderDashboards_IgnoreTheAnswerTime()
+    {
+        var json = System.Text.Json.JsonSerializer.Serialize(MachineRelay.AsAnswer(Status(Received), Received));
+        Assert.Contains("AnsweredUtc", json);
+        var older = System.Text.Json.JsonSerializer.Deserialize<OlderPayload>(json, new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true })!;
+        Assert.Equal(Received, older.UpdatedUtc);
+    }
+
+    [Fact]
+    public void AnAnswer_IsStampedWithItsTime_UnlessNoStatusCouldBeBuiltForAWhile()
+    {
+        var fresh = MachineRelay.AsAnswer(new MachineStatusPayload { UpdatedUtc = Received.AddSeconds(-10) }, Received);
+        Assert.Equal((Received, Received), (fresh.UpdatedUtc, fresh.AnsweredUtc));
+
+        var stale = MachineRelay.AsAnswer(new MachineStatusPayload { UpdatedUtc = Received.AddSeconds(-40) }, Received);
+        Assert.Equal((Received.AddSeconds(-40), Received), (stale.UpdatedUtc, stale.AnsweredUtc));
+    }
+}
+
+[Collection(FleetSettingsCollection.Name)]
+public class ClockOffsetFleetTests
+{
+    [Fact]
+    public async Task APcWhoseClockIsBehind_IsListedOnline()
+    {
+        await AuditFleetConfig.WithConfigAsync(async () =>
+        {
+            using var agent = new TestAgent("BEHINDPC");
+            agent.Status = s => s with { UpdatedUtc = DateTime.UtcNow.AddSeconds(-100) };
+            FleetConfig.SetFleetKey(agent.Key);
+            FleetConfig.Update(c => c.KnownPeers.Add(new PeerRecord { Name = "BEHINDPC", Address = agent.Address, LastSeenUtc = DateTime.UtcNow }));
+
+            var listed = Assert.Single(await MachineRelay.ReadFleetAsync(), m => m.MachineName == "BEHINDPC");
+
+            Assert.Empty(listed.ConnectionProblem);
+            Assert.True(listed.IsOnline);
+            Assert.True(DateTime.UtcNow - listed.UpdatedUtc < TimeSpan.FromSeconds(10));
+        });
+    }
+}
+
+/// <summary>Runs a test with its own fleet.json in the test state folder, and puts back the one before it.</summary>
+internal static class AuditFleetConfig
+{
+    private static readonly string ConfigPath = Path.Combine(FleetConfig.StateDir, "fleet.json");
+
+    public static async Task WithConfigAsync(Func<Task> test)
+    {
+        Directory.CreateDirectory(FleetConfig.StateDir);
+        var saved = File.Exists(ConfigPath) ? File.ReadAllText(ConfigPath) : null;
+        if (saved != null) File.Delete(ConfigPath);
+        try { await test(); }
+        finally
+        {
+            if (saved != null)
+            {
+                File.WriteAllText(ConfigPath, saved);
+                File.SetLastWriteTimeUtc(ConfigPath, DateTime.UtcNow.AddDays(-1).AddTicks(Random.Shared.Next()));
+            }
+            else if (File.Exists(ConfigPath)) File.Delete(ConfigPath);
+        }
+    }
+}
+
+public class StatusCacheBuildTests
+{
+    private static MachineStatusPayload Payload(int n) => new() { MachineName = "PC", LastCommandId = n.ToString(), UpdatedUtc = DateTime.UtcNow };
+
+    [Fact]
+    public async Task AFailingBuild_IsLoggedOnce_AndSoIsItsRecovery()
+    {
+        var builds = 0;
+        var fail = true;
+        var log = new List<string>();
+        var cache = new StatusCache(() =>
+        {
+            var n = Interlocked.Increment(ref builds);
+            return fail ? throw new InvalidOperationException("WMI is broken") : Task.FromResult(Payload(n));
+        }, message => { lock (log) log.Add(message); });
+
+        for (var i = 0; i < 3; i++) await Assert.ThrowsAsync<InvalidOperationException>(() => cache.GetAsync());
+        Assert.True(builds >= 3);
+        Assert.Single(log, m => m.Contains("WMI is broken"));
+
+        fail = false;
+        await cache.GetAsync();
+        Assert.Equal(2, log.Count);
+        Assert.Contains("works again", log[1]);
+    }
+
+    [Fact]
+    public async Task AHungBuild_IsGivenUp_AndAnotherOneIsStarted()
+    {
+        var builds = 0;
+        var hang = new TaskCompletionSource<MachineStatusPayload>();
+        var log = new List<string>();
+        var cache = new StatusCache(() =>
+        {
+            var n = Interlocked.Increment(ref builds);
+            return n == 2 ? hang.Task : Task.FromResult(Payload(n));
+        }, message => { lock (log) log.Add(message); }) { BuildTimeout = TimeSpan.FromMilliseconds(300) };
+        Assert.Equal("1", (await cache.GetAsync()).LastCommandId);
+
+        await Task.Delay(StatusCache.FreshFor + TimeSpan.FromMilliseconds(100));
+        Assert.Equal("1", (await cache.GetAsync()).LastCommandId);
+        Assert.True(SpinWait.SpinUntil(() => Volatile.Read(ref builds) == 2, TimeSpan.FromSeconds(1)));
+
+        // Still hung after the timeout: the next request starts another build, which shows up.
+        await Task.Delay(400);
+        await cache.GetAsync();
+        Assert.True(SpinWait.SpinUntil(() => Volatile.Read(ref builds) == 3, TimeSpan.FromSeconds(1)));
+        await Task.Delay(200);
+        Assert.Equal("3", (await cache.GetAsync()).LastCommandId);
+        Assert.Contains(log, m => m.Contains("took more than"));
+
+        // The hung build finishing late does not bring back its older status.
+        hang.SetResult(Payload(2));
+        await Task.Delay(100);
+        Assert.Equal("3", (await cache.GetAsync()).LastCommandId);
+    }
 }

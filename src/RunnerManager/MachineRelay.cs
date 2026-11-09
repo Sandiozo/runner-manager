@@ -248,11 +248,67 @@ public static class MachineRelay
         }
     }
 
+    // How far each PC's clock is from this PC's, as used for its answers (guarded by LastStatus's lock).
+    private static readonly Dictionary<string, TimeSpan> ClockOffsets = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>
+    /// Clocks this close need no correction (the measurement includes the network's delay). A PC's correction changes
+    /// only when its clock moves by more than this, so the times of its jobs, which name their alerts, stay the same.
+    /// </summary>
+    private static readonly TimeSpan ClockTolerance = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// A PC's status by this PC's clock. The other PC stamps its times with its own clock, which may be off by up to the
+    /// two minutes the connection allows, and a dashboard compares them with its own (a PC is online while its status
+    /// is under 30 seconds old). The status counts as updated when the answer arrived, less the age the PC reports for
+    /// it; its start time and the times of its jobs move by how far its clock is off. Event times stay as the PC
+    /// reported them, since they name its alerts.
+    /// </summary>
+    internal static MachineStatusPayload ByLocalClock(string key, MachineStatusPayload payload, DateTime receivedUtc)
+    {
+        // Older agents send no AnsweredUtc: they stamp UpdatedUtc when they answer.
+        var answered = payload.AnsweredUtc != default ? payload.AnsweredUtc : payload.UpdatedUtc;
+        var measured = receivedUtc - answered;
+        // The connection refuses clocks further apart, so this is no answer time: keep the status as it is.
+        if (answered == default || measured.Duration() > FleetCrypto.MaxClockSkew + ClockTolerance) return payload;
+        var age = answered > payload.UpdatedUtc ? answered - payload.UpdatedUtc : TimeSpan.Zero;
+        var offset = ClockOffset(key, measured);
+        return payload with
+        {
+            UpdatedUtc = receivedUtc - age,
+            AnsweredUtc = receivedUtc,
+            BootUtc = payload.BootUtc + offset,
+            Runners = offset == TimeSpan.Zero ? payload.Runners : payload.Runners.Select(r => Shifted(r, offset)).ToArray()
+        };
+    }
+
+    private static TimeSpan ClockOffset(string key, TimeSpan measured)
+    {
+        lock (LastStatus)
+        {
+            var known = ClockOffsets.GetValueOrDefault(key);
+            if ((measured - known).Duration() <= ClockTolerance) return known;
+            var offset = TimeSpan.FromSeconds(Math.Round(measured.TotalSeconds));
+            ClockOffsets[key] = offset;
+            return offset;
+        }
+    }
+
+    /// <summary>A runner's job times moved by <paramref name="offset"/>. Its properties are init-only, so it is copied the way it arrived, as JSON.</summary>
+    private static MachineRunnerStatus Shifted(MachineRunnerStatus runner, TimeSpan offset)
+    {
+        if (runner.JobStartedUtc == null && runner.QuietSinceUtc == null) return runner;
+        var copy = JsonSerializer.SerializeToNode(runner)!.AsObject();
+        if (runner.JobStartedUtc is { } started) copy[nameof(MachineRunnerStatus.JobStartedUtc)] = started + offset;
+        if (runner.QuietSinceUtc is { } quiet) copy[nameof(MachineRunnerStatus.QuietSinceUtc)] = quiet + offset;
+        return copy.Deserialize<MachineRunnerStatus>() ?? runner;
+    }
+
     /// <summary>A PC answered at <paramref name="address"/>: remember it there, and list it (with a warning if its name is taken twice).</summary>
     private static MachineInfo Accept(MachineStatusPayload? payload, string address)
     {
         if (payload == null) throw new InvalidOperationException("The PC returned no status.");
         var machineKey = Sanitize(payload.MachineName);
+        payload = ByLocalClock(machineKey, payload, DateTime.UtcNow);
         NoteAnswer(machineKey, payload);
         NoteSighting(payload.MachineName, payload.MachineId, address);
         RememberPeer(payload.MachineName, FleetNetwork.WithPort(address), payload.AppVersion, payload.MachineId);
@@ -376,6 +432,7 @@ public static class MachineRelay
         var machineKey = Sanitize(payload.MachineName);
         if (machineKey != Sanitize(pc.Name) && (machineKey == LocalMachineKey || FleetConfig.Current.KnownPeers.Any(p => Sanitize(p.Name) == machineKey)))
             return MachineInfo.Placeholder("MANAGED_" + machineKey, payload.MachineName, DateTime.UtcNow, address, ManagedNameProblem(payload.MachineName), managed: true);
+        payload = ByLocalClock(machineKey, payload, DateTime.UtcNow);
         NoteAnswer(machineKey, payload);
         NoteSighting(payload.MachineName, payload.MachineId, address);
         var at = FleetNetwork.WithPort(address);
@@ -690,15 +747,14 @@ public static class MachineRelay
             return command.Id;
         }
         // Several dashboards may poll at once; the (WMI-heavy) status is built at most every two seconds, in the background.
-        var status = _status = new StatusCache(async () => BuildPayload(await GatherLocalStateAsync(), state.LastCommandId, lastResult));
+        var status = _status = new StatusCache(async () => BuildPayload(await GatherLocalStateAsync(), state.LastCommandId, lastResult), AppendAgentLog);
         async Task<MachineStatusPayload> StatusAsync()
         {
             var cached = await status.GetAsync();
             // Pending before results: a command that finishes in between then shows in both, never in neither.
             var running = pending.Keys.ToArray();
-            return cached with
+            return AsAnswer(cached, DateTime.UtcNow) with
             {
-                UpdatedUtc = DateTime.UtcNow,
                 PendingCommandIds = running,
                 RecentCommands = state.Results,
                 Busy = running.Length > 0 || !AgentWork.IsIdle
@@ -804,6 +860,17 @@ public static class MachineRelay
     }
 
     private static void InvalidateStatus() => _status?.Invalidate();
+
+    /// <summary>
+    /// A built status as the answer to a request: stamped with the time it is sent, as agents always did, unless no
+    /// status could be built for <see cref="StatusCache.StaleAfter"/>. Then it keeps the time it was built, so it does
+    /// not look current. <see cref="MachineStatusPayload.AnsweredUtc"/> gives newer dashboards this PC's clock.
+    /// </summary>
+    internal static MachineStatusPayload AsAnswer(MachineStatusPayload built, DateTime nowUtc) => built with
+    {
+        UpdatedUtc = nowUtc - built.UpdatedUtc <= StatusCache.StaleAfter ? nowUtc : built.UpdatedUtc,
+        AnsweredUtc = nowUtc
+    };
 
     private static async Task<string> ExecuteCommandAsync(MachineCommand command)
     {
@@ -1604,7 +1671,16 @@ public sealed record MachineStatusPayload
     public string MachineId { get; init; } = string.Empty;
     public int AgentProtocolVersion { get; init; }
     public string AppVersion { get; init; } = string.Empty;
+    /// <summary>
+    /// When the status was current. The agent stamps it when it answers (unless it could not build a status for a
+    /// while); dashboards replace it with their own clock's time (see <see cref="MachineRelay.ByLocalClock"/>).
+    /// </summary>
     public DateTime UpdatedUtc { get; init; }
+    /// <summary>
+    /// The agent's clock when it answered, so a dashboard can tell a clock that is off from a status that is old.
+    /// Older agents don't send it; their <see cref="UpdatedUtc"/> is always that time. Older dashboards ignore it.
+    /// </summary>
+    public DateTime AnsweredUtc { get; init; }
     public bool FleetAgentRunning { get; init; }
     public string LastCommandId { get; init; } = string.Empty;
     public string LastCommandResult { get; init; } = string.Empty;
@@ -1633,6 +1709,7 @@ public sealed record MachineStatusPayload
     public string Fingerprint() => JsonSerializer.Serialize(this with
     {
         UpdatedUtc = default,
+        AnsweredUtc = default,
         Busy = false,
         CpuPercent = 0,
         MemoryPercent = 0
