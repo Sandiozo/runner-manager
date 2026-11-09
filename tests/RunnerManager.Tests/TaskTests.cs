@@ -25,6 +25,8 @@ public class ScheduledTaskXmlTests
         var settings = task.Element(Ns + "Settings")!;
         Assert.Equal("IgnoreNew", settings.Element(Ns + "MultipleInstancesPolicy")!.Value);
         Assert.NotNull(settings.Element(Ns + "RestartOnFailure"));
+        // Normal priority: Task Scheduler's default (7) runs the agent below normal.
+        Assert.Equal("4", settings.Element(Ns + "Priority")!.Value);
         // Signed-in only: the fleet key is protected for the user, so the logon type stays interactive.
         Assert.Equal("InteractiveToken", task.Element(Ns + "Principals")!.Element(Ns + "Principal")!.Element(Ns + "LogonType")!.Value);
         Assert.Equal("Fleet agent & co", task.Element(Ns + "RegistrationInfo")!.Element(Ns + "Description")!.Value);
@@ -49,6 +51,7 @@ public class ScheduledTaskXmlTests
         var withoutKeepAlive = System.Text.RegularExpressions.Regex.Replace(current, "<TimeTrigger>.*?</TimeTrigger>", string.Empty);
         Assert.False(ScheduledTasks.IsCurrentAgentDefinition(withoutKeepAlive));
         Assert.False(ScheduledTasks.IsCurrentAgentDefinition(current.Replace("<ExecutionTimeLimit>PT0S", "<ExecutionTimeLimit>PT72H")));
+        Assert.False(ScheduledTasks.IsCurrentAgentDefinition(current.Replace("<Priority>4</Priority>", "<Priority>7</Priority>")));
         Assert.False(ScheduledTasks.IsCurrentAgentDefinition(string.Empty));
         Assert.False(ScheduledTasks.IsCurrentAgentDefinition("not xml"));
     }

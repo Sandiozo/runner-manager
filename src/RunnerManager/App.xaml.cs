@@ -91,6 +91,10 @@ public partial class App : Application
             return;
         }
 
+        // A task an older version registered starts the agent and the dashboard below normal priority.
+        if (ProcessPriority.RaiseToNormal())
+            MachineRelay.AppendAgentLog("Runner Manager was started below normal priority. It now runs at normal priority.");
+
         if (e.Args.Any(a => a.Equals("--install-agent", StringComparison.OrdinalIgnoreCase)))
         {
             ShutdownMode = ShutdownMode.OnExplicitShutdown;

@@ -244,7 +244,7 @@ public static class ScheduledTasks
     <RunOnlyIfIdle>false</RunOnlyIfIdle>
     <WakeToRun>false</WakeToRun>
     <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
-    <Priority>7</Priority>
+    <Priority>{TaskPriority}</Priority>
     {restart}
   </Settings>
   <Actions Context="Author">
@@ -260,7 +260,24 @@ public static class ScheduledTasks
 
     private const string KeepAliveInterval = "PT5M";
 
-    /// <summary>Whether the agent task's definition has everything the current version registers (older ones lack the keep-alive trigger).</summary>
+    /// <summary>
+    /// Normal priority. Task Scheduler's default (7, which earlier versions registered) starts the task below normal,
+    /// with low I/O and memory priority, so a build that uses every core starves the fleet agent and the programs it starts.
+    /// </summary>
+    internal const string TaskPriority = "4";
+
+    /// <summary>Whether the task runs at <see cref="TaskPriority"/>. Task Scheduler leaves out the default priority, so a missing one is old.</summary>
+    internal static bool HasCurrentPriority(string xml)
+    {
+        if (ParseTask(xml) is not { } task) return false;
+        var ns = task.Name.Namespace;
+        return task.Element(ns + "Settings")?.Element(ns + "Priority")?.Value.Trim() == TaskPriority;
+    }
+
+    /// <summary>
+    /// Whether the agent task's definition has everything the current version registers (older ones lack the keep-alive
+    /// trigger, or run below normal priority).
+    /// </summary>
     internal static bool IsCurrentAgentDefinition(string xml)
     {
         if (ParseTask(xml) is not { } task) return false;
@@ -275,12 +292,14 @@ public static class ScheduledTasks
                && settings.Element(ns + "DisallowStartIfOnBatteries")?.Value == "false"
                && settings.Element(ns + "StopIfGoingOnBatteries")?.Value == "false"
                && settings.Element(ns + "ExecutionTimeLimit")?.Value == "PT0S"
-               && settings.Element(ns + "RestartOnFailure") != null;
+               && settings.Element(ns + "RestartOnFailure") != null
+               && HasCurrentPriority(xml);
     }
 
     /// <summary>
     /// Registers the agent task again when its definition is from an older version, keeping the exe it runs. Re-registering
     /// may end the running agent, so it is started again afterwards (by a helper when the agent does this itself).
+    /// Registrations take <see cref="LockAsync"/>, so the agent and the dashboard doing this at once register it one at a time.
     /// </summary>
     public static async Task<bool> UpdateAgentTaskIfOutdatedAsync(bool fromAgent)
     {

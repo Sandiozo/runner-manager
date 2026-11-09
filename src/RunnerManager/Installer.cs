@@ -171,7 +171,8 @@ public static class Installer
 
     /// <summary>
     /// The installed dashboard opens through the launch task, so make sure this user's task exists, is turned on and starts
-    /// the installed exe, and keep the version in Settings → Apps current after updates. The task is checked once per
+    /// the installed exe, and keep the version in Settings → Apps current after updates. A launch or "start with Windows"
+    /// task that an older version registered below normal priority is registered again. The tasks are checked once per
     /// version, or again when <paramref name="force"/> is set (the dashboard had to ask with UAC).
     /// </summary>
     public static async Task EnsureLaunchTaskAsync(bool force = false)
@@ -179,12 +180,25 @@ public static class Installer
         if (!AppUpdater.IsRunningInstalledCopy) return;
         RefreshUninstallEntryVersion();
         if (!force && InstallChecks.IsDone(LaunchTaskCheck)) return;
-        var xml = await ScheduledTasks.QueryXmlAsync(ScheduledTasks.LaunchTaskName);
-        if (xml.Length == 0 || !Elevation.IsUsableLaunchTask(xml, AppUpdater.InstalledExe))
+        if (LaunchTaskNeedsRegistering(await ScheduledTasks.QueryXmlAsync(ScheduledTasks.LaunchTaskName), AppUpdater.InstalledExe))
             await ScheduledTasks.RegisterLaunchTaskAsync(AppUpdater.InstalledExe);
+        if (StartupTaskNeedsRegistering(await ScheduledTasks.QueryXmlAsync(ScheduledTasks.DashboardTaskName), AppUpdater.InstalledExe))
+            await RegisterStartupTaskAsync(AppUpdater.InstalledExe);
         await MigrateSharedTasksAsync(AppUpdater.InstalledExe);
         InstallChecks.MarkDone(LaunchTaskCheck);
     }
+
+    /// <summary>Whether the launch task must be registered: it is missing, cannot start <paramref name="exe"/>, or runs below normal priority.</summary>
+    internal static bool LaunchTaskNeedsRegistering(string xml, string exe)
+        => xml.Length == 0 || !Elevation.IsUsableLaunchTask(xml, exe) || !ScheduledTasks.HasCurrentPriority(xml);
+
+    /// <summary>
+    /// Whether this user's "start with Windows" task must be registered again: it is turned on but starts another exe or
+    /// runs below normal priority. A missing or turned-off task is left as the user chose.
+    /// </summary>
+    internal static bool StartupTaskNeedsRegistering(string xml, string exe)
+        => xml.Length > 0 && ScheduledTasks.IsEnabled(xml) && ScheduledTasks.IsCurrentUser(ScheduledTasks.PrincipalOf(xml))
+           && (!ScheduledTasks.HasCurrentPriority(xml) || !string.Equals(ScheduledTasks.CommandOf(xml), exe, StringComparison.OrdinalIgnoreCase));
 
     /// <summary>
     /// 2.3 and earlier named the launch and startup tasks the same for every Windows user, so a second user's setup took
