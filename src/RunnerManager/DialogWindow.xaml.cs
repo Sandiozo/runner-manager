@@ -8,7 +8,10 @@ namespace RunnerManager;
 
 public enum DialogTone { Info, Question, Warning, Danger, Error }
 
-/// <summary>Themed replacement for MessageBox: Cancel, then the secondary choice, then the primary (default) button on the right.</summary>
+/// <summary>
+/// Themed replacement for MessageBox: Cancel, then the secondary choice, then the primary button on the right. The primary
+/// button is the default, except in danger dialogs, where Cancel is (see <see cref="DialogRules.DefaultFor"/>).
+/// </summary>
 public partial class DialogWindow : Window
 {
     private string? _result;
@@ -19,10 +22,21 @@ public partial class DialogWindow : Window
     {
         InitializeComponent();
         WindowTheme.Apply(this);
+        // A long message scrolls inside the dialog instead of pushing the buttons off the screen.
+        MaxHeight = Math.Max(320, SystemParameters.WorkArea.Height - 60);
         PreviewKeyDown += (_, e) =>
         {
-            if (e.Key != Key.Escape) return;
-            Finish(null);
+            if (e.Key == Key.Escape)
+            {
+                Finish(null);
+                return;
+            }
+            // Like a Windows message box: Ctrl+C copies the whole text unless some of it is selected.
+            if (e.Key == Key.C && Keyboard.Modifiers == ModifierKeys.Control && Keyboard.FocusedElement is not TextBox { SelectionLength: > 0 })
+            {
+                try { Clipboard.SetText(DialogRules.CopyText(HeadingText.Text, MessageText.Text, DetailText.Text)); } catch { }
+                e.Handled = true;
+            }
         };
     }
 
@@ -38,7 +52,7 @@ public partial class DialogWindow : Window
             dialog.ShowInTaskbar = true;
             dialog.Loaded += (_, _) => dialog.Activate();
         }
-        dialog.AddButtons(tone, primary, secondary, cancel, primaryIsDefault: true);
+        dialog.AddButtons(tone, primary, secondary, cancel, DialogRules.DefaultFor(tone, cancel != null));
         dialog.ShowDialog();
         return dialog._result;
     }
@@ -56,7 +70,7 @@ public partial class DialogWindow : Window
         dialog.Topmost = true;
         dialog.ShowInTaskbar = true;
         dialog.ShowActivated = false;
-        dialog.AddButtons(tone, primary, null, cancel, primaryIsDefault: false);
+        dialog.AddButtons(tone, primary, null, cancel, DialogDefault.None);
         var closed = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
         var registration = cancellationToken.Register(() => dialog.Dispatcher.InvokeAsync(() => { if (dialog.IsVisible) dialog.Close(); }));
         dialog.Closed += (_, _) =>
@@ -107,12 +121,12 @@ public partial class DialogWindow : Window
         return dialog;
     }
 
-    private void AddButtons(DialogTone tone, string primary, string? secondary, string? cancel, bool primaryIsDefault)
+    private void AddButtons(DialogTone tone, string primary, string? secondary, string? cancel, DialogDefault defaultButton)
     {
-        if (cancel != null) AddButton(cancel, "GhostButton", isCancel: true);
+        if (cancel != null) AddButton(cancel, "GhostButton", isDefault: defaultButton == DialogDefault.Cancel, isCancel: true);
         if (secondary != null) AddButton(secondary, null);
         AddButton(primary, tone is DialogTone.Danger ? "SolidDangerButton" : tone is DialogTone.Error or DialogTone.Info ? null : "PrimaryButton",
-            isDefault: primaryIsDefault);
+            isDefault: defaultButton == DialogDefault.Primary);
     }
 
     private void AddButton(string label, string? style, bool isDefault = false, bool isCancel = false)

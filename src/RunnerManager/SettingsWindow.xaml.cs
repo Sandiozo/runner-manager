@@ -460,13 +460,15 @@ public partial class SettingsWindow : Window
         if (boxes.Count == 0) body.Children.Add(new TextBlock { Text = "No other PCs are in the fleet. Only this PC gets the new code.", TextWrapping = TextWrapping.Wrap });
 
         var confirmed = false;
-        var change = new Button { Content = "Change code", MinWidth = 110, Margin = new Thickness(8, 0, 0, 0), IsDefault = true, Style = (Style)FindResource("SolidDangerButton") };
+        var change = new Button { Content = "Change code", MinWidth = 110, Margin = new Thickness(8, 0, 0, 0), Style = (Style)FindResource("SolidDangerButton") };
         change.Click += (_, _) =>
         {
             confirmed = true;
             window.DialogResult = true;
         };
-        var cancel = new Button { Content = "Cancel", MinWidth = 88, IsCancel = true, Style = (Style)FindResource("GhostButton") };
+        // As in the other danger dialogs, Enter cancels: changing the code needs a click or a deliberate key press.
+        var cancel = new Button { Content = "Cancel", MinWidth = 88, IsCancel = true, IsDefault = true, Style = (Style)FindResource("GhostButton") };
+        window.Loaded += (_, _) => cancel.Focus();
         var buttons = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Children = { cancel, change } };
         var footer = new Border { Padding = new Thickness(28, 14, 28, 14), BorderThickness = new Thickness(0, 1, 0, 0), Child = buttons };
         footer.SetResourceReference(Border.BackgroundProperty, "Bg0Brush");
