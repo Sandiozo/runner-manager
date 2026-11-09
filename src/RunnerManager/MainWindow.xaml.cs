@@ -120,10 +120,21 @@ public partial class MainWindow : Window
             _refreshQueuedForceAuth |= forceAuthCheck;
             return;
         }
-        if (_operationRunning) return;
         _refreshing = true;
         try
         {
+            // Other PCs are read directly from their agents on the network; GitHub isn't involved, so they never
+            // wait for it.
+            var machinesTask = MachineRelay.ReadFleetAsync(_forceDiscovery);
+            _forceDiscovery = false;
+            // While an operation runs on this PC, only the other PCs are refreshed: this PC's runners, fleet agent and
+            // fleet membership are what operations change, and everything is refreshed when the operation ends.
+            if (_operationRunning)
+            {
+                ApplyFleet(await machinesTask, Runners.ToList(), localRunnersRead: false);
+                LastUpdatedText.Text = $"Updated {DateTime.Now:HH:mm:ss}  ·  Refreshes every {_settings.RefreshSeconds}s";
+                return;
+            }
             var enrollmentTask = MachineRelay.IsAgentInstalledAsync();
             if (forceAuthCheck || DateTime.Now - _lastAuthCheck > AuthCheckInterval)
             {
@@ -155,31 +166,18 @@ public partial class MainWindow : Window
             var runnersTask = refreshLocalRunners
                 ? RunnerService.ReadSnapshotAsync(_githubAuthenticated)
                 : Task.FromResult(Runners.ToList());
-            // Other PCs are read directly from their agents on the network; GitHub isn't involved.
-            var machinesTask = MachineRelay.ReadFleetAsync(_forceDiscovery);
-            _forceDiscovery = false;
-            await Task.WhenAll(runnersTask, machinesTask);
+            // This PC's runners wait for GitHub, which can be slow: show the other PCs first, with this PC's last readings.
+            if (await Task.WhenAny(runnersTask, machinesTask) == machinesTask && !runnersTask.IsCompleted)
+                ApplyFleet(await machinesTask, Runners.ToList(), localRunnersRead: false);
             var runners = await runnersTask;
             var machines = await machinesTask;
-            var localIndex = machines.FindIndex(m => m.IsLocal);
-            if (localIndex >= 0) machines[localIndex] = machines[localIndex].WithLocalRunners(runners);
-
-            if (refreshLocalRunners)
+            // An operation may have started while this refresh waited.
+            if (_operationRunning)
             {
-                _lastLocalRunnerRefresh = DateTime.Now;
-                ApplyLocalRunners(runners);
+                ApplyFleet(machines, Runners.ToList(), localRunnersRead: false);
+                return;
             }
-            ApplyMachines(machines);
-            UpdateNavShape();
-            ApplyEnrollmentStatus();
-            ScheduleLocalAgentUpdate(machines.FirstOrDefault(m => m.IsLocal));
-            StartStoppedLocalAgent(machines.FirstOrDefault(m => m.IsLocal));
-            ApplyPendingStates();
-            ReportRemoteResults();
-            ApplyFilter();
-            UpdateSummary();
-            DetectChanges();
-            ReportAgentEvents();
+            ApplyFleet(machines, runners, refreshLocalRunners);
             await CheckRunnerHealthAsync();
             await RefreshFleetExtrasAsync();
             LastUpdatedText.Text = $"Updated {DateTime.Now:HH:mm:ss}  ·  Refreshes every {_settings.RefreshSeconds}s";
@@ -193,7 +191,8 @@ public partial class MainWindow : Window
         catch (Exception ex)
         {
             AddActivity($"Refresh failed: {ex.Message}");
-            SetStatus($"Refresh failed: {ex.Message}", StatusKind.Error);
+            // An operation shows its progress there.
+            if (!_operationRunning) SetStatus($"Refresh failed: {ex.Message}", StatusKind.Error);
         }
         finally
         {
@@ -205,6 +204,37 @@ public partial class MainWindow : Window
                 await RefreshAsync(force);
             }
         }
+    }
+
+    /// <summary>
+    /// Shows a reading of the fleet, with <paramref name="runners"/> as this PC's runners. While an operation runs on this
+    /// PC, nothing on this PC is started or changed, and cards that show a pending action are kept as they are.
+    /// </summary>
+    private void ApplyFleet(List<MachineInfo> machines, List<RunnerInfo> runners, bool localRunnersRead)
+    {
+        machines = machines.ToList();
+        var localIndex = machines.FindIndex(m => m.IsLocal);
+        if (localIndex >= 0) machines[localIndex] = machines[localIndex].WithLocalRunners(runners);
+        var duringOperation = _operationRunning;
+        if (localRunnersRead)
+        {
+            _lastLocalRunnerRefresh = DateTime.Now;
+            ApplyLocalRunners(runners);
+        }
+        ApplyMachines(machines, duringOperation);
+        UpdateNavShape();
+        if (!duringOperation)
+        {
+            ApplyEnrollmentStatus();
+            ScheduleLocalAgentUpdate(machines.FirstOrDefault(m => m.IsLocal));
+            StartStoppedLocalAgent(machines.FirstOrDefault(m => m.IsLocal));
+        }
+        ApplyPendingStates(clearOthers: !duringOperation);
+        ReportRemoteResults();
+        ApplyFilter();
+        UpdateSummary();
+        DetectChanges();
+        ReportAgentEvents();
     }
 
     private async Task EnsureAgentTaskSettingsAsync()
@@ -351,7 +381,11 @@ public partial class MainWindow : Window
     /// Updates the Machines list in place: unchanged machines keep their existing cards (so hover,
     /// expansion and scroll position survive the 5-second refresh) and only get their time-based text updated.
     /// </summary>
-    private void ApplyMachines(List<MachineInfo> machines)
+    /// <param name="keepBusy">
+    /// An operation runs on this PC: this PC's card, and cards with a pending action that the operation may have set, are
+    /// kept; a PC that came or went waits for the refresh at the end of the operation.
+    /// </param>
+    private void ApplyMachines(List<MachineInfo> machines, bool keepBusy = false)
     {
         foreach (var machine in machines)
         {
@@ -371,6 +405,7 @@ public partial class MainWindow : Window
             && Machines.Zip(machines).All(pair => pair.First.MachineKey == pair.Second.MachineKey);
         // "All PCs" is only in the sidebar when there are several PCs (see UpdateNavShape).
         var offset = NavItems.Contains(_allMachines) ? 1 : 0;
+        if (!sameShape && keepBusy) return;
         if (!sameShape)
         {
             _suppressNavSelection = true;
@@ -390,6 +425,11 @@ public partial class MainWindow : Window
         {
             var existing = Machines[i];
             var incoming = machines[i];
+            if (keepBusy && (existing.IsLocal || existing.PendingAction.Length > 0 || existing.Runners.Any(r => r.PendingAction.Length > 0)))
+            {
+                existing.Touch(incoming);
+                continue;
+            }
             if (existing.Fingerprint == incoming.Fingerprint)
             {
                 existing.SetPending(incoming.PendingAction);
@@ -469,7 +509,11 @@ public partial class MainWindow : Window
     }
 
     /// <summary>Shows "Stopping…"-style states on runners until the agent reports the result.</summary>
-    private void ApplyPendingStates()
+    /// <param name="clearOthers">
+    /// Clear the pending state of runners without a queued command; false while an operation on this PC runs, since it
+    /// shows its own (for example "Move").
+    /// </param>
+    private void ApplyPendingStates(bool clearOthers = true)
     {
         foreach (var machine in Machines)
         foreach (var runner in machine.Runners)
@@ -477,7 +521,7 @@ public partial class MainWindow : Window
             var key = RunnerKey(runner);
             if (!_pendingRunnerCommands.TryGetValue(key, out var pending))
             {
-                runner.SetPending(string.Empty);
+                if (clearOthers) runner.SetPending(string.Empty);
                 continue;
             }
             var result = machine.CommandResult(pending.CommandId);
