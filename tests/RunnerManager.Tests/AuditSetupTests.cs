@@ -174,4 +174,23 @@ public class AuditSetupTests
         })!;
         Assert.True(process.WaitForExit(30_000), "The script did not finish within 30 seconds.");
     }
+
+    // ================= Update health =================
+
+    [Fact]
+    public async Task AnUpdate_WorksOnlyOnceTheAgentAnswers()
+    {
+        var asked = 0;
+        Assert.True(await UpdateGuard.WaitUntilAnsweringAsync(() => Task.FromResult<bool?>(++asked >= 3),
+            TimeSpan.Zero, TimeSpan.FromMilliseconds(10), TimeSpan.FromSeconds(10)));
+        Assert.Equal(3, asked);
+
+        // Never answers: not marked as working.
+        Assert.False(await UpdateGuard.WaitUntilAnsweringAsync(() => Task.FromResult<bool?>(false),
+            TimeSpan.Zero, TimeSpan.FromMilliseconds(10), TimeSpan.FromMilliseconds(100)));
+
+        // Without a pairing code nothing can ask it, so staying up is enough.
+        Assert.True(await UpdateGuard.WaitUntilAnsweringAsync(() => Task.FromResult<bool?>(null),
+            TimeSpan.Zero, TimeSpan.FromMilliseconds(10), TimeSpan.Zero));
+    }
 }

@@ -34,7 +34,7 @@ public enum DashboardUpdateDecision { Nothing, MarkHealthy, RollBack, Forget }
 /// Undoes an update that does not work on this PC. Installing a release keeps the exe it replaces as
 /// RunnerManager.exe.previous and marks the update as pending. Each start of the new fleet agent is counted; when it
 /// keeps ending before it ran for <see cref="HealthyAfter"/>, or never starts at all, the previous exe is put back.
-/// Once an agent has run that long, the version is recorded as good.
+/// Once an agent has run that long and answered a status request on this PC, the version is recorded as good.
 /// </summary>
 public static class UpdateGuard
 {
@@ -161,10 +161,49 @@ public static class UpdateGuard
         var version = AppUpdater.CurrentVersion;
         _ = Task.Run(async () =>
         {
-            await Task.Delay(HealthyAfter);
-            MarkHealthy(version);
+            if (await WaitUntilAnsweringAsync(AgentAnswersStatusAsync, HealthyAfter, AnswerRetryInterval, AnswerWaitLimit))
+                MarkHealthy(version);
+            else
+                MachineRelay.AppendAgentLog($"The fleet agent of v{version} does not answer status requests on this PC. The update is not marked as working.");
         });
         return true;
+    }
+
+    /// <summary>After <see cref="HealthyAfter"/>, how often the agent asks itself for its status until it answers.</summary>
+    internal static readonly TimeSpan AnswerRetryInterval = TimeSpan.FromSeconds(30);
+    /// <summary>How long after <see cref="HealthyAfter"/> the agent keeps asking.</summary>
+    internal static readonly TimeSpan AnswerWaitLimit = TimeSpan.FromMinutes(30);
+
+    /// <summary>
+    /// Waits <paramref name="after"/>, then asks until <paramref name="answers"/> is true (answered) or null (nothing to ask),
+    /// for at most <paramref name="limit"/>. Returns false when it never answered.
+    /// </summary>
+    internal static async Task<bool> WaitUntilAnsweringAsync(Func<Task<bool?>> answers, TimeSpan after, TimeSpan retry, TimeSpan limit)
+    {
+        await Task.Delay(after);
+        var deadline = DateTime.UtcNow + limit;
+        while (true)
+        {
+            if (await answers() != false) return true;
+            if (DateTime.UtcNow >= deadline) return false;
+            await Task.Delay(retry);
+        }
+    }
+
+    /// <summary>
+    /// Whether this PC's fleet agent answers a status request over the fleet connection, as the dashboard asks it: true when
+    /// it answered, false when not, null without a pairing code (nothing can ask it then, so staying up is all it can show).
+    /// </summary>
+    private static async Task<bool?> AgentAnswersStatusAsync()
+    {
+        if (FleetConfig.Current.FleetKey == null) return null;
+        try
+        {
+            var response = await FleetNetwork.CallAsync("127.0.0.1", MachineRelay.LocalMachineKey, new FleetRequest { Op = "status" },
+                TimeSpan.FromSeconds(30));
+            return response.Status != null;
+        }
+        catch { return false; }
     }
 
     /// <summary>Called when the fleet agent ends normally, so the exit does not count as a crash.</summary>
