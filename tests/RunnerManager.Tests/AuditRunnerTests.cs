@@ -184,6 +184,26 @@ public class AuditRunnerTests
         finally { JobWatch.Update(Array.Empty<RunnerInfo>()); }
     }
 
+    [Theory]
+    [InlineData(@"mysql.exe -u root -pSecret shop", "-u root")]
+    [InlineData(@"curl.exe -u user:pass https://example.com/api", "")]
+    [InlineData(@"curl.exe --user=user:pass https://example.com/api", "")]
+    [InlineData(@"curl.exe -uuser:pass https://example.com/api", "")]
+    [InlineData(@"sshpass.exe -p hunter2 ssh host", "")]
+    [InlineData(@"C:\Windows\system32\net.exe use \\srv\share P@ss /user:dom\bob", "use")]
+    [InlineData(@"NET1.EXE user bob S3cret /add", "user")]
+    [InlineData(@"tool.exe --password=hunter2 run", "")]
+    [InlineData(@"tool.exe deploy token=abc", "deploy")]
+    [InlineData(@"tool.exe login ghp_abcdef1234567890", "login")]
+    [InlineData(@"git.exe clone https://bob:hunter2@example.com/team/repo.git", "clone repo.git")]
+    [InlineData(@"git.exe fetch https://bob:hunter2@example.com", "fetch example.com")]
+    [InlineData(@"schtasks.exe /Create /RU bob /RP hunter2", "Create RU bob")]
+    // Ordinary arguments stay.
+    [InlineData(@"dotnet.exe build -p:Configuration=Release", "build -p:Configuration=Release")]
+    [InlineData(@"git.exe push -u origin main", "push -u origin")]
+    public void ProcessArguments_LeaveOutCommonPasswordForms(string commandLine, string expected)
+        => Assert.Equal(expected, RunnerActivity.ShortArguments(commandLine));
+
     [Fact]
     public void OutputFile_ThatWentAway_IsNoProgress()
     {

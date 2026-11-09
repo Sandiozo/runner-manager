@@ -32,7 +32,18 @@ public static class RunnerActivity
     private static readonly Regex AnsiCodes = new(@"\x1B\[[0-9;?]*[A-Za-z]", RegexOptions.Compiled);
     // actions/checkout passes the repository token to git as -c http.extraheader="AUTHORIZATION: basic …".
     private static readonly string[] SecretHints =
-        { "token", "password", "secret", "apikey", "api_key", "pat=", "authorization", "extraheader", "bearer" };
+    {
+        "token", "password", "passwd", "pwd", "secret", "apikey", "api_key", "api-key", "pat=", "authorization", "extraheader",
+        "bearer", "credential", "auth", "pass:", "pass="
+    };
+    /// <summary>Raw GitHub, GitLab and Slack tokens, alone or as a value (ghp_…, github_pat_…, glpat-…, xoxb-…).</summary>
+    private static readonly Regex TokenValue = new(@"(^|[=:])(gh[pousr]_|github_pat_|glpat-|xox[abprs]-)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    /// <summary>A password attached to -p or -P (mysql -pSecret, 7z -pSecret), but not an MSBuild property (-p:Name=Value).</summary>
+    private static readonly Regex AttachedPassword = new(@"^-[pP]([^:]|$)", RegexOptions.Compiled);
+    /// <summary>User and password with -u or --user (curl -u user:pass, --user=user:pass, -uuser:pass).</summary>
+    private static readonly Regex AttachedUser = new(@"^(-u|--user=)\S*:", RegexOptions.Compiled);
+    /// <summary>The user and password in a URL (https://user:pass@host/…).</summary>
+    private static readonly Regex UrlCredentials = new(@"(?<=://)[^/@\s]+@", RegexOptions.Compiled);
     private static readonly object CpuGate = new();
     // Processor time per process at the previous reading, keyed by ID and start time so a reused ID starts over.
     private static readonly Dictionary<(int Id, string Started), (ulong Cpu, DateTime When)> CpuReadings = new();
@@ -349,18 +360,30 @@ public static class RunnerActivity
         if (text.Length == 0) return string.Empty;
         var end = text[0] == '"' ? text.IndexOf('"', 1) : text.IndexOf(' ');
         if (end < 0) return string.Empty;
+        var program = Path.GetFileNameWithoutExtension(text[..end].Trim('"').TrimEnd());
+        // net use and net user take passwords as plain arguments: only the subcommand is shown.
+        var limit = program.Equals("net", StringComparison.OrdinalIgnoreCase) || program.Equals("net1", StringComparison.OrdinalIgnoreCase) ? 1 : 3;
+        var tokens = text[(end + 1)..].Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(t => UrlCredentials.Replace(t.Trim('"'), string.Empty)).Where(t => t.Length > 0).ToList();
         var parts = new List<string>();
-        foreach (var token in text[(end + 1)..].Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        for (var i = 0; i < tokens.Count && parts.Count < limit; i++)
         {
-            if (parts.Count == 3) break;
-            var clean = token.Trim('"');
-            if (clean.Length == 0) continue;
-            if (SecretHints.Any(hint => clean.Contains(hint, StringComparison.OrdinalIgnoreCase))) break;
+            var clean = tokens[i];
+            // Everything from a secret on is left out: the value often follows its option.
+            if (LooksSecret(clean, i + 1 < tokens.Count ? tokens[i + 1] : string.Empty)) break;
             parts.Add(clean.Contains('\\') || clean.Contains('/') ? Path.GetFileName(clean.TrimEnd('\\', '/')) : clean);
         }
         var joined = string.Join(' ', parts);
         return joined.Length > 60 ? joined[..57] + "…" : joined;
     }
+
+    private static bool LooksSecret(string token, string next)
+        => SecretHints.Any(hint => token.Contains(hint, StringComparison.OrdinalIgnoreCase))
+           || TokenValue.IsMatch(token)
+           || AttachedPassword.IsMatch(token)
+           || AttachedUser.IsMatch(token)
+           || ((token is "-u" or "--user") && next.Contains(':'))
+           || token.Equals("/p", StringComparison.OrdinalIgnoreCase) || token.Equals("/rp", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Output files written before the job's worker started belong to an earlier job (a minute of slack for clocks).</summary>
     private static DateTime? OutputNotBefore(DateTime? workerStartedUtc) => workerStartedUtc?.AddMinutes(-1);
