@@ -11,6 +11,7 @@ public partial class MainWindow
     private async void RunnerRemove_Click(object sender, RoutedEventArgs e)
     {
         if (ItemFrom<MachineRunnerStatus>(sender) is not { CanRemove: true } runner) return;
+        if (IsOperationRunning(runner, $"Delete {runner.TitleText}")) return;
         const string deleteFiles = "Delete runner and files";
         const string keepFiles = "Delete runner, keep files";
         var where = runner.IsLocalMachine ? "this PC" : runner.MachineName;
@@ -28,6 +29,7 @@ public partial class MainWindow
     private async void RunnerConvert_Click(object sender, RoutedEventArgs e)
     {
         if (ItemFrom<MachineRunnerStatus>(sender) is not { CanConvert: true } runner) return;
+        if (IsOperationRunning(runner, $"Convert {runner.TitleText}")) return;
         if (!DialogWindow.Confirm(this, $"Run {runner.TitleText} as a Windows service?",
                 "The console window closes, and what starts it at sign-in is turned off so it does not start twice: startup entries are moved to " +
                 "%LOCALAPPDATA%\\RunnerManager\\disabled-startup, and scheduled tasks that start it are disabled. " +
@@ -43,6 +45,8 @@ public partial class MainWindow
         if (ItemFrom<MachineRunnerStatus>(sender) is not { CanMove: true } runner) return;
         var source = Machines.FirstOrDefault(m => m.MachineKey == runner.MachineKey);
         if (source == null) return;
+        // A move always runs from this PC, wherever the runner is.
+        if (IsOperationRunning($"Move {runner.TitleText}")) return;
         var candidates = Machines
             .Where(m => m.MachineKey != source.MachineKey && (m.IsLocal || (m.IsOnline && m.AgentProtocolVersion >= 9)))
             .ToList();

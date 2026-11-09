@@ -665,6 +665,7 @@ public partial class MainWindow : Window
     {
         if (_githubAuthenticated)
         {
+            if (IsOperationRunning("Disconnect GitHub")) return;
             if (!DialogWindow.Confirm(this, "Disconnect GitHub?",
                     "The GitHub CLI on this PC is signed out. Runner Manager stops showing other PCs and GitHub job status until you connect again.",
                     "Disconnect", danger: true)) return;
@@ -712,6 +713,7 @@ public partial class MainWindow : Window
                 GitHubConnect_Click(sender, e);
             return;
         }
+        if (IsOperationRunning("Add runner")) return;
         var dialog = new AddRunnerWindow { Owner = this };
         if (dialog.ShowDialog() != true || dialog.Setup == null) return;
         await RunOperationAsync("Add runner", log => RunnerService.CreateRunnerAsync(dialog.Setup, log));
@@ -726,11 +728,7 @@ public partial class MainWindow : Window
     /// </summary>
     private async Task<bool> RunOperationAsync(string title, Func<Action<string>, Task> operation)
     {
-        if (_operationRunning)
-        {
-            AddActivity($"{title} skipped: another operation is still running.");
-            return false;
-        }
+        if (IsOperationRunning(title)) return false;
         _operationRunning = true;
         _operationTitle = title;
         var operationId = ++_operationId;
@@ -759,6 +757,22 @@ public partial class MainWindow : Window
     }
 
     private int _operationId;
+
+    /// <summary>
+    /// Tells the user when an operation on this PC is still running, since only one runs at a time. Called before a
+    /// dialog is filled in, so the work is not lost. Returns true when one is running.
+    /// </summary>
+    private bool IsOperationRunning(string title)
+    {
+        if (!_operationRunning) return false;
+        AddActivity($"{title} skipped: “{_operationTitle}” is still running.");
+        DialogWindow.Info(this, "Another operation is running",
+            $"“{_operationTitle}” is still running on this PC. Try “{title}” again when it is done. Its progress is shown in the status bar.");
+        return true;
+    }
+
+    /// <summary>Like <see cref="IsOperationRunning"/>, for an action on a runner: only actions on this PC wait for each other.</summary>
+    private bool IsOperationRunning(MachineRunnerStatus runner, string title) => runner.IsLocalMachine && IsOperationRunning(title);
 
     /// <summary>
     /// What an operation logs to: the activity list and the status bar. Operations log from background threads
@@ -896,6 +910,7 @@ public partial class MainWindow : Window
     {
         if (ItemFrom<MachineRunnerStatus>(sender) is not { } runner) return;
         var action = runner.IsRunning ? "Stop" : "Start";
+        if (IsOperationRunning(runner, $"{action} {runner.TitleText}")) return;
         if (action == "Stop" && runner.IsBusy && !DialogWindow.Confirm(this, $"Stop {runner.TitleText}?",
                 "This runner is running a job. Stopping it cancels the job.", "Stop runner", danger: true))
             return;
@@ -910,6 +925,7 @@ public partial class MainWindow : Window
     private async void RunnerRestart_Click(object sender, RoutedEventArgs e)
     {
         if (ItemFrom<MachineRunnerStatus>(sender) is not { } runner) return;
+        if (IsOperationRunning(runner, $"Restart {runner.TitleText}")) return;
         if (runner.IsBusy && !DialogWindow.Confirm(this, $"Restart {runner.TitleText}?",
                 "This runner is running a job. Restarting it cancels the job.", "Restart runner", danger: true))
             return;
@@ -925,6 +941,7 @@ public partial class MainWindow : Window
             DialogWindow.Info(this, "Cannot edit this runner", "Wait for the current job to finish, then try again.");
             return;
         }
+        if (IsOperationRunning(runner, $"Edit {runner.TitleText}")) return;
         var dialog = new EditRunnerWindow(runner) { Owner = this };
         if (dialog.ShowDialog() != true || dialog.Edit == null) return;
         var edit = dialog.Edit;
@@ -936,6 +953,7 @@ public partial class MainWindow : Window
     private async void RunnerRepair_Click(object sender, RoutedEventArgs e)
     {
         if (ItemFrom<MachineRunnerStatus>(sender)?.LocalRunner is not { } runner) return;
+        if (IsOperationRunning($"Repair {runner.AgentName}")) return;
         if (!DialogWindow.Confirm(this, $"Repair {runner.AgentName}?",
                 "The runner is unregistered and registered again with the same name and labels. It is then installed as a Windows service.",
                 "Repair")) return;
@@ -945,6 +963,7 @@ public partial class MainWindow : Window
     private async void RunnerWorkflow_Click(object sender, RoutedEventArgs e)
     {
         if (ItemFrom<MachineRunnerStatus>(sender)?.LocalRunner is not { } runner) return;
+        if (IsOperationRunning("Check workflows")) return;
         if (!DialogWindow.Confirm(this, "Check workflows?",
                 $"Jobs in {runner.RepositoryPath} that use a GitHub-hosted Windows runner (windows-latest, windows-2022, …) are switched to this runner. Changes are committed directly to the repository.",
                 "Check and update")) return;
@@ -990,7 +1009,7 @@ public partial class MainWindow : Window
     /// <summary>Takes this PC out of the fleet (the other PCs are told to forget it).</summary>
     public async Task LeaveFleetAsync()
     {
-        if (!InFleet || IsAgentWorkRunning()) return;
+        if (!InFleet || IsAgentWorkRunning() || IsOperationRunning("Leave fleet")) return;
         var others = Machines.Where(m => !m.IsLocal && !m.IsManaged).Select(m => m.MachineName).ToList();
         if (!DialogWindow.Confirm(this, $"Remove {Environment.MachineName} from the fleet?",
                 (others.Count > 0 ? $"{string.Join(", ", others)} will forget this PC. " : string.Empty) +
@@ -1020,7 +1039,7 @@ public partial class MainWindow : Window
             DialogWindow.Info(this, "Another Windows user runs the fleet agent", AgentOwnership.Describe(owner));
             return;
         }
-        if (IsAgentWorkRunning()) return;
+        if (IsAgentWorkRunning() || IsOperationRunning("Join fleet")) return;
         var newFleet = false;
         if (start == FleetStart.New && FleetConfig.Current.FleetKey == null)
         {

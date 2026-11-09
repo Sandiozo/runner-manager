@@ -571,6 +571,7 @@ public partial class MainWindow
     private async void RunnerCleanWork_Click(object sender, RoutedEventArgs e)
     {
         if (ItemFrom<MachineRunnerStatus>(sender) is not { CanCleanWork: true } runner) return;
+        if (IsOperationRunning(runner, $"Clean {runner.TitleText} work folder")) return;
         var size = runner.WorkFolderBytes == null ? "all" : $"{SystemHealth.FormatBytes(runner.WorkFolderBytes)} of";
         if (!DialogWindow.Confirm(this, $"Clean the work folder of {runner.TitleText}?",
                 $"This deletes {size} checkouts, tool caches and build output on {runner.MachineName}. The runner stops during cleanup and starts again afterwards. The next job starts with a fresh checkout.",
@@ -584,6 +585,7 @@ public partial class MainWindow
         KeepBoundCheck(sender);
         if (ItemFrom<MachineRunnerStatus>(sender) is not { CanChangeStartup: true } runner) return;
         var start = !runner.StartsAutomatically;
+        if (IsOperationRunning(runner, $"{(start ? "Turn on" : "Turn off")} automatic start for {runner.TitleText}")) return;
         await RunRunnerActionAsync(runner, "Startup", $"{(start ? "Turn on" : "Turn off")} automatic start for {runner.TitleText}",
             log => RunnerService.SetStartAutomaticallyAsync(runner.CommandKey, start, log), value: start ? "on" : "off");
     }
