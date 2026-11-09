@@ -346,6 +346,10 @@ public static partial class RunnerService
         if (NetworkFolderProblem(setup.InstallPath) is { } networkProblem) throw new InvalidOperationException(networkProblem);
         if (Directory.Exists(setup.InstallPath) && Directory.EnumerateFileSystemEntries(setup.InstallPath).Any())
             throw new InvalidOperationException("The runner folder already contains files. Choose an empty or new folder.");
+        // Checked before the download, which takes minutes: config.cmd refuses a taken name only at the end. A move
+        // replaces the registration with the same name on purpose.
+        if (!setup.ReplaceExisting)
+            await EnsureNameIsFreeAsync(scope, setup.RepositoryUrl, ownId: 0, setup.RunnerName.Trim());
 
         var createdFolder = !Directory.Exists(setup.InstallPath);
         Directory.CreateDirectory(setup.InstallPath);
@@ -372,21 +376,34 @@ public static partial class RunnerService
             await ConfigureAsync(setup.InstallPath, setup.RepositoryUrl, token, setup.RunnerName,
                 "_work", setup.Labels, runAsService: true, replace: setup.ReplaceExisting, setup.Options);
         }
-        catch
+        catch (Exception error)
         {
             // Leave the folder as it was, so trying again with the same folder works.
-            await UndoFailedRegistrationAsync(setup, scope, log);
+            var replaced = await UndoFailedRegistrationAsync(setup, scope, log);
             await Task.Run(() => RemoveFailedInstall(setup.InstallPath, createdFolder));
+            if (replaced) throw new InvalidOperationException($"{error.Message}\n{ReplacedRegistrationNote}", error);
             throw;
         }
         TryDelete(zipPath);
+        log("Runner created and registered.");
         if (setup.CheckWorkflows && !string.IsNullOrWhiteSpace(repoPath))
         {
+            // The runner works either way, so a failed check is a warning, not a failed create.
             log("Checking repository workflows…");
-            await WorkflowManager.CheckAndUpdateAsync(repoPath, setup.Labels, log);
+            try { await WorkflowManager.CheckAndUpdateAsync(repoPath, setup.Labels, log); }
+            catch (Exception ex)
+            {
+                log($"Warning: the workflow check failed: {FirstLine(ex.Message)} The runner was created. Use Check workflows in the runner's menu to try again.");
+            }
         }
-        log("Runner created and registered.");
     }
+
+    /// <summary>
+    /// Added to the error of a failed install for a move when config.cmd had already replaced the moved runner's
+    /// registration (--replace): the old copy cannot connect to GitHub until it is registered again.
+    /// </summary>
+    public const string ReplacedRegistrationNote = "The runner's registration on GitHub was already replaced, so the old copy can no " +
+        "longer connect to GitHub. To keep the runner on the old PC, edit the old copy and save it to register it again, or move the runner again.";
 
     public static async Task RepairRunnerAsync(RunnerInfo runner, Action<string> log)
     {
@@ -425,6 +442,7 @@ public static partial class RunnerService
         EnsureValidConfigInput(wanted.Url, wanted.Name, wanted.Labels);
         await EnsureNameIsFreeAsync(local, wanted.Name);
         var wasRunning = local.IsRunning;
+        var wasMarked = IsMarkedStopped(local.Name);
         var restoreRecovery = HoldAutoRecovery(local.Name);
         try
         {
@@ -434,16 +452,57 @@ public static partial class RunnerService
             else if (wasRunning) await ControlServiceAsync(local.Name, "Stop");
             await RegisterAgainAsync(local, wanted, current, log);
         }
-        finally { restoreRecovery(); }
-
-        if (wasRunning)
+        catch
         {
-            var updated = (await ReadSnapshotAsync(queryGitHub: false))
-                .FirstOrDefault(r => r.InstallPath.Equals(local.InstallPath, StringComparison.OrdinalIgnoreCase));
-            if (updated != null && updated.ServiceInstalled && !updated.IsRunning)
-                await ControlServiceAsync(updated.Name, "Start");
+            restoreRecovery();
+            // Registering again with the old values (the rollback) also starts the service.
+            try { await KeepRunStateAsync(local, wasRunning, wasMarked, log); }
+            catch (Exception ex) { log($"Could not leave the runner running or stopped as it was: {ex.Message}"); }
+            throw;
         }
+        restoreRecovery();
+        await KeepRunStateAsync(local, wasRunning, wasMarked, log);
         log("Runner settings updated.");
+    }
+
+    /// <summary>
+    /// After a runner was registered again: config.cmd starts the service it installs, and a new runner name gives the
+    /// service a new name. The runner is left running or stopped as it was, and the stopped mark moves to the new name.
+    /// </summary>
+    private static async Task KeepRunStateAsync(RunnerInfo before, bool wasRunning, bool wasMarked, Action<string> log)
+    {
+        var updated = (await ReadSnapshotAsync(queryGitHub: false))
+            .FirstOrDefault(r => r.InstallPath.Equals(before.InstallPath, StringComparison.OrdinalIgnoreCase));
+        if (updated == null || !updated.ServiceInstalled) return;
+        if (!string.IsNullOrEmpty(before.Name) && !updated.Name.Equals(before.Name, StringComparison.OrdinalIgnoreCase))
+        {
+            MarkStopped(before.Name, false);
+            if (wasMarked) MarkStopped(updated.Name, true);
+        }
+        if (wasRunning && !updated.IsRunning) await ControlServiceAsync(updated.Name, "Start");
+        else if (!wasRunning && updated.IsRunning)
+        {
+            if (HasWorkerNow(updated))
+            {
+                log("The runner took a job right after it was registered again, so it keeps running. Stop it when the job is done.");
+                return;
+            }
+            // Marked first, so auto-recovery doesn't start it again.
+            MarkStopped(updated.Name, true);
+            log("Stopping the runner again, as it was stopped before…");
+            await ControlServiceAsync(updated.Name, "Stop");
+        }
+    }
+
+    private static bool IsMarkedStopped(string serviceName)
+        => !string.IsNullOrWhiteSpace(serviceName) && FleetConfig.Current.ManuallyStopped.Contains(serviceName, StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Sets or clears the mark that keeps auto-recovery from starting a runner; only a setting, so a failure is not an error.</summary>
+    private static void MarkStopped(string serviceName, bool stopped)
+    {
+        if (string.IsNullOrWhiteSpace(serviceName)) return;
+        try { FleetConfig.SetManuallyStopped(serviceName, stopped); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
     }
 
     public static async Task CheckWorkflowsAsync(RunnerInfo runner, Action<string> log)
@@ -599,12 +658,16 @@ public static partial class RunnerService
     /// Refuses a name that another runner in the repository or organization already has. Checked before config remove:
     /// registering with a taken name fails only after the old registration is gone.
     /// </summary>
-    private static async Task EnsureNameIsFreeAsync(RunnerInfo runner, string name)
+    private static Task EnsureNameIsFreeAsync(RunnerInfo runner, string name)
+        => EnsureNameIsFreeAsync(runner.ApiScope, runner.GitHubUrl, runner.AgentId, name);
+
+    /// <param name="ownId">The ID of the runner that may keep the name, or 0 for a new runner.</param>
+    private static async Task EnsureNameIsFreeAsync(string scope, string registrationUrl, long ownId, string name)
     {
-        var ids = await GitHubCli.FindRunnerIdsByNameAsync(runner.ApiScope, name)
+        var ids = await GitHubCli.FindRunnerIdsByNameAsync(scope, name)
                   ?? throw new InvalidOperationException($"Could not check on GitHub whether the name {name} is free. Try again.");
-        if (ids.Any(id => id != runner.AgentId))
-            throw new InvalidOperationException($"Another runner named {name} is already registered for {RepositoryName(runner.GitHubUrl)}. Choose a different name.");
+        if (ids.Any(id => id != ownId))
+            throw new InvalidOperationException($"Another runner named {name} is already registered for {RepositoryName(registrationUrl)}. Choose a different name.");
     }
 
     /// <summary>
@@ -654,10 +717,13 @@ public static partial class RunnerService
     /// </summary>
     private static void EnsureNotBusyNow(RunnerInfo runner)
     {
-        if (ReadProcesses().Any(p => p.Name.Equals("Runner.Worker.exe", StringComparison.OrdinalIgnoreCase)
-                                     && RootFromExecutable(p.ExecutablePath).Equals(runner.InstallPath, StringComparison.OrdinalIgnoreCase)))
+        if (HasWorkerNow(runner))
             throw new InvalidOperationException("The runner just started a job. Wait for it to finish and try again.");
     }
+
+    private static bool HasWorkerNow(RunnerInfo runner)
+        => ReadProcesses().Any(p => p.Name.Equals("Runner.Worker.exe", StringComparison.OrdinalIgnoreCase)
+                                    && RootFromExecutable(p.ExecutablePath).Equals(runner.InstallPath, StringComparison.OrdinalIgnoreCase));
 
     /// <summary>
     /// Stops a runner only when it is idle, checked right before stopping. For callers that stop a runner to change it
@@ -1288,15 +1354,16 @@ public static partial class RunnerService
 
     /// <summary>
     /// After a failed install: config.cmd may have registered the runner, or created its Windows service, before it
-    /// failed. The registration is removed, unless it replaced the registration of a runner being moved here (the old
-    /// copy needs it), and a service that points into the folder is deleted.
+    /// failed. The registration is removed, unless it replaced the registration of a runner being moved here (removing
+    /// it would delete the moved runner's registration too), and a service that points into the folder is deleted.
+    /// Returns true when the registration of a runner being moved was replaced.
     /// </summary>
-    private static async Task UndoFailedRegistrationAsync(RunnerSetup setup, string scope, Action<string> log)
+    private static async Task<bool> UndoFailedRegistrationAsync(RunnerSetup setup, string scope, Action<string> log)
     {
+        var replaced = false;
         if (File.Exists(Path.Combine(setup.InstallPath, ".runner")) && File.Exists(Path.Combine(setup.InstallPath, "config.cmd")))
         {
-            if (setup.ReplaceExisting)
-                log("The runner registration is left in place, because it replaced the registration of the runner being moved.");
+            if (setup.ReplaceExisting) replaced = true;
             else
             {
                 try
@@ -1312,7 +1379,7 @@ public static partial class RunnerService
         }
         List<RunnerServiceRecord> services;
         try { services = await Task.Run(ReadRunnerServices); }
-        catch { return; }
+        catch { return replaced; }
         foreach (var service in services.Where(s => SameFolder(s.Root, setup.InstallPath)))
         {
             log($"Removing the Windows service {service.Name} the failed install created…");
@@ -1320,6 +1387,7 @@ public static partial class RunnerService
             var (code, output) = await ScheduledTasks.RunAsync("sc.exe", $"delete \"{service.Name}\"", ScheduledTasks.ShortTimeout);
             if (code != 0) log($"Could not remove the Windows service {service.Name}: {output.Trim()}");
         }
+        return replaced;
     }
 
     private static bool SameFolder(string a, string b)
