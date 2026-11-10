@@ -478,11 +478,12 @@
                                                                         <StackPanel Grid.Column="1" VerticalAlignment="Center">
                                                                             <TextBlock Text="{Binding TitleText}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" local:TrimmedText.ToolTip="True"/>
                                                                             <TextBlock Text="{Binding RepositoryText}" Style="{StaticResource Caption}" FontSize="11" Margin="0,1,0,0" TextTrimming="CharacterEllipsis" local:TrimmedText.ToolTip="True"/>
-                                                                            <StackPanel Orientation="Horizontal" Margin="0,2,0,0" Visibility="{Binding JobLineVisibility}">
+                                                                            <!-- A DockPanel gives the summary a width, so a long one ends in an ellipsis -->
+                                                                            <DockPanel Margin="0,2,0,0" Visibility="{Binding JobLineVisibility}">
                                                                                 <TextBlock Text="&#xE768;" Style="{StaticResource Icon}" FontSize="9" Foreground="{DynamicResource AccentBrush}"
                                                                                            VerticalAlignment="Center" Margin="0,0,5,0"/>
-                                                                                <TextBlock Text="{Binding LiveJob.Summary}" FontSize="11" Foreground="{DynamicResource AccentBrush}" TextTrimming="CharacterEllipsis"/>
-                                                                            </StackPanel>
+                                                                                <TextBlock Text="{Binding LiveJob.Summary}" FontSize="11" Foreground="{DynamicResource AccentBrush}" TextTrimming="CharacterEllipsis" local:TrimmedText.ToolTip="True"/>
+                                                                            </DockPanel>
                                                                         </StackPanel>
                                                                         <Border Grid.Column="2" Style="{StaticResource Pill}" Background="{Binding StatusTint}" Margin="10,0,10,0"
                                                                                 ToolTip="{Binding StatusTip}">
