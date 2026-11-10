@@ -340,7 +340,7 @@ public sealed class AssistantHttpServer : IDisposable
 
     /// <summary>
     /// Finishes a sign-in and starts its session. The caller must show that it opened this sign-in's secret, which
-    /// only a process of the same Windows user can: the same trust as reading the pairing code from fleet.json. The
+    /// only a process of the same Windows user can: the same trust as reading the fleet code from fleet.json. The
     /// answer shows the same about the agent, for the secret the caller sealed, so the caller knows it is talking to
     /// its own user's agent. The session's token is not in the answer: both sides work it out from the two secrets.
     /// </summary>

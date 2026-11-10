@@ -41,7 +41,7 @@ public class AuditAssistantTests
         // Neither side opens the other side's kind, so a secret cannot be sent back to the side that sealed it.
         Assert.Null(LocalSignIn.Open(LocalSignIn.Seal(secret, LocalSignIn.AgentChallenge), LocalSignIn.ClientChallenge));
         Assert.Null(LocalSignIn.Open(LocalSignIn.Seal(secret, LocalSignIn.ClientChallenge), LocalSignIn.AgentChallenge));
-        // Other DPAPI data of this user does not open: the pairing code and the URL token are sealed without a purpose.
+        // Other DPAPI data of this user does not open: the fleet code and the URL token are sealed without a purpose.
         Assert.Null(LocalSignIn.Open(ProtectedData.Protect(secret, null, DataProtectionScope.CurrentUser), LocalSignIn.AgentChallenge));
         Assert.Null(LocalSignIn.Open(ProtectedData.Protect(secret, Encoding.UTF8.GetBytes("RunnerManager.LocalAssistant.v1"), DataProtectionScope.CurrentUser),
             LocalSignIn.ClientChallenge));
