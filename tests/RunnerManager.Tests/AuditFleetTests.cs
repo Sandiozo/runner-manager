@@ -979,3 +979,120 @@ public class StatusCacheBuildTests
         return false;
     }
 }
+
+[Collection(FleetSettingsCollection.Name)]
+public class AssistantSwitchTests
+{
+    private static readonly string ConfigPath = Path.Combine(FleetConfig.StateDir, "fleet.json");
+
+    /// <summary>Runs a test with its own switch store, a file that stands in for the registry, and puts back the one before it.</summary>
+    private static Task WithStoreAsync(bool administrator, Action<string> test) => AuditFleetConfig.WithConfigAsync(() =>
+    {
+        var path = Path.Combine(FleetConfig.StateDir, $"assistant-switches-{Guid.NewGuid():N}.json");
+        var before = AssistantSwitches.Store;
+        AssistantSwitches.Store = new FileSwitchStore(path) { CanWrite = administrator };
+        try { test(path); }
+        finally
+        {
+            AssistantSwitches.Store = before;
+            File.Delete(path);
+        }
+        return Task.CompletedTask;
+    });
+
+    private static void WriteFleetJson(string json)
+    {
+        File.WriteAllText(ConfigPath, json);
+        File.SetLastWriteTimeUtc(ConfigPath, DateTime.UtcNow.AddDays(-3).AddTicks(Random.Shared.Next()));
+    }
+
+    private static string AgentLog()
+    {
+        if (!File.Exists(MachineRelay.AgentLogPath)) return string.Empty;
+        using var stream = new FileStream(MachineRelay.AgentLogPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        return new StreamReader(stream).ReadToEnd();
+    }
+
+    [Fact]
+    public void Tests_KeepTheSwitchesInAFileInTheStateFolder_NotInTheRegistry()
+    {
+        var store = Assert.IsType<FileSwitchStore>(AssistantSwitches.Store);
+        Assert.Equal(Path.Combine(FleetConfig.StateDir, "assistant-switches.json"), store.Where);
+    }
+
+    [Fact]
+    public async Task TheSwitchesInFleetJson_AreMovedOnce_AndFleetJsonNoLongerCountsAfterThat()
+    {
+        await WithStoreAsync(administrator: true, path =>
+        {
+            WriteFleetJson("{\"Watchdog\":true,\"Assistant\":{\"Enabled\":true,\"AskBeforeChanges\":false,\"HttpEnabled\":false}}");
+            Assert.True(FleetConfig.Current.Assistant.Enabled);
+            Assert.False(FleetConfig.Current.Assistant.AskBeforeChanges);
+            Assert.Equal(new AssistantSwitchValues(true, false), new FileSwitchStore(path).Read());
+            Assert.Contains($"moved from fleet.json to {path}", AgentLog());
+
+            // The next save drops them from fleet.json.
+            FleetConfig.Update(c => c.Watchdog = false);
+            var saved = File.ReadAllText(ConfigPath);
+            Assert.DoesNotContain("\"Enabled\"", saved);
+            Assert.DoesNotContain("AskBeforeChanges", saved);
+            Assert.True(FleetConfig.Current.Assistant.Enabled);
+
+            // Turned off by an administrator, then turned on in fleet.json by another program, also in a new process.
+            FleetConfig.Update(c =>
+            {
+                c.Assistant.Enabled = false;
+                c.Assistant.AskBeforeChanges = true;
+            });
+            AssistantSwitches.Store = new FileSwitchStore(path);
+            WriteFleetJson("{\"Assistant\":{\"Enabled\":true,\"AskBeforeChanges\":false}}");
+            Assert.False(FleetConfig.Current.Assistant.Enabled);
+            Assert.True(FleetConfig.Current.Assistant.AskBeforeChanges);
+            Assert.Equal(new AssistantSwitchValues(false, true), new FileSwitchStore(path).Read());
+        });
+    }
+
+    [Fact]
+    public async Task WithoutAdministratorRights_TheSwitchesCanOnlyBeRead_AndFleetJsonDoesNotTurnThemOn()
+    {
+        await WithStoreAsync(administrator: false, path =>
+        {
+            WriteFleetJson("{\"Assistant\":{\"Enabled\":true,\"AskBeforeChanges\":false}}");
+            // Nothing stored yet, and this process may not move them: the defaults count.
+            Assert.False(FleetConfig.Current.Assistant.Enabled);
+            Assert.True(FleetConfig.Current.Assistant.AskBeforeChanges);
+            Assert.False(File.Exists(path));
+
+            var before = File.ReadAllText(ConfigPath);
+            var refused = Assert.Throws<UnauthorizedAccessException>(() => FleetConfig.Update(c => c.Assistant.Enabled = true));
+            Assert.Equal(AssistantSwitches.NotAdministratorText, refused.Message);
+            Assert.Throws<UnauthorizedAccessException>(() => FleetConfig.Update(c => c.Assistant.AskBeforeChanges = false));
+            Assert.Equal(before, File.ReadAllText(ConfigPath));
+            Assert.False(File.Exists(path));
+            Assert.False(FleetConfig.Current.Assistant.Enabled);
+
+            // What an administrator stored is what counts.
+            new FileSwitchStore(path).Write(new AssistantSwitchValues(true, false));
+            Assert.True(FleetConfig.Current.Assistant.Enabled);
+            Assert.False(FleetConfig.Current.Assistant.AskBeforeChanges);
+        });
+    }
+
+    [Fact]
+    public async Task AChangeOfASwitch_IsLoggedWithTheOldAndTheNewValue()
+    {
+        await WithStoreAsync(administrator: true, _ =>
+        {
+            Assert.False(FleetConfig.Current.Assistant.Enabled);
+            var start = AgentLog().Length;
+            FleetConfig.Update(c => c.Assistant.Enabled = true);
+            FleetConfig.Update(c => c.Assistant.Enabled = true);
+            FleetConfig.Update(c => c.Assistant.AskBeforeChanges = false);
+            var log = AgentLog()[start..];
+            Assert.Equal(2, log.Split("\"Allow AI assistants\" changed from off to on.").Length);
+            Assert.Contains("\"Ask before changes\" changed from on to off.", log);
+            Assert.True(FleetConfig.Current.Assistant.Enabled);
+            Assert.False(FleetConfig.Current.Assistant.AskBeforeChanges);
+        });
+    }
+}

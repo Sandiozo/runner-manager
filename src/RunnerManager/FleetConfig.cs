@@ -136,11 +136,18 @@ public sealed class FleetConfig
         }
     }
 
+    private static FleetConfig Read(out bool hasPlainKey)
+    {
+        var config = ReadFile(out hasPlainKey);
+        AssistantSwitches.MoveFromFile(config.Assistant);
+        return config;
+    }
+
     /// <summary>
     /// Reads fleet.json. Only a missing file gives defaults; a file that cannot be read or parsed (for example while
     /// another process writes it) is retried briefly and then reported, so callers never mistake it for empty settings.
     /// </summary>
-    private static FleetConfig Read(out bool hasPlainKey)
+    private static FleetConfig ReadFile(out bool hasPlainKey)
     {
         for (var attempt = 0; ; attempt++)
         {
@@ -674,9 +681,35 @@ public static class CommandSigner
 /// <summary>AI assistant access: off by default; reading is always allowed once on, changes follow these rules.</summary>
 public sealed class AssistantOptions
 {
-    public bool Enabled { get; set; }
-    /// <summary>Ask before an assistant creates, starts, stops or restarts a runner. Moving and removing always ask.</summary>
-    public bool AskBeforeChanges { get; set; } = true;
+    /// <summary>"Allow AI assistants". Not in fleet.json: see <see cref="AssistantSwitches"/>. Setting it needs administrator rights.</summary>
+    [JsonIgnore]
+    public bool Enabled
+    {
+        get => AssistantSwitches.Current.Enabled;
+        set => AssistantSwitches.Set(enabled: value);
+    }
+
+    /// <summary>
+    /// Ask before an assistant creates, starts, stops or restarts a runner. Moving and removing always ask. Not in
+    /// fleet.json: see <see cref="AssistantSwitches"/>. Setting it needs administrator rights.
+    /// </summary>
+    [JsonIgnore]
+    public bool AskBeforeChanges
+    {
+        get => AssistantSwitches.Current.AskBeforeChanges;
+        set => AssistantSwitches.Set(askBeforeChanges: value);
+    }
+
+    // Where earlier versions kept the two switches: read only to move them once, and never written again.
+    [JsonInclude, JsonPropertyName(nameof(Enabled)), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    private bool? EnabledJson { get => null; set => EnabledInFile = value; }
+
+    [JsonInclude, JsonPropertyName(nameof(AskBeforeChanges)), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    private bool? AskBeforeChangesJson { get => null; set => AskBeforeChangesInFile = value; }
+
+    internal bool? EnabledInFile { get; private set; }
+    internal bool? AskBeforeChangesInFile { get; private set; }
+
     /// <summary>Also serve MCP over HTTP on this PC only (127.0.0.1), for AI tools that connect to a URL.</summary>
     public bool HttpEnabled { get; set; }
     /// <summary>The HTTP endpoint's access token, encrypted for this Windows user with DPAPI.</summary>
