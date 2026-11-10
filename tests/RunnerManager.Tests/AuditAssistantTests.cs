@@ -11,6 +11,8 @@ using System.Text.Json.Nodes;
 namespace RunnerManager.Tests;
 
 /// <summary>Tests for the fixes that followed the audit of the AI assistant code at 2.8.2.</summary>
+// The endpoint reads the assistant settings in fleet.json for every request without a session token of its own.
+[Collection(FleetSettingsCollection.Name)]
 public class AuditAssistantTests
 {
     private const string Initialize = """{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","clientInfo":{"name":"Test"}}}""";
