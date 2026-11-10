@@ -7,7 +7,8 @@ namespace RunnerManager;
 
 public static class GitHubCli
 {
-    private static readonly TimeSpan DefaultTimeout = TimeSpan.FromSeconds(45);
+    /// <summary>How long gh may take when the caller sets no other limit. Every status poll uses it.</summary>
+    internal static readonly TimeSpan DefaultTimeout = TimeSpan.FromSeconds(45);
     /// <summary>Status polls share this gate, so a refresh never starts more than four gh processes at a time.</summary>
     private static readonly SemaphoreSlim PollGate = new(4);
 
@@ -401,7 +402,7 @@ public static class GitHubCli
 
         var status = 0;
         var newEtag = string.Empty;
-        string? remaining = null, reset = null, retryAfter = null;
+        string? remaining = null, reset = null, retryAfter = null, date = null;
         foreach (var line in headers.Split('\n'))
         {
             if (line.StartsWith("HTTP/", StringComparison.OrdinalIgnoreCase))
@@ -413,10 +414,11 @@ public static class GitHubCli
             else if (HeaderValue(line, "X-RateLimit-Remaining") is { } left) remaining = left;
             else if (HeaderValue(line, "X-RateLimit-Reset") is { } at) reset = at;
             else if (HeaderValue(line, "Retry-After") is { } wait) retryAfter = wait;
+            else if (HeaderValue(line, "Date") is { } sent) date = sent;
         }
         var response = new ConditionalResult(status, string.IsNullOrEmpty(newEtag) ? known : newEtag, body);
         if (response.Ok || response.NotModified) GitHubFailures.Succeeded(endpoint);
-        else GitHubFailures.Failed(endpoint, status, remaining, reset, retryAfter, result);
+        else GitHubFailures.Failed(endpoint, status, new LimitHeaders(remaining, reset, retryAfter, date), result);
         return response;
     }
 

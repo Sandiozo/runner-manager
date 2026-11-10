@@ -779,6 +779,101 @@ public class GitHubBackOffTests
     }
 
     [Fact]
+    public void FullMemory_DropsTheFailuresThatAreAskedAgainSoonest_NotAllOfThem()
+    {
+        using var gh = new FakeGh(_ => FakeGh.Http(404));
+        var prefix = $"repos/octo/m-{Guid.NewGuid():N}";
+        string Endpoint(int number) => $"{prefix}-{number}/actions/runs?per_page=6";
+        void Fail(int number)
+        {
+            GitHubFailures.Failed(Endpoint(number), 404, default, FakeGh.Http(404));
+            gh.Now += TimeSpan.FromMilliseconds(10);
+        }
+        bool IsPaused(int number) => GitHubFailures.Blocking(Endpoint(number)) != null;
+        const int max = GitHubFailures.MaxEndpoints;
+
+        // Two failures that nothing has asked about for a long time, then as many fresh ones as fit.
+        Fail(-2);
+        Fail(-1);
+        gh.Now += TimeSpan.FromMinutes(5);
+        for (var number = 1; number <= max - 2; number++) Fail(number);
+
+        // The next two take the place of the two old ones.
+        Fail(max - 1);
+        Fail(max);
+        Assert.All(Enumerable.Range(1, max), number => Assert.True(IsPaused(number)));
+
+        // With only fresh ones, each new failure costs the one whose pause ends first.
+        Fail(max + 1);
+        Fail(max + 2);
+        Assert.False(IsPaused(1));
+        Assert.False(IsPaused(2));
+        Assert.All(Enumerable.Range(3, max), number => Assert.True(IsPaused(number)));
+    }
+
+    [Fact]
+    public async Task TimedOutRequest_WhileOthersAreAnswered_PausesOnlyItself()
+    {
+        var slow = $"repos/{NewRepository()}";
+        var other = $"repos/{NewRepository()}";
+        // A start that returns nothing is a gh that did not finish in time.
+        using var gh = new FakeGh(arguments => arguments[1].StartsWith(slow, StringComparison.Ordinal) ? null : FakeGh.Http(200));
+
+        Assert.True((await GitHubCli.GetConditionalAsync($"{other}/actions/runs?per_page=6", null)).Ok);
+        gh.Now += TimeSpan.FromSeconds(40);
+        Assert.Equal(0, (await GitHubCli.GetConditionalAsync($"{slow}/actions/runs?per_page=6", null)).StatusCode);
+
+        var problem = GitHubCli.ProblemFor(slow);
+        Assert.Equal("GitHub did not answer in time.", problem!.Reason);
+        Assert.Equal(gh.Now.AddSeconds(45), problem.RetryUtc);
+        Assert.Null(GitHubCli.ProblemFor(other));
+
+        // The request that hung is left alone; the others are still sent.
+        await GitHubCli.GetConditionalAsync($"{slow}/actions/runs?per_page=6", null);
+        Assert.True((await GitHubCli.GetConditionalAsync($"{other}/actions/runners?per_page=100", null)).Ok);
+        Assert.Equal(3, gh.Calls.Length);
+    }
+
+    [Fact]
+    public async Task TimedOutRequest_WhenNothingWasAnsweredMeanwhile_PausesEveryPoll()
+    {
+        var slow = $"repos/{NewRepository()}";
+        var other = $"repos/{NewRepository()}";
+        var reachable = true;
+        using var gh = new FakeGh(_ => reachable ? FakeGh.Http(200) : null);
+
+        // The last answer is older than the time the request waited, so it says nothing about now.
+        await GitHubCli.GetConditionalAsync($"{other}/actions/runs?per_page=6", null);
+        reachable = false;
+        gh.Now += TimeSpan.FromSeconds(50);
+        await GitHubCli.GetConditionalAsync($"{slow}/actions/runs?per_page=6", null);
+
+        Assert.Equal("GitHub did not answer in time. Check the internet connection.", GitHubCli.ProblemFor(other)!.Reason);
+        await GitHubCli.GetConditionalAsync($"{other}/actions/runs?per_page=6", null);
+        Assert.Equal(2, gh.Calls.Length);
+
+        gh.Now += TimeSpan.FromSeconds(31);
+        await GitHubCli.GetConditionalAsync($"{other}/actions/runs?per_page=6", null);
+        Assert.Equal(3, gh.Calls.Length);
+    }
+
+    [Fact]
+    public async Task RateLimit_IsWaitedOut_ByGitHubsClock_NotThisPcs()
+    {
+        var scope = $"repos/{NewRepository()}";
+        // This PC's clock is 5 minutes behind GitHub's. The limit resets 20 minutes after GitHub sent the answer.
+        var sent = Noon.AddMinutes(5);
+        var reset = new DateTimeOffset(sent.AddMinutes(20)).ToUnixTimeSeconds();
+        using var gh = new FakeGh(_ => FakeGh.Http(403,
+            headers: $"Date: {sent:r}\r\nX-Ratelimit-Remaining: 0\r\nX-Ratelimit-Reset: {reset}\r\n",
+            error: "gh: API rate limit exceeded for user ID 1. (HTTP 403)"));
+
+        await GitHubCli.GetConditionalAsync($"{scope}/actions/runs?per_page=6", null);
+
+        Assert.Equal(Noon.AddMinutes(20).AddSeconds(2), GitHubCli.ProblemFor(scope)!.RetryUtc);
+    }
+
+    [Fact]
     public async Task FailedRunnerList_AsksOncePerRunner_NotOnEveryRefresh()
     {
         var scope = $"repos/{NewRepository()}";
@@ -812,17 +907,24 @@ public class GitHubBackOffTests
     public void Failures_AreDescribedInTheAppsWords()
     {
         (GitHubProblem Problem, GitHubFailures.FailureScope Scope) Describe(int status, CommandResult result,
-            string? remaining = null, string? reset = null, string? retryAfter = null)
-            => GitHubFailures.Describe(status, remaining, reset, retryAfter, result, Noon);
+            string? remaining = null, string? reset = null, string? retryAfter = null, string? date = null, bool othersAnswered = false)
+            => GitHubFailures.Describe(status, new LimitHeaders(remaining, reset, retryAfter, date), result, Noon, othersAnswered);
         static string Epoch(DateTime time) => new DateTimeOffset(time).ToUnixTimeSeconds().ToString();
 
         var missing = Describe(0, Failure(GitHubFailures.GhMissingMessage, -1));
         Assert.Equal((GitHubFailures.GhMissingMessage, GitHubFailures.FailureScope.Everything), (missing.Problem.Reason, missing.Scope));
 
-        var slow = Describe(0, Failure("GitHub CLI timed out (gh api repos/octo/app). Check the internet connection and try again.", -1));
+        var timedOut = Failure("GitHub CLI timed out (gh api repos/octo/app). Check the internet connection and try again.", -1);
+        var slow = Describe(0, timedOut);
         Assert.Equal(("GitHub did not answer in time. Check the internet connection.", GitHubFailures.FailureScope.Everything),
             (slow.Problem.Reason, slow.Scope));
         Assert.Equal(Noon.AddSeconds(30), slow.Problem.RetryUtc);
+        var oneSlow = Describe(0, timedOut, othersAnswered: true);
+        Assert.Equal(("GitHub did not answer in time.", GitHubFailures.FailureScope.Endpoint), (oneSlow.Problem.Reason, oneSlow.Scope));
+        Assert.Equal(Noon.AddSeconds(45), oneSlow.Problem.RetryUtc);
+        // Only a request that hung is helped by the others' answers.
+        Assert.Equal(GitHubFailures.FailureScope.Everything,
+            Describe(0, Failure("error connecting to api.github.com"), othersAnswered: true).Scope);
 
         var signedOut = Describe(0, Failure("To get started with GitHub CLI, please run:  gh auth login\n", 4));
         Assert.Equal(("GitHub is not connected.", GitHubFailures.FailureScope.SignIn), (signedOut.Problem.Reason, signedOut.Scope));
@@ -837,6 +939,12 @@ public class GitHubBackOffTests
         Assert.Equal(Noon.AddMinutes(61), Describe(403, limit, "0", Epoch(Noon.AddHours(5))).Problem.RetryUtc);
         Assert.Equal(Noon.AddSeconds(62), Describe(403, limit, "0", "99999999999999999999").Problem.RetryUtc);
         Assert.Equal(Noon.AddSeconds(122), Describe(429, Failure("gh: HTTP 429"), retryAfter: "120").Problem.RetryUtc);
+
+        // The reset time is GitHub's, so the wait is counted from the time on GitHub's answer when it has one.
+        var inTen = Epoch(Noon.AddMinutes(10));
+        Assert.Equal(Noon.AddMinutes(7).AddSeconds(2), Describe(403, limit, "0", inTen, date: Noon.AddMinutes(3).ToString("r")).Problem.RetryUtc);
+        Assert.Equal(Noon.AddMinutes(13).AddSeconds(2), Describe(403, limit, "0", inTen, date: Noon.AddMinutes(-3).ToString("r")).Problem.RetryUtc);
+        Assert.Equal(Noon.AddMinutes(10).AddSeconds(2), Describe(403, limit, "0", inTen, date: "yesterday").Problem.RetryUtc);
 
         var secondary = Describe(403, Failure("gh: You have exceeded a secondary rate limit. Please wait a few minutes. (HTTP 403)"), "4990");
         Assert.True(secondary.Problem.RateLimited);
