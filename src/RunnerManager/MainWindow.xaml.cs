@@ -43,6 +43,8 @@ public partial class MainWindow : Window
     private bool _operationRunning;
     private string _operationTitle = string.Empty;
     private bool _githubAuthenticated;
+    /// <summary>gh has been asked once; until then the dashboard does not say that GitHub is not connected.</summary>
+    private bool _githubChecked;
     private string _githubLogin = string.Empty;
     private bool _isEnrolled;
     private bool _agentTaskChecked;
@@ -141,6 +143,7 @@ public partial class MainWindow : Window
             {
                 var wasAuthenticated = _githubAuthenticated;
                 _githubAuthenticated = await GitHubCli.IsAuthenticatedAsync();
+                _githubChecked = true;
                 _lastAuthCheck = DateTime.Now;
                 if (_githubAuthenticated && (!wasAuthenticated || string.IsNullOrEmpty(_githubLogin)))
                 {
@@ -198,6 +201,8 @@ public partial class MainWindow : Window
         finally
         {
             _refreshing = false;
+            // A first refresh that failed says so in the status bar.
+            LoadingPanel.Visibility = Visibility.Collapsed;
             if (_refreshQueued)
             {
                 var force = _refreshQueuedForceAuth;
@@ -213,6 +218,7 @@ public partial class MainWindow : Window
     /// </summary>
     private void ApplyFleet(List<MachineInfo> machines, List<RunnerInfo> runners, bool localRunnersRead)
     {
+        LoadingPanel.Visibility = Visibility.Collapsed;
         machines = machines.ToList();
         var localIndex = machines.FindIndex(m => m.IsLocal);
         if (localIndex >= 0) machines[localIndex] = machines[localIndex].WithLocalRunners(runners);
@@ -576,8 +582,8 @@ public partial class MainWindow : Window
         var selected = Machines.FirstOrDefault(m => m.MachineKey == _selectedMachineKey)
                        ?? (IsSinglePc ? Machines.FirstOrDefault() : null);
         PageTitle.Text = selected?.MachineName ?? "All PCs";
-        PageSubtitle.Text = !_githubAuthenticated
-            ? "Connect GitHub in the account menu (bottom left) to add runners and see job status"
+        PageSubtitle.Text = _githubChecked && !_githubAuthenticated
+            ? "Connect GitHub to add runners and see job status"
             : selected != null
                 ? selected.RunnerSummary
                 : "GitHub runners on all PCs";
@@ -712,8 +718,10 @@ public partial class MainWindow : Window
         GitHubAccountText.Text = _githubAuthenticated
             ? string.IsNullOrEmpty(_githubLogin) ? "GitHub" : _githubLogin
             : "GitHub";
-        GitHubStatusText.Text = _githubAuthenticated ? "Connected" : WaitingForSignIn ? "Waiting for sign-in" : "Not connected";
-        GitHubStatusText.Foreground = _githubAuthenticated ? Palette.Success : Palette.Warning;
+        GitHubStatusText.Text = _githubAuthenticated ? "Connected" : WaitingForSignIn ? "Waiting for sign-in"
+            : _githubChecked ? "Not connected" : "Checking…";
+        GitHubStatusText.Foreground = _githubAuthenticated ? Palette.Success : _githubChecked ? Palette.Warning : Palette.TextMuted;
+        ConnectGitHubButton.Visibility = _githubChecked && !_githubAuthenticated ? Visibility.Visible : Visibility.Collapsed;
         AvatarText.Text = _githubAuthenticated && _githubLogin.Length > 0 ? _githubLogin[..1].ToUpperInvariant() : "?";
         AvatarBadge.Background = _githubAuthenticated ? Palette.Tint(Palette.Info) : (Brush)FindResource("Bg3Brush");
         ConnectMenuItem.Visibility = _githubAuthenticated ? Visibility.Collapsed : Visibility.Visible;
@@ -754,6 +762,12 @@ public partial class MainWindow : Window
         GitHubCli.LaunchLogin();
         AddActivity("Opened GitHub sign-in. Complete it in the browser or terminal window.");
         WatchGitHubSignIn();
+    }
+
+    private void ConnectGitHubButton_Click(object sender, RoutedEventArgs e)
+    {
+        // The account menu's item also disconnects; this button only connects.
+        if (!_githubAuthenticated) GitHubConnect_Click(sender, e);
     }
 
     private async void GitHubReconnect_Click(object sender, RoutedEventArgs e)

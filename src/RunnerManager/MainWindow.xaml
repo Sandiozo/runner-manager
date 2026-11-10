@@ -273,6 +273,13 @@
                         <TextBlock Text="Ctrl+F" FontSize="10" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,10,0"
                                    Foreground="{DynamicResource TextFaintBrush}" IsHitTestVisible="False" x:Name="SearchHint"/>
                     </Grid>
+                    <Button x:Name="ConnectGitHubButton" Click="ConnectGitHubButton_Click" Margin="0,0,8,0" Visibility="Collapsed"
+                            ToolTip="Sign in with the GitHub CLI to add runners and see jobs, queues and recent runs">
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="&#xE8D7;" Style="{StaticResource Icon}" FontSize="12" Margin="0,0,8,0"/>
+                            <TextBlock Text="Connect GitHub"/>
+                        </StackPanel>
+                    </Button>
                     <Button Style="{StaticResource PrimaryButton}" Click="AddRunner_Click" ToolTip="Add a self-hosted runner on this PC (Ctrl+N)">
                         <StackPanel Orientation="Horizontal">
                             <TextBlock Text="&#xE710;" Style="{StaticResource Icon}" FontSize="12" Foreground="{DynamicResource OnAccentBrush}" Margin="0,0,8,0"/>
@@ -455,8 +462,11 @@
                                                         <TextBlock Text="RUNNERS" Style="{StaticResource SectionLabel}" VerticalAlignment="Center"/>
                                                         <TextBlock Text="{Binding RunnerSummary}" Style="{StaticResource Caption}" FontSize="11" HorizontalAlignment="Right" VerticalAlignment="Center"/>
                                                     </DockPanel>
-                                                    <TextBlock Text="No runners on this PC." Style="{StaticResource Caption}" Margin="8,8,8,10"
-                                                               Visibility="{Binding NoRunnersVisibility}"/>
+                                                    <StackPanel Orientation="Horizontal" Margin="8,8,8,10" Visibility="{Binding NoRunnersVisibility}">
+                                                        <TextBlock Text="{Binding NoRunnersText}" Style="{StaticResource Caption}" VerticalAlignment="Center"/>
+                                                        <Button Content="Add runner" Click="AddRunner_Click" Padding="10,3" Margin="12,0,0,0"
+                                                                Visibility="{Binding AddRunnerVisibility}" ToolTip="Add a self-hosted runner on this PC (Ctrl+N)"/>
+                                                    </StackPanel>
                                                     <ItemsControl ItemsSource="{Binding Runners}">
                                                         <ItemsControl.ItemTemplate>
                                                             <DataTemplate DataType="{x:Type local:MachineRunnerStatus}">
@@ -835,6 +845,11 @@
                         <TextBlock Text="&#xE721;" Style="{StaticResource Icon}" FontSize="28" Foreground="{DynamicResource TextFaintBrush}"/>
                         <TextBlock x:Name="NoResultsText" Style="{StaticResource Caption}" FontSize="13" Margin="0,12,0,0" HorizontalAlignment="Center"/>
                     </StackPanel>
+                    <!-- Until the first reading of this PC and the fleet -->
+                    <StackPanel x:Name="LoadingPanel" Margin="0,40,0,0" HorizontalAlignment="Center">
+                        <TextBlock Text="&#xE895;" Style="{StaticResource Icon}" FontSize="28" Foreground="{DynamicResource TextFaintBrush}"/>
+                        <TextBlock Text="Loading PCs and runners…" Style="{StaticResource Caption}" FontSize="13" Margin="0,12,0,0" HorizontalAlignment="Center"/>
+                    </StackPanel>
                 </StackPanel>
             </ScrollViewer>
 
@@ -922,7 +937,7 @@
                     <ProgressBar x:Name="OperationProgress" Style="{StaticResource ThinProgress}" VerticalAlignment="Top" IsIndeterminate="False" Visibility="Hidden"/>
                     <DockPanel Margin="20,4,16,4">
                         <TextBlock x:Name="StatusGlyph" Text="&#xE73E;" Style="{StaticResource Icon}" FontSize="11" Foreground="{DynamicResource SuccessBrush}" Margin="0,0,8,0"/>
-                        <TextBlock x:Name="StatusText" Text="Ready" Style="{StaticResource Caption}" FontSize="11" TextTrimming="CharacterEllipsis" local:TrimmedText.ToolTip="True"/>
+                        <TextBlock x:Name="StatusText" Text="Loading…" Style="{StaticResource Caption}" FontSize="11" TextTrimming="CharacterEllipsis" local:TrimmedText.ToolTip="True"/>
                         <TextBlock x:Name="LastUpdatedText" Text="" Style="{StaticResource Caption}" FontSize="11" HorizontalAlignment="Right"/>
                     </DockPanel>
                 </Grid>

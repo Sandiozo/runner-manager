@@ -591,6 +591,11 @@ public sealed class MachineInfo : INotifyPropertyChanged
         }
     }
     public Visibility NoRunnersVisibility => Runners.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
+    public string NoRunnersText => IsLocal ? "No runners on this PC."
+        : IsReachable ? $"No runners on {MachineName}."
+        : $"{MachineName} is not connected, so its runners are not known.";
+    /// <summary>The dashboard adds runners on this PC.</summary>
+    public Visibility AddRunnerVisibility => IsLocal ? Visibility.Visible : Visibility.Collapsed;
 
     public string LastResultText
     {
@@ -611,7 +616,7 @@ public sealed class MachineInfo : INotifyPropertyChanged
         nameof(MemoryPercent), nameof(MemoryText), nameof(MemoryBrush), nameof(UptimeText),
         nameof(LastResultText), nameof(LastResultVisibility),
         nameof(IsOnline), nameof(IsReachable), nameof(StatusText), nameof(StatusBrush), nameof(StatusTint), nameof(StatusTextBrush),
-        nameof(SupportsFleetTools), nameof(CanUpdateAgent), nameof(SidebarSubtitle),
+        nameof(SupportsFleetTools), nameof(CanUpdateAgent), nameof(SidebarSubtitle), nameof(NoRunnersText),
         // Runner health is read after the card is built.
         nameof(ProblemBadgeVisibility), nameof(ProblemBadgeText), nameof(ProblemTip)
     };

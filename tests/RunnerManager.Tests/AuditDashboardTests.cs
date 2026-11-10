@@ -364,7 +364,8 @@ public class AuditDashboardTests
     public void SignIn_ShowsThatItIsWaiting()
     {
         var window = NewDashboard();
-        Assert.Equal("Not connected", WpfTestApp.Run(() => window.GitHubStatusText.Text));
+        // Until gh has been asked, it does not say that GitHub is not connected.
+        Assert.Equal("Checking…", WpfTestApp.Run(() => window.GitHubStatusText.Text));
         WpfTestApp.Run(window.WatchGitHubSignIn);
         Assert.Equal("Waiting for sign-in", WpfTestApp.Run(() => window.GitHubStatusText.Text));
     }
@@ -750,6 +751,40 @@ public class AuditDashboardTests
     [InlineData(null, true, "")]
     public void OutputNote_SaysWhyTheOutputDoesNotChange(bool? finished, bool held, string note)
         => Assert.Equal(note, MainWindow.OutputNoteText(finished, held));
+
+    // ----- Item 21: loading and empty states -----
+
+    [Fact]
+    public void FirstLoad_SaysItIsLoading()
+    {
+        var window = NewDashboard();
+        WpfTestApp.Run(() =>
+        {
+            Assert.Equal(Visibility.Visible, window.LoadingPanel.Visibility);
+            Assert.Equal("Loading…", window.StatusText.Text);
+            // Not connected is not known yet, so there is nothing to connect.
+            Assert.Equal(Visibility.Collapsed, window.ConnectGitHubButton.Visibility);
+        });
+    }
+
+    [Fact]
+    public void PcWithoutRunners_SaysWhatCanBeDone()
+    {
+        var local = PcWith(Environment.MachineName);
+        Assert.Equal("No runners on this PC.", local.NoRunnersText);
+        Assert.Equal(Visibility.Visible, local.AddRunnerVisibility);
+
+        var online = MachineInfo.FromPayload("BUILD-08", new MachineStatusPayload
+        {
+            MachineName = "BUILD-08", AgentProtocolVersion = 14, UpdatedUtc = DateTime.UtcNow, FleetAgentRunning = true
+        });
+        Assert.Equal("No runners on BUILD-08.", online.NoRunnersText);
+        // Runners are added on this PC.
+        Assert.Equal(Visibility.Collapsed, online.AddRunnerVisibility);
+
+        var offline = MachineInfo.Placeholder("BUILD-09", "BUILD-09", DateTime.UtcNow.AddHours(-2), "192.168.1.29", "Not reachable at 192.168.1.29:47800");
+        Assert.Equal("BUILD-09 is not connected, so its runners are not known.", offline.NoRunnersText);
+    }
 
     // ----- Bug 10: keyboard shortcuts -----
 

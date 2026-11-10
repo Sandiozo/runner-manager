@@ -32,6 +32,7 @@ public partial class MainWindow
     {
         if (_started) return;
         _started = true;
+        SetStatus("Loading…", StatusKind.Busy);
         CreateTray();
         AddActivity($"Runner Manager v{AppUpdater.CurrentVersion} started.");
         try
