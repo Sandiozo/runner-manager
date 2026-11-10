@@ -41,6 +41,8 @@ public class AuditDialogTests
     [InlineData("100.101.102.103")]
     [InlineData("100.101.102.103:47821")]
     [InlineData("build_box:8080")]
+    [InlineData("JĀNIS-PC")]
+    [InlineData("ОФИС-ПК:47821")]
     public void AddressThatCanBeCalled_IsAccepted(string address)
         => Assert.Null(FleetAddressRules.Problem(address, "THIS-PC", LocalAddresses));
 
@@ -62,14 +64,50 @@ public class AuditDialogTests
     public void AddressThatCannotWork_IsRefused(string address)
         => Assert.NotNull(FleetAddressRules.Problem(address, "THIS-PC", LocalAddresses));
 
+    private static readonly PeerRecord[] Peers =
+        { new() { Name = "OFFICE", Address = "office.example.ts.net:47821", LastSeenUtc = new DateTime(2026, 1, 2) } };
+
+    private static readonly MachineInfo[] NoPcs = Array.Empty<MachineInfo>();
+
+    private static MachineInfo NoAnswerAt(string address, string problem)
+        => MachineInfo.Placeholder("ADDR_" + MachineRelay.Sanitize(address), address, DateTime.MinValue, address, problem);
+
     [Fact]
     public void AddressStatus_NamesThePcThatAnswersThere()
     {
-        var peers = new[] { new PeerRecord { Name = "OFFICE", Address = "office.example.ts.net:47821", LastSeenUtc = new DateTime(2026, 1, 2) } };
-        Assert.Equal("OFFICE answers here  ·  last seen seen", FleetAddressRules.Status("office.example.ts.net", peers, null, _ => "seen"));
+        Assert.Equal("OFFICE answers here  ·  last seen seen",
+            FleetAddressRules.Status("office.example.ts.net", Peers, Array.Empty<ManagedPcRecord>(), NoPcs, null, _ => "seen"));
         Assert.Equal("No PC in this fleet answered. Not reachable at 10.0.0.9:47821.",
-            FleetAddressRules.Status("10.0.0.9", peers, "Not reachable at 10.0.0.9:47821", _ => "seen"));
-        Assert.Equal("Not checked yet.", FleetAddressRules.Status("10.0.0.9", peers, null, _ => "seen"));
+            FleetAddressRules.Status("10.0.0.9", Peers, Array.Empty<ManagedPcRecord>(), new[] { NoAnswerAt("10.0.0.9", "Not reachable at 10.0.0.9:47821") }, null, _ => "seen"));
+        Assert.Equal("Not checked yet.", FleetAddressRules.Status("10.0.0.9", Peers, Array.Empty<ManagedPcRecord>(), NoPcs, null, _ => "seen"));
+    }
+
+    [Fact]
+    public void AddressStatus_ForAPcKnownAtAnotherAddress_NamesItAndWhereItIsListed()
+    {
+        // OFFICE answers at its Tailscale name, but the fleet lists it at its address on the local network.
+        var peers = new[] { new PeerRecord { Name = "OFFICE", Address = "192.168.1.30:47821" } };
+        var answer = new MachineInfo { MachineKey = MachineRelay.Sanitize("OFFICE"), MachineName = "OFFICE", Address = "office.example.ts.net" };
+        Assert.Equal("OFFICE answers here. It is listed at 192.168.1.30:47821.",
+            FleetAddressRules.Status("office.example.ts.net", peers, Array.Empty<ManagedPcRecord>(), NoPcs, answer, _ => "seen"));
+        Assert.Equal("OFFICE answers here.",
+            FleetAddressRules.Status("office.example.ts.net", Array.Empty<PeerRecord>(), Array.Empty<ManagedPcRecord>(), NoPcs, answer, _ => "seen"));
+        // When it was asked, nothing answered.
+        Assert.Equal("No PC in this fleet answered. The PC refused the fleet code.",
+            FleetAddressRules.Status("10.0.0.9", peers, Array.Empty<ManagedPcRecord>(), NoPcs, NoAnswerAt("10.0.0.9", "The PC refused the fleet code"), _ => "seen"));
+        // The newest refresh did not reach it, after it answered when it was asked.
+        Assert.StartsWith("No PC in this fleet answered.",
+            FleetAddressRules.Status("office.example.ts.net", peers, Array.Empty<ManagedPcRecord>(),
+                new[] { NoAnswerAt("office.example.ts.net", "Not reachable") }, answer, _ => "seen"));
+    }
+
+    [Fact]
+    public void AddressStatus_ForAManagedPc_SaysTheAddressIsNotNeeded()
+    {
+        var managed = new[] { new ManagedPcRecord { Name = "KIOSK", Address = "kiosk.example.ts.net:47821" } };
+        Assert.Equal("This is the address of KIOSK, a PC managed one way. It is found without this address, so you can remove it.",
+            FleetAddressRules.Status("KIOSK.example.ts.net", Peers, managed,
+                new[] { NoAnswerAt("KIOSK.example.ts.net", "The PC refused the fleet code") }, null, _ => "seen"));
     }
 
     [Fact]

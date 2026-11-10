@@ -14,7 +14,8 @@ internal static class FleetAddressRules
         if (text.StartsWith('[') || text.Count(c => c == ':') > 1) return "IPv6 addresses are not supported. Enter the PC's IPv4 address or its name.";
         var (host, port) = FleetNetwork.SplitHostPort(text);
         if (text.Contains(':') && port is not (>= 1 and <= 65535)) return "The port must be a number from 1 to 65535.";
-        if (host.Length == 0 || !host.All(c => char.IsAsciiLetterOrDigit(c) || c is '-' or '.' or '_'))
+        // Windows PC names can have letters of any alphabet, such as JĀNIS-PC.
+        if (host.Length == 0 || !host.All(c => char.IsLetterOrDigit(c) || c is '-' or '.' or '_'))
             return "A PC name or address can only contain letters, digits, '-', '_' and '.'.";
         if (host.Equals(thisPcName, StringComparison.OrdinalIgnoreCase) || host.Equals("localhost", StringComparison.OrdinalIgnoreCase)
             || host.StartsWith("127.", StringComparison.Ordinal) || localAddresses.Contains(host, StringComparer.OrdinalIgnoreCase))
@@ -25,16 +26,41 @@ internal static class FleetAddressRules
     internal static bool SameHost(string a, string b)
         => FleetNetwork.HostOf(a).Equals(FleetNetwork.HostOf(b), StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>The placeholder the fleet refresh lists for an address where no PC answered.</summary>
+    internal static bool IsAddressPlaceholder(MachineInfo machine, string address) => machine.MachineKey == "ADDR_" + MachineRelay.Sanitize(address);
+
     /// <summary>
-    /// What the last fleet refresh found at the address: the paired PC that answered there, or why none did
-    /// (<paramref name="problem"/>, from the placeholder the refresh listed for it).
+    /// What is known about the address: the PC that has it, the PC that answered when it was asked, or why none did.
     /// </summary>
-    internal static string Status(string address, IEnumerable<PeerRecord> knownPeers, string? problem, Func<DateTime, string> lastSeen)
+    /// <param name="machines">The PCs of the last fleet refresh, with a placeholder for each address where none answered.</param>
+    /// <param name="answer">
+    /// What the address answered when Settings asked it: the PC, or a placeholder with the reason. The fleet refresh
+    /// lists a PC that answers there at the address it already had, so only this names it.
+    /// </param>
+    internal static string Status(string address, IEnumerable<PeerRecord> knownPeers, IEnumerable<ManagedPcRecord> managedPcs,
+        IReadOnlyCollection<MachineInfo> machines, MachineInfo? answer, Func<DateTime, string> lastSeen)
     {
+        // A managed PC refuses requests made with the fleet code, and is reached at its own address anyway.
+        if (managedPcs.FirstOrDefault(p => SameHost(p.Address, address)) is { } managed)
+            return $"This is the address of {managed.Name}, a PC managed one way. It is found without this address, so you can remove it.";
         if (knownPeers.FirstOrDefault(p => SameHost(p.Address, address)) is { } peer)
             return $"{peer.Name} answers here  ·  last seen {lastSeen(peer.LastSeenUtc)}";
-        return string.IsNullOrWhiteSpace(problem) ? "Not checked yet." : $"No PC in this fleet answered. {problem.Trim().TrimEnd('.')}.";
+        // The newest refresh did not reach the address.
+        if (machines.FirstOrDefault(m => IsAddressPlaceholder(m, address)) is { } unanswered)
+            return NoAnswer(unanswered.ConnectionProblem);
+        if (answer != null && IsAddressPlaceholder(answer, address)) return NoAnswer(answer.ConnectionProblem);
+        if (answer != null)
+        {
+            var listed = knownPeers.FirstOrDefault(p => MachineRelay.Sanitize(p.Name) == answer.MachineKey);
+            return listed is { Address.Length: > 0 }
+                ? $"{answer.MachineName} answers here. It is listed at {listed.Address}."
+                : $"{answer.MachineName} answers here.";
+        }
+        return "Not checked yet.";
     }
+
+    private static string NoAnswer(string problem)
+        => string.IsNullOrWhiteSpace(problem) ? "No PC in this fleet answered." : $"No PC in this fleet answered. {problem.Trim().TrimEnd('.')}.";
 }
 
 /// <summary>Forgetting a PC, worded and done the same way on the dashboard and in Settings.</summary>

@@ -61,7 +61,7 @@ public partial class SettingsWindow : Window
         StartupToggle.IsEnabled = false;
         Loaded += async (_, _) =>
         {
-            await Task.WhenAll(ReadStartupTaskAsync(), ReadAgentStateAsync());
+            await Task.WhenAll(ReadStartupTaskAsync(), ReadAgentStateAsync(), CheckAddressesAsync(again: false));
             await CheckForUpdatesAsync(force: false);
         };
     }
@@ -424,6 +424,10 @@ public partial class SettingsWindow : Window
 
     private static string LastSeen(DateTime utc) => utc == DateTime.MinValue ? "never" : utc.ToLocalTime().ToString("g");
 
+    /// <summary>What each address answered when this window asked it (see <see cref="CheckAddressesAsync"/>).</summary>
+    private readonly Dictionary<string, MachineInfo> _addressAnswers = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _addressesChecking = new(StringComparer.OrdinalIgnoreCase);
+
     private void RefreshPeers()
     {
         var config = FleetConfig.Current;
@@ -434,11 +438,48 @@ public partial class SettingsWindow : Window
         PeersEmptyPanel.Visibility = peers.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         // The dashboard lists an address where no PC answered as a placeholder, with the reason.
         var machines = (Owner as MainWindow)?.Machines.ToList() ?? new List<MachineInfo>();
+        var localAddresses = FleetNetwork.LocalAddresses().ToList();
         AddressList.ItemsSource = config.ManualAddresses
-            .Select(a => new AddressRow(a, FleetAddressRules.Status(a, config.KnownPeers,
-                machines.FirstOrDefault(m => m.MachineKey == "ADDR_" + MachineRelay.Sanitize(a))?.ConnectionProblem, LastSeen)))
+            .Select(a => new AddressRow(a, FleetAddressRules.Problem(a, Environment.MachineName, localAddresses)
+                ?? (_addressesChecking.Contains(a) ? "Checking…"
+                    : FleetAddressRules.Status(a, config.KnownPeers, config.ManagedPcs, machines, _addressAnswers.GetValueOrDefault(a), LastSeen))))
             .ToList();
         ThisPcAddressText.Text = $"This PC: {Environment.MachineName}  ·  {string.Join(", ", FleetNetwork.LocalAddresses())}  ·  port {FleetNetwork.AgentPort}";
+    }
+
+    /// <summary>
+    /// Asks the addresses that no known PC has, with the status request the fleet refresh sends there. The refresh
+    /// lists a PC that answers at such an address under the address it already had, so this is what names it.
+    /// </summary>
+    private async Task CheckAddressesAsync(bool again)
+    {
+        var config = FleetConfig.Current;
+        if (config.FleetKey == null) return;
+        var localAddresses = FleetNetwork.LocalAddresses().ToList();
+        var addresses = config.ManualAddresses
+            .Where(a => FleetAddressRules.Problem(a, Environment.MachineName, localAddresses) == null
+                        && !config.KnownPeers.Any(p => FleetAddressRules.SameHost(p.Address, a))
+                        && !config.ManagedPcs.Any(p => FleetAddressRules.SameHost(p.Address, a))
+                        && (again || !_addressAnswers.ContainsKey(a)))
+            .Where(_addressesChecking.Add)
+            .ToList();
+        if (addresses.Count == 0) return;
+        RefreshPeers();
+        try
+        {
+            var answers = await Task.WhenAll(addresses.Select(a => MachineRelay.FetchPeerAsync(null, null, a, null)));
+            for (var i = 0; i < addresses.Count; i++)
+                if (answers[i] is { } answer) _addressAnswers[addresses[i]] = answer;
+        }
+        catch (Exception)
+        {
+            // The status stays as the last fleet refresh found it.
+        }
+        finally
+        {
+            foreach (var address in addresses) _addressesChecking.Remove(address);
+        }
+        RefreshPeers();
     }
 
     private async void FindPcs_Click(object sender, RoutedEventArgs e)
@@ -447,7 +488,7 @@ public partial class SettingsWindow : Window
         FindPcsButton.Content = "Searching…";
         try
         {
-            await _fleetChanged();
+            await Task.WhenAll(_fleetChanged(), CheckAddressesAsync(again: true));
             RefreshPeers();
         }
         finally
@@ -474,7 +515,7 @@ public partial class SettingsWindow : Window
         FleetConfig.Update(c => c.ManualAddresses.Add(address));
         AddressBox.Clear();
         RefreshPeers();
-        await _fleetChanged();
+        await Task.WhenAll(_fleetChanged(), CheckAddressesAsync(again: false));
         RefreshPeers();
     }
 
