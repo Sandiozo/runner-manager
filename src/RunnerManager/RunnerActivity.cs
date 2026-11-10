@@ -31,15 +31,26 @@ public static class RunnerActivity
     private static readonly Regex Timestamp = new(@"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z ?", RegexOptions.Compiled);
     private static readonly Regex AnsiCodes = new(@"\x1B\[[0-9;?]*[A-Za-z]", RegexOptions.Compiled);
     // actions/checkout passes the repository token to git as -c http.extraheader="AUTHORIZATION: basic …".
+    // sonar.login= holds a token, sig= signs an Azure storage URL, and curl -H "Cookie: …" sends a session.
     private static readonly string[] SecretHints =
     {
         "token", "password", "passwd", "pwd", "secret", "apikey", "api_key", "api-key", "pat=", "authorization", "extraheader",
-        "bearer", "credential", "auth", "pass:", "pass="
+        "bearer", "credential", "auth", "pass:", "pass=", "login=", "sig=", "cookie"
     };
     /// <summary>Raw GitHub, GitLab and Slack tokens, alone or as a value (ghp_…, github_pat_…, glpat-…, xoxb-…).</summary>
     private static readonly Regex TokenValue = new(@"(^|[=:])(gh[pousr]_|github_pat_|glpat-|xox[abprs]-)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
-    /// <summary>A password attached to -p or -P (mysql -pSecret, 7z -pSecret), but not an MSBuild property (-p:Name=Value).</summary>
-    private static readonly Regex AttachedPassword = new(@"^-[pP]([^:]|$)", RegexOptions.Compiled);
+    /// <summary>An option for a password or passphrase whose value follows it: --pass X, --passphrase X, keytool -storepass X, openssl -passin.</summary>
+    private static readonly Regex PassOption = new(@"^(--?|/)[a-z0-9._-]*(?<!by)pass(phrase|in|out)?([=:]|$)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    /// <summary>
+    /// Programs whose -p or -P is a password, attached (mysql -pSecret, 7z -pSecret) or as the next argument (sqlcmd -P
+    /// Secret). For other programs -p is often something else: a port, mkdir -p, Unity's -projectPath, MSBuild's -p:.
+    /// </summary>
+    private static readonly HashSet<string> PasswordP = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "mysql", "mysqldump", "mysqladmin", "mysqlimport", "mysqlcheck", "mysqlshow", "mysqlpump", "mysqlsh",
+        "mariadb", "mariadb-dump", "mariadb-admin", "7z", "7za", "7zr", "7zz", "rar", "unrar", "winrar", "zip", "unzip",
+        "sshpass", "sqlcmd", "bcp", "osql", "mongo", "mongosh", "mongodump", "mongorestore", "mongoexport", "mongoimport"
+    };
     /// <summary>User and password with -u or --user (curl -u user:pass, --user=user:pass, -uuser:pass).</summary>
     private static readonly Regex AttachedUser = new(@"^(-u|--user=)\S*:", RegexOptions.Compiled);
     /// <summary>The user and password in a URL (https://user:pass@host/…).</summary>
@@ -367,6 +378,7 @@ public static class RunnerActivity
         var program = Path.GetFileNameWithoutExtension(text[..end].Trim('"').TrimEnd());
         // net use and net user take passwords as plain arguments: only the subcommand is shown.
         var limit = program.Equals("net", StringComparison.OrdinalIgnoreCase) || program.Equals("net1", StringComparison.OrdinalIgnoreCase) ? 1 : 3;
+        var passwordP = PasswordP.Contains(program);
         var tokens = text[(end + 1)..].Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .Select(t => UrlCredentials.Replace(t.Trim('"'), string.Empty)).Where(t => t.Length > 0).ToList();
         var parts = new List<string>();
@@ -374,17 +386,19 @@ public static class RunnerActivity
         {
             var clean = tokens[i];
             // Everything from a secret on is left out: the value often follows its option.
-            if (LooksSecret(clean, i + 1 < tokens.Count ? tokens[i + 1] : string.Empty)) break;
+            if (LooksSecret(clean, i + 1 < tokens.Count ? tokens[i + 1] : string.Empty, passwordP)) break;
             parts.Add(clean.Contains('\\') || clean.Contains('/') ? Path.GetFileName(clean.TrimEnd('\\', '/')) : clean);
         }
         var joined = string.Join(' ', parts);
         return joined.Length > 60 ? joined[..57] + "…" : joined;
     }
 
-    private static bool LooksSecret(string token, string next)
+    /// <param name="passwordP">The program takes a password with -p or -P (see <see cref="PasswordP"/>).</param>
+    private static bool LooksSecret(string token, string next, bool passwordP)
         => SecretHints.Any(hint => token.Contains(hint, StringComparison.OrdinalIgnoreCase))
            || TokenValue.IsMatch(token)
-           || AttachedPassword.IsMatch(token)
+           || PassOption.IsMatch(token)
+           || (passwordP && token.Length >= 2 && token[0] == '-' && (token[1] is 'p' or 'P'))
            || AttachedUser.IsMatch(token)
            || ((token is "-u" or "--user") && next.Contains(':'))
            || token.Equals("/p", StringComparison.OrdinalIgnoreCase) || token.Equals("/rp", StringComparison.OrdinalIgnoreCase);

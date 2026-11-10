@@ -237,9 +237,24 @@ public class AuditRunnerTests
     [InlineData(@"git.exe clone https://bob:hunter2@example.com/team/repo.git", "clone repo.git")]
     [InlineData(@"git.exe fetch https://bob:hunter2@example.com", "fetch example.com")]
     [InlineData(@"schtasks.exe /Create /RU bob /RP hunter2", "Create RU bob")]
+    [InlineData(@"7z.exe x -pSecret backup.7z", "x")]
+    [InlineData(@"sqlcmd.exe -U sa -P Secret", "-U sa")]
+    [InlineData(@"tool.exe --pass hunter2 run", "")]
+    [InlineData(@"gpg.exe --batch --passphrase hunter2 -c file", "--batch")]
+    [InlineData(@"keytool.exe -genkey -storepass hunter2", "-genkey")]
+    [InlineData(@"mvn.exe verify -Dsonar.login=abc123", "verify")]
+    [InlineData(@"mvn.exe verify -Dsonar.token=abc123", "verify")]
+    [InlineData(@"azcopy.exe copy https://acct.blob.core.windows.net/c?sv=2022-11-02&sig=abc123 out", "copy")]
+    [InlineData(@"curl.exe -H ""Cookie: session=abc"" https://example.com", "-H")]
+    [InlineData(@"curl.exe -H ""Authorization: Bearer abc"" https://example.com", "-H")]
     // Ordinary arguments stay.
     [InlineData(@"dotnet.exe build -p:Configuration=Release", "build -p:Configuration=Release")]
+    [InlineData(@"dotnet.exe msbuild -property:Configuration=Release", "msbuild -property:Configuration=Release")]
     [InlineData(@"git.exe push -u origin main", "push -u origin")]
+    [InlineData(@"Unity.exe -batchmode -projectPath C:\proj\Game -quit", "-batchmode -projectPath Game")]
+    [InlineData(@"mkdir.exe -p build/out", "-p out")]
+    [InlineData(@"node.exe server.js -p 8080", "server.js -p 8080")]
+    [InlineData(@"gradle.exe build -Pversion=1.2", "build -Pversion=1.2")]
     public void ProcessArguments_LeaveOutCommonPasswordForms(string commandLine, string expected)
         => Assert.Equal(expected, RunnerActivity.ShortArguments(commandLine));
 
