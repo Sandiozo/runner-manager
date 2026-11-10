@@ -37,6 +37,11 @@ public static class Pairing
     /// <summary>How long a host waits for the user of the new PC to confirm the codes there.</summary>
     internal static readonly TimeSpan ConfirmTimeout = TimeSpan.FromMinutes(3);
     private static readonly TimeSpan StepTimeout = TimeSpan.FromSeconds(10);
+    /// <summary>
+    /// How long a new PC waits for "done" after its "confirmed". Longer than a step: the host saves the PC before it
+    /// answers, and may first wait for its settings file, for up to 10 seconds.
+    /// </summary>
+    internal static readonly TimeSpan DoneTimeout = TimeSpan.FromSeconds(30);
 
     public sealed record Host(string Name, string Address, int Version = Version)
     {
@@ -279,14 +284,19 @@ public static class Pairing
     /// "confirmed", and this PC keeps the code only when the host has answered "done": so both have the pairing, or
     /// neither. Leaving without an answer closes the connection, which the host takes as a no.
     /// </summary>
+    /// <remarks>
+    /// After a yes there is no leaving: the host may have added this PC already, so <paramref name="cancellationToken"/>
+    /// no longer ends the wait for "done". That wait ends by itself after <see cref="DoneTimeout"/>.
+    /// </remarks>
     private static async Task ConfirmWithHostAsync(Stream stream, byte[] transferKey, string myName, JoinOffer offer,
         Func<JoinOffer, Task<bool>> confirm, CancellationToken cancellationToken)
     {
         var stopped = $"{offer.HostName} stopped waiting before the codes were confirmed on this PC. This PC was not added. " +
                       $"On {offer.HostName}, click “Add a PC” again, then try again.";
         // The host may stop waiting while the user reads: it then says why, or the connection ends.
-        var hostSays = ReadAsync(stream, cancellationToken, Timeout.InfiniteTimeSpan);
+        var hostSays = ReadAsync(stream, CancellationToken.None, Timeout.InfiniteTimeSpan);
         _ = hostSays.ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);
+        var confirmed = false;
         try
         {
             var answer = confirm(offer);
@@ -298,14 +308,18 @@ public static class Pairing
             }
             if (!await answer) throw new OperationCanceledException(NotConfirmed);
             cancellationToken.ThrowIfCancellationRequested();
-            await WriteAsync(stream, new PairMessage { Type = "confirmed", Payload = Proof(transferKey, ConfirmedContext(myName)) }, cancellationToken);
-            var done = await hostSays.WaitAsync(StepTimeout, cancellationToken);
+            confirmed = true;
+            await WriteAsync(stream, new PairMessage { Type = "confirmed", Payload = Proof(transferKey, ConfirmedContext(myName)) }, CancellationToken.None);
+            var done = await hostSays.WaitAsync(DoneTimeout);
             if (done.Type != "done") throw new InvalidOperationException(done.Error.Length > 0 ? done.Error : stopped);
             if (!IsProof(transferKey, done.Payload, DoneContext)) throw new CryptographicException("The pairing check failed. Try again.");
         }
         catch (Exception ex) when (ex is IOException or SocketException or TimeoutException or InvalidDataException or JsonException)
         {
-            throw new InvalidOperationException(stopped, ex);
+            // After the yes it is not known whether the host added this PC. Joining again sets both right.
+            throw new InvalidOperationException(confirmed
+                ? $"{offer.HostName} did not answer after the codes were confirmed. This PC has not joined. Try again."
+                : stopped, ex);
         }
     }
 

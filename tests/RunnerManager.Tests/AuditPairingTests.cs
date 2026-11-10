@@ -536,6 +536,25 @@ public class ConfirmedMessageTests
     }
 
     [Fact]
+    public async Task AfterItsYes_ThePcWaitsForTheHostsAnswer_AlsoWhenTheJoinIsCancelled()
+    {
+        // The host adds the PC before it answers. A PC that left in that moment would have no code, and the host a PC.
+        using var cancel = new CancellationTokenSource();
+        var key = CommandSigner.NewKey();
+        var port = TestPorts.FreeRange(2);
+        using var host = new Pairing.PairingHost(key, "HOSTPC", port, port + 1);
+        host.JoinRequested += request => request.Allow();
+        // Back or Cancel, while the host saves the PC.
+        host.Joined += _ => cancel.Cancel();
+        host.Start();
+
+        var result = await Pairing.JoinAsync($"127.0.0.1:{port}", "NEWPC", _ => { }, _ => Task.FromResult(true), cancel.Token).WaitAsync(Step);
+
+        Assert.True(cancel.IsCancellationRequested);
+        Assert.Equal(key, result.PairingKey);
+    }
+
+    [Fact]
     public async Task AJoinerThatDoesNotConfirm_IsNotToldThatTheHostWaits()
     {
         // A joiner that knows the seal but not "confirmed": the host adds it when it has its code, as before.
@@ -594,7 +613,7 @@ public class ConfirmedMessageTests
             var join = Pairing.JoinAsync($"127.0.0.1:{port}", "NEWPC", _ => { }, CancellationToken.None).WaitAsync(Step);
             if (answer == "done") Assert.Equal(key, (await join).PairingKey);
             else if (answer == "forged") await Assert.ThrowsAsync<CryptographicException>(() => join);
-            else Assert.Contains("stopped waiting", (await Assert.ThrowsAsync<InvalidOperationException>(() => join)).Message);
+            else Assert.Contains("did not answer after the codes were confirmed", (await Assert.ThrowsAsync<InvalidOperationException>(() => join)).Message);
             await host.WaitAsync(Step);
         }
         finally { listener.Stop(); }

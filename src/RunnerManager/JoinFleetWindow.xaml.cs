@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Windows;
@@ -18,6 +19,7 @@ public partial class JoinFleetWindow : Window
     private CancellationTokenSource? _joinCts;
     private TaskCompletionSource<bool>? _codesMatch;
     private bool _searching;
+    private bool _finishing;
 
     public bool StartNewFleet { get; private set; }
     public byte[]? PairingKey { get; private set; }
@@ -140,16 +142,21 @@ public partial class JoinFleetWindow : Window
         MismatchText.Visibility = Visibility.Collapsed;
         // Hidden keeps its place: Back and Cancel must not move under the pointer when the button appears.
         ConfirmButton.Visibility = Visibility.Hidden;
-        ConfirmButton.IsEnabled = true;
+        SetFinishing(false);
         var cts = _joinCts = new CancellationTokenSource();
         try
         {
-            var result = await Pairing.JoinAsync(address, Environment.MachineName, code => Dispatcher.Invoke(() =>
+            Pairing.JoinResult result;
+            try
             {
-                CodeText.Text = code;
-                ConfirmText.Text = $"Check that {label} shows the same 6-digit code. Then click Allow on {label}.";
-                WaitText.Text = $"Waiting for {label}…";
-            }), offer => Dispatcher.Invoke(() => AskCodesMatch(label, offer, cts)), cts.Token);
+                result = await Pairing.JoinAsync(address, Environment.MachineName, code => Dispatcher.Invoke(() =>
+                {
+                    CodeText.Text = code;
+                    ConfirmText.Text = $"Check that {label} shows the same 6-digit code. Then click Allow on {label}.";
+                    WaitText.Text = $"Waiting for {label}…";
+                }), offer => Dispatcher.Invoke(() => AskCodesMatch(label, offer, cts)), cts.Token);
+            }
+            finally { SetFinishing(false); }
             // Closed or left in the moment the answer arrived: the code is not used.
             if (cts.IsCancellationRequested)
             {
@@ -199,9 +206,28 @@ public partial class JoinFleetWindow : Window
 
     private void CodesMatch_Click(object sender, RoutedEventArgs e)
     {
-        // The other PC is told now, and answers before the code is used. One click is enough.
-        ConfirmButton.IsEnabled = false;
-        _codesMatch?.TrySetResult(true);
+        if (_codesMatch is not { } answer) return;
+        // The other PC is told now, and adds this PC before it answers. Until that answer there is no way back:
+        // leaving now could leave the other PC with a PC that has no code.
+        SetFinishing(true);
+        answer.TrySetResult(true);
+    }
+
+    /// <summary>
+    /// While the other PC finishes, Back and Cancel are off and the window stays open (see <see cref="OnClosing"/>).
+    /// It ends by itself: with the answer, or after half a minute without one.
+    /// </summary>
+    private void SetFinishing(bool finishing)
+    {
+        _finishing = finishing;
+        ConfirmButton.IsEnabled = BackButton.IsEnabled = CancelButton.IsEnabled = !finishing;
+        ConfirmButton.Content = finishing ? "Finishing…" : "The codes match";
+    }
+
+    protected override void OnClosing(CancelEventArgs e)
+    {
+        base.OnClosing(e);
+        if (_finishing) e.Cancel = true;
     }
 
     private void Back_Click(object sender, RoutedEventArgs e)
