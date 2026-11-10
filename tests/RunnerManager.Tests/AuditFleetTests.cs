@@ -580,6 +580,34 @@ public class ManagedNameTests
         });
     }
 
+    [Fact]
+    public async Task AFleetMemberThatBecomesManagedOneWay_ForgetsItsOldFleet()
+    {
+        await AuditFleetConfig.WithConfigAsync(() =>
+        {
+            FleetConfig.SetFleetKey(CommandSigner.NewKey());
+            FleetConfig.Update(c =>
+            {
+                c.KnownPeers.Add(new PeerRecord { Name = "OLDMEMBER", Address = "127.0.0.1:1", LastSeenUtc = DateTime.UtcNow });
+                c.ManualAddresses.Add("old-pc.tailnet.ts.net");
+            });
+            FleetConfig.AddManagedPc("OLDMANAGED", "127.0.0.1:2", CommandSigner.NewKey());
+            FleetConfig.RemoveManagedPc(CommandSigner.KeyId(CommandSigner.NewKey()));
+            var own = CommandSigner.NewKey();
+
+            FleetConfig.BecomeManaged(own, "NEWHOST");
+
+            var config = FleetConfig.Current;
+            Assert.Equal(own, config.FleetKey);
+            Assert.Empty(config.KnownPeers);
+            Assert.Empty(config.ManagedPcs);
+            Assert.Empty(config.RemovedManagedPcs);
+            // Addresses the user typed stay, as when leaving a fleet.
+            Assert.Contains("old-pc.tailnet.ts.net", config.ManualAddresses);
+            return Task.CompletedTask;
+        });
+    }
+
     private static ManagedPcShare Share(string name, byte[] key, DateTime added, string machineId = "") => new()
     {
         Name = name, Address = "100.64.0.5:47821", MachineId = machineId, AddedUtc = added, Key = Convert.ToBase64String(key)

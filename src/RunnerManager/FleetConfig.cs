@@ -484,12 +484,19 @@ public sealed class FleetConfig
         c.KnownPeers.Clear();
     });
 
-    /// <summary>This PC joined a fleet one way: <paramref name="key"/> is its own code, known only to that fleet.</summary>
+    /// <summary>
+    /// This PC joined a fleet one way: <paramref name="key"/> is its own code, known only to that fleet. It replaces the
+    /// fleet code, so what belonged to an earlier fleet goes, as when leaving one: its PCs, and the codes of the PCs it
+    /// managed one way (this PC could still reach them).
+    /// </summary>
     public static void BecomeManaged(byte[] key, string managedBy) => Update(c =>
     {
         c.ProtectedFleetKey = Protect(key);
         c.ClearPendingFleetKey();
         c.ManagedBy = managedBy.Length > 0 ? managedBy : "another fleet";
+        c.KnownPeers.Clear();
+        c.ManagedPcs.Clear();
+        c.RemovedManagedPcs.Clear();
     });
 
     /// <summary>
