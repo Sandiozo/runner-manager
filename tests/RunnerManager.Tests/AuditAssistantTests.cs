@@ -612,6 +612,18 @@ public class AuditAssistantTests
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => patient.SendAsync(Initialize, cancellationToken: gone.Token)).WaitAsync(TimeSpan.FromSeconds(30));
     }
 
+    /// <summary>
+    /// The agent is on this PC. A proxy from Windows' settings, or from the environment an AI tool starts its
+    /// programs with, would get the token and every request.
+    /// </summary>
+    [Fact]
+    public void Client_ConnectsStraightToThisPc_WithoutAProxy()
+    {
+        using var handler = AgentLink.NewHandler();
+        Assert.False(handler.UseProxy);
+        Assert.Null(handler.Proxy);
+    }
+
     [Fact]
     public async Task SignIn_ThatIsNeverUsed_IsForgottenSoon()
     {

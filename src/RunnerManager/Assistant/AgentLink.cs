@@ -52,7 +52,7 @@ public sealed class AgentLink : IDisposable
         public byte[] Key { get; } = key;
     }
 
-    private readonly HttpClient _http = new(new SocketsHttpHandler { ConnectTimeout = TimeSpan.FromSeconds(5) }) { Timeout = Timeout.InfiniteTimeSpan };
+    private readonly HttpClient _http = new(NewHandler()) { Timeout = Timeout.InfiniteTimeSpan };
     private readonly SemaphoreSlim _signInGate = new(1, 1);
     /// <summary>Only one request signs in again or starts a new session after the agent forgot this one.</summary>
     private readonly SemaphoreSlim _recoverGate = new(1, 1);
@@ -65,6 +65,12 @@ public sealed class AgentLink : IDisposable
     private volatile string? _initialize;
     private Task? _initializing;
     private (DateTime Until, string Message)? _unreachable;
+
+    /// <summary>
+    /// How this process connects to the agent: straight to this PC. A proxy from Windows' settings or from the
+    /// environment an AI tool starts its programs with (HTTP_PROXY) is not used. It would get the token and every request.
+    /// </summary>
+    internal static SocketsHttpHandler NewHandler() => new() { ConnectTimeout = TimeSpan.FromSeconds(5), UseProxy = false };
 
     /// <param name="signInTimeout">A shorter time for the sign-in, for tests.</param>
     public AgentLink(string? url = null, TimeSpan? signInTimeout = null)
