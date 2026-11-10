@@ -127,6 +127,16 @@ public partial class DialogWindow : Window
         if (secondary != null) AddButton(secondary, null);
         AddButton(primary, tone is DialogTone.Danger ? "SolidDangerButton" : tone is DialogTone.Error or DialogTone.Info ? null : "PrimaryButton",
             isDefault: defaultButton == DialogDefault.Primary);
+        FitTextToButtons();
+    }
+
+    /// <summary>Lets the text use the width that a wide row of buttons gives the dialog.</summary>
+    private void FitTextToButtons()
+    {
+        ButtonPanel.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+        // The footer and the text area have the same side padding, so the text can be as wide as the buttons, less the icon.
+        var iconColumn = IconBadge.Width + IconBadge.Margin.Left + IconBadge.Margin.Right;
+        TextPanel.MaxWidth = Math.Max(TextPanel.MaxWidth, ButtonPanel.DesiredSize.Width - iconColumn);
     }
 
     private void AddButton(string label, string? style, bool isDefault = false, bool isCancel = false)

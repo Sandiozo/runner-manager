@@ -40,11 +40,12 @@
                 <Border x:Name="IconBadge" Width="36" Height="36" CornerRadius="18" VerticalAlignment="Top" Margin="0,0,14,0">
                     <TextBlock x:Name="IconGlyph" Style="{StaticResource Icon}" FontSize="16"/>
                 </Border>
-                <!-- The text keeps the width of a plain dialog; a wide row of buttons widens the window instead. -->
-                <StackPanel Grid.Column="1" MaxWidth="350" HorizontalAlignment="Left">
+                <!-- A long text wraps at the width of a plain dialog instead of widening it. A wide row of buttons widens the
+                     dialog, and then the text gets that width too (DialogWindow.FitTextToButtons). -->
+                <StackPanel x:Name="TextPanel" Grid.Column="1" MaxWidth="350" HorizontalAlignment="Left">
                     <TextBlock x:Name="HeadingText" FontSize="16" FontWeight="SemiBold" TextWrapping="Wrap"/>
                     <TextBox x:Name="MessageText" Style="{StaticResource SelectableText}" Foreground="{DynamicResource TextMutedBrush}" FontSize="13"
-                             Margin="-2,8,-2,0"/>
+                             TextBlock.LineHeight="19" Margin="-2,8,-2,0"/>
                     <Border x:Name="DetailBox" Background="{DynamicResource Bg0Brush}" BorderBrush="{DynamicResource BorderSubtleBrush}"
                             BorderThickness="1" CornerRadius="6" Padding="8,8" Margin="0,12,0,0" Visibility="Collapsed">
                         <TextBox x:Name="DetailText" Style="{StaticResource SelectableText}" FontFamily="{StaticResource MonoFont}" FontSize="12"
