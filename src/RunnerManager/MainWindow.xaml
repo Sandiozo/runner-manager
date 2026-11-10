@@ -146,7 +146,7 @@
                 </Grid>
                 <StackPanel Grid.Column="1">
                     <TextBlock Text="{Binding MachineName}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" ToolTip="{Binding MachineName}"/>
-                    <TextBlock Text="{Binding SidebarSubtitle}" Style="{StaticResource Caption}" FontSize="11" Margin="0,1,0,0" TextTrimming="CharacterEllipsis"/>
+                    <TextBlock Text="{Binding SidebarSubtitle}" Style="{StaticResource Caption}" FontSize="11" Margin="0,1,0,0" TextTrimming="CharacterEllipsis" local:TrimmedText.ToolTip="True"/>
                 </StackPanel>
             </Grid>
         </DataTemplate>
@@ -182,7 +182,7 @@
                             <TextBlock x:Name="AvatarText" Text="?" FontWeight="SemiBold" HorizontalAlignment="Center" VerticalAlignment="Center"/>
                         </Border>
                         <StackPanel Grid.Column="1" Margin="10,0,0,0" VerticalAlignment="Center">
-                            <TextBlock x:Name="GitHubAccountText" Text="GitHub" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+                            <TextBlock x:Name="GitHubAccountText" Text="GitHub" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" local:TrimmedText.ToolTip="True"/>
                             <TextBlock x:Name="GitHubStatusText" Text="Checking…" Style="{StaticResource Caption}" FontSize="11"/>
                         </StackPanel>
                         <StackPanel Grid.Column="2" Orientation="Horizontal">
@@ -252,7 +252,7 @@
                             FontSize="10" Padding="8,6" ToolTip="Hide until the next version" AutomationProperties.Name="Hide until the next version"
                             Click="DismissUpdateBanner_Click"/>
                     <Button x:Name="UpdateBannerButton" DockPanel.Dock="Right" Content="Install update" Style="{StaticResource PrimaryButton}" Padding="12,4" Click="InstallUpdate_Click"/>
-                    <TextBlock x:Name="UpdateBannerText" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+                    <TextBlock x:Name="UpdateBannerText" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" local:TrimmedText.ToolTip="True"/>
                 </DockPanel>
             </Border>
             <Grid Margin="20,14,20,10">
@@ -294,8 +294,8 @@
                         </Border>
                         <TextBlock x:Name="TileMachines" Text="–" FontSize="17" FontWeight="SemiBold" Margin="10,0,10,0" VerticalAlignment="Center"/>
                         <StackPanel VerticalAlignment="Center">
-                            <TextBlock Text="PCs online" Style="{StaticResource Caption}" FontSize="11" TextTrimming="CharacterEllipsis"/>
-                            <TextBlock x:Name="TileMachinesSub" Style="{StaticResource Caption}" FontSize="11" TextTrimming="CharacterEllipsis"/>
+                            <TextBlock Text="PCs online" Style="{StaticResource Caption}" FontSize="11" TextTrimming="CharacterEllipsis" local:TrimmedText.ToolTip="True"/>
+                            <TextBlock x:Name="TileMachinesSub" Style="{StaticResource Caption}" FontSize="11" TextTrimming="CharacterEllipsis" local:TrimmedText.ToolTip="True"/>
                         </StackPanel>
                     </DockPanel>
                 </Border>
@@ -306,8 +306,8 @@
                         </Border>
                         <TextBlock x:Name="TileRunners" Text="–" FontSize="17" FontWeight="SemiBold" Margin="10,0,10,0" VerticalAlignment="Center"/>
                         <StackPanel VerticalAlignment="Center">
-                            <TextBlock Text="Runners running" Style="{StaticResource Caption}" FontSize="11" TextTrimming="CharacterEllipsis"/>
-                            <TextBlock x:Name="TileRunnersSub" Style="{StaticResource Caption}" FontSize="11" TextTrimming="CharacterEllipsis"/>
+                            <TextBlock Text="Runners running" Style="{StaticResource Caption}" FontSize="11" TextTrimming="CharacterEllipsis" local:TrimmedText.ToolTip="True"/>
+                            <TextBlock x:Name="TileRunnersSub" Style="{StaticResource Caption}" FontSize="11" TextTrimming="CharacterEllipsis" local:TrimmedText.ToolTip="True"/>
                         </StackPanel>
                     </DockPanel>
                 </Border>
@@ -318,8 +318,8 @@
                         </Border>
                         <TextBlock x:Name="TileBusy" Text="–" FontSize="17" FontWeight="SemiBold" Margin="10,0,10,0" VerticalAlignment="Center"/>
                         <StackPanel VerticalAlignment="Center">
-                            <TextBlock Text="Busy" Style="{StaticResource Caption}" FontSize="11" TextTrimming="CharacterEllipsis"/>
-                            <TextBlock x:Name="TileBusySub" Style="{StaticResource Caption}" FontSize="11" TextTrimming="CharacterEllipsis"/>
+                            <TextBlock Text="Busy" Style="{StaticResource Caption}" FontSize="11" TextTrimming="CharacterEllipsis" local:TrimmedText.ToolTip="True"/>
+                            <TextBlock x:Name="TileBusySub" Style="{StaticResource Caption}" FontSize="11" TextTrimming="CharacterEllipsis" local:TrimmedText.ToolTip="True"/>
                         </StackPanel>
                     </DockPanel>
                 </Border>
@@ -374,9 +374,12 @@
                                                     <TextBlock Text="&#xE72E;" Style="{StaticResource Icon}" FontSize="12" Foreground="{DynamicResource SuccessBrush}" Margin="10,0,0,0"
                                                                Visibility="{Binding SignedVisibility}" ToolTip="{Binding SignedTip}"/>
                                                 </StackPanel>
-                                                <TextBlock Style="{StaticResource Caption}" FontSize="11" Margin="0,1,0,0" TextTrimming="CharacterEllipsis">
+                                                <TextBlock Style="{StaticResource Caption}" FontSize="11" Margin="0,1,0,0" TextTrimming="CharacterEllipsis" local:TrimmedText.ToolTip="True">
                                                     <Run Text="{Binding AgentText, Mode=OneWay}"/><Run Text="  ·  " Foreground="{DynamicResource TextFaintBrush}"/><Run Text="{Binding SyncText, Mode=OneWay}"/><Run Text="  ·  " Foreground="{DynamicResource TextFaintBrush}"/><Run Text="{Binding VersionText, Mode=OneWay}"/>
                                                 </TextBlock>
+                                                <!-- Why the PC cannot be reached -->
+                                                <TextBlock Text="{Binding ConnectionProblem}" Visibility="{Binding ProblemLineVisibility}" Foreground="{Binding StatusTextBrush}"
+                                                           FontSize="11" TextWrapping="Wrap" Margin="0,2,0,0"/>
                                                 <!-- Collapsed: how the hidden runners are -->
                                                 <StackPanel Orientation="Horizontal" Margin="0,3,0,0" Visibility="{Binding CollapsedSummaryVisibility}">
                                                     <TextBlock Text="{Binding RunnerSummary}" Style="{StaticResource Caption}" FontSize="11" VerticalAlignment="Center"/>
@@ -473,8 +476,8 @@
                                                                         <TextBlock Text="{Binding ExpandGlyph}" Style="{StaticResource Icon}" FontSize="9"
                                                                                    Foreground="{DynamicResource TextFaintBrush}" Margin="2,0,10,0"/>
                                                                         <StackPanel Grid.Column="1" VerticalAlignment="Center">
-                                                                            <TextBlock Text="{Binding TitleText}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
-                                                                            <TextBlock Text="{Binding RepositoryText}" Style="{StaticResource Caption}" FontSize="11" Margin="0,1,0,0" TextTrimming="CharacterEllipsis"/>
+                                                                            <TextBlock Text="{Binding TitleText}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" local:TrimmedText.ToolTip="True"/>
+                                                                            <TextBlock Text="{Binding RepositoryText}" Style="{StaticResource Caption}" FontSize="11" Margin="0,1,0,0" TextTrimming="CharacterEllipsis" local:TrimmedText.ToolTip="True"/>
                                                                             <StackPanel Orientation="Horizontal" Margin="0,2,0,0" Visibility="{Binding JobLineVisibility}">
                                                                                 <TextBlock Text="&#xE768;" Style="{StaticResource Icon}" FontSize="9" Foreground="{DynamicResource AccentBrush}"
                                                                                            VerticalAlignment="Center" Margin="0,0,5,0"/>
@@ -566,7 +569,14 @@
                                                                                     </DockPanel>
                                                                                     <TextBlock Text="{Binding LiveJob.Title}" Tag="{Binding LiveJob.Url}" MouseLeftButtonUp="Link_Click" KeyDown="Link_KeyDown"
                                                                                                Focusable="True" FocusVisualStyle="{StaticResource SubtleFocus}" FontWeight="SemiBold"
-                                                                                               Margin="0,4,0,0" TextTrimming="CharacterEllipsis" Cursor="Hand" ToolTip="Open the job on GitHub"/>
+                                                                                               Margin="0,4,0,0" TextTrimming="CharacterEllipsis" Cursor="Hand">
+                                                                                        <TextBlock.ToolTip>
+                                                                                            <StackPanel>
+                                                                                                <TextBlock Text="{Binding LiveJob.Title}" FontWeight="SemiBold"/>
+                                                                                                <TextBlock Text="Open the job on GitHub"/>
+                                                                                            </StackPanel>
+                                                                                        </TextBlock.ToolTip>
+                                                                                    </TextBlock>
                                                                                     <TextBlock Text="{Binding LiveJob.Note}" Visibility="{Binding LiveJob.NoteVisibility}" Style="{StaticResource Caption}"
                                                                                                FontSize="12" TextWrapping="Wrap" Margin="0,4,0,0"/>
 
@@ -595,7 +605,7 @@
                                                                                                     </TextBlock>
                                                                                                     <TextBlock DockPanel.Dock="Right" Text="{Binding DurationText}" Style="{StaticResource Caption}" FontSize="11"
                                                                                                                Margin="12,0,0,0" VerticalAlignment="Center"/>
-                                                                                                    <TextBlock Text="{Binding Name}" FontSize="12" TextTrimming="CharacterEllipsis" VerticalAlignment="Center">
+                                                                                                    <TextBlock Text="{Binding Name}" FontSize="12" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" local:TrimmedText.ToolTip="True">
                                                                                                         <TextBlock.Style>
                                                                                                             <Style TargetType="TextBlock">
                                                                                                                 <Style.Triggers>
@@ -632,7 +642,7 @@
                                                                                                             <ColumnDefinition Width="52"/>
                                                                                                             <ColumnDefinition Width="72"/>
                                                                                                         </Grid.ColumnDefinitions>
-                                                                                                        <TextBlock FontSize="12" TextTrimming="CharacterEllipsis">
+                                                                                                        <TextBlock FontSize="12" TextTrimming="CharacterEllipsis" local:TrimmedText.ToolTip="True">
                                                                                                             <Run Text="{Binding Name, Mode=OneWay}" FontWeight="SemiBold"/><Run Text="  "/><Run Text="{Binding Arguments, Mode=OneWay}" Foreground="{DynamicResource TextMutedBrush}"/>
                                                                                                         </TextBlock>
                                                                                                         <TextBlock Grid.Column="1" Text="{Binding CpuText}" FontSize="12" TextAlignment="Right"/>
@@ -680,7 +690,7 @@
                                                                                                         </TextBlock.Style>
                                                                                                     </TextBlock>
                                                                                                     <TextBlock DockPanel.Dock="Right" Text="{Binding Detail}" Style="{StaticResource Caption}" FontSize="11" Margin="12,0,6,0" VerticalAlignment="Center"/>
-                                                                                                    <TextBlock Text="{Binding Title}" FontSize="12" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
+                                                                                                    <TextBlock Text="{Binding Title}" FontSize="12" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" local:TrimmedText.ToolTip="True"/>
                                                                                                 </DockPanel>
                                                                                             </Border>
                                                                                         </DataTemplate>
@@ -907,7 +917,7 @@
                     <ProgressBar x:Name="OperationProgress" Style="{StaticResource ThinProgress}" VerticalAlignment="Top" IsIndeterminate="False" Visibility="Hidden"/>
                     <DockPanel Margin="20,4,16,4">
                         <TextBlock x:Name="StatusGlyph" Text="&#xE73E;" Style="{StaticResource Icon}" FontSize="11" Foreground="{DynamicResource SuccessBrush}" Margin="0,0,8,0"/>
-                        <TextBlock x:Name="StatusText" Text="Ready" Style="{StaticResource Caption}" FontSize="11" TextTrimming="CharacterEllipsis"/>
+                        <TextBlock x:Name="StatusText" Text="Ready" Style="{StaticResource Caption}" FontSize="11" TextTrimming="CharacterEllipsis" local:TrimmedText.ToolTip="True"/>
                         <TextBlock x:Name="LastUpdatedText" Text="" Style="{StaticResource Caption}" FontSize="11" HorizontalAlignment="Right"/>
                     </DockPanel>
                 </Grid>

@@ -506,7 +506,9 @@ public sealed class MachineInfo : INotifyPropertyChanged
         : IsLocalOnly ? Palette.Info : IsPairingProblem ? Palette.Warning : IsOnline ? Palette.Success : Palette.Danger;
     public Brush StatusTint => Palette.Tint(StatusBrush);
     public Brush StatusTextBrush => Palette.OnTint(StatusBrush);
-    public string AgentText => ConnectionProblem.Length > 0 ? ConnectionProblem
+    public Visibility ProblemLineVisibility => ConnectionProblem.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+    // The reason is often a long sentence, so it has its own line and the caption keeps the sync time and version.
+    public string AgentText => ConnectionProblem.Length > 0 ? "Not connected"
         : IsLocalOnly
             ? (LocalAgentOutdated ? "Fleet agent outdated. Other PCs cannot reach this PC." : "This PC")
         : IsLocal ? "Visible to other PCs in the fleet"

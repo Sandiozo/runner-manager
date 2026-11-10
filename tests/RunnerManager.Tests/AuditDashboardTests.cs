@@ -649,6 +649,63 @@ public class AuditDashboardTests
         finally { MachineInfo.CollapsedPcs.Remove("BUILD-03"); }
     }
 
+    // ----- Item 19: cut text -----
+
+    private static TextBlock Trimmed(Border host, double width, TextBlock block)
+    {
+        block.TextTrimming = TextTrimming.CharacterEllipsis;
+        TrimmedText.SetToolTip(block, true);
+        host.Child = block;
+        host.Measure(new Size(width, 100));
+        host.Arrange(new Rect(0, 0, width, 100));
+        host.UpdateLayout();
+        return block;
+    }
+
+    [Fact]
+    public void CutText_ShowsTheWholeTextAsATooltip()
+        => WpfTestApp.Run(() =>
+        {
+            const string title = "Build and test the Windows installer on every pull request";
+            var row = new Border { ToolTip = "Open the job on GitHub" };
+            var cut = Trimmed(row, 60, new TextBlock { Text = title });
+            // Without a tooltip, none would open.
+            Assert.NotNull(cut.ToolTip);
+            Assert.Equal(title, TrimmedText.TipFor(cut));
+            // When the text fits, the tooltip around it is shown, if there is one.
+            Assert.Equal("Open the job on GitHub", TrimmedText.TipFor(Trimmed(row, 2000, new TextBlock { Text = title })));
+            Assert.Null(TrimmedText.TipFor(Trimmed(new Border(), 2000, new TextBlock { Text = title })));
+        });
+
+    [Fact]
+    public void CutText_CountsEveryRun()
+        => WpfTestApp.Run(() =>
+        {
+            var block = new TextBlock();
+            block.Inlines.Add(new System.Windows.Documents.Run("msbuild.exe") { FontWeight = FontWeights.SemiBold });
+            block.Inlines.Add(new System.Windows.Documents.Run("  /m /p:Configuration=Release RunnerManager.sln"));
+            const string whole = "msbuild.exe  /m /p:Configuration=Release RunnerManager.sln";
+            Assert.Equal(whole, TrimmedText.FullText(block));
+            var host = new Border();
+            Assert.Equal(whole, TrimmedText.TipFor(Trimmed(host, 80, block)));
+            Assert.Null(TrimmedText.TipFor(Trimmed(host, 2000, block)));
+        });
+
+    [Fact]
+    public void OfflineReason_HasItsOwnLine()
+    {
+        const string problem = "Not reachable at 192.168.1.20:47800";
+        var pc = MachineInfo.Placeholder("BUILD-04", "BUILD-04", DateTime.UtcNow.AddMinutes(-5), "192.168.1.20", problem);
+        Assert.Equal("Not connected", pc.AgentText);
+        Assert.Equal(problem, pc.ConnectionProblem);
+        Assert.Equal(Visibility.Visible, pc.ProblemLineVisibility);
+        Assert.Equal(Visibility.Collapsed, PcWith("BUILD-05").ProblemLineVisibility);
+        // The line wraps, so a long reason is read in full.
+        var line = Regex.Match(Xaml("MainWindow.xaml"), @"<TextBlock Text=""\{Binding ConnectionProblem\}""[^>]*>");
+        Assert.True(line.Success);
+        Assert.Contains(@"TextWrapping=""Wrap""", line.Value);
+    }
+
     // ----- Bug 10: keyboard shortcuts -----
 
     [Theory]

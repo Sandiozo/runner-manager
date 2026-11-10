@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text.Json;
@@ -127,6 +128,82 @@ public static class Menus
             menu.Opened -= AlignRight;
             menu.HorizontalOffset = button.ActualWidth - menu.ActualWidth;
         }
+    }
+}
+
+/// <summary>
+/// For a TextBlock with TextTrimming and no tooltip of its own: when the text is cut, its tooltip is the whole text.
+/// When the text fits, it shows the tooltip of the element around it, if any.
+/// </summary>
+public static class TrimmedText
+{
+    public static readonly DependencyProperty ToolTipProperty = DependencyProperty.RegisterAttached(
+        "ToolTip", typeof(bool), typeof(TrimmedText), new PropertyMetadata(false, OnToolTipChanged));
+
+    public static bool GetToolTip(DependencyObject element) => (bool)element.GetValue(ToolTipProperty);
+    public static void SetToolTip(DependencyObject element, bool value) => element.SetValue(ToolTipProperty, value);
+
+    private static void OnToolTipChanged(DependencyObject element, DependencyPropertyChangedEventArgs e)
+    {
+        if (element is not TextBlock text) return;
+        text.ToolTipOpening -= Opening;
+        if (e.NewValue is not true) return;
+        // A tooltip only opens when there is one. What it shows is decided when it opens.
+        text.ToolTip ??= " ";
+        text.ToolTipOpening += Opening;
+    }
+
+    private static void Opening(object sender, ToolTipEventArgs e)
+    {
+        var text = (TextBlock)sender;
+        if (TipFor(text) is { } tip) text.ToolTip = tip;
+        else e.Handled = true;
+    }
+
+    internal static object? TipFor(TextBlock text)
+    {
+        var whole = FullText(text);
+        return IsCut(text, whole) ? whole : ContainerToolTip(text);
+    }
+
+    internal static string FullText(TextBlock text)
+    {
+        var runs = Runs(text);
+        return runs.Length > 0 ? string.Concat(runs.Select(r => r.Text)) : text.Text;
+    }
+
+    internal static bool IsCut(TextBlock text, string whole)
+    {
+        if (whole.Length == 0 || text.ActualWidth <= 0) return false;
+        var formatted = new FormattedText(whole, CultureInfo.CurrentUICulture, text.FlowDirection,
+            new Typeface(text.FontFamily, text.FontStyle, text.FontWeight, text.FontStretch), text.FontSize, Brushes.Black,
+            VisualTreeHelper.GetDpi(text).PixelsPerDip);
+        // Runs can have their own font, such as a bold name before its details.
+        var start = 0;
+        foreach (var run in Runs(text))
+        {
+            var length = run.Text.Length;
+            if (length == 0) continue;
+            formatted.SetFontFamily(run.FontFamily, start, length);
+            formatted.SetFontSize(run.FontSize, start, length);
+            formatted.SetFontWeight(run.FontWeight, start, length);
+            formatted.SetFontStyle(run.FontStyle, start, length);
+            start += length;
+        }
+        return formatted.Width > text.ActualWidth - text.Padding.Left - text.Padding.Right + 0.5;
+    }
+
+    // Reading Inlines would turn a plain text into a Run; the logical children are only Runs when there are some.
+    private static System.Windows.Documents.Run[] Runs(TextBlock text) =>
+        LogicalTreeHelper.GetChildren(text).OfType<System.Windows.Documents.Run>().ToArray();
+
+    private static object? ContainerToolTip(DependencyObject element)
+    {
+        for (var parent = VisualTreeHelper.GetParent(element); parent != null; parent = VisualTreeHelper.GetParent(parent))
+            if (ToolTipService.GetToolTip(parent) is { } tip)
+                // A ToolTip control can only belong to one element.
+                return tip is string ? tip : null;
+        return null;
     }
 }
 
