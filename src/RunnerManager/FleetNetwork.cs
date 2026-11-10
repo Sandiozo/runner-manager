@@ -227,7 +227,7 @@ public static class FleetNetwork
     {
         var message = RefusalMessage(reason);
         return TargetHeader(targetMachineKey) != targetMachineKey && (reason.Length == 0 || reason.Equals("denied", StringComparison.OrdinalIgnoreCase))
-            ? $"{message} Or {targetMachineKey} runs an older version of Runner Manager, which can't read some letters in its name. Update Runner Manager there."
+            ? $"{message} Or {targetMachineKey} runs an older version of Runner Manager, which cannot read some letters in its name. Update Runner Manager there."
             : message;
     }
 
