@@ -508,9 +508,9 @@ public class PcNameHeaderTests
     [Theory]
     [InlineData("PC_1", "PC_1")]
     [InlineData("*", "*")]
-    [InlineData("ÖSTRA", "ÖSTRA")]
+    [InlineData("ÖSTRA", "%C3%96STRA")]
     [InlineData("ĀBOLS", "%C4%80BOLS")]
-    public void TheHeader_KeepsAsciiAndLatin1Names_AndEncodesTheRest(string key, string header)
+    public void TheHeader_KeepsAsciiNames_AndEncodesTheRest(string key, string header)
     {
         Assert.Equal(header, FleetNetwork.TargetHeader(key));
         Assert.Equal(key, FleetNetwork.TargetFromHeader(header));
@@ -527,6 +527,8 @@ public class PcNameHeaderTests
         var response = await FleetNetwork.CallAsync(agent.Address, name, new FleetRequest { Op = "status" }, pairingKey: agent.Key);
 
         Assert.Equal(name, response.Status!.MachineName);
+        // Only ASCII goes on the wire, so the agent's code page plays no part.
+        Assert.True(FleetNetwork.TargetHeader(name).All(char.IsAscii));
     }
 
     [Fact]
@@ -544,7 +546,8 @@ public class PcNameHeaderTests
     public void AnOlderAgentsRefusal_MentionsTheName_OnlyWhenItWasEncoded()
     {
         Assert.Contains("older version", FleetNetwork.RefusalMessage("denied", "ĀBOLS"));
-        Assert.DoesNotContain("older version", FleetNetwork.RefusalMessage("denied", "ÖSTRA"));
+        Assert.Contains("older version", FleetNetwork.RefusalMessage("denied", "ÖSTRA"));
+        Assert.DoesNotContain("older version", FleetNetwork.RefusalMessage("denied", "PC_1"));
         Assert.DoesNotContain("older version", FleetNetwork.RefusalMessage("wrong PC", "ĀBOLS"));
     }
 }

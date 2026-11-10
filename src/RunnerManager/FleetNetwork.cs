@@ -198,26 +198,26 @@ public static class FleetNetwork
 
     /// <summary>
     /// Requests go straight to the agents, on the local network or Tailscale: a proxy set up in Windows can't reach those
-    /// addresses, and an agent never redirects. The PC name header is sent as Latin-1 (see <see cref="TargetHeader"/>).
+    /// addresses, and an agent never redirects.
     /// </summary>
     internal static SocketsHttpHandler CreateHandler() => new()
     {
         UseProxy = false,
         AllowAutoRedirect = false,
         UseCookies = false,
-        ConnectTimeout = ConnectTimeout,
-        RequestHeaderEncodingSelector = (name, _) => name.Equals(TargetHeaderName, StringComparison.OrdinalIgnoreCase) ? Encoding.Latin1 : null
+        ConnectTimeout = ConnectTimeout
     };
 
     internal const string TargetHeaderName = "X-RW-To";
 
     /// <summary>
-    /// The X-RW-To header for a PC name key, which can have letters outside A–Z. Header bytes are read as Latin-1, so a
-    /// name in Latin-1 (such as "ÖSTRA") is sent as it is and every agent reads it. Other names (such as "ĀBOLS") are
-    /// percent-encoded, which only newer agents decode; before, requests to them could not be sent at all.
+    /// The X-RW-To header for a PC name key, which can have letters outside A–Z. A header holds only ASCII here, and the
+    /// agent's HttpListener reads other bytes with the PC's code page, so any other name (such as "ÖSTRA" or "ĀBOLS") is
+    /// percent-encoded, which only newer agents decode; before, requests to them could not be sent at all. ASCII names
+    /// are sent as they are, as before.
     /// </summary>
     internal static string TargetHeader(string machineKey)
-        => machineKey.All(c => c <= (char)0xFF) ? machineKey : Uri.EscapeDataString(machineKey);
+        => machineKey.All(char.IsAscii) ? machineKey : Uri.EscapeDataString(machineKey);
 
     /// <summary>The PC name key in an X-RW-To header. A name key never has a '%', so one means it was percent-encoded.</summary>
     internal static string TargetFromHeader(string header) => header.Contains('%') ? Uri.UnescapeDataString(header) : header;
