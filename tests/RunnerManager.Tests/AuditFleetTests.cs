@@ -226,8 +226,12 @@ public class ClockOffsetTests
         var fresh = MachineRelay.AsAnswer(new MachineStatusPayload { UpdatedUtc = Received.AddSeconds(-10) }, Received);
         Assert.Equal((Received, Received), (fresh.UpdatedUtc, fresh.AnsweredUtc));
 
-        var stale = MachineRelay.AsAnswer(new MachineStatusPayload { UpdatedUtc = Received.AddSeconds(-40) }, Received);
-        Assert.Equal((Received.AddSeconds(-40), Received), (stale.UpdatedUtc, stale.AnsweredUtc));
+        // A busy PC whose builds take longer than the dashboard's online window still looks online.
+        var slow = MachineRelay.AsAnswer(new MachineStatusPayload { UpdatedUtc = Received.AddSeconds(-45) }, Received);
+        Assert.Equal(Received, slow.UpdatedUtc);
+
+        var stale = MachineRelay.AsAnswer(new MachineStatusPayload { UpdatedUtc = Received.AddSeconds(-100) }, Received);
+        Assert.Equal((Received.AddSeconds(-100), Received), (stale.UpdatedUtc, stale.AnsweredUtc));
     }
 }
 
@@ -767,6 +771,67 @@ public class StatusCacheBuildTests
         hang.SetResult(Payload(2));
         await Task.Delay(100);
         Assert.True(int.Parse((await cache.GetAsync()).LastCommandId) >= 3);
+    }
+
+    [Fact]
+    public async Task ASlowBuildThatFinishesInTime_RunsAlone_AndIsNotLogged()
+    {
+        var builds = 0;
+        var running = 0;
+        var most = 0;
+        var log = new List<string>();
+        var cache = new StatusCache(async () =>
+        {
+            var n = Interlocked.Increment(ref builds);
+            var now = Interlocked.Increment(ref running);
+            lock (log) most = Math.Max(most, now);
+            try
+            {
+                await Task.Delay(n == 1 ? 0 : 400);
+                return Payload(n);
+            }
+            finally { Interlocked.Decrement(ref running); }
+        }, message => { lock (log) log.Add(message); }) { BuildTimeout = TimeSpan.FromSeconds(2) };
+        Assert.Equal("1", (await cache.GetAsync()).LastCommandId);
+
+        await Task.Delay(StatusCache.FreshFor + TimeSpan.FromMilliseconds(100));
+        await cache.GetAsync();
+        await cache.GetAsync();
+        // A command ran while build 2 runs: build 3 starts after it, not beside it.
+        cache.Invalidate();
+
+        Assert.Equal("3", (await cache.GetAsync()).LastCommandId);
+        Assert.Equal(3, builds);
+        Assert.Equal(1, most);
+        Assert.Empty(log);
+    }
+
+    [Fact]
+    public async Task BuildsThatAreSlowEveryTime_AreLoggedOnce()
+    {
+        var builds = 0;
+        var log = new List<string>();
+        var cache = new StatusCache(async () =>
+        {
+            var n = Interlocked.Increment(ref builds);
+            await Task.Delay(n == 1 ? 0 : 350);
+            return Payload(n);
+        }, message => { lock (log) log.Add(message); }) { BuildTimeout = TimeSpan.FromMilliseconds(200) };
+        await cache.GetAsync();
+
+        // Several slow builds, each replaced after the timeout and each finishing late.
+        for (var end = DateTime.UtcNow.AddSeconds(7); DateTime.UtcNow < end;)
+        {
+            await cache.GetAsync();
+            await Task.Delay(50);
+        }
+
+        Assert.True(builds >= 4, $"{builds} builds");
+        lock (log)
+        {
+            Assert.Single(log, m => m.Contains("took more than"));
+            Assert.DoesNotContain(log, m => m.Contains("works again"));
+        }
     }
 
     private static async Task<bool> UntilAsync(Func<Task<bool>> condition)
