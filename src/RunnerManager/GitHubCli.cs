@@ -64,7 +64,10 @@ public static class GitHubCli
     /// <summary>Why GitHub could not be read just now, whatever was asked, or null when the last status polls worked.</summary>
     public static GitHubProblem? CurrentProblem => GitHubFailures.Current(null);
 
-    /// <summary>Forgets the failures, so GitHub is asked again at once (after the user connects GitHub or asks for a refresh).</summary>
+    /// <summary>
+    /// Forgets the failures, so GitHub is asked again at once (after the user connects GitHub or asks for a refresh).
+    /// The job view's failed reads end with them: they are only kept while a failure holds their requests back.
+    /// </summary>
     public static void ForgetProblems() => GitHubFailures.Forget();
 
     private static readonly string[] ActiveAuthStatus = { "auth", "status", "--active", "--hostname", "github.com" };
