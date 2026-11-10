@@ -114,6 +114,9 @@ public partial class PairingHostWindow : Window
         // A request on screen keeps the window open; the time starts again when the last one is answered.
         _expiry.Stop();
         RequestTitle.Text = $"{request.Name} wants to join";
+        var sameName = SameNameWarning(FleetConfig.Current, request.Name, request.MachineId);
+        SameNameText.Text = sameName ?? string.Empty;
+        SameNamePanel.Visibility = sameName != null ? Visibility.Visible : Visibility.Collapsed;
         CodeText.Text = request.Code;
         // Nothing is chosen for the user, for any PC: with a choice already made, a stray key or click on Allow would
         // hand over the fleet's code.
@@ -130,6 +133,30 @@ public partial class PairingHostWindow : Window
         // appeared must not answer it.
         FocusManager.SetFocusedElement(this, null);
         if (IsKeyboardFocusWithin) Keyboard.ClearFocus();
+    }
+
+    /// <summary>
+    /// What to tell the user when the name of a joining PC is taken here already. The joining PC chooses its name, and
+    /// a PC that is saved takes the place of the one saved under that name. Null when the name is free, or when the PC
+    /// sent the machine ID of the PC that has the name: then it is that PC, joining again.
+    /// </summary>
+    /// <param name="machineId">The joining PC's machine ID, or null from a PC that sends none.</param>
+    /// <param name="thisPc">The name of this PC; tests give one.</param>
+    internal static string? SameNameWarning(FleetConfig config, string name, string? machineId, string? thisPc = null)
+    {
+        var key = MachineRelay.Sanitize(name);
+        // A saved PC without an ID (it has an older agent, or was not reached yet) cannot be told to be the same PC.
+        bool IsAnother(string knownName, string knownId)
+            => MachineRelay.Sanitize(knownName) == key
+               && (machineId == null || !knownId.Equals(machineId, StringComparison.OrdinalIgnoreCase));
+        // Never the same PC, whatever ID it sends.
+        if (key == MachineRelay.Sanitize(thisPc ?? Environment.MachineName))
+            return $"This PC is also named {name}. Two PCs in one fleet cannot have the same name. Rename one of them in Windows first.";
+        if (config.KnownPeers.Any(p => IsAnother(p.Name, p.MachineId)))
+            return $"A PC named {name} is already in this fleet. Allow only if this is the same PC.";
+        if (config.ManagedPcs.Any(p => IsAnother(p.Name, p.MachineId)))
+            return $"This fleet already manages a PC named {name}. Allow only if this is the same PC.";
+        return null;
     }
 
     private void Next()

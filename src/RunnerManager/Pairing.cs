@@ -91,17 +91,49 @@ public static class Pairing
         /// host has answered "done". So the host adds it only then, and under the name that "confirmed" proves (see
         /// <see cref="ConfirmedContext"/>). Needs <see cref="SealedAllow"/>: the seal is how the host says that it waits.
         /// </summary>
-        Confirms = 4
+        Confirms = 4,
+        /// <summary>
+        /// Its machine ID follows this byte in the nonce: one byte with the length, then the ID. So the host has the
+        /// ID, as the joiner sent it, when it shows the request (see <see cref="MachineIdOf"/>).
+        /// </summary>
+        MachineId = 8
     }
 
     internal const int NonceRandomBytes = 32;
+    /// <summary>The longest machine ID that pairing carries. The IDs that Runner Manager makes have 32 characters.</summary>
+    internal const int MaxMachineIdLength = 64;
 
-    internal static byte[] NewNonce(JoinerFeatures features)
-        => FleetCrypto.Concat(RandomNumberGenerator.GetBytes(NonceRandomBytes), new[] { (byte)features });
+    /// <param name="machineId">The joiner's machine ID, as <see cref="SendableMachineId"/> gave it, or null to send none.</param>
+    internal static byte[] NewNonce(JoinerFeatures features, string? machineId = null)
+    {
+        var random = RandomNumberGenerator.GetBytes(NonceRandomBytes);
+        if (machineId == null) return FleetCrypto.Concat(random, new[] { (byte)features });
+        var id = Encoding.ASCII.GetBytes(machineId);
+        return FleetCrypto.Concat(random, new[] { (byte)(features | JoinerFeatures.MachineId), (byte)id.Length }, id);
+    }
 
     /// <summary>The features in a joiner's nonce, or null from a joiner that sends none.</summary>
     internal static JoinerFeatures? FeaturesOf(byte[] nonce)
         => nonce.Length > NonceRandomBytes ? (JoinerFeatures)nonce[NonceRandomBytes] : null;
+
+    /// <summary>A machine ID that pairing can carry, or null: up to 64 letters, digits and hyphens.</summary>
+    internal static string? SendableMachineId(string? machineId)
+        => machineId is { Length: > 0 and <= MaxMachineIdLength } && machineId.All(c => char.IsAsciiLetterOrDigit(c) || c == '-')
+            ? machineId
+            : null;
+
+    /// <summary>
+    /// The machine ID in a joiner's nonce, or null from a joiner that sends none. The commitment covers the nonce, so
+    /// once that is checked a device on the path cannot have changed the ID. It is still only what the joiner says
+    /// about itself: it tells two PCs with one name apart, and does not prove which PC this is.
+    /// </summary>
+    internal static string? MachineIdOf(byte[] nonce)
+    {
+        if (FeaturesOf(nonce)?.HasFlag(JoinerFeatures.MachineId) != true) return null;
+        var start = NonceRandomBytes + 2;
+        if (nonce.Length < start || nonce.Length < start + nonce[start - 1]) return null;
+        return SendableMachineId(Encoding.ASCII.GetString(nonce, start, nonce[start - 1]));
+    }
 
     /// <summary>What the code in "allow" was sealed with before the host's name and the one-way flag were sealed with it.</summary>
     internal const string TransferContext = "rw-pair-transfer";
@@ -117,9 +149,10 @@ public static class Pairing
     /// <summary>
     /// What the proof in "confirmed" is sealed with. It holds the joiner's name as the joiner sent it: the name in
     /// "commit" is not protected, and the host saves the PC under the name it got. So a name that was changed on the
-    /// path does not get confirmed.
+    /// path does not get confirmed. It also holds the machine ID when the joiner sent one, which the host saves too.
     /// </summary>
-    internal static string ConfirmedContext(string joinerName) => $"rw-pair-confirmed\n{joinerName}";
+    internal static string ConfirmedContext(string joinerName, string? machineId = null)
+        => machineId == null ? $"rw-pair-confirmed\n{joinerName}" : $"rw-pair-confirmed\n{joinerName}\n{machineId}";
 
     internal const string DoneContext = "rw-pair-done";
 
@@ -196,9 +229,14 @@ public static class Pairing
     /// alone decides when to allow. Without the confirmation here, any device on the network could hand this PC a code
     /// of its choice. A host that waits for the confirmation is told the answer, and adds this PC only after a yes.
     /// </remarks>
+    /// <param name="machineId">
+    /// This PC's machine ID (<see cref="FleetConfig.LocalMachineId"/>). The host uses it to tell this PC from another
+    /// PC with the same name. Without one, as in tests, none is sent, and the host treats this PC like an older one.
+    /// </param>
     public static async Task<JoinResult> JoinAsync(string address, string myName, Action<string> showCode,
-        Func<JoinOffer, Task<bool>> confirm, CancellationToken cancellationToken)
+        Func<JoinOffer, Task<bool>> confirm, CancellationToken cancellationToken, string? machineId = null)
     {
+        var myId = SendableMachineId(machineId);
         var (host, typedPort) = FleetNetwork.SplitHostPort(address);
         using var tcp = new TcpClient();
         using (var connect = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
@@ -209,7 +247,7 @@ public static class Pairing
         using var stream = tcp.GetStream();
         using var ecdh = ECDiffieHellman.Create(ECCurve.NamedCurves.nistP256);
         var myPublic = ecdh.PublicKey.ExportSubjectPublicKeyInfo();
-        var nonce = NewNonce(JoinerFeatures.SealedAllow | JoinerFeatures.CanBeManaged | JoinerFeatures.Confirms);
+        var nonce = NewNonce(JoinerFeatures.SealedAllow | JoinerFeatures.CanBeManaged | JoinerFeatures.Confirms, myId);
 
         // 1. Commit to our key without showing it.
         await WriteAsync(stream, new PairMessage
@@ -258,7 +296,7 @@ public static class Pairing
         try
         {
             var offer = new JoinOffer(result.HostName, result.Managed);
-            if (hostWaits) await ConfirmWithHostAsync(stream, transferKey, myName, offer, confirm, cancellationToken);
+            if (hostWaits) await ConfirmWithHostAsync(stream, transferKey, ConfirmedContext(myName, myId), offer, confirm, cancellationToken);
             else
             {
                 // An older host: it has added this PC already, and hears nothing more.
@@ -288,7 +326,8 @@ public static class Pairing
     /// After a yes there is no leaving: the host may have added this PC already, so <paramref name="cancellationToken"/>
     /// no longer ends the wait for "done". That wait ends by itself after <see cref="DoneTimeout"/>.
     /// </remarks>
-    private static async Task ConfirmWithHostAsync(Stream stream, byte[] transferKey, string myName, JoinOffer offer,
+    /// <param name="confirmedContext">What the proof in "confirmed" is sealed with: this PC's name and machine ID as it sent them.</param>
+    private static async Task ConfirmWithHostAsync(Stream stream, byte[] transferKey, string confirmedContext, JoinOffer offer,
         Func<JoinOffer, Task<bool>> confirm, CancellationToken cancellationToken)
     {
         var stopped = $"{offer.HostName} stopped waiting before the codes were confirmed on this PC. This PC was not added. " +
@@ -309,7 +348,7 @@ public static class Pairing
             if (!await answer) throw new OperationCanceledException(NotConfirmed);
             cancellationToken.ThrowIfCancellationRequested();
             confirmed = true;
-            await WriteAsync(stream, new PairMessage { Type = "confirmed", Payload = Proof(transferKey, ConfirmedContext(myName)) }, CancellationToken.None);
+            await WriteAsync(stream, new PairMessage { Type = "confirmed", Payload = Proof(transferKey, confirmedContext) }, CancellationToken.None);
             var done = await hostSays.WaitAsync(DoneTimeout);
             if (done.Type != "done") throw new InvalidOperationException(done.Error.Length > 0 ? done.Error : stopped);
             if (!IsProof(transferKey, done.Payload, DoneContext)) throw new CryptographicException("The pairing check failed. Try again.");
@@ -347,6 +386,12 @@ public static class Pairing
         /// is added only when its "confirmed" proves that it sent this name.
         /// </summary>
         public string Name { get; init; } = string.Empty;
+        /// <summary>
+        /// The joiner's machine ID as the joiner sent it, or null when it sent none (an older PC, before 2.9). A device
+        /// on the path cannot change it. It is what the PC says about itself: enough to tell it from another PC with
+        /// the same name, and no proof of which PC it is.
+        /// </summary>
+        public string? MachineId { get; init; }
         public string Code { get; init; } = string.Empty;
         public string Address { get; init; } = string.Empty;
         /// <summary>The joiner can be allowed one way (2.8 and later). Older PCs only join as fleet members.</summary>
@@ -360,7 +405,7 @@ public static class Pairing
         public bool CodeSent => _codeSent;
         /// <summary>
         /// The joiner's "confirmed" did not pass the check: it was not made by the PC of this exchange, or that PC
-        /// sent another name than <see cref="Name"/>. The PC was not added.
+        /// sent another name than <see cref="Name"/> or another ID than <see cref="MachineId"/>. The PC was not added.
         /// </summary>
         public bool CheckFailed => _checkFailed;
         internal Task<Decision> Answer => _decision.Task;
@@ -538,6 +583,7 @@ public static class Pairing
                     request = new JoinRequest
                     {
                         Name = string.IsNullOrWhiteSpace(commit.Name) ? "A PC" : commit.Name.Trim(),
+                        MachineId = MachineIdOf(nonce),
                         Code = ComparisonCode(shared, myPublic, joinerPublic),
                         Address = RemoteAddress(client),
                         CanBeManaged = features?.HasFlag(JoinerFeatures.CanBeManaged) ?? commit.CanBeManaged,
@@ -630,8 +676,8 @@ public static class Pairing
             if (await next == 0) return string.Empty;
             var message = await ReadAsync(stream, _cts.Token, StepTimeout, first[0]);
             // The proof holds the name that the joiner sent. This PC is about to save the joiner under the name that
-            // arrived, so the two must be the same: a device on the path could have changed it.
-            if (message.Type == "confirmed" && IsProof(transferKey, message.Payload, ConfirmedContext(sentName))) return null;
+            // arrived, so the two must be the same: a device on the path could have changed it. The same for its ID.
+            if (message.Type == "confirmed" && IsProof(transferKey, message.Payload, ConfirmedContext(sentName, request.MachineId))) return null;
             request.MarkCheckFailed();
             return "The pairing check failed. Try again.";
         }

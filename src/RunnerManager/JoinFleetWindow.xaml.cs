@@ -149,12 +149,14 @@ public partial class JoinFleetWindow : Window
             Pairing.JoinResult result;
             try
             {
+                // Not on this thread: the first use writes the ID to the settings file, which can be busy for a while.
+                var machineId = await Task.Run(LocalMachineId);
                 result = await Pairing.JoinAsync(address, Environment.MachineName, code => Dispatcher.Invoke(() =>
                 {
                     CodeText.Text = code;
                     ConfirmText.Text = $"Check that {label} shows the same 6-digit code. Then click Allow on {label}.";
                     WaitText.Text = $"Waiting for {label}…";
-                }), offer => Dispatcher.Invoke(() => AskCodesMatch(label, offer, cts)), cts.Token);
+                }), offer => Dispatcher.Invoke(() => AskCodesMatch(label, offer, cts)), cts.Token, machineId);
             }
             finally { SetFinishing(false); }
             // Closed or left in the moment the answer arrived: the code is not used.
@@ -181,6 +183,16 @@ public partial class JoinFleetWindow : Window
             Back_Click(this, new RoutedEventArgs());
             ChooseJoin_Click(this, new RoutedEventArgs());
         }
+    }
+
+    /// <summary>
+    /// This PC's machine ID for the other PC, which tells this PC from another one with the same name by it. Without
+    /// one the join goes on as from an older PC, so a settings file that cannot be read does not stop it here.
+    /// </summary>
+    private static string? LocalMachineId()
+    {
+        try { return FleetConfig.LocalMachineId; }
+        catch { return null; }
     }
 
     /// <summary>

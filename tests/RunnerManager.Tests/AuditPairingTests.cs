@@ -304,7 +304,9 @@ public class SealedAllowTests
                 Assert.Equal(0, await stream.ReadAsync(new byte[1]).AsTask().WaitAsync(Step));
             });
 
-            var result = await Pairing.JoinAsync($"127.0.0.1:{port}", "NEWPC", _ => { }, CancellationToken.None);
+            // With a machine ID, as the app sends it: the nonce is at its longest, and the old host takes it as it is.
+            var result = await Pairing.JoinAsync($"127.0.0.1:{port}", "NEWPC", _ => { }, _ => Task.FromResult(true), CancellationToken.None,
+                "0f8fad5bd9cb469fa16570867728950e");
             await oldHost;
 
             Assert.Equal(ownKey, result.PairingKey);
@@ -322,10 +324,10 @@ public class SealedAllowTests
 public class ConfirmedMessageTests
 {
     private static readonly TimeSpan Step = TimeSpan.FromSeconds(5);
-    private const Pairing.JoinerFeatures Current =
+    internal const Pairing.JoinerFeatures Current =
         Pairing.JoinerFeatures.SealedAllow | Pairing.JoinerFeatures.CanBeManaged | Pairing.JoinerFeatures.Confirms;
 
-    private static Pairing.PairingHost StartHost(Action<Pairing.JoinRequest> answer, out int port, TimeSpan? confirmTimeout = null)
+    internal static Pairing.PairingHost StartHost(Action<Pairing.JoinRequest> answer, out int port, TimeSpan? confirmTimeout = null)
     {
         port = TestPorts.FreeRange(2);
         var host = new Pairing.PairingHost(CommandSigner.NewKey(), "HOSTPC", port, port + 1) { ConfirmTimeout = confirmTimeout ?? Pairing.ConfirmTimeout };
@@ -335,11 +337,12 @@ public class ConfirmedMessageTests
     }
 
     /// <summary>A joiner by hand, up to the host's answer: that answer, and the key that both PCs derived.</summary>
-    private static async Task<(Pairing.PairMessage Answer, byte[] TransferKey)> JoinByHandAsync(NetworkStream stream, Pairing.JoinerFeatures features)
+    internal static async Task<(Pairing.PairMessage Answer, byte[] TransferKey)> JoinByHandAsync(NetworkStream stream, Pairing.JoinerFeatures features,
+        string? machineId = null)
     {
         using var ecdh = ECDiffieHellman.Create(ECCurve.NamedCurves.nistP256);
         var myPublic = ecdh.PublicKey.ExportSubjectPublicKeyInfo();
-        var nonce = Pairing.NewNonce(features);
+        var nonce = Pairing.NewNonce(features, machineId);
         await Pairing.WriteAsync(stream, new Pairing.PairMessage
         {
             Type = "commit", Version = Pairing.Version, Name = "NEWPC", Commit = Convert.ToBase64String(Pairing.Commitment(myPublic, nonce)), CanBeManaged = true
@@ -617,6 +620,201 @@ public class ConfirmedMessageTests
             await host.WaitAsync(Step);
         }
         finally { listener.Stop(); }
+    }
+}
+
+/// <summary>
+/// A joining PC sends its machine ID, so that "Add a PC" can tell it from another PC with the same name before the
+/// user allows it.
+/// </summary>
+public class JoinerMachineIdTests
+{
+    private static readonly TimeSpan Step = TimeSpan.FromSeconds(5);
+    private const string Id = "0f8fad5bd9cb469fa16570867728950e";
+
+    [Fact]
+    public async Task TheHost_HasTheMachineId_WhenItShowsTheRequest()
+    {
+        var seen = new TaskCompletionSource<Pairing.JoinRequest>();
+        // Not answered yet: the ID is there before the user of the host decides.
+        using var host = ConfirmedMessageTests.StartHost(request => seen.TrySetResult(request), out var port);
+        var joined = false;
+        host.Joined += _ => joined = true;
+
+        var join = Pairing.JoinAsync($"127.0.0.1:{port}", "NEWPC", _ => { }, _ => Task.FromResult(true), CancellationToken.None, Id);
+        var request = await seen.Task.WaitAsync(Step);
+        Assert.Equal(Id, request.MachineId);
+
+        request.Allow();
+        await join.WaitAsync(Step);
+        Assert.True(joined);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("an id with spaces")]
+    [InlineData("0f8fad5bd9cb469fa16570867728950e0f8fad5bd9cb469fa16570867728950e0")]
+    public async Task APcWithoutAnIdThatCanBeSent_PairsAsBefore(string? machineId)
+    {
+        var seen = new TaskCompletionSource<Pairing.JoinRequest>();
+        using var host = ConfirmedMessageTests.StartHost(request => { seen.TrySetResult(request); request.Allow(); }, out var port);
+        var joined = false;
+        host.Joined += _ => joined = true;
+
+        await Pairing.JoinAsync($"127.0.0.1:{port}", "NEWPC", _ => { }, _ => Task.FromResult(true), CancellationToken.None, machineId).WaitAsync(Step);
+
+        Assert.Null((await seen.Task.WaitAsync(Step)).MachineId);
+        Assert.True(joined);
+    }
+
+    [Fact]
+    public void TheNonce_CarriesTheId_AfterTheFeatures()
+    {
+        var nonce = Pairing.NewNonce(ConfirmedMessageTests.Current, Id);
+
+        Assert.Equal(Pairing.NonceRandomBytes + 2 + Id.Length, nonce.Length);
+        Assert.Equal(ConfirmedMessageTests.Current | Pairing.JoinerFeatures.MachineId, Pairing.FeaturesOf(nonce));
+        Assert.Equal(Id, Pairing.MachineIdOf(nonce));
+        // Bytes after the ID are left for what a later version adds.
+        Assert.Equal(Id, Pairing.MachineIdOf(nonce.Concat(new byte[] { 1, 2, 3 }).ToArray()));
+    }
+
+    [Fact]
+    public void ANonceWithoutAnId_GivesNone()
+    {
+        // An older joiner (before 2.9): random bytes only.
+        Assert.Null(Pairing.MachineIdOf(RandomNumberGenerator.GetBytes(Pairing.NonceRandomBytes)));
+        // Features, but not this one.
+        Assert.Null(Pairing.MachineIdOf(Pairing.NewNonce(ConfirmedMessageTests.Current)));
+        // The feature without what it promises, cut off at each place.
+        var nonce = Pairing.NewNonce(ConfirmedMessageTests.Current, Id);
+        for (var length = Pairing.NonceRandomBytes + 1; length < nonce.Length; length++)
+            Assert.Null(Pairing.MachineIdOf(nonce[..length]));
+        // An ID that is not made of letters, digits and hyphens.
+        var odd = (byte[])nonce.Clone();
+        odd[^1] = (byte)'\n';
+        Assert.Null(Pairing.MachineIdOf(odd));
+        odd[^1] = 0xE9;
+        Assert.Null(Pairing.MachineIdOf(odd));
+        // An empty one.
+        var empty = Pairing.NewNonce(ConfirmedMessageTests.Current | Pairing.JoinerFeatures.MachineId).Append((byte)0).ToArray();
+        Assert.Null(Pairing.MachineIdOf(empty));
+    }
+
+    [Fact]
+    public async Task ADeviceOnThePath_CannotChangeTheMachineId()
+    {
+        // With the ID of a PC of the fleet in its place, "Add a PC" would show no warning for a PC of the same name.
+        var requests = 0;
+        using var host = ConfirmedMessageTests.StartHost(request => { requests++; request.Allow(); }, out var port);
+        var relay = SealedAllowTests.StartRelay(port, message =>
+        {
+            if (message.Type != "reveal") return message;
+            var nonce = Convert.FromBase64String(message.Nonce);
+            System.Text.Encoding.ASCII.GetBytes("ffffffffffffffffffffffffffffffff").CopyTo(nonce, Pairing.NonceRandomBytes + 2);
+            return message with { Nonce = Convert.ToBase64String(nonce) };
+        }, out var address);
+        try
+        {
+            var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                Pairing.JoinAsync(address, "NEWPC", _ => { }, _ => Task.FromResult(true), CancellationToken.None, Id).WaitAsync(Step));
+            Assert.Contains("pairing check failed", error.Message);
+            Assert.Equal(0, requests);
+        }
+        finally { relay.Stop(); }
+    }
+
+    [Theory]
+    [InlineData("without the id")]
+    [InlineData("another id")]
+    [InlineData("genuine")]
+    public async Task TheHost_AddsThePc_OnlyForAConfirmedThatHoldsItsId(string proof)
+    {
+        var seen = new TaskCompletionSource<Pairing.JoinRequest>();
+        using var host = ConfirmedMessageTests.StartHost(request => { seen.TrySetResult(request); request.Allow(); }, out var port);
+        var joined = false;
+        host.Joined += _ => joined = true;
+        using var client = new TcpClient();
+        await client.ConnectAsync(IPAddress.Loopback, port);
+        var stream = client.GetStream();
+
+        var (allow, transferKey) = await ConfirmedMessageTests.JoinByHandAsync(stream, ConfirmedMessageTests.Current, Id);
+        Assert.Equal("allow", allow.Type);
+        await Pairing.WriteAsync(stream, new Pairing.PairMessage
+        {
+            Type = "confirmed",
+            Payload = Pairing.Proof(transferKey, proof switch
+            {
+                "without the id" => Pairing.ConfirmedContext("NEWPC"),
+                "another id" => Pairing.ConfirmedContext("NEWPC", "ffffffffffffffffffffffffffffffff"),
+                _ => Pairing.ConfirmedContext("NEWPC", Id)
+            })
+        }, CancellationToken.None);
+
+        var answer = await Pairing.ReadAsync(stream, CancellationToken.None, Step);
+        var request = await seen.Task.WaitAsync(Step);
+        await request.Ended.WaitAsync(Step);
+        Assert.Equal(Id, request.MachineId);
+        Assert.Equal(proof == "genuine" ? "done" : "deny", answer.Type);
+        Assert.Equal(proof == "genuine", joined);
+        Assert.Equal(proof != "genuine", request.CheckFailed);
+    }
+
+    private static FleetConfig Fleet() => new()
+    {
+        KnownPeers = { new PeerRecord { Name = "OFFICE-PC", MachineId = Id }, new PeerRecord { Name = "OLD-PC" } },
+        ManagedPcs = { new ManagedPcRecord { Name = "GUEST-PC", MachineId = "aaaa1111" }, new ManagedPcRecord { Name = "NEW-GUEST" } }
+    };
+
+    private static string? Warning(string name, string? machineId) => PairingHostWindow.SameNameWarning(Fleet(), name, machineId, thisPc: "HOST-PC");
+
+    [Fact]
+    public void AddAPc_DoesNotWarn_WhenTheNameIsFree()
+    {
+        Assert.Null(Warning("LAPTOP", Id));
+        Assert.Null(Warning("LAPTOP", null));
+    }
+
+    [Fact]
+    public void AddAPc_DoesNotWarn_WhenThePcOfThatNameJoinsAgain()
+    {
+        Assert.Null(Warning("OFFICE-PC", Id));
+        Assert.Null(Warning("OFFICE-PC", Id.ToUpperInvariant()));
+        Assert.Null(Warning("GUEST-PC", "aaaa1111"));
+    }
+
+    [Theory]
+    // Another PC with the name of a PC of the fleet.
+    [InlineData("OFFICE-PC", "ffffffffffffffffffffffffffffffff", "A PC named OFFICE-PC is already in this fleet. Allow only if this is the same PC.")]
+    // An older PC, which sends no ID.
+    [InlineData("OFFICE-PC", null, "A PC named OFFICE-PC is already in this fleet. Allow only if this is the same PC.")]
+    // Runner Manager takes names that differ only in punctuation as one name.
+    [InlineData("office_pc", "ffffffffffffffffffffffffffffffff", "A PC named office_pc is already in this fleet. Allow only if this is the same PC.")]
+    // The saved PC has no ID yet, so it cannot be told to be the same one.
+    [InlineData("OLD-PC", Id, "A PC named OLD-PC is already in this fleet. Allow only if this is the same PC.")]
+    [InlineData("GUEST-PC", Id, "This fleet already manages a PC named GUEST-PC. Allow only if this is the same PC.")]
+    [InlineData("GUEST-PC", null, "This fleet already manages a PC named GUEST-PC. Allow only if this is the same PC.")]
+    [InlineData("NEW-GUEST", Id, "This fleet already manages a PC named NEW-GUEST. Allow only if this is the same PC.")]
+    public void AddAPc_Warns_WhenTheNameIsTaken_AndThePcDidNotShowThatItIsThatPc(string name, string? machineId, string expected)
+        => Assert.Equal(expected, Warning(name, machineId));
+
+    [Fact]
+    public void AddAPc_Warns_WhenAnotherPcOfThatNameIsKnownToo()
+    {
+        // The ID is the one of the fleet's PC of that name, but a managed PC has the name as well.
+        var fleet = Fleet();
+        fleet.ManagedPcs.Add(new ManagedPcRecord { Name = "OFFICE-PC", MachineId = "bbbb2222" });
+
+        Assert.Equal("This fleet already manages a PC named OFFICE-PC. Allow only if this is the same PC.",
+            PairingHostWindow.SameNameWarning(fleet, "OFFICE-PC", Id, thisPc: "HOST-PC"));
+    }
+
+    [Fact]
+    public void AddAPc_Warns_WhenTheJoiningPcHasTheNameOfThisPc()
+    {
+        Assert.StartsWith("This PC is also named HOST-PC.", Warning("HOST-PC", Id));
+        Assert.StartsWith("This PC is also named host_pc.", Warning("host_pc", null));
     }
 }
 
