@@ -63,7 +63,7 @@ public partial class AddRunnerWindow : Window
         Validate();
     }
 
-    private bool IsTaken(string name) => AddRunnerForm.NameProblem(name, _repository.Scope, _existing) != null && RunnerService.RunnerNameProblem(name) == null;
+    private bool IsTaken(string name) => AddRunnerForm.NameProblem(name, _repository.Scope, _existing) != null && AddRunnerForm.NameRuleProblem(name) == null;
 
     /// <summary>A free folder for the repository, so a second runner for it does not start with a folder that has files.</summary>
     private static string SuggestFolder(string registrationUrl)

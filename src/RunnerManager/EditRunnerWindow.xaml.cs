@@ -21,7 +21,8 @@ public partial class EditRunnerWindow : Window
         _currentName = runner.AgentName;
         _canClearLabels = canClearLabels;
         // Runners on other PCs report their labels in their status; for runners on this PC they are read from GitHub.
-        _currentLabels = runner.CustomLabels.Length > 0 ? runner.CustomLabels : runner.LocalRunner?.CustomLabels ?? Array.Empty<string>();
+        // A PC can send null for the list.
+        _currentLabels = runner.CustomLabels is { Length: > 0 } reported ? reported : runner.LocalRunner?.CustomLabels ?? Array.Empty<string>();
         _alwaysAdded = runner.IsLocalMachine
             ? $"The labels self-hosted, Windows and {RunnerService.ArchitectureLabel} are always added."
             : "The labels self-hosted, Windows and X64 or ARM64 are always added.";

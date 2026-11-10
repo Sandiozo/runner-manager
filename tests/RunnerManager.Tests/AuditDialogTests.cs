@@ -143,6 +143,21 @@ public class AuditDialogTests
         Assert.NotNull(AddRunnerForm.NameProblem(" ", "repos/owner/repo", existing));
     }
 
+    [Fact]
+    public void TypedRunnerName_LongerThanGitHubAllows_IsRefused()
+    {
+        var longest = new string('r', AddRunnerForm.MaxNameLength);
+        Assert.Null(AddRunnerForm.NameProblem(longest, "repos/owner/repo", Array.Empty<(string, string)>()));
+        Assert.Equal("The name is too long. GitHub allows at most 64 characters.",
+            AddRunnerForm.NameProblem(longest + "r", "repos/owner/repo", Array.Empty<(string, string)>()));
+        Assert.Null(AddRunnerForm.NameProblem($"  {longest}  ", "repos/owner/repo", Array.Empty<(string, string)>()));
+
+        var edit = EditRunnerForm.Check("pc-app", Array.Empty<string>(), longest + "r", "", false);
+        Assert.Equal("The name is too long. GitHub allows at most 64 characters.", edit.NameProblem);
+        Assert.False(edit.CanSave);
+        Assert.True(EditRunnerForm.Check("pc-app", Array.Empty<string>(), longest, "", false).CanSave);
+    }
+
     [Theory]
     [InlineData("MyRunner")]
     [InlineData(@"Runners\app")]

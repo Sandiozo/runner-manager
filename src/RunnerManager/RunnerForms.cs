@@ -7,7 +7,7 @@ internal static class AddRunnerForm
 {
     internal const string RepositoryHint = "Enter a repository URL or owner/repo. For an organization runner, enter the organization URL.";
     /// <summary>GitHub refuses longer runner names.</summary>
-    internal const int MaxDefaultNameLength = 64;
+    internal const int MaxNameLength = 64;
 
     /// <param name="Url">The registration URL to use (https://github.com/owner/repo or https://github.com/org).</param>
     /// <param name="Problem">Null when the URL can be registered.</param>
@@ -56,12 +56,12 @@ internal static class AddRunnerForm
         var target = repository.RepositoryPath.Length > 0 ? repository.RepositoryPath.Split('/').Last() : repository.Organization;
         var name = Clean(target.Length > 0 && repository.IsValid ? $"{machineName}-{target}" : machineName);
         if (name.Length == 0) name = "runner";
-        if (name.Length > MaxDefaultNameLength) name = name[..MaxDefaultNameLength].TrimEnd('-', '.');
+        if (name.Length > MaxNameLength) name = name[..MaxNameLength].TrimEnd('-', '.');
         var candidate = name;
         for (var i = 2; taken(candidate) && i < 100; i++)
         {
             var suffix = $"-{i}";
-            candidate = (name.Length + suffix.Length > MaxDefaultNameLength ? name[..(MaxDefaultNameLength - suffix.Length)] : name) + suffix;
+            candidate = (name.Length + suffix.Length > MaxNameLength ? name[..(MaxNameLength - suffix.Length)] : name) + suffix;
         }
         return candidate;
     }
@@ -70,10 +70,15 @@ internal static class AddRunnerForm
     private static string Clean(string value)
         => new string(value.Select(c => char.IsAsciiLetterOrDigit(c) || c is '-' or '_' or '.' ? c : '-').ToArray()).Trim('-', '.');
 
+    /// <summary>Null when the name has only allowed characters and is not too long for GitHub.</summary>
+    internal static string? NameRuleProblem(string name)
+        => RunnerService.RunnerNameProblem(name)
+           ?? (name.Trim().Length > MaxNameLength ? $"The name is too long. GitHub allows at most {MaxNameLength} characters." : null);
+
     /// <summary>Null when the name can be registered for this repository or organization.</summary>
     internal static string? NameProblem(string name, string scope, IEnumerable<(string Scope, string Name)> existing)
     {
-        if (RunnerService.RunnerNameProblem(name) is { } problem) return problem;
+        if (NameRuleProblem(name) is { } problem) return problem;
         var trimmed = name.Trim();
         return scope.Length > 0 && existing.Any(r => r.Scope.Equals(scope, StringComparison.OrdinalIgnoreCase)
                                                      && r.Name.Equals(trimmed, StringComparison.OrdinalIgnoreCase))
@@ -135,7 +140,7 @@ internal static class EditRunnerForm
         var labelsChanged = !new HashSet<string>(labels, StringComparer.Ordinal).SetEquals(current);
         var changed = !newName.Equals(currentName.Trim(), StringComparison.Ordinal) || labelsChanged;
 
-        var nameProblem = RunnerService.RunnerNameProblem(newName);
+        var nameProblem = AddRunnerForm.NameRuleProblem(newName);
         var labelsProblem = RunnerService.LabelsProblem(labels) ?? (clears && !canClearLabels ? ClearNotPossible : null);
         var request = changed && nameProblem == null && labelsProblem == null
             ? new RunnerEditRequest(newName, labels, ClearLabels: clears)
