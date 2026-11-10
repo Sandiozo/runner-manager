@@ -69,7 +69,7 @@ internal static class ForgetPc
     internal static string Heading(string name) => $"Forget {name}?";
 
     internal static string Message(string name, bool online) => online
-        ? $"{name} is online and still has the pairing code, so it may appear again. To remove it permanently, use “Leave fleet” in its ⋯ menu on {name}."
+        ? $"{name} is online and still has the fleet code, so it may appear again. To remove it permanently, use “Leave fleet” in its ⋯ menu on {name}."
         : $"{name} is removed from this list. If it is still in the fleet, it appears again when it is found.";
 
     /// <summary>The addresses added in Settings that point at one of <paramref name="addresses"/>, so the PC is not found there again.</summary>

@@ -280,7 +280,7 @@ public class AuditDialogTests
     public void ForgetWording_MatchesTheDashboard()
     {
         Assert.Equal("Forget OFFICE?", ForgetPc.Heading("OFFICE"));
-        Assert.Contains("still has the pairing code", ForgetPc.Message("OFFICE", online: true));
+        Assert.Contains("still has the fleet code", ForgetPc.Message("OFFICE", online: true));
         Assert.Contains("appears again when it is found", ForgetPc.Message("OFFICE", online: false));
     }
 }

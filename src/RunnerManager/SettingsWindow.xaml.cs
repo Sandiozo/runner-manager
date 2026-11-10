@@ -66,7 +66,7 @@ public partial class SettingsWindow : Window
         };
     }
 
-    /// <summary>A pairing code alone does not join a fleet: the fleet agent is what other PCs reach, and it runs auto-recovery.</summary>
+    /// <summary>A fleet code alone does not join a fleet: the fleet agent is what other PCs reach, and it runs auto-recovery.</summary>
     private async Task ReadAgentStateAsync()
     {
         try { _agentInstalled = await MachineRelay.IsAgentInstalledAsync(); }
@@ -276,8 +276,9 @@ public partial class SettingsWindow : Window
 
     private async void GenerateKey_Click(object sender, RoutedEventArgs e)
     {
-        if (FleetConfig.Current.FleetKey != null && !DialogWindow.Confirm(this, "Replace the pairing code?",
-                "Your other PCs cannot connect to this PC until you enter the new code on them.", "Replace code", danger: true))
+        if (FleetConfig.Current.FleetKey != null && !DialogWindow.Confirm(this, "Give only this PC a new fleet code?",
+                "Your other PCs keep the current code, and cannot connect to this PC until you enter the new code on them. " +
+                "To give every PC a new code, use “Change the fleet code on every PC”.", "New code", danger: true))
             return;
         FleetConfig.SetFleetKey(CommandSigner.NewKey());
         await JoinWithCodeAsync();
@@ -321,10 +322,10 @@ public partial class SettingsWindow : Window
         try
         {
             Clipboard.SetText(CommandSigner.FormatKey(key));
-            DialogWindow.Info(this, "Pairing code copied",
-                "On another PC, open Settings → Fleet → ⋯ → Enter pairing code, and paste it. Keep the code private, like a password: anyone on your network with it can control your PCs.");
+            DialogWindow.Info(this, "Fleet code copied",
+                "On another PC, open Settings → Fleet → ⋯ → Enter fleet code, and paste it. Keep the code private, like a password: anyone on your network with it can control your PCs.");
         }
-        catch (Exception ex) { DialogWindow.Error(this, "Could not copy the pairing code", ex.Message); }
+        catch (Exception ex) { DialogWindow.Error(this, "Could not copy the fleet code", ex.Message); }
     }
 
     private void PasteKey_Click(object sender, RoutedEventArgs e)
@@ -351,7 +352,7 @@ public partial class SettingsWindow : Window
         var key = CommandSigner.ParseKey(PasteKeyBox.Text);
         if (key == null)
         {
-            DialogWindow.Info(this, "Invalid pairing code", "Paste the full code copied from another PC. It starts with rwk_.");
+            DialogWindow.Info(this, "Invalid fleet code", "Paste the full code copied from another PC. It starts with rwk_.");
             return;
         }
         FleetConfig.SetFleetKey(key);
@@ -361,8 +362,8 @@ public partial class SettingsWindow : Window
 
     private async void RemoveKey_Click(object sender, RoutedEventArgs e)
     {
-        if (!DialogWindow.Confirm(this, "Remove the pairing code?",
-                "This PC and your other PCs cannot connect to each other until you set a pairing code again.", "Remove code", danger: true)) return;
+        if (!DialogWindow.Confirm(this, "Remove the fleet code?",
+                "This PC and your other PCs cannot connect to each other until you set a fleet code again.", "Remove code", danger: true)) return;
         FleetConfig.SetFleetKey(null);
         UpdateKeyStatus();
         await _fleetChanged();
@@ -575,7 +576,7 @@ public partial class SettingsWindow : Window
 
         // A failure is shown by the dashboard, with the operation's title.
         MachineRelay.FleetCodeChange? result = null;
-        await RunOperationAsync("Change fleet code", async log => result = await MachineRelay.ChangeFleetCodeAsync(choice.Keep, choice.LeaveOut, log));
+        await RunOperationAsync("Change the fleet code on every PC", async log => result = await MachineRelay.ChangeFleetCodeAsync(choice.Keep, choice.LeaveOut, log));
         UpdateKeyStatus();
         RefreshPeers();
         await _fleetChanged();
@@ -589,7 +590,7 @@ public partial class SettingsWindow : Window
         if (result.ManagedSwitched.Count > 0) lines.Add($"Managed PCs with a new code of their own: {string.Join(", ", result.ManagedSwitched)}.");
         if (result.ManagedFailed.Count > 0) lines.Add($"Managed PCs that kept their old code:\n{string.Join("\n", result.ManagedFailed)}\nA PC that was left out may still reach them. Stop managing them and pair them again.");
         if (lines.Count == 0) lines.Add("No other PCs are in the fleet.");
-        DialogWindow.Show(this, result.Failed.Count + result.ManagedFailed.Count > 0 ? DialogTone.Warning : DialogTone.Info, "The fleet has a new pairing code",
+        DialogWindow.Show(this, result.Failed.Count + result.ManagedFailed.Count > 0 ? DialogTone.Warning : DialogTone.Info, "The fleet code was changed",
             string.Join("\n\n", lines), "OK", cancel: null);
     }
 
@@ -598,7 +599,7 @@ public partial class SettingsWindow : Window
     {
         var window = new Window
         {
-            Title = "Change fleet code", Owner = this, Width = 480, SizeToContent = SizeToContent.Height, ResizeMode = ResizeMode.NoResize,
+            Title = "Change the fleet code on every PC", Owner = this, Width = 480, SizeToContent = SizeToContent.Height, ResizeMode = ResizeMode.NoResize,
             WindowStartupLocation = WindowStartupLocation.CenterOwner, ShowInTaskbar = false, FontSize = 13,
             FontFamily = (System.Windows.Media.FontFamily)FindResource("UiFont")
         };
@@ -607,11 +608,11 @@ public partial class SettingsWindow : Window
         WindowTheme.Apply(window);
 
         var body = new StackPanel { Margin = new Thickness(28, 26, 28, 20) };
-        body.Children.Add(new TextBlock { Text = "Change the fleet code?", FontSize = 20, FontWeight = FontWeights.SemiBold });
+        body.Children.Add(new TextBlock { Text = "Change the fleet code on every PC?", FontSize = 20, FontWeight = FontWeights.SemiBold });
         var intro = new TextBlock
         {
             TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 14),
-            Text = "The PCs you keep get a new pairing code, and the old one stops working. PCs you leave out, and PCs that are " +
+            Text = "The PCs you keep get a new fleet code, and the old one stops working. PCs you leave out, and PCs that are " +
                    "offline or too old, keep the old code: they can no longer reach the fleet and must be paired again."
         };
         intro.SetResourceReference(TextBlock.ForegroundProperty, "TextMutedBrush");
@@ -743,11 +744,11 @@ public partial class SettingsWindow : Window
         var enable = AssistantToggle.IsChecked == true;
         if (enable && (FleetConfig.Current.FleetKey == null || !await MachineRelay.IsAgentRunningAsync()))
         {
-            // Assistants hand their changes to this PC's fleet agent, which needs a pairing code even with only this PC.
+            // Assistants hand their changes to this PC's fleet agent, which needs a fleet code even with only this PC.
             // That changes this PC (a code, a scheduled task, firewall rules), so ask first.
             var installed = _agentInstalled ?? await MachineRelay.IsAgentInstalledAsync();
             var what = FleetConfig.Current.FleetKey == null
-                ? "Runner Manager starts a fleet with only this PC: it creates a pairing code, installs the fleet agent and opens its ports in Windows Firewall for the local network and Tailscale. Other PCs can join later with the code."
+                ? "Runner Manager starts a fleet with only this PC: it creates a fleet code, installs the fleet agent and opens its ports in Windows Firewall for the local network and Tailscale. Other PCs can join later with the code."
                 : installed
                     ? "The fleet agent on this PC is not running. Runner Manager installs it again and starts it."
                     : "Runner Manager installs the fleet agent and opens its ports in Windows Firewall for the local network and Tailscale.";

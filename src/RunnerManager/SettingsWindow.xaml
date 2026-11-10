@@ -192,18 +192,18 @@
                     </Border>
                     <Border Style="{StaticResource Group}">
                         <StackPanel>
-                            <local:SettingRow x:Name="KeyRow" Glyph="&#xE8D7;" Title="Pairing code">
+                            <local:SettingRow x:Name="KeyRow" Glyph="&#xE8D7;" Title="Fleet code">
                                 <StackPanel Orientation="Horizontal">
                                     <Button x:Name="GenerateKeyButton" Content="Start a new fleet" Style="{StaticResource PrimaryButton}" Click="GenerateKey_Click" Margin="0,0,6,0"/>
                                     <Button x:Name="FinishJoiningButton" Content="Finish joining" Style="{StaticResource PrimaryButton}" Click="FinishJoining_Click" Margin="0,0,6,0"
                                             Visibility="Collapsed" AutomationProperties.HelpText="Installs and starts the fleet agent, so other PCs can reach this PC"/>
-                                    <Button x:Name="CopyKeyButton" Content="Copy" Click="CopyKey_Click" Margin="0,0,6,0" AutomationProperties.Name="Copy pairing code"/>
-                                    <Button Style="{StaticResource IconButton}" Content="&#xE712;" ToolTip="More pairing code actions" Click="OpenMenu_Click">
+                                    <Button x:Name="CopyKeyButton" Content="Copy" Click="CopyKey_Click" Margin="0,0,6,0" AutomationProperties.Name="Copy fleet code"/>
+                                    <Button Style="{StaticResource IconButton}" Content="&#xE712;" ToolTip="More fleet code actions" Click="OpenMenu_Click">
                                         <Button.ContextMenu>
                                             <ContextMenu>
-                                                <MenuItem Header="Enter pairing code…" Tag="&#xE70F;" Click="PasteKey_Click"/>
-                                                <MenuItem x:Name="ReplaceKeyItem" Header="Replace pairing code…" Tag="&#xE72C;" Click="GenerateKey_Click"/>
-                                                <MenuItem x:Name="RemoveKeyItem" Header="Remove pairing code…" Tag="&#xE74D;" Style="{StaticResource DangerMenuItem}" Click="RemoveKey_Click"/>
+                                                <MenuItem Header="Enter fleet code…" Tag="&#xE70F;" Click="PasteKey_Click"/>
+                                                <MenuItem x:Name="ReplaceKeyItem" Header="New fleet code for this PC only…" Tag="&#xE72C;" Click="GenerateKey_Click"/>
+                                                <MenuItem x:Name="RemoveKeyItem" Header="Remove fleet code…" Tag="&#xE74D;" Style="{StaticResource DangerMenuItem}" Click="RemoveKey_Click"/>
                                             </ContextMenu>
                                         </Button.ContextMenu>
                                     </Button>
@@ -216,8 +216,8 @@
                                     <ColumnDefinition Width="Auto"/>
                                 </Grid.ColumnDefinitions>
                                 <TextBox x:Name="PasteKeyBox" Tag="rwk_…" FontFamily="{StaticResource MonoFont}" KeyDown="PasteKeyBox_KeyDown"
-                                         AutomationProperties.Name="Pairing code" AutomationProperties.HelpText="The code copied from another PC. It starts with rwk_"/>
-                                <Button Grid.Column="1" Content="Save" Style="{StaticResource PrimaryButton}" Margin="8,0,0,0" Click="SaveKey_Click" AutomationProperties.Name="Save pairing code"/>
+                                         AutomationProperties.Name="Fleet code" AutomationProperties.HelpText="The code copied from another PC. It starts with rwk_"/>
+                                <Button Grid.Column="1" Content="Save" Style="{StaticResource PrimaryButton}" Margin="8,0,0,0" Click="SaveKey_Click" AutomationProperties.Name="Save fleet code"/>
                                 <Button Grid.Column="2" Content="Cancel" Style="{StaticResource GhostButton}" Margin="6,0,0,0" Click="CancelPasteKey_Click"/>
                             </Grid>
                             <Border Style="{StaticResource Divider}"/>
@@ -277,10 +277,10 @@
                         </StackPanel>
                     </Border>
 
-                    <!-- Change fleet code -->
+                    <!-- Change the fleet code on every PC -->
                     <Border Style="{StaticResource Group}">
-                        <local:SettingRow Glyph="&#xE72E;" Title="Change fleet code"
-                                          Description="Gives the PCs you keep a new pairing code. Use it when a PC was lost or the code got out.">
+                        <local:SettingRow Glyph="&#xE72E;" Title="Change the fleet code on every PC"
+                                          Description="Gives every PC you keep a new fleet code, and the old one stops working. Use it when a PC was lost or the code got out.">
                             <Button x:Name="ChangeFleetCodeButton" Content="Change code…" Click="ChangeFleetCode_Click"/>
                         </local:SettingRow>
                     </Border>
