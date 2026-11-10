@@ -87,11 +87,12 @@ public partial class PairingHostWindow : Window
     private void Remove(Pairing.JoinRequest request)
     {
         _confirming.Remove(request);
-        // Allowed, but it ended before it was added: the other PC left or the connection broke, or its user did not
-        // confirm the codes there.
+        // Allowed, but it ended before it was added: the other PC left or the connection broke, its user did not
+        // confirm the codes there, or its answer did not pass the check (its name was changed on the way, for example).
         if (_sending.Remove(request, out var ownCode))
         {
-            _notAdded.Add(request.CodeSent ? $"{request.Name} did not confirm the codes. It was not added."
+            _notAdded.Add(request.CheckFailed ? $"{request.Name} was not added. The pairing check failed. Try again."
+                : request.CodeSent ? $"{request.Name} did not confirm the codes. It was not added."
                 // A PC allowed one way gets a code of its own, which is not the fleet code.
                 : ownCode != null ? $"{request.Name} left before it got its code. It was not added."
                 : $"{request.Name} left before it got the fleet code. It was not added.");

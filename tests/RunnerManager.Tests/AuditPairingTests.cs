@@ -131,7 +131,7 @@ public class SealedAllowTests
     }
 
     /// <summary>A device on the path: it passes each pairing message on after <paramref name="change"/>.</summary>
-    private static TcpListener StartRelay(int hostPort, Func<Pairing.PairMessage, Pairing.PairMessage> change, out string address)
+    internal static TcpListener StartRelay(int hostPort, Func<Pairing.PairMessage, Pairing.PairMessage> change, out string address)
     {
         var port = TestPorts.FreeRange(1);
         var listener = new TcpListener(IPAddress.Loopback, port);
@@ -459,10 +459,14 @@ public class ConfirmedMessageTests
         Assert.Contains("HOSTPC could not save this PC", error.Message);
     }
 
-    [Fact]
-    public async Task ADeviceOnThePath_CannotConfirmForThePc()
+    [Theory]
+    [InlineData("another key")]
+    [InlineData("another name")]
+    [InlineData("genuine")]
+    public async Task TheHost_AddsThePc_OnlyForAConfirmedThatThePcItselfMade(string proof)
     {
-        using var host = StartHost(request => request.Allow(), out var port);
+        var seen = new TaskCompletionSource<Pairing.JoinRequest>();
+        using var host = StartHost(request => { seen.TrySetResult(request); request.Allow(); }, out var port);
         var joined = false;
         host.Joined += _ => joined = true;
         using var client = new TcpClient();
@@ -474,16 +478,61 @@ public class ConfirmedMessageTests
         // The seal says that the host waits.
         Assert.NotNull(FleetCrypto.Open(transferKey, Convert.FromBase64String(allow.Payload), Pairing.AllowContext("HOSTPC", managed: false, confirms: true)));
 
-        // The device has seen every message, but not the key that the two PCs derived.
         await Pairing.WriteAsync(stream, new Pairing.PairMessage
         {
-            Type = "confirmed", Payload = Pairing.Proof(CommandSigner.NewKey(), Pairing.ConfirmedContext)
+            Type = "confirmed",
+            Payload = proof switch
+            {
+                // From a device that has seen every message, but not the key that the two PCs derived.
+                "another key" => Pairing.Proof(CommandSigner.NewKey(), Pairing.ConfirmedContext("NEWPC")),
+                // From the PC itself, but it joined under another name than the one that arrived at the host.
+                "another name" => Pairing.Proof(transferKey, Pairing.ConfirmedContext("OTHERPC")),
+                _ => Pairing.Proof(transferKey, Pairing.ConfirmedContext("NEWPC"))
+            }
         }, CancellationToken.None);
 
         var answer = await Pairing.ReadAsync(stream, CancellationToken.None, Step);
-        Assert.Equal("deny", answer.Type);
-        Assert.Contains("pairing check failed", answer.Error);
-        Assert.False(joined);
+        var request = await seen.Task.WaitAsync(Step);
+        await request.Ended.WaitAsync(Step);
+        if (proof == "genuine")
+        {
+            Assert.Equal("done", answer.Type);
+            Assert.NotNull(FleetCrypto.Open(transferKey, Convert.FromBase64String(answer.Payload), Pairing.DoneContext));
+            Assert.True(joined);
+            Assert.False(request.CheckFailed);
+        }
+        else
+        {
+            Assert.Equal("deny", answer.Type);
+            Assert.Contains("pairing check failed", answer.Error);
+            Assert.False(joined);
+            Assert.True(request.CheckFailed);
+        }
+    }
+
+    [Fact]
+    public async Task ADeviceOnThePath_CannotRenameTheJoiningPc()
+    {
+        // The host saves a PC under the name in "commit", which nothing protects on the way, and a PC that is managed
+        // one way replaces the one of that name. Both users then approve a request that looks right to each of them.
+        var seen = new TaskCompletionSource<Pairing.JoinRequest>();
+        using var host = StartHost(request => { seen.TrySetResult(request); request.Allow(); }, out var port);
+        var joined = false;
+        host.Joined += _ => joined = true;
+        var relay = SealedAllowTests.StartRelay(port, message => message.Type == "commit" ? message with { Name = "BUILD-SERVER" } : message, out var address);
+        try
+        {
+            var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                Pairing.JoinAsync(address, "NEWPC", _ => { }, CancellationToken.None).WaitAsync(Step));
+            Assert.Contains("pairing check failed", error.Message);
+
+            var request = await seen.Task.WaitAsync(Step);
+            await request.Ended.WaitAsync(Step);
+            Assert.Equal("BUILD-SERVER", request.Name);
+            Assert.True(request.CheckFailed);
+            Assert.False(joined);
+        }
+        finally { relay.Stop(); }
     }
 
     [Fact]
@@ -532,7 +581,8 @@ public class ConfirmedMessageTests
 
                 var confirmed = await Pairing.ReadAsync(stream, CancellationToken.None, Step);
                 Assert.Equal("confirmed", confirmed.Type);
-                Assert.NotNull(FleetCrypto.Open(transferKey, Convert.FromBase64String(confirmed.Payload), Pairing.ConfirmedContext));
+                // The proof holds the name that the PC sent in "commit".
+                Assert.NotNull(FleetCrypto.Open(transferKey, Convert.FromBase64String(confirmed.Payload), Pairing.ConfirmedContext("NEWPC")));
                 if (answer == "silent") return;
                 // "forged": from a device that has not made the exchange.
                 var proof = Pairing.Proof(answer == "done" ? transferKey : CommandSigner.NewKey(), Pairing.DoneContext);

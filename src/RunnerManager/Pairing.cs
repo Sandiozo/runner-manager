@@ -83,8 +83,8 @@ public static class Pairing
         CanBeManaged = 2,
         /// <summary>
         /// After "allow" it sends "confirmed" once its user has confirmed the codes, and keeps the code only when the
-        /// host has answered "done". So the host adds it only then. Needs <see cref="SealedAllow"/>: the seal is how
-        /// the host says that it waits.
+        /// host has answered "done". So the host adds it only then, and under the name that "confirmed" proves (see
+        /// <see cref="ConfirmedContext"/>). Needs <see cref="SealedAllow"/>: the seal is how the host says that it waits.
         /// </summary>
         Confirms = 4
     }
@@ -109,7 +109,13 @@ public static class Pairing
     internal static string AllowContext(string hostName, bool managed, bool confirms = false)
         => $"rw-pair-allow{(confirms ? "-confirm" : string.Empty)}\n{(managed ? "managed" : "member")}\n{hostName}";
 
-    internal const string ConfirmedContext = "rw-pair-confirmed";
+    /// <summary>
+    /// What the proof in "confirmed" is sealed with. It holds the joiner's name as the joiner sent it: the name in
+    /// "commit" is not protected, and the host saves the PC under the name it got. So a name that was changed on the
+    /// path does not get confirmed.
+    /// </summary>
+    internal static string ConfirmedContext(string joinerName) => $"rw-pair-confirmed\n{joinerName}";
+
     internal const string DoneContext = "rw-pair-done";
 
     /// <summary>
@@ -247,7 +253,7 @@ public static class Pairing
         try
         {
             var offer = new JoinOffer(result.HostName, result.Managed);
-            if (hostWaits) await ConfirmWithHostAsync(stream, transferKey, offer, confirm, cancellationToken);
+            if (hostWaits) await ConfirmWithHostAsync(stream, transferKey, myName, offer, confirm, cancellationToken);
             else
             {
                 // An older host: it has added this PC already, and hears nothing more.
@@ -273,7 +279,7 @@ public static class Pairing
     /// "confirmed", and this PC keeps the code only when the host has answered "done": so both have the pairing, or
     /// neither. Leaving without an answer closes the connection, which the host takes as a no.
     /// </summary>
-    private static async Task ConfirmWithHostAsync(Stream stream, byte[] transferKey, JoinOffer offer,
+    private static async Task ConfirmWithHostAsync(Stream stream, byte[] transferKey, string myName, JoinOffer offer,
         Func<JoinOffer, Task<bool>> confirm, CancellationToken cancellationToken)
     {
         var stopped = $"{offer.HostName} stopped waiting before the codes were confirmed on this PC. This PC was not added. " +
@@ -292,7 +298,7 @@ public static class Pairing
             }
             if (!await answer) throw new OperationCanceledException(NotConfirmed);
             cancellationToken.ThrowIfCancellationRequested();
-            await WriteAsync(stream, new PairMessage { Type = "confirmed", Payload = Proof(transferKey, ConfirmedContext) }, cancellationToken);
+            await WriteAsync(stream, new PairMessage { Type = "confirmed", Payload = Proof(transferKey, ConfirmedContext(myName)) }, cancellationToken);
             var done = await hostSays.WaitAsync(StepTimeout, cancellationToken);
             if (done.Type != "done") throw new InvalidOperationException(done.Error.Length > 0 ? done.Error : stopped);
             if (!IsProof(transferKey, done.Payload, DoneContext)) throw new CryptographicException("The pairing check failed. Try again.");
@@ -321,6 +327,11 @@ public static class Pairing
         private readonly TaskCompletionSource<Decision> _decision = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly TaskCompletionSource _ended = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private volatile bool _codeSent;
+        private volatile bool _checkFailed;
+        /// <summary>
+        /// The joiner's name as it arrived in "commit", which is not protected. A joiner that <see cref="Confirms"/>
+        /// is added only when its "confirmed" proves that it sent this name.
+        /// </summary>
         public string Name { get; init; } = string.Empty;
         public string Code { get; init; } = string.Empty;
         public string Address { get; init; } = string.Empty;
@@ -333,6 +344,11 @@ public static class Pairing
         public bool Confirms { get; init; }
         /// <summary>The joiner was sent its code. One that <see cref="Confirms"/> has joined only at <see cref="PairingHost.Joined"/>.</summary>
         public bool CodeSent => _codeSent;
+        /// <summary>
+        /// The joiner's "confirmed" did not pass the check: it was not made by the PC of this exchange, or that PC
+        /// sent another name than <see cref="Name"/>. The PC was not added.
+        /// </summary>
+        public bool CheckFailed => _checkFailed;
         internal Task<Decision> Answer => _decision.Task;
         /// <summary>
         /// Completes when the host is done with the request: it was denied or timed out, the other PC left, or the
@@ -344,6 +360,7 @@ public static class Pairing
         public void AllowManaged(byte[] key) => _decision.TrySetResult(new Decision(true, key));
         public void Deny() => _decision.TrySetResult(new Decision(false));
         internal void MarkCodeSent() => _codeSent = true;
+        internal void MarkCheckFailed() => _checkFailed = true;
         internal void End() => _ended.TrySetResult();
     }
 
@@ -553,7 +570,7 @@ public static class Pairing
                     }
 
                     Confirming?.Invoke(request);
-                    var refusal = await AwaitConfirmedAsync(stream, gone, first, transferKey);
+                    var refusal = await AwaitConfirmedAsync(stream, gone, first, transferKey, request, commit.Name);
                     if (refusal == null)
                     {
                         // The joiner keeps its code only once it hears "done", so it also hears when it could not be added.
@@ -583,7 +600,9 @@ public static class Pairing
         /// to tell it: nothing when it went away, which is how it says no.
         /// </summary>
         /// <param name="next">The read of the first byte of what the joiner sends next, into <paramref name="first"/>.</param>
-        private async Task<string?> AwaitConfirmedAsync(Stream stream, Task<int> next, byte[] first, byte[] transferKey)
+        /// <param name="sentName">The joiner's name exactly as it arrived in "commit".</param>
+        private async Task<string?> AwaitConfirmedAsync(Stream stream, Task<int> next, byte[] first, byte[] transferKey,
+            JoinRequest request, string sentName)
         {
             using var waiting = CancellationTokenSource.CreateLinkedTokenSource(_listen.Token);
             try
@@ -596,9 +615,11 @@ public static class Pairing
             finally { waiting.Cancel(); }
             if (await next == 0) return string.Empty;
             var message = await ReadAsync(stream, _cts.Token, StepTimeout, first[0]);
-            return message.Type == "confirmed" && IsProof(transferKey, message.Payload, ConfirmedContext)
-                ? null
-                : "The pairing check failed. Try again.";
+            // The proof holds the name that the joiner sent. This PC is about to save the joiner under the name that
+            // arrived, so the two must be the same: a device on the path could have changed it.
+            if (message.Type == "confirmed" && IsProof(transferKey, message.Payload, ConfirmedContext(sentName))) return null;
+            request.MarkCheckFailed();
+            return "The pairing check failed. Try again.";
         }
 
         /// <summary>
