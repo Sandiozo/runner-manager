@@ -228,7 +228,13 @@ public sealed class FleetActions
     internal static async Task SetServiceEnabledAsync(string key, bool enabled, bool manualStart = false)
     {
         if (!key.StartsWith("actions.runner.", StringComparison.OrdinalIgnoreCase)) return;
-        await RunnerService.SetServiceStartModeAsync(key,
-            !enabled ? ServiceStart.Disabled : manualStart ? ServiceStart.Manual : ServiceStart.Automatic);
+        await RunnerService.SetServiceStartModeAsync(key, StartMode(enabled, manualStart));
     }
+
+    /// <summary>
+    /// The sc.exe start= value for <see cref="SetServiceEnabledAsync"/>. Starting with Windows is "delayed-auto", as
+    /// config.cmd installs runner services, so turning a service on again leaves it as it was installed.
+    /// </summary>
+    internal static string StartMode(bool enabled, bool manualStart)
+        => !enabled ? ServiceStart.Disabled : manualStart ? ServiceStart.Manual : "delayed-auto";
 }

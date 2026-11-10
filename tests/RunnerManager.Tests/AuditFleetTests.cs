@@ -449,6 +449,17 @@ public class GuardedReadTests
     }
 }
 
+public class MoveUndoTests
+{
+    [Fact]
+    public void AServiceTurnedOnAgain_StartsAsConfigCmdInstalledIt()
+    {
+        Assert.Equal("delayed-auto", FleetActions.StartMode(enabled: true, manualStart: false));
+        Assert.Equal(ServiceStart.Manual, FleetActions.StartMode(enabled: true, manualStart: true));
+        Assert.Equal(ServiceStart.Disabled, FleetActions.StartMode(enabled: false, manualStart: false));
+    }
+}
+
 public class ConsoleRunnerCommandTests
 {
     [Theory]
