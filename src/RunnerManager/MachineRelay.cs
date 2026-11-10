@@ -800,6 +800,10 @@ public static class MachineRelay
         RemoveRemoteDesktopLeftovers();
 
         var lastWatchdogUtc = DateTime.MinValue;
+        // A hung read of this PC's state (WMI) must not hold up the commands this loop runs.
+        var watchdogRead = new GuardedRead<LocalState>(() => GatherLocalStateAsync(), StatusCache.DefaultBuildTimeout, AppendAgentLog,
+            $"Auto-recovery skipped its check: reading this PC's runners took more than {(int)StatusCache.DefaultBuildTimeout.TotalSeconds} seconds.",
+            "Auto-recovery can read this PC's runners again.");
         DateTime? restartByUtc = null;
         while (!cancellationToken.IsCancellationRequested)
         {
@@ -859,7 +863,7 @@ public static class MachineRelay
                 if (DateTime.UtcNow - lastWatchdogUtc >= WatchdogInterval)
                 {
                     lastWatchdogUtc = DateTime.UtcNow;
-                    if (await RunWatchdogAsync(await GatherLocalStateAsync())) InvalidateStatus();
+                    if (await watchdogRead.ReadAsync() is { } local && await RunWatchdogAsync(local)) InvalidateStatus();
                 }
             }
             catch (Exception ex)

@@ -414,6 +414,41 @@ public class FleetConnectionTests
     }
 }
 
+public class GuardedReadTests
+{
+    [Fact]
+    public async Task AHungRead_IsGivenUp_IsNotStartedAgainWhileItRuns_AndIsLoggedOnce()
+    {
+        var reads = 0;
+        var hang = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var log = new List<string>();
+        var guarded = new GuardedRead<string>(() => Interlocked.Increment(ref reads) == 1 ? hang.Task : Task.FromResult($"read {reads}"),
+            TimeSpan.FromMilliseconds(100), message => { lock (log) log.Add(message); }, "slow", "again");
+
+        Assert.Null(await guarded.ReadAsync());
+        // Still hung: the loop goes on without starting another read.
+        Assert.Null(await guarded.ReadAsync());
+        Assert.Equal(1, reads);
+        Assert.Equal(new[] { "slow" }, log);
+
+        hang.SetResult("late");
+        Assert.Equal("read 2", await guarded.ReadAsync());
+        Assert.Equal(new[] { "slow", "again" }, log);
+    }
+
+    [Fact]
+    public async Task AFailedRead_Throws_AndTheNextOneRuns()
+    {
+        var reads = 0;
+        var guarded = new GuardedRead<string>(
+            () => ++reads == 1 ? Task.FromException<string>(new InvalidOperationException("WMI")) : Task.FromResult("ok"),
+            TimeSpan.FromSeconds(30), _ => { }, "slow", "again");
+
+        await Assert.ThrowsAsync<InvalidOperationException>(guarded.ReadAsync);
+        Assert.Equal("ok", await guarded.ReadAsync());
+    }
+}
+
 public class ConsoleRunnerCommandTests
 {
     [Theory]

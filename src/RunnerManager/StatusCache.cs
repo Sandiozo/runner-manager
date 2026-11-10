@@ -22,7 +22,9 @@ internal sealed class StatusCache(Func<Task<MachineStatusPayload>> build, Action
     /// A build that takes longer is given up (a WMI query can hang for good), and the next request starts another. A busy
     /// PC can take half a minute for a build that still finishes.
     /// </summary>
-    internal TimeSpan BuildTimeout { get; init; } = TimeSpan.FromSeconds(60);
+    internal TimeSpan BuildTimeout { get; init; } = DefaultBuildTimeout;
+    /// <summary>How long reading this PC's state may take, here and for the watchdog.</summary>
+    internal static readonly TimeSpan DefaultBuildTimeout = TimeSpan.FromSeconds(60);
     /// <summary>How many builds may run at once, given-up ones included, so a PC whose WMI hangs doesn't pile up threads.</summary>
     private const int MaxRunningBuilds = 3;
     private readonly object _gate = new();
