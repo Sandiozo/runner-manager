@@ -51,10 +51,23 @@ public partial class SetupWindow : Window
         DesktopShortcutToggle.IsChecked = Installer.HasDesktopShortcut;
         // Not changeable until the scheduled tasks are read, so the answer never overrides the user's choice.
         StartupToggle.IsEnabled = false;
-        try { StartupToggle.IsChecked = await Installer.StartsWithWindowsAsync(); }
+        try
+        {
+            if (await Installer.StartsWithWindowsAsync() is { } starts)
+            {
+                StartupToggle.IsChecked = starts;
+                _startupKnown = true;
+            }
+            else MachineRelay.AppendAgentLog("Setup could not read the startup task, so it leaves it as it is unless the choice is changed.");
+        }
         catch (Exception ex) { MachineRelay.AppendAgentLog($"Setup could not read the startup task: {ex.Message}"); }
         finally { StartupToggle.IsEnabled = true; }
     }
+
+    /// <summary>Whether the startup choice is known: read from the install, or set by the user. Otherwise setup leaves the task as it is.</summary>
+    private bool _startupKnown;
+
+    private void StartupToggle_Click(object sender, RoutedEventArgs e) => _startupKnown = true;
 
     private void ShowPage(int page)
     {
@@ -78,6 +91,8 @@ public partial class SetupWindow : Window
 
     private async void Next_Click(object sender, RoutedEventArgs e)
     {
+        // An install may still wait for the startup task to be read, on the options page.
+        if (_installing) return;
         if (_page < 1) { ShowPage(_page + 1); return; }
         if (_page == 1) { await InstallAsync(); return; }
         Finish();
@@ -85,6 +100,7 @@ public partial class SetupWindow : Window
 
     private void Back_Click(object sender, RoutedEventArgs e)
     {
+        if (_installing) return;
         if (_page == 1) ShowPage(0);
         // After a failed install: back to the options, to change them and install again.
         else if (_page == 2 && !_installed && !_installing) ShowPage(1);
@@ -92,7 +108,7 @@ public partial class SetupWindow : Window
 
     private SetupChoices Choices => new(
         DesktopShortcutToggle.IsChecked == true,
-        StartupToggle.IsChecked == true,
+        _startupKnown ? StartupToggle.IsChecked == true : null,
         SeveralPcsOption.IsChecked != true ? FleetChoice.SinglePc : JoinFleetOption.IsChecked == true ? FleetChoice.JoinFleet : FleetChoice.NewFleet);
 
     private async Task InstallAsync()

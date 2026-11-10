@@ -67,7 +67,7 @@
                 <CheckBox x:Name="DesktopShortcutToggle" Style="{StaticResource ToggleSwitch}" Margin="0,4" AutomationProperties.Name="Desktop shortcut">
                     <TextBlock Text="Desktop shortcut"/>
                 </CheckBox>
-                <CheckBox x:Name="StartupToggle" Style="{StaticResource ToggleSwitch}" Margin="0,4" AutomationProperties.Name="Start with Windows"
+                <CheckBox x:Name="StartupToggle" Style="{StaticResource ToggleSwitch}" Margin="0,4" Click="StartupToggle_Click" AutomationProperties.Name="Start with Windows"
                           AutomationProperties.HelpText="Opens minimized in the notification area and notifies you when a runner stops.">
                     <StackPanel>
                         <TextBlock Text="Start with Windows"/>

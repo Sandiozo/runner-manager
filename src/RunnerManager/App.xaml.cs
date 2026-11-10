@@ -44,17 +44,19 @@ public partial class App : Application
     protected override async void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
+        // An AI tool may start the exe by a path with spaces but without quotes; the pieces of that path are not arguments.
+        var startArgs = RunningCopies.WithoutProgramPathPieces(e.Args, Environment.CommandLine, Environment.ProcessPath);
         // An exception on another thread ends the process; this is where it gets recorded.
         AppDomain.CurrentDomain.UnhandledException += (_, args) =>
             MachineRelay.AppendAgentLog($"Runner Manager stopped after an unexpected error: {args.ExceptionObject}");
-        ElevatedByPrompt = e.Args.Contains(ElevationAttemptedArgument, StringComparer.OrdinalIgnoreCase);
-        if (e.Args.Contains(ProbeArgument, StringComparer.OrdinalIgnoreCase))
+        ElevatedByPrompt = startArgs.Contains(ElevationAttemptedArgument, StringComparer.OrdinalIgnoreCase);
+        if (startArgs.Contains(ProbeArgument, StringComparer.OrdinalIgnoreCase))
         {
             Shutdown(0);
             return;
         }
         // Started by an AI tool, without administrator rights: changes go through the fleet agent.
-        if (AssistantHost.IsAssistantLaunch(e.Args))
+        if (AssistantHost.IsAssistantLaunch(startArgs))
         {
             ShutdownMode = ShutdownMode.OnExplicitShutdown;
             ThemeManager.Apply(AppSettings.Load().Theme);
@@ -64,7 +66,7 @@ public partial class App : Application
                 args.Handled = true;
             };
             int exitCode;
-            try { exitCode = await AssistantHost.RunAsync(e.Args); }
+            try { exitCode = await AssistantHost.RunAsync(startArgs); }
             catch (Exception ex)
             {
                 MachineRelay.AppendAgentLog($"Assistant stopped after an unexpected error: {ex.Message}");
@@ -76,7 +78,7 @@ public partial class App : Application
         if (!Elevation.IsElevated)
         {
             ShutdownMode = ShutdownMode.OnExplicitShutdown;
-            await HandOffToElevatedAsync(e.Args);
+            await HandOffToElevatedAsync(startArgs);
             Shutdown();
             return;
         }
@@ -87,13 +89,13 @@ public partial class App : Application
         };
         // Runner Manager installs per user. Elevated with another account's password, it would set itself up in that
         // account's profile (its own %LOCALAPPDATA%, registry and tasks), so it stops instead.
-        if (Elevation.OtherUserThanStarted(e.Args) is { } started)
+        if (Elevation.OtherUserThanStarted(startArgs) is { } started)
         {
             var message = $"Runner Manager needs a Windows account with administrator rights. It was started by {started}, " +
                           $"but with the password of {Elevation.CurrentUserName}, so it would set itself up for {Elevation.CurrentUserName} instead. " +
                           "Sign in to Windows with an administrator account and start Runner Manager there.";
             MachineRelay.AppendAgentLog($"Stopped: elevated as {Elevation.CurrentUserName}, started by {started}.");
-            if (!e.Args.Contains("--quiet", StringComparer.OrdinalIgnoreCase))
+            if (!startArgs.Contains("--quiet", StringComparer.OrdinalIgnoreCase))
                 MessageBox.Show(message, "Runner Manager", MessageBoxButton.OK, MessageBoxImage.Warning);
             Shutdown(1);
             return;
@@ -102,10 +104,10 @@ public partial class App : Application
         // A task an older version registered starts the agent and the dashboard below normal priority.
         if (ProcessPriority.RaiseToNormal())
             MachineRelay.AppendAgentLog("Runner Manager was started below normal priority. It now runs at normal priority.");
-        if (AppUpdater.RepairMissingExe() is { } repaired)
-            MachineRelay.AppendAgentLog($"{AppPaths.ExeName} was missing after an interrupted update. Put {repaired} in its place.");
+        // Logs what it found; the dashboard tells the user about an exe that is missing for another reason.
+        UpdateGuard.RepairMissingExe(tellUser: false);
 
-        if (e.Args.Any(a => a.Equals("--install-agent", StringComparison.OrdinalIgnoreCase)))
+        if (startArgs.Any(a => a.Equals("--install-agent", StringComparison.OrdinalIgnoreCase)))
         {
             ShutdownMode = ShutdownMode.OnExplicitShutdown;
             try { await MachineRelay.InstallAndStartAgentTaskAsync(); }
@@ -114,7 +116,7 @@ public partial class App : Application
             return;
         }
 
-        if (e.Args.Any(a => a.Equals("--agent", StringComparison.OrdinalIgnoreCase)))
+        if (startArgs.Any(a => a.Equals("--agent", StringComparison.OrdinalIgnoreCase)))
         {
             ShutdownMode = ShutdownMode.OnExplicitShutdown;
             DispatcherUnhandledException += (_, args) =>
@@ -135,16 +137,16 @@ public partial class App : Application
             return;
         }
 
-        if (e.Args.Any(a => a.Equals("--uninstall", StringComparison.OrdinalIgnoreCase)))
+        if (startArgs.Any(a => a.Equals("--uninstall", StringComparison.OrdinalIgnoreCase)))
         {
             ShutdownMode = ShutdownMode.OnExplicitShutdown;
             ThemeManager.Apply(AppSettings.Load().Theme);
-            await UninstallAsync(e.Args);
+            await UninstallAsync(startArgs);
             Shutdown();
             return;
         }
 
-        if (Installer.IsSetupLaunch(e.Args))
+        if (Installer.IsSetupLaunch(startArgs))
         {
             ShutdownMode = ShutdownMode.OnLastWindowClose;
             ThemeManager.Apply(AppTheme.Dark);
@@ -158,10 +160,10 @@ public partial class App : Application
         var settings = AppSettings.Load();
         ThemeManager.Apply(settings.Theme);
         ShutdownMode = ShutdownMode.OnExplicitShutdown;
-        var minimized = e.Args.Any(a => a.Equals("--minimized", StringComparison.OrdinalIgnoreCase));
+        var minimized = startArgs.Any(a => a.Equals("--minimized", StringComparison.OrdinalIgnoreCase));
 
         // "Restart now": the dashboard that started this one is exiting. Wait for it, so it is not asked to come to the front.
-        if (AfterProcessId(e.Args) is { } previous) await WaitForExitAsync(previous, PreviousDashboardExitTimeout);
+        if (AfterProcessId(startArgs) is { } previous) await WaitForExitAsync(previous, PreviousDashboardExitTimeout);
 
         // One dashboard per user: a second launch brings the running one to the front instead.
         _dashboardMutex = new Mutex(initiallyOwned: false, DashboardMutexName);
@@ -196,7 +198,7 @@ public partial class App : Application
 
         var window = new MainWindow();
         MainWindow = window;
-        foreach (var arg in e.Args)
+        foreach (var arg in startArgs)
         {
             if (arg.StartsWith("--fleet=", StringComparison.OrdinalIgnoreCase)) window.PostSetupFleet = arg[8..].ToLowerInvariant();
         }
@@ -233,6 +235,9 @@ public partial class App : Application
                 catch (Exception ex) { MachineRelay.AppendAgentLog($"Could not update the fleet agent task: {ex.Message}"); }
                 foreach (var name in await ScheduledTasks.RepairOwnTasksAsync(fromAgent: true))
                     MachineRelay.AppendAgentLog($"Repaired the scheduled task \"{name}\". Windows could not start it.");
+                // The dashboard leaves its own tasks alone while they run it; the agent catches a moment when they do not.
+                try { await Installer.EnsureLaunchTaskAsync(); }
+                catch (Exception ex) { MachineRelay.AppendAgentLog($"Could not update the dashboard's scheduled tasks: {ex.Message}"); }
             });
         await MachineRelay.RunAgentAsync(CancellationToken.None);
         if (!another) UpdateGuard.OnAgentExiting();
@@ -316,14 +321,14 @@ public partial class App : Application
         try
         {
             using var searcher = new System.Management.ManagementObjectSearcher(
-                $"SELECT ProcessId, SessionId, CommandLine FROM Win32_Process WHERE Name = '{AppPaths.ExeName}' OR Name = '{AppPaths.LegacyExeName}'");
+                $"SELECT ProcessId, SessionId, ExecutablePath, CommandLine FROM Win32_Process WHERE Name = '{AppPaths.ExeName}' OR Name = '{AppPaths.LegacyExeName}'");
             foreach (System.Management.ManagementObject item in searcher.Get())
             {
                 using (item)
                 {
                     var id = Convert.ToInt32(item["ProcessId"]);
                     if (id == Environment.ProcessId || Convert.ToInt32(item["SessionId"]) != session) continue;
-                    if (RunningCopies.RoleOf(item["CommandLine"]?.ToString()) != CopyRole.Dashboard) continue;
+                    if (RunningCopies.RoleOf(item["CommandLine"]?.ToString(), item["ExecutablePath"]?.ToString()) != CopyRole.Dashboard) continue;
                     try { found.Add(Process.GetProcessById(id)); } catch (ArgumentException) { }
                 }
             }

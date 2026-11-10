@@ -316,6 +316,44 @@ public static class ScheduledTasks
 
     public static async Task<bool> ExistsAsync(string name) => (await RunAsync("schtasks.exe", $"/Query /TN \"{name}\"", ShortTimeout)).ExitCode == 0;
 
+    /// <summary>Whether the task exists: true, false, or null when that could not be read (so a failed read is never taken for "missing").</summary>
+    public static async Task<bool?> ExistsOrUnknownAsync(string name) => await ExistsAsync(name) ? true : IsRegistered(name);
+
+    /// <summary>Whether the task is in Task Scheduler's own list (in the registry), or null when that cannot be read.</summary>
+    internal static bool? IsRegistered(string name)
+    {
+        try
+        {
+            using var tree = Registry.LocalMachine.OpenSubKey($@"{TaskCacheKey}\Tree");
+            if (tree == null) return null;
+            using var task = tree.OpenSubKey(name);
+            return task != null;
+        }
+        catch (Exception ex) when (ex is SecurityException or UnauthorizedAccessException or IOException) { return null; }
+    }
+
+    /// <summary>
+    /// Whether an instance of the task runs: true, false, or null when that cannot be told. Registering a task again can
+    /// end its running instance, so a task is registered again only when this is false. Read through Task Scheduler's own
+    /// interface, because schtasks.exe words the status in the language of Windows.
+    /// </summary>
+    public static async Task<bool?> IsRunningAsync(string name)
+    {
+        var task = name.Replace("'", "''");
+        var (code, output) = await RunAsync("powershell.exe",
+            "-NoLogo -NoProfile -NonInteractive -Command \"$s = New-Object -ComObject Schedule.Service; $s.Connect(); " +
+            $"try {{ [int]$s.GetFolder('\\').GetTask('{task}').State }} catch {{ -1 }}\"", ShortTimeout);
+        return code == 0 ? ParseTaskState(output) : null;
+    }
+
+    /// <summary>
+    /// Task Scheduler's state of a task (TASK_STATE): 4 running and 2 queued count as running, 1 disabled and 3 ready do
+    /// not, and -1 stands for a task that does not exist. Anything else is unknown.
+    /// </summary>
+    internal static bool? ParseTaskState(string output) => int.TryParse(output.Trim(), out var state)
+        ? state switch { 2 or 4 => true, -1 or 1 or 3 => false, _ => null }
+        : null;
+
     public static async Task<string> QueryXmlAsync(string name)
     {
         var (code, output) = await RunAsync("schtasks.exe", $"/Query /TN \"{name}\" /XML", ShortTimeout);

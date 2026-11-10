@@ -385,7 +385,7 @@ public static class AppUpdater
                 replacedVersion = InstalledVersion ?? string.Empty;
                 Directory.CreateDirectory(InstallDir);
                 RemoveOldFiles();
-                ReplaceFile(downloaded, InstalledExe, keepPrevious: true);
+                ReplaceFile(downloaded, InstalledExe, keepPrevious: true, new SwapMarker(SwapKind.Update, replacedVersion, release.Version));
                 return true;
             }));
             if (!swapped)
@@ -465,10 +465,11 @@ public static class AppUpdater
     /// first and flushed to disk; a running exe can't be overwritten but can be renamed, so the current file is renamed
     /// away, the new one is moved into place, and the current file is renamed back if that fails. The swap starts once
     /// no scanner holds the new file, so the moment without <paramref name="destination"/> is just two renames; a swap cut
-    /// off there (a crash or a power cut) leaves a complete "{destination}.new" that <see cref="RepairMissingExe"/> puts in place.
+    /// off there (a crash or a power cut) leaves a complete "{destination}.new" and the <paramref name="swap"/> marker, which
+    /// <see cref="RepairMissingExe"/> uses to finish it. A failed swap removes its .new, so no repair ever puts it in place.
     /// With <paramref name="keepPrevious"/>, the current file is kept as "{destination}.previous", so the update can be undone.
     /// </summary>
-    internal static void ReplaceFile(string source, string destination, bool keepPrevious = false)
+    internal static void ReplaceFile(string source, string destination, bool keepPrevious = false, SwapMarker? swap = null)
     {
         var next = destination + ".new";
         var partial = next + ".partial";
@@ -484,26 +485,42 @@ public static class AppUpdater
             try { File.Delete(partial); } catch { }
             throw;
         }
-        WaitUntilUnused(next, NewFileWait);
         string? previous = null;
-        if (File.Exists(destination))
-        {
-            var aside = keepPrevious ? destination + ".previous" : OldPathFor(destination);
-            // The version kept last time may still run (a dashboard that was not restarted): rename it out of the way.
-            if (keepPrevious && File.Exists(aside)) Retry(() => File.Move(aside, OldPathFor(destination)));
-            Retry(() => File.Move(destination, aside));
-            previous = aside;
-        }
+        var marked = false;
         try
         {
-            Retry(() => File.Move(next, destination));
+            WaitUntilUnused(next, NewFileWait);
+            if (File.Exists(destination))
+            {
+                if (swap != null)
+                {
+                    WriteSwapMarker(destination, swap);
+                    marked = true;
+                }
+                var aside = keepPrevious ? destination + ".previous" : OldPathFor(destination);
+                // The version kept last time may still run (a dashboard that was not restarted): rename it out of the way.
+                if (keepPrevious && File.Exists(aside)) Retry(() => File.Move(aside, OldPathFor(destination)));
+                Retry(() => File.Move(destination, aside));
+                previous = aside;
+            }
+            try
+            {
+                Retry(() => File.Move(next, destination));
+            }
+            catch (Exception ex)
+            {
+                if (previous != null) PutBack(previous, destination, ex);
+                throw;
+            }
         }
-        catch (Exception ex)
+        catch
         {
-            if (previous != null) PutBack(previous, destination, ex);
             try { File.Delete(next); } catch { }
+            // Kept only while the file is missing (it could not be put back), so a repair can finish the swap.
+            if (marked && File.Exists(destination)) DeleteSwapMarker(destination);
             throw;
         }
+        if (marked) DeleteSwapMarker(destination);
         // Succeeds when the old file is not in use; otherwise the next install removes it.
         if (previous != null && !keepPrevious)
         {
@@ -513,9 +530,9 @@ public static class AppUpdater
 
     /// <summary>
     /// Puts RunnerManager.exe.previous back as RunnerManager.exe. The current exe (it may be running) is renamed to an
-    /// .old.exe file, which a later install removes.
+    /// .old.exe file, which a later install removes. <paramref name="swap"/> says what is put back, for a repair.
     /// </summary>
-    internal static void RestorePrevious()
+    internal static void RestorePrevious(SwapMarker swap)
     {
         var previous = InstalledExe + ".previous";
         if (!File.Exists(previous)) throw new FileNotFoundException("There is no previous version to go back to.", previous);
@@ -524,15 +541,23 @@ public static class AppUpdater
             string? aside = null;
             if (File.Exists(InstalledExe))
             {
+                WriteSwapMarker(InstalledExe, swap);
                 aside = OldPathFor(InstalledExe);
-                Retry(() => File.Move(InstalledExe, aside));
+                try { Retry(() => File.Move(InstalledExe, aside)); }
+                catch
+                {
+                    DeleteSwapMarker(InstalledExe);
+                    throw;
+                }
             }
             try { Retry(() => File.Move(previous, InstalledExe)); }
             catch (Exception ex)
             {
                 if (aside != null) PutBack(aside, InstalledExe, ex);
+                DeleteSwapMarker(InstalledExe);
                 throw;
             }
+            DeleteSwapMarker(InstalledExe);
             // This build is no longer the installed one, so a setup tried again copies it again.
             _installedThisBuild = false;
         });
@@ -569,29 +594,80 @@ public static class AppUpdater
     }
 
     /// <summary>
-    /// Puts RunnerManager.exe back when a swap was cut off between its two renames (a crash or a power cut): the complete
-    /// new file (.new) when there is one, otherwise the version a rollback was putting back (.previous). Only where the
-    /// Settings → Apps entry shows an install, and not while another process holds the update lock. Returns the file it
-    /// put back, or null.
+    /// Puts RunnerManager.exe back when a swap was cut off while the exe was renamed away (a crash or a power cut). Only a
+    /// swap leaves its marker (<see cref="SwapMarkerPath"/>) beside the exe for that moment, so an exe that went missing
+    /// otherwise (quarantined by antivirus, deleted by hand) is never replaced by the older copy kept for a rollback.
+    /// Only where the Settings → Apps entry shows an install, and not while another process holds the update lock.
     /// </summary>
-    internal static string? RepairMissingExe() => RepairMissingExe(InstalledExe, () => Installer.HasUninstallEntry);
+    internal static ExeRepair RepairMissingExe() => RepairMissingExe(InstalledExe, () => Installer.HasUninstallEntry);
 
-    internal static string? RepairMissingExe(string exe, Func<bool> isInstalled)
+    internal static ExeRepair RepairMissingExe(string exe, Func<bool> isInstalled)
     {
+        var nothing = new ExeRepair(RepairSource.None, null);
         try
         {
-            var next = exe + ".new";
-            var previous = exe + ".previous";
-            if (File.Exists(exe) || !File.Exists(next) && !File.Exists(previous) || !isInstalled()) return null;
-            return TryWithUpdateLock<string?>(TimeSpan.FromSeconds(2), () =>
+            var marker = SwapMarkerPath(exe);
+            if (File.Exists(exe) && !File.Exists(marker) || !isInstalled()) return nothing;
+            return TryWithUpdateLock(TimeSpan.FromSeconds(2), () =>
             {
-                if (File.Exists(exe)) return null;
-                var source = File.Exists(next) ? next : previous;
-                File.Move(source, exe);
-                return Path.GetFileName(source);
-            }, out var repaired) ? repaired : null;
+                var next = exe + ".new";
+                var previous = exe + ".previous";
+                var swap = ReadSwapMarker(exe);
+                var source = DecideRepair(File.Exists(exe), File.Exists(next), File.Exists(previous), swap);
+                switch (source)
+                {
+                    case RepairSource.New:
+                        File.Move(next, exe);
+                        break;
+                    case RepairSource.Previous:
+                        File.Move(previous, exe);
+                        try { File.Delete(next); } catch { }
+                        break;
+                }
+                // Left by a swap that ended (or never reached the gap) without removing it.
+                if (source != RepairSource.Unexplained && File.Exists(exe)) DeleteSwapMarker(exe);
+                return new ExeRepair(source, swap);
+            }, out var repair) ? repair : nothing;
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return null; }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return nothing; }
+    }
+
+    /// <summary>
+    /// Which file to put in place of a missing exe. Without a swap marker nothing is: the exe went missing for another
+    /// reason. A cut-off update or install finishes with its complete new file; a cut-off rollback finishes with .previous.
+    /// </summary>
+    internal static RepairSource DecideRepair(bool exeExists, bool newExists, bool previousExists, SwapMarker? swap)
+    {
+        if (exeExists) return RepairSource.None;
+        if (swap == null) return RepairSource.Unexplained;
+        var forward = swap.Kind is SwapKind.Update or SwapKind.Install;
+        if (forward && newExists) return RepairSource.New;
+        return previousExists ? RepairSource.Previous : RepairSource.Unexplained;
+    }
+
+    /// <summary>Written beside the exe while a swap has renamed it away, and removed when the swap ends.</summary>
+    internal static string SwapMarkerPath(string exe) => exe + ".swapping";
+
+    internal static void WriteSwapMarker(string exe, SwapMarker swap)
+    {
+        // Flushed, so a power cut right after the rename still finds it.
+        using var file = new FileStream(SwapMarkerPath(exe), FileMode.Create, FileAccess.Write, FileShare.None);
+        JsonSerializer.Serialize(file, swap);
+        file.Flush(flushToDisk: true);
+    }
+
+    /// <summary>The marker of a swap that did not end, or null. One that cannot be read still counts as a swap.</summary>
+    internal static SwapMarker? ReadSwapMarker(string exe)
+    {
+        var path = SwapMarkerPath(exe);
+        if (!File.Exists(path)) return null;
+        try { return JsonSerializer.Deserialize<SwapMarker>(File.ReadAllText(path)) ?? new SwapMarker(SwapKind.Unknown, "", ""); }
+        catch (JsonException) { return new SwapMarker(SwapKind.Unknown, "", ""); }
+    }
+
+    private static void DeleteSwapMarker(string exe)
+    {
+        try { File.Delete(SwapMarkerPath(exe)); } catch { }
     }
 
     /// <summary>
@@ -749,8 +825,8 @@ public static class AppUpdater
     {
         var exe = await DownloadAndInstallAsync(release, log);
         await CreateStartMenuShortcutAsync();
-        if (await ScheduledTasks.ExistsAsync(ScheduledTasks.DashboardTaskName))
-            await Installer.RegisterStartupTaskAsync(exe);
+        // Only when it needs it, and not while it runs: the dashboard installing this may have been started by it.
+        await Installer.UpdateStartupTaskAsync(exe);
         if (!await MachineRelay.IsAgentInstalledAsync() || await AgentOwnership.OtherUserAsync() != null) return false;
         log("Switching the fleet agent to the new version...");
         await MachineRelay.RegisterAgentTaskAsync(exe);
@@ -808,6 +884,7 @@ public static class AppUpdater
         RemoveOldFiles();
         log($"Installing Runner Manager v{CurrentVersion} to {InstallDir}...");
         var files = AppFiles();
+        var install = new SwapMarker(SwapKind.Install, InstalledVersion ?? string.Empty, CurrentVersion);
         await Task.Run(() => WithUpdateLock(() =>
         {
             // Going from a multi-file build to a single-file exe: clear the old app files so only the exe remains.
@@ -831,7 +908,8 @@ public static class AppUpdater
                 Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
                 // Files of a running agent can't be overwritten but can be renamed out of the way. The exe it replaces is
                 // kept, so setup can put it back when a later step fails.
-                ReplaceFile(source, destination, keepPrevious: relative.Equals(AssetName, StringComparison.OrdinalIgnoreCase));
+                var isExe = relative.Equals(AssetName, StringComparison.OrdinalIgnoreCase);
+                ReplaceFile(source, destination, keepPrevious: isExe, isExe ? install : null);
             }
         }));
         _installedThisBuild = true;
@@ -886,6 +964,20 @@ public sealed class ReleaseInfo
     public long Size { get; init; }
     public string Sha256 { get; init; } = string.Empty;
 }
+
+/// <summary>
+/// What a swap of the installed exe does, so a repair after a cut-off swap knows how to finish it: an update (watched by
+/// <see cref="UpdateGuard"/>) or an install by setup goes forward, a rollback or setup's undo goes back.
+/// </summary>
+public enum SwapKind { Unknown, Update, Install, Rollback, Undo }
+
+/// <summary>A swap that is under way: its kind, the version it replaces and the version it puts in place.</summary>
+public sealed record SwapMarker(SwapKind Kind, string From, string To);
+
+public enum RepairSource { None, New, Previous, Unexplained }
+
+/// <summary>What <see cref="AppUpdater.RepairMissingExe()"/> did: put a file in place, found the exe missing without a swap, or nothing.</summary>
+public sealed record ExeRepair(RepairSource Source, SwapMarker? Marker);
 
 /// <summary>The result of an update check: the newest release, or why it could not be checked.</summary>
 public sealed record ReleaseCheck(ReleaseInfo? Release, string Problem)

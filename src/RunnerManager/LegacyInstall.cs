@@ -53,7 +53,8 @@ public static class LegacyInstall
         }
         if (!fromSetup)
         {
-            await ScheduledTasks.RegisterLaunchTaskAsync(exe);
+            // Not while it runs: this dashboard may have been started by it (the dashboard checks the task again later).
+            await Installer.RegisterIfIdleAsync(ScheduledTasks.LaunchTaskName, () => ScheduledTasks.RegisterLaunchTaskAsync(exe));
             await Installer.RefreshShortcutsAsync(exe);
         }
 

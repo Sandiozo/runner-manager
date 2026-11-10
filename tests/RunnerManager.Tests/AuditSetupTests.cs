@@ -201,29 +201,98 @@ public class AuditSetupTests
     }
 
     [Fact]
-    public void AMissingExe_IsPutBackFromTheCompleteNewFile_OrElseFromThePreviousOne()
+    public void AMissingExe_IsPutBackOnlyAfterAnInterruptedSwap()
     {
         var folder = Path.Combine(Path.GetTempPath(), $"rm-repair-{Guid.NewGuid():N}");
         Directory.CreateDirectory(folder);
         try
         {
             var exe = Path.Combine(folder, "RunnerManager.exe");
-            // Nothing to repair, or no install there.
-            Assert.Null(AppUpdater.RepairMissingExe(exe, () => true));
+            // No install there: nothing to do.
+            Assert.Equal(RepairSource.None, AppUpdater.RepairMissingExe(exe, () => false).Source);
             File.WriteAllText(exe + ".new", "new");
-            Assert.Null(AppUpdater.RepairMissingExe(exe, () => false));
-
-            // Cut off between the renames of an update: the new file goes in.
             File.WriteAllText(exe + ".previous", "old");
-            Assert.Equal("RunnerManager.exe.new", AppUpdater.RepairMissingExe(exe, () => true));
+            Assert.Equal(RepairSource.None, AppUpdater.RepairMissingExe(exe, () => false).Source);
+
+            // Missing without a swap (quarantined, deleted by hand): no other version is put in its place.
+            Assert.Equal(RepairSource.Unexplained, AppUpdater.RepairMissingExe(exe, () => true).Source);
+            Assert.False(File.Exists(exe));
+
+            // Cut off between the renames of an update: the new file goes in, and the marker goes.
+            AppUpdater.WriteSwapMarker(exe, new SwapMarker(SwapKind.Update, "2.8.2", "2.9.0"));
+            var update = AppUpdater.RepairMissingExe(exe, () => true);
+            Assert.Equal(RepairSource.New, update.Source);
+            Assert.Equal(new SwapMarker(SwapKind.Update, "2.8.2", "2.9.0"), update.Marker);
             Assert.Equal("new", File.ReadAllText(exe));
             Assert.Equal("old", File.ReadAllText(exe + ".previous"));
-            Assert.Null(AppUpdater.RepairMissingExe(exe, () => true));
+            Assert.False(File.Exists(AppUpdater.SwapMarkerPath(exe)));
+            Assert.Equal(RepairSource.None, AppUpdater.RepairMissingExe(exe, () => true).Source);
 
             // Cut off in a rollback: the previous version goes in.
             File.Delete(exe);
-            Assert.Equal("RunnerManager.exe.previous", AppUpdater.RepairMissingExe(exe, () => true));
+            AppUpdater.WriteSwapMarker(exe, new SwapMarker(SwapKind.Rollback, "2.9.0", "2.8.2"));
+            Assert.Equal(RepairSource.Previous, AppUpdater.RepairMissingExe(exe, () => true).Source);
             Assert.Equal("old", File.ReadAllText(exe));
+
+            // A marker left by a swap that ended is removed, and nothing is moved.
+            AppUpdater.WriteSwapMarker(exe, new SwapMarker(SwapKind.Update, "2.8.2", "2.9.0"));
+            Assert.Equal(RepairSource.None, AppUpdater.RepairMissingExe(exe, () => true).Source);
+            Assert.False(File.Exists(AppUpdater.SwapMarkerPath(exe)));
+            Assert.Equal("old", File.ReadAllText(exe));
+        }
+        finally { Directory.Delete(folder, recursive: true); }
+    }
+
+    [Theory]
+    [InlineData(true, true, true, SwapKind.Update, RepairSource.None)]
+    [InlineData(false, true, true, null, RepairSource.Unexplained)]
+    [InlineData(false, false, true, null, RepairSource.Unexplained)]
+    [InlineData(false, true, true, SwapKind.Update, RepairSource.New)]
+    [InlineData(false, true, true, SwapKind.Install, RepairSource.New)]
+    [InlineData(false, false, true, SwapKind.Update, RepairSource.Previous)]
+    [InlineData(false, true, true, SwapKind.Rollback, RepairSource.Previous)]
+    [InlineData(false, true, true, SwapKind.Undo, RepairSource.Previous)]
+    [InlineData(false, true, true, SwapKind.Unknown, RepairSource.Previous)]
+    [InlineData(false, false, false, SwapKind.Rollback, RepairSource.Unexplained)]
+    public void TheRepairOfAMissingExe_FollowsTheSwapThatWasCutOff(bool exe, bool next, bool previous, SwapKind? kind, RepairSource expected)
+        => Assert.Equal(expected, AppUpdater.DecideRepair(exe, next, previous, kind is { } k ? new SwapMarker(k, "1.0.0", "1.1.0") : null));
+
+    [Fact]
+    public void ASwapMarkerThatCannotBeRead_StillCountsAsASwap()
+    {
+        var exe = Path.Combine(Path.GetTempPath(), $"rm-marker-{Guid.NewGuid():N}.exe");
+        try
+        {
+            Assert.Null(AppUpdater.ReadSwapMarker(exe));
+            File.WriteAllText(AppUpdater.SwapMarkerPath(exe), "{ cut off");
+            Assert.Equal(SwapKind.Unknown, AppUpdater.ReadSwapMarker(exe)!.Kind);
+        }
+        finally { File.Delete(AppUpdater.SwapMarkerPath(exe)); }
+    }
+
+    [Fact]
+    public void AFailedSwap_LeavesNoNewFileForARepairToPutInPlace()
+    {
+        var folder = Path.Combine(Path.GetTempPath(), $"rm-failed-swap-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(folder);
+        try
+        {
+            var source = Path.Combine(folder, "download.exe");
+            var exe = Path.Combine(folder, "RunnerManager.exe");
+            File.WriteAllText(source, "new");
+            File.WriteAllText(exe, "old");
+            var swap = new SwapMarker(SwapKind.Update, "2.8.2", "2.9.0");
+            // Open without delete sharing, so the current exe cannot be renamed away.
+            using (new FileStream(exe, FileMode.Open, FileAccess.Read, FileShare.Read))
+                Assert.ThrowsAny<IOException>(() => AppUpdater.ReplaceFile(source, exe, keepPrevious: true, swap));
+            Assert.Equal("old", File.ReadAllText(exe));
+            Assert.False(File.Exists(exe + ".new"));
+            Assert.False(File.Exists(AppUpdater.SwapMarkerPath(exe)));
+
+            // A swap that works leaves no marker either.
+            AppUpdater.ReplaceFile(source, exe, keepPrevious: true, swap);
+            Assert.Equal("new", File.ReadAllText(exe));
+            Assert.False(File.Exists(AppUpdater.SwapMarkerPath(exe)));
         }
         finally { Directory.Delete(folder, recursive: true); }
     }
@@ -348,5 +417,90 @@ public class AuditSetupTests
         // Without a pairing code nothing can ask it, so staying up is enough.
         Assert.True(await UpdateGuard.WaitUntilAnsweringAsync(() => Task.FromResult<bool?>(null),
             TimeSpan.Zero, TimeSpan.FromMilliseconds(10), TimeSpan.Zero));
+    }
+
+    [Fact]
+    public void AnUpdateWhoseAgentStaysUpWithoutAnswering_IsNoLongerWatched()
+    {
+        var pending = new PendingUpdate { Version = "2.9.0", PreviousVersion = "2.8.2", InstalledUtc = DateTime.UtcNow, Running = true };
+        var state = new UpdateState { Pending = pending };
+        // After the wait, later stops (a restart of the PC) are no failed starts: there is nothing left to count them on.
+        var stopped = UpdateGuard.StopWatching(state, "2.9.0");
+        Assert.Null(stopped.Pending);
+        Assert.Equal(AgentStartDecision.Nothing, UpdateGuard.DecideAgentStart(stopped.Pending, "2.9.0", runningInstalledCopy: true).Decision);
+        // Another version's pending update stays.
+        Assert.Same(pending, UpdateGuard.StopWatching(state, "2.9.1").Pending);
+
+        // Within the wait, an agent that stops before it worked still counts.
+        var (decision, watched) = UpdateGuard.DecideAgentStart(pending, "2.9.0", runningInstalledCopy: true);
+        Assert.Equal(AgentStartDecision.Watch, decision);
+        Assert.Equal(1, watched!.FailedStarts);
+        Assert.Equal(1, watched.Starts);
+    }
+
+    [Fact]
+    public void RollbackReasons_SayWhatHappened()
+    {
+        Assert.Equal("the fleet agent stopped 3 times before it answered a status request on this PC", UpdateGuard.AgentStopsReason(3, answersStatus: true));
+        Assert.Equal("the fleet agent stopped 3 times within 2 minutes of starting", UpdateGuard.AgentStopsReason(3, answersStatus: false));
+        var neverStarted = new PendingUpdate { Version = "2.9.0" };
+        Assert.Equal("its fleet agent did not start within 10 minutes", UpdateGuard.DashboardRollbackReason(neverStarted));
+        Assert.StartsWith("its fleet agent stopped before it worked", UpdateGuard.DashboardRollbackReason(neverStarted with { Starts = 1 }));
+        Assert.StartsWith("its fleet agent stopped before it worked", UpdateGuard.DashboardRollbackReason(neverStarted with { Running = true }));
+    }
+
+    // ================= Tasks that run =================
+
+    [Theory]
+    [InlineData("4\r\n", true)]
+    [InlineData("2", true)]
+    [InlineData("3", false)]
+    [InlineData("1", false)]
+    [InlineData("-1", false)]
+    [InlineData("0", null)]
+    [InlineData("", null)]
+    [InlineData("Exception calling GetTask", null)]
+    public void ATaskIsRegisteredAgainOnlyWhenItIsKnownNotToRun(string output, bool? running)
+        => Assert.Equal(running, ScheduledTasks.ParseTaskState(output));
+
+    // ================= Setup =================
+
+    [Theory]
+    [InlineData(false, false, false, false)]
+    [InlineData(true, null, false, true)]
+    [InlineData(false, true, null, true)]
+    [InlineData(false, null, false, null)]
+    [InlineData(null, false, false, null)]
+    public void AStartupTaskThatCannotBeRead_IsLeftAsItIs(bool? own, bool? shared, bool? legacy, bool? expected)
+        => Assert.Equal(expected, Installer.AnyStartupTask(own, shared, legacy));
+
+    [Theory]
+    [InlineData("C:\\Program Files\\RunnerManager\\RunnerManager.exe --mcp", null, CopyRole.Assistant)]
+    [InlineData("C:\\Program Files\\RunnerManager\\RunnerManager.exe --mcp", "C:\\Program Files\\RunnerManager\\RunnerManager.exe", CopyRole.Assistant)]
+    [InlineData("C:\\Program Files\\RunnerManager\\RunnerManager.exe ai list-pcs", null, CopyRole.Assistant)]
+    [InlineData("C:\\Program Files\\RunnerManager\\RunnerManager.exe --agent", null, CopyRole.Agent)]
+    [InlineData("C:\\Program Files\\RunnerManager\\RunnerManager.exe", null, CopyRole.Dashboard)]
+    [InlineData("C:\\Program Files\\RunnerManager\\RunnerManager --minimized", "C:\\Program Files\\RunnerManager\\RunnerManager", CopyRole.Dashboard)]
+    [InlineData("RunnerManager --mcp", null, CopyRole.Assistant)]
+    // An argument that ends in .exe is not taken for the program.
+    [InlineData("RunnerManager ai run --path C:\\x.exe", null, CopyRole.Assistant)]
+    [InlineData("C:\\Apps\\RunnerManager ai run --path C:\\x.exe", null, CopyRole.Assistant)]
+    public void AProgramPathWithSpacesButWithoutQuotes_IsNotTakenForArguments(string commandLine, string? programPath, CopyRole expected)
+        => Assert.Equal(expected, RunningCopies.RoleOf(commandLine, programPath));
+
+    [Fact]
+    public void ACopyStartedByAPathWithSpacesButWithoutQuotes_SeesOnlyItsRealArguments()
+    {
+        const string exe = @"C:\Program Files\RunnerManager\RunnerManager.exe";
+        // As Windows splits it: "C:\Program" is the program, "Files\RunnerManager\RunnerManager.exe" the first argument.
+        Assert.Equal(new[] { "--mcp" },
+            RunningCopies.WithoutProgramPathPieces(new[] { @"Files\RunnerManager\RunnerManager.exe", "--mcp" }, exe + " --mcp", exe));
+        Assert.Empty(RunningCopies.WithoutProgramPathPieces(new[] { @"Files\RunnerManager\RunnerManager.exe" }, exe, exe));
+        // Quoted, or without spaces: unchanged.
+        Assert.Equal(new[] { "--mcp" }, RunningCopies.WithoutProgramPathPieces(new[] { "--mcp" }, $"\"{exe}\" --mcp", exe));
+        Assert.Equal(new[] { "--mcp" },
+            RunningCopies.WithoutProgramPathPieces(new[] { "--mcp" }, @"C:\Apps\RunnerManager.exe --mcp", @"C:\Apps\RunnerManager.exe"));
+        // Started some other way: unchanged.
+        Assert.Equal(new[] { "Files", "--mcp" }, RunningCopies.WithoutProgramPathPieces(new[] { "Files", "--mcp" }, "RunnerManager Files --mcp", exe));
     }
 }
