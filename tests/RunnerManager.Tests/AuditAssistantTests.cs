@@ -601,9 +601,10 @@ public class AuditAssistantTests
         var refused = await Assert.ThrowsAsync<AgentLinkException>(() => link.SendAsync(Initialize)).WaitAsync(TimeSpan.FromSeconds(30));
         Assert.Contains("did not answer this program's sign-in in time", refused.Message);
         Assert.True(refused.AgentUnavailable);
-        // A request that waited for that sign-in fails at once, and does not ask again.
-        await Assert.ThrowsAsync<AgentLinkException>(() => link.SendAsync(Ping)).WaitAsync(TimeSpan.FromSeconds(30));
-        lock (held) Assert.Single(held);
+        // Nothing is remembered about it. The next request asks again: a busy agent may only have been slow.
+        var again = await Assert.ThrowsAsync<AgentLinkException>(() => link.SendAsync(Ping)).WaitAsync(TimeSpan.FromSeconds(30));
+        Assert.Contains("did not answer this program's sign-in in time", again.Message);
+        lock (held) Assert.Equal(2, held.Count);
 
         // When the AI tool itself gives up, that is not reported as a sign-in that took too long.
         using var patient = new AgentLink(url, signInTimeout: TimeSpan.FromMinutes(5));

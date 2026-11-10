@@ -35,8 +35,12 @@ public sealed class AgentLink : IDisposable
 
     private const string OlderAgent = "This PC's fleet agent runs an older Runner Manager. Open Runner Manager and update the fleet agent, or restart it, then try again.";
 
-    /// <summary>The sign-in is two short calls. A program that holds the agent's port must not keep the AI tool waiting on them.</summary>
-    private static readonly TimeSpan DefaultSignInTimeout = TimeSpan.FromSeconds(20);
+    /// <summary>
+    /// How long the sign-in's two short calls may take. Long enough for a fleet agent on a PC whose runners use all
+    /// of its CPU and memory, which is the usual state of such a PC. Only a program that holds the agent's port and
+    /// never answers takes longer; without a limit the AI tool would wait for it without end.
+    /// </summary>
+    private static readonly TimeSpan DefaultSignInTimeout = TimeSpan.FromMinutes(2);
 
     /// <summary>The most that is read of a sign-in answer, which is under 1 KB.</summary>
     private const int MaxSignInAnswerBytes = 16 * 1024;
@@ -261,13 +265,11 @@ public sealed class AgentLink : IDisposable
             using var limit = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             limit.CancelAfter(_signInTimeout);
             try { return _signedIn = await NewSignInAsync(limit.Token); }
+            // Nothing is remembered about it: the next request asks again, in case the agent was only slow.
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
             {
-                var message = "The fleet agent did not answer this program's sign-in in time. Try again. " +
-                              "If this happens again, restart Runner Manager's fleet agent, or check which program uses port " + _port + ".";
-                // The requests that waited for this sign-in fail at once, instead of each waiting as long.
-                _unreachable = (DateTime.UtcNow + UnreachableMemory, message);
-                throw new AgentLinkException(message);
+                throw new AgentLinkException("The fleet agent did not answer this program's sign-in in time. Try again. " +
+                                             "If this happens again, restart Runner Manager's fleet agent, or check which program uses port " + _port + ".");
             }
         }
         finally { _signInGate.Release(); }
