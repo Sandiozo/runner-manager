@@ -684,14 +684,21 @@ public class AgentFileTests
     {
         var line = $"Log line {Guid.NewGuid():N}";
         Directory.CreateDirectory(FleetConfig.StateDir);
-        Task append;
-        // As the other process does while it appends: the log is open for writing for a moment.
-        using (new FileStream(MachineRelay.AgentLogPath, FileMode.Append, FileAccess.Write, FileShare.Read))
+        var inUse = 0;
+        // As the other process does while it appends: the log is open for writing, here until the append found it in use.
+        var other = new FileStream(MachineRelay.AgentLogPath, FileMode.Append, FileAccess.Write, FileShare.Read);
+        MachineRelay.AgentLogInUse = () =>
         {
-            append = Task.Run(() => MachineRelay.AppendAgentLog(line));
-            await Task.Delay(40);
+            Interlocked.Increment(ref inUse);
+            other.Dispose();
+        };
+        try { MachineRelay.AppendAgentLog(line); }
+        finally
+        {
+            MachineRelay.AgentLogInUse = null;
+            other.Dispose();
         }
-        await append;
+        Assert.True(inUse > 0);
 
         // Another test's line may have rotated the log since.
         var text = string.Empty;

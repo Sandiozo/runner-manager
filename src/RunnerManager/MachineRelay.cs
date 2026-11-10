@@ -1581,6 +1581,8 @@ public static class MachineRelay
     }
 
     private static readonly object AgentLogGate = new();
+    /// <summary>Called when an append finds the log in use, before it tries again (tests free the log here).</summary>
+    internal static Action? AgentLogInUse { get; set; }
 
     public static void AppendAgentLog(string message)
     {
@@ -1603,7 +1605,11 @@ public static class MachineRelay
                     File.AppendAllText(AgentLogPath, line);
                     return;
                 }
-                catch (IOException) { Thread.Sleep(25); }
+                catch (IOException)
+                {
+                    AgentLogInUse?.Invoke();
+                    Thread.Sleep(25);
+                }
                 catch { return; }
             }
         }
