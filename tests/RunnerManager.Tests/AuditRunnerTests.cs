@@ -33,7 +33,43 @@ public class AuditRunnerTests
 
             Assert.NotNull(file);
             Assert.Equal(hung, file!.Path);
-            Assert.Equal(new[] { "Compiling…", "" }, RunnerActivity.ReadOutput(root, 10));
+            var worker = new RunnerActivity.ProcessSnapshot(new[] { Worker(root, DateTime.UtcNow.AddHours(-3)) });
+            Assert.Equal(new[] { "Compiling…", "" }, RunnerActivity.ReadOutput(root, 10, worker));
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
+    public void Output_IsEmpty_WhenTheRunnerRunsNoJob_AndShowsOnlyThisJobsPage()
+    {
+        var root = NewRunnerRoot();
+        try
+        {
+            // A page the runner did not upload after an earlier job.
+            WritePage(root, "left_1.log", "an earlier job\n", DateTime.UtcNow.AddHours(-5));
+            var idle = new RunnerActivity.ProcessSnapshot(Array.Empty<RunnerActivity.ProcessRow>());
+            Assert.Empty(RunnerActivity.ReadOutput(root, 10, idle));
+
+            var busy = new RunnerActivity.ProcessSnapshot(new[] { Worker(root, DateTime.UtcNow.AddMinutes(-10)) });
+            Assert.Empty(RunnerActivity.ReadOutput(root, 10, busy));
+            WritePage(root, "now_1.log", "this job\n", DateTime.UtcNow.AddMinutes(-5));
+            Assert.Equal(new[] { "this job", "" }, RunnerActivity.ReadOutput(root, 10, busy));
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
+    public void OutputFile_CreatedBeforeTheWorker_IsLeftOut_AlsoWhenWrittenSince()
+    {
+        var root = NewRunnerRoot();
+        try
+        {
+            var path = WritePage(root, "old_1.log", "an earlier job\n", DateTime.UtcNow.AddHours(-5));
+            File.SetLastWriteTimeUtc(path, DateTime.UtcNow);
+
+            // Skipped by the listed creation time, without opening it.
+            Assert.Null(RunnerActivity.CurrentOutputFile(root, DateTime.UtcNow.AddHours(-1)));
+            Assert.Equal(path, RunnerActivity.CurrentOutputFile(root)!.Path);
         }
         finally { Directory.Delete(root, recursive: true); }
     }
@@ -75,6 +111,9 @@ public class AuditRunnerTests
 
     private static RunnerActivity.ProcessRow Row(int id, int parent, string name, string path, DateTime startedUtc)
         => new(id, parent, name, path, string.Empty, 0, 0, System.Management.ManagementDateTimeConverter.ToDmtfDateTime(startedUtc.ToLocalTime()));
+
+    private static RunnerActivity.ProcessRow Worker(string root, DateTime startedUtc)
+        => Row(1, 0, "Runner.Worker.exe", Path.Combine(root, "bin", "Runner.Worker.exe"), startedUtc);
 
     private static RunnerInfo Busy(string root) => new() { InstallPath = root, IsRunning = true, ActivityText = "Busy" };
 

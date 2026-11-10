@@ -60,7 +60,7 @@ public static class RunnerActivity
             var processes = ProcessSnapshot.Read();
             return new RunnerJobActivity
             {
-                Output = ReadOutput(root, OutputLines, OutputNotBefore(WorkerStartedUtc(root, processes))),
+                Output = ReadOutput(root, OutputLines, processes),
                 Processes = ReadProcesses(root, processes),
                 CapturedUtc = DateTime.UtcNow
             };
@@ -95,17 +95,20 @@ public static class RunnerActivity
     /// The file the runner writes the running step's output to. The runner keeps it in _diag\pages until it uploads it
     /// to GitHub, so it only exists while a step runs. A hung step's file can be hours old, so there is no age limit.
     /// </summary>
-    /// <param name="notBeforeUtc">When the job's Runner.Worker started: older files are left over from an earlier job.</param>
+    /// <param name="notBeforeUtc">When the job's Runner.Worker started: files created before it are left over from an earlier job.</param>
     internal static OutputFile? CurrentOutputFile(string root, DateTime? notBeforeUtc = null)
     {
-        var folder = Path.Combine(root, "_diag", "pages");
-        List<string> paths;
-        try { paths = Directory.Exists(folder) ? Directory.EnumerateFiles(folder, "*.log").ToList() : new List<string>(); }
+        var folder = new DirectoryInfo(Path.Combine(root, "_diag", "pages"));
+        List<FileInfo> listed;
+        try { listed = folder.Exists ? folder.EnumerateFiles("*.log").ToList() : new List<FileInfo>(); }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return null; }
         OutputFile? newest = null;
-        foreach (var path in paths)
+        foreach (var entry in listed)
         {
-            if (ReadOutputFile(path) is not { } file || (notBeforeUtc is { } notBefore && file.ChangedUtc < notBefore)) continue;
+            // The listing's creation time is right (only the size and last write lag behind an open file), so files of
+            // earlier jobs are skipped without opening them. The live view reads every few seconds.
+            if (notBeforeUtc is { } notBefore && entry.CreationTimeUtc < notBefore) continue;
+            if (ReadOutputFile(entry.FullName) is not { } file) continue;
             if (newest == null || file.ChangedUtc > newest.ChangedUtc) newest = file;
         }
         return newest;
@@ -134,18 +137,23 @@ public static class RunnerActivity
         public string State => $"{System.IO.Path.GetFileName(Path)}|{Length}|{ChangedUtc.Ticks}";
     }
 
-    /// <summary>The last lines of the running step's output, without timestamps and color codes.</summary>
+    /// <summary>The last lines of the running step's output, without timestamps and color codes. None when the runner runs no job.</summary>
     internal static string[] ReadOutput(string root, int lines)
     {
-        DateTime? workerStarted = null;
-        try { workerStarted = WorkerStartedUtc(root, ProcessSnapshot.Read(WorkerName)); }
-        catch (Exception ex) when (ex is ManagementException or System.Runtime.InteropServices.COMException) { }
-        return ReadOutput(root, lines, OutputNotBefore(workerStarted));
+        ProcessSnapshot workers;
+        try { workers = ProcessSnapshot.Read(WorkerName); }
+        catch (Exception ex) when (ex is ManagementException or System.Runtime.InteropServices.COMException) { return Array.Empty<string>(); }
+        return ReadOutput(root, lines, workers);
     }
 
-    private static string[] ReadOutput(string root, int lines, DateTime? notBeforeUtc)
+    /// <param name="processes">The PC's processes, or at least its Runner.Worker processes.</param>
+    internal static string[] ReadOutput(string root, int lines, ProcessSnapshot processes)
     {
-        var file = CurrentOutputFile(root, notBeforeUtc);
+        var workers = processes.Rows.Where(p => IsWorkerOf(p, root)).ToList();
+        // Without a job, files in _diag\pages are left over from an earlier one (a page the runner did not upload).
+        if (workers.Count == 0) return Array.Empty<string>();
+        var workerStarted = workers.Select(p => ParseStarted(p.Started)).Where(s => s != null).Min();
+        var file = CurrentOutputFile(root, OutputNotBefore(workerStarted));
         if (file == null) return Array.Empty<string>();
         try { return CleanLines(ReadTail(file.Path, 64 * 1024)).TakeLast(lines).ToArray(); }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return Array.Empty<string>(); }
@@ -252,10 +260,6 @@ public static class RunnerActivity
     private static bool IsWorkerOf(ProcessRow process, string root)
         => process.Name.Equals(WorkerName, StringComparison.OrdinalIgnoreCase)
            && process.Path.StartsWith(Path.Combine(root, "bin") + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
-
-    /// <summary>When the runner's earliest running Runner.Worker started, or null when it runs no job.</summary>
-    private static DateTime? WorkerStartedUtc(string root, ProcessSnapshot processes)
-        => processes.Rows.Where(p => IsWorkerOf(p, root)).Select(p => ParseStarted(p.Started)).Where(s => s != null).Min();
 
     /// <summary>
     /// The job's processes: the runner's Runner.Worker processes and everything they started. A process whose parent
