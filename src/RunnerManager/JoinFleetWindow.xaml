@@ -114,13 +114,13 @@
                                      KeyDown="AddressBox_KeyDown"/>
                             <Button Grid.Column="1" Content="Connect" Margin="8,0,0,0" Click="ConnectAddress_Click"/>
                         </Grid>
-                        <TextBlock Text="Or paste a pairing code" FontSize="12" FontWeight="SemiBold" Margin="0,14,0,6"/>
+                        <TextBlock Text="Or enter the fleet code" FontSize="12" FontWeight="SemiBold" Margin="0,14,0,6"/>
                         <Grid>
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="*"/>
                                 <ColumnDefinition Width="Auto"/>
                             </Grid.ColumnDefinitions>
-                            <TextBox x:Name="CodeBox" Tag="rwk_…" FontFamily="{StaticResource MonoFont}" AutomationProperties.Name="Pairing code"
+                            <TextBox x:Name="CodeBox" Tag="rwk_…" FontFamily="{StaticResource MonoFont}" AutomationProperties.Name="Fleet code"
                                      KeyDown="CodeBox_KeyDown"/>
                             <Button Grid.Column="1" Content="Join" Margin="8,0,0,0" Click="PasteCode_Click"/>
                         </Grid>

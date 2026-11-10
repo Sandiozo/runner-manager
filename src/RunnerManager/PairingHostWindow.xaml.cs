@@ -89,11 +89,12 @@ public partial class PairingHostWindow : Window
         _confirming.Remove(request);
         // Allowed, but it ended before it was added: the other PC left or the connection broke, or its user did not
         // confirm the codes there.
-        if (_sending.Remove(request))
+        if (_sending.Remove(request, out var ownCode))
         {
-            _notAdded.Add(request.CodeSent
-                ? $"{request.Name} did not confirm the codes. It was not added."
-                : $"{request.Name} left before it got its code. It was not added.");
+            _notAdded.Add(request.CodeSent ? $"{request.Name} did not confirm the codes. It was not added."
+                // A PC allowed one way gets a code of its own, which is not the fleet code.
+                : ownCode != null ? $"{request.Name} left before it got its code. It was not added."
+                : $"{request.Name} left before it got the fleet code. It was not added.");
             ShowResults();
         }
         if (_current == request)
@@ -261,7 +262,8 @@ public partial class PairingHostWindow : Window
         var message = _confirming.Count == 1
             ? $"{names} has not confirmed the codes yet. If this window closes now, {names} is not added."
             : $"These PCs have not confirmed the codes yet: {names}. If this window closes now, they are not added.";
-        if (!DialogWindow.Confirm(this, "Close “Add a PC” now?", message, "Close anyway")) e.Cancel = true;
+        // A danger: "Close anyway" must not be what a stray Enter chooses.
+        if (!DialogWindow.Confirm(this, "Close “Add a PC” now?", message, "Close anyway", danger: true)) e.Cancel = true;
     }
 
     private void Deny_Click(object sender, RoutedEventArgs e)
@@ -282,11 +284,11 @@ public partial class PairingHostWindow : Window
     {
         try
         {
-            if (FleetConfig.Current.FleetKey is not { } key) throw new InvalidOperationException("This PC has no pairing code.");
+            if (FleetConfig.Current.FleetKey is not { } key) throw new InvalidOperationException("This PC has no fleet code.");
             Clipboard.SetText(CommandSigner.FormatKey(key));
             CopyCodeButton.Content = "Copied";
             CopyNoteText.Visibility = Visibility.Visible;
         }
-        catch (Exception ex) { DialogWindow.Error(this, "Could not copy the pairing code", ex.Message); }
+        catch (Exception ex) { DialogWindow.Error(this, "Could not copy the fleet code", ex.Message); }
     }
 }

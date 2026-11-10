@@ -120,7 +120,7 @@ public partial class JoinFleetWindow : Window
         var key = CommandSigner.ParseKey(CodeBox.Text);
         if (key == null)
         {
-            DialogWindow.Info(this, "Invalid pairing code", "Paste the full pairing code copied from another PC. It starts with rwk_.");
+            DialogWindow.Info(this, "Invalid fleet code", "Paste the full fleet code copied from another PC. It starts with rwk_.");
             return;
         }
         PairingKey = key;

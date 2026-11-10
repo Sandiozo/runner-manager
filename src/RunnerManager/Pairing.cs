@@ -10,7 +10,7 @@ namespace RunnerManager;
 /// <summary>
 /// Bluetooth-style pairing. A PC already in the fleet "hosts" pairing for a few minutes; a new PC finds it on the
 /// network, both run an ECDH key exchange and show the same 6-digit number, and once the user clicks Allow on the host
-/// the fleet pairing code is sent across encrypted with the exchanged key. The new PC accepts the code only after its
+/// the fleet code is sent across encrypted with the exchanged key. The new PC accepts the code only after its
 /// user has confirmed the number too, and the host adds the new PC only when it hears that. A passive listener learns
 /// nothing, and a man in the middle would show different numbers on the two screens.
 /// </summary>
@@ -70,8 +70,8 @@ public static class Pairing
 
     /// <summary>
     /// What a joiner can do. It sends them as one byte after the random bytes of its nonce: the commitment covers the
-    /// nonce, so a device on the path cannot change or remove them, and a host that does not know them (2.4 to 2.8.2)
-    /// takes the longer nonce as it is. A joiner that sends none is one of those versions.
+    /// nonce, so a device on the path cannot change or remove them, and a host that does not know them (before 2.9)
+    /// takes the longer nonce as it is. A joiner that sends none is from before 2.9 too.
     /// </summary>
     [Flags]
     internal enum JoinerFeatures : byte
@@ -178,7 +178,7 @@ public static class Pairing
     /// <summary>
     /// Connects to a hosting PC, shows the comparison code through <paramref name="showCode"/>, and waits for the
     /// user to allow the join on the host and then for <paramref name="confirm"/>: the user of this PC saying that both
-    /// PCs show the same code. Returns the fleet's pairing code, or this PC's own code when it is managed one way.
+    /// PCs show the same code. Returns the fleet code, or this PC's own code when it is managed one way.
     /// </summary>
     /// <remarks>
     /// Hosts are found by unauthenticated UDP, so the PC that answered may not be the one the user means, and that PC
@@ -237,9 +237,11 @@ public static class Pairing
             hostWaits = false;
             sealedAllow = FleetCrypto.Open(transferKey, payload, AllowContext(decision.Name, decision.Managed));
         }
+        // A PC that is managed one way gets a code of its own, which is not the fleet code.
+        var code = decision.Managed ? "pairing code" : "fleet code";
         var key = sealedAllow ?? FleetCrypto.Open(transferKey, payload, TransferContext)
-                  ?? throw new CryptographicException("Could not decrypt the pairing code.");
-        if (key.Length != 32) throw new CryptographicException("Received an invalid pairing code.");
+                  ?? throw new CryptographicException($"Could not decrypt the {code}.");
+        if (key.Length != 32) throw new CryptographicException($"Received an invalid {code}.");
         var result = new JoinResult(key, sealedAllow != null ? decision.Name : hello.Name,
             FleetNetwork.JoinHostPort(AgentHost(tcp, host), FleetNetwork.AgentPort), decision.Managed);
         try
@@ -325,8 +327,8 @@ public static class Pairing
         /// <summary>The joiner can be allowed one way (2.8 and later). Older PCs only join as fleet members.</summary>
         public bool CanBeManaged { get; init; }
         /// <summary>
-        /// The joiner says when its user has confirmed the codes, and keeps its code only then. An older PC (up to
-        /// 2.8.2) keeps its code as soon as it arrives, and says nothing more.
+        /// The joiner says when its user has confirmed the codes, and keeps its code only then. An older PC (before
+        /// 2.9) keeps its code as soon as it arrives, and says nothing more.
         /// </summary>
         public bool Confirms { get; init; }
         /// <summary>The joiner was sent its code. One that <see cref="Confirms"/> has joined only at <see cref="PairingHost.Joined"/>.</summary>
