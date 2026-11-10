@@ -693,13 +693,16 @@ public class AuditAssistantTests
         var online = Online("BUILD", Runner("a", "octocat/web"));
         var offline = Offline("GPU", Runner("b", "octocat/web"));
 
-        var live = JsonSerializer.SerializeToNode(AssistantTools.DescribeRunner(online, online.Runners[0]), McpServer.ResultJson)!;
+        var reachable = AssistantTools.ReachableNow(new[] { online, offline });
+        Assert.Equal(new[] { online }, reachable);
+
+        var live = JsonSerializer.SerializeToNode(AssistantTools.DescribeRunner(online, online.Runners[0], reachable.Contains(online)), McpServer.ResultJson)!;
         Assert.True(live["pc_online"]!.GetValue<bool>());
         Assert.Equal("idle", live["state"]!.GetValue<string>());
         Assert.Null(live["last_known_state"]);
 
         // The offline PC's last status still says the runner is idle.
-        var stale = JsonSerializer.SerializeToNode(AssistantTools.DescribeRunner(offline, offline.Runners[0]), McpServer.ResultJson)!;
+        var stale = JsonSerializer.SerializeToNode(AssistantTools.DescribeRunner(offline, offline.Runners[0], reachable.Contains(offline)), McpServer.ResultJson)!;
         Assert.False(stale["pc_online"]!.GetValue<bool>());
         Assert.Equal("unknown", stale["state"]!.GetValue<string>());
         Assert.Equal("idle", stale["last_known_state"]!.GetValue<string>());
@@ -713,18 +716,93 @@ public class AuditAssistantTests
         var offline = Offline("GPU", Runner("b", "octocat/web"));
         var onlyOffline = new[] { (offline, offline.Runners[0]) };
         var both = new[] { (online, online.Runners[0]), (offline, offline.Runners[0]) };
+        var reachable = AssistantTools.ReachableNow(new[] { online, offline });
 
-        Assert.Equal("No runner yet. Call create_runner to add one.", AssistantTools.FindNextStep(target, Array.Empty<(MachineInfo, MachineRunnerStatus)>(), null));
-        Assert.StartsWith("Use runs-on: [self-hosted, Windows, X64]", AssistantTools.FindNextStep(target, both, AssistantTools.RunsOn(both)));
-        var next = AssistantTools.FindNextStep(target, onlyOffline, AssistantTools.RunsOn(onlyOffline));
+        Assert.Equal("No runner yet. Call create_runner to add one.", AssistantTools.FindNextStep(target, Array.Empty<(MachineInfo, MachineRunnerStatus)>(), null, reachable));
+        Assert.StartsWith("Use runs-on: [self-hosted, Windows, X64]", AssistantTools.FindNextStep(target, both, AssistantTools.RunsOn(both), reachable));
+        var next = AssistantTools.FindNextStep(target, onlyOffline, AssistantTools.RunsOn(onlyOffline), reachable);
         Assert.Contains("offline now (GPU)", next);
         Assert.Contains("even_if_exists=true", next);
 
         // create_runner refuses with the same picture.
-        Assert.Contains("already has a runner: a on BUILD, b on GPU (offline). Use it", AssistantTools.AlreadyHasRunner(target, both.ToList()).Message);
-        var refused = AssistantTools.AlreadyHasRunner(target, onlyOffline.ToList()).Message;
+        Assert.Contains("already has a runner: a on BUILD, b on GPU (offline). Use it", AssistantTools.AlreadyHasRunner(target, both.ToList(), reachable).Message);
+        var refused = AssistantTools.AlreadyHasRunner(target, onlyOffline.ToList(), reachable).Message;
         Assert.Contains("its PC is offline now: b on GPU (offline)", refused);
         Assert.DoesNotContain("Use it", refused);
+    }
+
+    /// <summary>
+    /// A PC counts as online for 30 seconds after its last report, by the clock. The stuck and waiting checks ask
+    /// GitHub and can take longer than that. The tools must go by what was true when they read the fleet: asked
+    /// again afterwards, every PC looks offline, and find_runner_for_repo would send the assistant to create_runner
+    /// with even_if_exists, which adds a second runner.
+    /// </summary>
+    [Fact]
+    public async Task ReadTools_GoByWhatWasOnlineWhenTheyReadTheFleet_HoweverLongGitHubTakes()
+    {
+        var stale = new List<MachineInfo>();
+
+        // A fleet whose one PC reported 28 seconds ago, and a health read that takes until that is too old.
+        AssistantTools.FleetReads Slow()
+        {
+            MachineInfo? pc = null;
+            return new AssistantTools.FleetReads(
+                () =>
+                {
+                    pc = MachineInfo.FromPayload("BUILD", Status("BUILD", new[] { OrganizationRunner("a", "octocat") }, DateTime.UtcNow - TimeSpan.FromSeconds(28)));
+                    return Task.FromResult(new List<MachineInfo> { pc });
+                },
+                async _ =>
+                {
+                    while (pc!.IsReachable) await Task.Delay(50);
+                    lock (stale) stale.Add(pc);
+                    return new FleetHealth();
+                });
+        }
+
+        static async Task<JsonNode> Run(Func<AssistantCall, AssistantTools.FleetReads, Task<object>> tool, string arguments, AssistantTools.FleetReads reads)
+        {
+            using var document = JsonDocument.Parse(arguments);
+            var call = new AssistantCall(document.RootElement, (_, _) => Task.FromResult(true), _ => { });
+            return JsonSerializer.SerializeToNode(await tool(call, reads), McpServer.ResultJson)!;
+        }
+
+        var listing = Run(AssistantTools.ListRunnersAsync, "{}", Slow());
+        var finding = Run(AssistantTools.FindRunnerAsync, """{"repository":"octocat"}""", Slow());
+        var status = Run(AssistantTools.JobStatusAsync, """{"pc":"BUILD","runner":"a"}""", Slow());
+        var alerting = Run(AssistantTools.RecentAlertsAsync, "{}", Slow());
+        await Task.WhenAll(listing, finding, status, alerting).WaitAsync(TimeSpan.FromSeconds(60));
+        // Every one of them waited until its PC's last report was too old to count.
+        lock (stale) Assert.Equal(4, stale.Count);
+        Assert.All(stale, pc => Assert.False(pc.IsReachable));
+
+        var runner = (await listing)[0]!;
+        Assert.True(runner["pc_online"]!.GetValue<bool>());
+        Assert.Equal("idle", runner["state"]!.GetValue<string>());
+        Assert.Null(runner["last_known_state"]);
+
+        var found = await finding;
+        Assert.Equal(1, found["runners_online"]!.GetValue<int>());
+        Assert.True(found["runners"]![0]!["pc_online"]!.GetValue<bool>());
+        Assert.StartsWith("Use runs-on: [self-hosted, Windows, X64]", found["next_step"]!.GetValue<string>());
+        Assert.DoesNotContain("even_if_exists", found["next_step"]!.GetValue<string>());
+
+        var job = await status;
+        Assert.True(job["pc_online"]!.GetValue<bool>());
+        Assert.Equal("idle", job["state"]!.GetValue<string>());
+        Assert.Null(job["note"]);
+
+        Assert.DoesNotContain("PC offline", (await alerting)["current_problems"]!.ToJsonString());
+
+        // create_runner's refusal goes by the same early answer, so it still points to the runner that is there.
+        var target = new AssistantTools.Target("octocat", true);
+        var early = MachineInfo.FromPayload("BUILD", Status("BUILD", new[] { OrganizationRunner("a", "octocat") }, DateTime.UtcNow - TimeSpan.FromSeconds(28)));
+        var online = AssistantTools.ReachableNow(new[] { early });
+        while (early.IsReachable) await Task.Delay(50);
+        var existing = new List<(MachineInfo, MachineRunnerStatus)> { (early, early.Runners[0]) };
+        Assert.Contains("already has a runner: a on BUILD. Use it", AssistantTools.AlreadyHasRunner(target, existing, online).Message);
+        // Asked only now, the same PC is offline: this is what the tools said before.
+        Assert.Contains("its PC is offline now", AssistantTools.AlreadyHasRunner(target, existing, AssistantTools.ReachableNow(new[] { early })).Message);
     }
 
     [Fact]
@@ -929,14 +1007,26 @@ public class AuditAssistantTests
     private static MachineInfo Offline(string name, params MachineRunnerStatus[] runners)
         => MachineInfo.FromPayload(name, Status(name, runners), problem: "Not reachable at 192.168.1.20:47823");
 
-    private static MachineStatusPayload Status(string name, MachineRunnerStatus[] runners) => new()
+    /// <param name="updatedUtc">When the PC sent this status; now when null.</param>
+    private static MachineStatusPayload Status(string name, MachineRunnerStatus[] runners, DateTime? updatedUtc = null) => new()
     {
         MachineName = name,
         AppVersion = AppUpdater.CurrentVersion,
         AgentProtocolVersion = MachineRelay.ProtocolVersion,
-        UpdatedUtc = DateTime.UtcNow,
+        UpdatedUtc = updatedUtc ?? DateTime.UtcNow,
         FleetAgentRunning = true,
         Runners = runners
+    };
+
+    /// <summary>An idle runner of an organization. Tools find it without asking GitHub for a repository's name.</summary>
+    private static MachineRunnerStatus OrganizationRunner(string name, string organization) => new()
+    {
+        AgentName = name,
+        Scope = $"orgs/{organization}",
+        ServiceName = $"actions.runner.{organization}.{name}",
+        ServiceInstalled = true,
+        IsRunning = true,
+        ActivityText = "Idle"
     };
 
     /// <summary>An idle runner with a Windows service.</summary>

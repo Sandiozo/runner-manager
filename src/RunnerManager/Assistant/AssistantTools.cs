@@ -240,15 +240,35 @@ public static class AssistantTools
 
     // ----- Read tools -----
 
+    /// <summary>The fleet as this PC knows it, and the stuck and waiting checks, which ask GitHub. A test replaces them.</summary>
+    internal sealed record FleetReads(Func<Task<List<MachineInfo>>> Fleet, Func<List<MachineInfo>, Task<FleetHealth>> Health)
+    {
+        public static readonly FleetReads Live = new(() => MachineRelay.ReadFleetAsync(), EvaluateHealthAsync);
+    }
+
+    /// <summary>
+    /// The PCs that can be reached, as of now. <see cref="MachineInfo.IsReachable"/> goes by the clock: a PC counts as
+    /// online for 30 seconds after its last report. So a tool asks once, right after it read the fleet, and uses that
+    /// answer from then on. The reads from GitHub that follow can take longer than 30 seconds, and asked again after
+    /// them every PC would look offline.
+    /// </summary>
+    internal static HashSet<MachineInfo> ReachableNow(IEnumerable<MachineInfo> machines)
+        => machines.Where(m => m.IsReachable).ToHashSet<MachineInfo>(ReferenceEqualityComparer.Instance);
+
+    /// <summary>The PCs that changes can be sent to, as of now. Read once, like <see cref="ReachableNow"/> and for the same reason.</summary>
+    private static HashSet<MachineInfo> ManageableNow(IEnumerable<MachineInfo> machines)
+        => machines.Where(CanManage).ToHashSet<MachineInfo>(ReferenceEqualityComparer.Instance);
+
     private static async Task<object> ListPcsAsync(AssistantCall call)
     {
         var machines = await MachineRelay.ReadFleetAsync();
+        var online = ReachableNow(machines);
         return machines.Select(m => new
         {
             name = m.MachineName,
             this_pc = m.IsLocal,
             managed = m.IsManaged,
-            online = m.IsReachable,
+            online = online.Contains(m),
             problem = m.ConnectionProblem.Length > 0 ? m.ConnectionProblem : null,
             version = m.AppVersion,
             cpu_percent = m.CpuPercent,
@@ -257,59 +277,71 @@ public static class AssistantTools
             disks = m.Disks.Select(d => new { drive = d.Name, free_gb = Math.Round(d.FreeGb), total_gb = Math.Round(d.TotalGb) }),
             runners = m.Runners.Length,
             // Left out for a PC that cannot be reached: what it reported last may no longer be true.
-            runners_running = m.IsReachable ? m.Runners.Count(r => r.IsRunning) : (int?)null,
-            runners_busy = m.IsReachable ? m.Runners.Count(r => r.IsBusy) : (int?)null,
+            runners_running = online.Contains(m) ? m.Runners.Count(r => r.IsRunning) : (int?)null,
+            runners_busy = online.Contains(m) ? m.Runners.Count(r => r.IsBusy) : (int?)null,
             can_manage = CanManage(m)
         }).ToList();
     }
 
-    private static async Task<object> ListRunnersAsync(AssistantCall call)
+    private static Task<object> ListRunnersAsync(AssistantCall call) => ListRunnersAsync(call, FleetReads.Live);
+
+    internal static async Task<object> ListRunnersAsync(AssistantCall call, FleetReads reads)
     {
-        var machines = await MachineRelay.ReadFleetAsync();
+        var machines = await reads.Fleet();
+        var online = ReachableNow(machines);
         if (call.Text("pc") is { } pc) machines = new List<MachineInfo> { FindPc(machines, pc) };
-        var health = await EvaluateHealthAsync(machines);
-        return machines.SelectMany(m => m.Runners.Select(r => DescribeRunner(m, r, health))).ToList();
+        var health = await reads.Health(machines);
+        return machines.SelectMany(m => m.Runners.Select(r => DescribeRunner(m, r, online.Contains(m), health))).ToList();
     }
 
-    private static async Task<object> FindRunnerAsync(AssistantCall call)
+    private static Task<object> FindRunnerAsync(AssistantCall call) => FindRunnerAsync(call, FleetReads.Live);
+
+    internal static async Task<object> FindRunnerAsync(AssistantCall call, FleetReads reads)
     {
         var target = await ResolveTargetAsync(call.RequiredText("repository"));
-        var machines = await MachineRelay.ReadFleetAsync();
+        var machines = await reads.Fleet();
+        var online = ReachableNow(machines);
         var matches = await RunnersForAsync(machines, target);
-        var health = await EvaluateHealthAsync(matches.Select(x => x.Machine).Distinct().ToList());
+        var health = await reads.Health(matches.Select(x => x.Machine).Distinct().ToList());
         (string[] Labels, string Note)? runsOn = matches.Count > 0 ? RunsOn(matches) : null;
         return new
         {
             target = target.Display,
             has_runner = matches.Count > 0,
-            runners_online = matches.Count(x => x.Machine.IsReachable),
-            runners = matches.Select(x => DescribeRunner(x.Machine, x.Runner, health)),
+            runners_online = matches.Count(x => online.Contains(x.Machine)),
+            runners = matches.Select(x => DescribeRunner(x.Machine, x.Runner, online.Contains(x.Machine), health)).ToList(),
             runs_on = runsOn?.Labels,
-            next_step = FindNextStep(target, matches, runsOn)
+            next_step = FindNextStep(target, matches, runsOn, online)
         };
     }
 
     /// <summary>What to do with the answer of find_runner_for_repo. A runner on a PC that cannot be reached is not one to count on.</summary>
-    internal static string FindNextStep(Target target, IReadOnlyCollection<(MachineInfo Machine, MachineRunnerStatus Runner)> matches, (string[] Labels, string Note)? runsOn)
+    /// <param name="online">The PCs that could be reached when the fleet was read (<see cref="ReachableNow"/>).</param>
+    internal static string FindNextStep(Target target, IReadOnlyCollection<(MachineInfo Machine, MachineRunnerStatus Runner)> matches,
+        (string[] Labels, string Note)? runsOn, IReadOnlySet<MachineInfo> online)
     {
         if (runsOn is not { } labels) return "No runner yet. Call create_runner to add one.";
         var use = $"runs-on: [{string.Join(", ", labels.Labels)}]";
-        if (matches.Any(x => x.Machine.IsReachable)) return $"Use {use} in the workflow.{labels.Note}";
+        if (matches.Any(x => online.Contains(x.Machine))) return $"Use {use} in the workflow.{labels.Note}";
         var pcs = string.Join(", ", matches.Select(x => x.Machine.MachineName).Distinct(StringComparer.OrdinalIgnoreCase));
         return $"{(matches.Count == 1 ? "The runner" : "Every runner")} for {target.Display} is on a PC that is offline now ({pcs}), so jobs wait until it is back. " +
                $"Tell the user. With {use} the workflow runs when the PC is online again; " +
                $"to add a runner on a PC that is online, call create_runner with even_if_exists=true.{labels.Note}";
     }
 
-    private static async Task<object> JobStatusAsync(AssistantCall call)
+    private static Task<object> JobStatusAsync(AssistantCall call) => JobStatusAsync(call, FleetReads.Live);
+
+    internal static async Task<object> JobStatusAsync(AssistantCall call, FleetReads reads)
     {
-        var (machine, runner) = await LocateRunnerAsync(call);
-        var health = await EvaluateHealthAsync(new List<MachineInfo> { machine });
+        var machines = await reads.Fleet();
+        var online = ReachableNow(machines);
+        var (machine, runner) = await LocateRunnerAsync(machines, call);
+        var health = await reads.Health(new List<MachineInfo> { machine });
         var problem = ProblemOf(runner, health);
         var queue = QueueOf(runner, health);
         // What an offline PC reported last says nothing about now, and it cannot be asked for output. GitHub may
         // still know a job that the runner took.
-        if (!machine.IsReachable)
+        if (!online.Contains(machine))
             return new
             {
                 notice = UntrustedNotice, pc = machine.MachineName, pc_online = false, runner = runner.TitleText, target = TargetOf(runner),
@@ -410,17 +442,20 @@ public static class AssistantTools
         return new { notice = UntrustedNotice, pc = machine.MachineName, runner = runner.TitleText, target = TargetOf(runner), log = log.Title, text };
     }
 
-    private static async Task<object> RecentAlertsAsync(AssistantCall call)
+    private static Task<object> RecentAlertsAsync(AssistantCall call) => RecentAlertsAsync(call, FleetReads.Live);
+
+    internal static async Task<object> RecentAlertsAsync(AssistantCall call, FleetReads reads)
     {
-        var machines = await MachineRelay.ReadFleetAsync();
-        var health = await EvaluateHealthAsync(machines);
+        var machines = await reads.Fleet();
+        var online = ReachableNow(machines);
+        var health = await reads.Health(machines);
         var hours = call.Number("hours", 24, 1, 168);
         var problems = machines.SelectMany(m => m.Runners.Select(r => (Machine: m, Runner: r)))
             .Select(x => (x.Machine, x.Runner, Health: health.Runners.GetValueOrDefault(JobHealth.Key(x.Runner))))
             .Where(x => x.Health is { IsProblem: true })
             .Select(x => (object)new { pc = x.Machine.MachineName, runner = x.Runner.TitleText, target = TargetOf(x.Runner), problem = x.Health!.Label, detail = Bounded(x.Health.Detail, 500) })
             .Concat(health.Unserved.Select(j => (object)new { repository = j.Repository, problem = "Job waiting for a runner", detail = Bounded(j.Text, 500) }))
-            .Concat(machines.Where(m => !m.IsReachable).Select(m => (object)new { pc = m.MachineName, problem = "PC offline", detail = m.ConnectionProblem.Length > 0 ? m.ConnectionProblem : "Its fleet agent is not reporting." }))
+            .Concat(machines.Where(m => !online.Contains(m)).Select(m => (object)new { pc = m.MachineName, problem = "PC offline", detail = m.ConnectionProblem.Length > 0 ? m.ConnectionProblem : "Its fleet agent is not reporting." }))
             .ToList();
         return new
         {
@@ -476,10 +511,13 @@ public static class AssistantTools
         var target = await ResolveTargetAsync(call.RequiredText("repository"));
         var evenIfExists = call.Flag("even_if_exists");
         var machines = await MachineRelay.ReadFleetAsync();
-        if (!evenIfExists && await RunnersForAsync(machines, target) is { Count: > 0 } existing) throw AlreadyHasRunner(target, existing);
+        // Asked now, before the names below are looked up on GitHub: see ReachableNow.
+        var online = ReachableNow(machines);
+        var manageable = ManageableNow(machines);
+        if (!evenIfExists && await RunnersForAsync(machines, target) is { Count: > 0 } existing) throw AlreadyHasRunner(target, existing, online);
 
-        var machine = call.Text("pc") is { } pc ? FindPc(machines, pc) : PickPc(machines);
-        RequireAgent(machine);
+        var machine = call.Text("pc") is { } pc ? FindPc(machines, pc) : PickPc(machines, manageable.Contains);
+        RequireAgent(machine, manageable.Contains(machine));
         var name = call.Text("name") ?? DefaultRunnerName(target, machine);
         var labels = call.TextList("labels");
         if (RunnerService.RunnerNameProblem(name) is { } nameProblem) throw new AssistantException(nameProblem);
@@ -494,10 +532,12 @@ public static class AssistantTools
 
         // The approval may have waited a while: check again with the fleet as it is now.
         machines = await MachineRelay.ReadFleetAsync();
-        if (!evenIfExists && await RunnersForAsync(machines, target) is { Count: > 0 } added) throw AlreadyHasRunner(target, added);
+        online = ReachableNow(machines);
+        manageable = ManageableNow(machines);
+        if (!evenIfExists && await RunnersForAsync(machines, target) is { Count: > 0 } added) throw AlreadyHasRunner(target, added, online);
         machine = machines.FirstOrDefault(m => m.MachineKey == machine.MachineKey)
                   ?? throw new AssistantException($"{machine.MachineName} is no longer in the fleet. Nothing was changed.");
-        RequireAgent(machine);
+        RequireAgent(machine, manageable.Contains(machine));
         call.CancellationToken.ThrowIfCancellationRequested();
 
         call.Log($"Creating {name} for {target.Display} on {machine.MachineName}. The download takes about 1–3 minutes…");
@@ -712,13 +752,14 @@ public static class AssistantTools
         catch (AssistantException) { return false; }
     }
 
-    internal static AssistantException AlreadyHasRunner(Target target, List<(MachineInfo Machine, MachineRunnerStatus Runner)> existing)
+    /// <param name="online">The PCs that could be reached when the fleet was read (<see cref="ReachableNow"/>).</param>
+    internal static AssistantException AlreadyHasRunner(Target target, List<(MachineInfo Machine, MachineRunnerStatus Runner)> existing, IReadOnlySet<MachineInfo> online)
     {
         var runsOn = RunsOn(existing);
-        var list = string.Join(", ", existing.Select(x => $"{x.Runner.TitleText} on {x.Machine.MachineName}{(x.Machine.IsReachable ? string.Empty : " (offline)")}"));
+        var list = string.Join(", ", existing.Select(x => $"{x.Runner.TitleText} on {x.Machine.MachineName}{(online.Contains(x.Machine) ? string.Empty : " (offline)")}"));
         var use = $"runs-on: [{string.Join(", ", runsOn.Labels)}]";
         // A runner on a PC that cannot be reached takes no jobs now: say so, instead of sending the assistant to it.
-        return new AssistantException(existing.Any(x => x.Machine.IsReachable)
+        return new AssistantException(existing.Any(x => online.Contains(x.Machine))
             ? $"{target.Display} already has a runner: {list}. Use it with {use}, or pass even_if_exists=true to add another.{runsOn.Note}"
             : $"{target.Display} already has a runner, but its PC is offline now: {list}. Jobs with {use} wait until the PC is back. " +
               $"Tell the user, or pass even_if_exists=true to add a runner on a PC that is online.{runsOn.Note}");
@@ -772,10 +813,10 @@ public static class AssistantTools
     /// <summary>The state of a runner on a PC that cannot be reached: what the PC reported last may no longer be true.</summary>
     internal const string UnknownState = "unknown";
 
-    internal static object DescribeRunner(MachineInfo machine, MachineRunnerStatus runner, FleetHealth? health = null)
+    /// <param name="online">Whether the PC could be reached when the fleet was read (<see cref="ReachableNow"/>).</param>
+    internal static object DescribeRunner(MachineInfo machine, MachineRunnerStatus runner, bool online, FleetHealth? health = null)
     {
         var labels = LabelsOf(machine, runner);
-        var online = machine.IsReachable;
         return new
         {
             pc = machine.MachineName,
@@ -897,9 +938,12 @@ public static class AssistantTools
             ? FleetConfig.Current.FleetKey != null && (!machine.IsLocalOnly || machine.LocalAgentOutdated)
             : machine.IsOnline && machine.AgentProtocolVersion >= 9;
 
-    private static void RequireAgent(MachineInfo machine)
+    private static void RequireAgent(MachineInfo machine) => RequireAgent(machine, CanManage(machine));
+
+    /// <param name="canManage">What <see cref="CanManage"/> said when the fleet was read, where slow work lies between.</param>
+    private static void RequireAgent(MachineInfo machine, bool canManage)
     {
-        if (CanManage(machine)) return;
+        if (canManage) return;
         throw new AssistantException(machine.IsLocal
             ? "This PC's fleet agent is not running, so Runner Manager cannot make changes for an assistant. Open Runner Manager, which starts it again."
             : $"{machine.MachineName} cannot be reached or runs an older Runner Manager. {machine.ConnectionProblem}".Trim());
@@ -912,8 +956,9 @@ public static class AssistantTools
     /// The PC for a new runner when the assistant does not name one: online, then the fleet's own PCs before PCs it
     /// manages one way (which usually belong to someone else), then fewest runners, then most free space.
     /// </summary>
-    internal static MachineInfo PickPc(IEnumerable<MachineInfo> machines)
-        => machines.Where(CanManage)
+    /// <param name="canManage">What <see cref="CanManage"/> said when the fleet was read; asked now when null.</param>
+    internal static MachineInfo PickPc(IEnumerable<MachineInfo> machines, Func<MachineInfo, bool>? canManage = null)
+        => machines.Where(canManage ?? CanManage)
                .OrderBy(m => m.IsManaged)
                .ThenBy(m => m.Runners.Length)
                .ThenByDescending(m => m.Disks.FirstOrDefault(d => d.Name.StartsWith("C", StringComparison.OrdinalIgnoreCase))?.FreeGb ?? 0)
