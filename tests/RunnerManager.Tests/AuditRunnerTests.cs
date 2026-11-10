@@ -261,8 +261,9 @@ public class AuditRunnerTests
         var file = Path.Combine(Path.GetTempPath(), $"rm-audit-{Guid.NewGuid():N}.zip");
         try
         {
+            // A byte every 100 ms against a 30 s stall limit: only the overall limit can end it, also on a busy PC.
             var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
-                RunnerService.DownloadFileAsync(url, file, TimeSpan.FromSeconds(1.5), TimeSpan.FromSeconds(1)));
+                RunnerService.DownloadFileAsync(url, file, TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(30)));
             Assert.Contains("did not finish within", error.Message);
         }
         finally

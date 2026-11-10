@@ -1685,8 +1685,11 @@ public static partial class RunnerService
     /// <summary>The architecture label runners on this PC get from GitHub: "ARM64" on ARM64 Windows, otherwise "X64".</summary>
     public static string ArchitectureLabel => IsArm64 ? "ARM64" : "X64";
 
-    /// <summary>The whole runner download may take this long (the package is about 100 MB).</summary>
-    private static readonly TimeSpan DownloadLimit = TimeSpan.FromMinutes(10);
+    /// <summary>
+    /// The whole runner download may take this long. The package is about 104 MB, so a slow but working link (about
+    /// 0.3 Mbit/s) still finishes; a link that stops sending is caught by <see cref="DownloadStallLimit"/>.
+    /// </summary>
+    private static readonly TimeSpan DownloadLimit = TimeSpan.FromMinutes(45);
     /// <summary>The download stops when no data arrives for this long.</summary>
     private static readonly TimeSpan DownloadStallLimit = TimeSpan.FromSeconds(60);
 
