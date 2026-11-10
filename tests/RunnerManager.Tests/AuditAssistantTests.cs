@@ -611,6 +611,54 @@ public class AuditAssistantTests
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => patient.SendAsync(Initialize, cancellationToken: gone.Token)).WaitAsync(TimeSpan.FromSeconds(30));
     }
 
+    [Fact]
+    public async Task SignIn_ThatIsNeverUsed_IsForgottenSoon()
+    {
+        var port = TestPorts.FreeRange(1);
+        var url = $"http://localhost:{port}/mcp";
+        // Long enough for the first request below when other tests keep this PC busy.
+        using var server = new AssistantHttpServer(port, "localhost") { UnusedSignInLifetime = TimeSpan.FromSeconds(1.5) };
+        _ = server.RunAsync();
+        using var http = new HttpClient();
+
+        var used = await SignInByHandAsync(http, url, port);
+        Assert.Equal(HttpStatusCode.OK, (await PostMcpAsync(http, url, used.Token, Ping)).StatusCode);
+        var unused = await SignInByHandAsync(http, url, port);
+        Assert.Equal(HttpStatusCode.OK, unused.Status);
+        await Task.Delay(2200);
+
+        // The one that sent no request is gone. The one that works stays, as before, for half a day without a request.
+        Assert.Equal(HttpStatusCode.Unauthorized, (await PostMcpAsync(http, url, unused.Token, Ping)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await PostMcpAsync(http, url, used.Token, Ping)).StatusCode);
+
+        // A client sends its first request right after it signed in, so the limit does not get in its way.
+        using var link = new AgentLink(url);
+        Assert.NotNull(await link.SendAsync(Initialize));
+    }
+
+    [Fact]
+    public async Task SignIns_ThatAreNeverUsed_AreFew_AndPushOutNoClientThatWorks()
+    {
+        using var server = StartEndpoint(out var url, out var port);
+        using var http = new HttpClient();
+        var working = await SignInByHandAsync(http, url, port);
+        Assert.Equal(HttpStatusCode.OK, (await PostMcpAsync(http, url, working.Token, Ping)).StatusCode);
+
+        // Far more sign-ins than the endpoint keeps, none of them used.
+        var unused = new List<SignIn>();
+        for (var i = 0; i < 70; i++) unused.Add(await SignInByHandAsync(http, url, port));
+        Assert.All(unused, signIn => Assert.Equal(HttpStatusCode.OK, signIn.Status));
+
+        // Only the latest few are kept, and the client that works was not pushed out for them.
+        var kept = 0;
+        foreach (var signIn in unused)
+            if ((await PostMcpAsync(http, url, signIn.Token, Ping)).StatusCode == HttpStatusCode.OK) kept++;
+        Assert.Equal(AssistantHttpServer.MaxUnusedSignIns, kept);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await PostMcpAsync(http, url, unused[0].Token, Ping)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await PostMcpAsync(http, url, unused[^1].Token, Ping)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await PostMcpAsync(http, url, working.Token, Ping)).StatusCode);
+    }
+
     // ----- Sessions -----
 
     [Fact]

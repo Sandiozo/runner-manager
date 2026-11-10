@@ -27,6 +27,11 @@ public sealed class AssistantHttpServer : IDisposable
     public const int MaxRequestBytes = 256 * 1024;
     private const int MaxSessions = 50;
     private const int MaxChallenges = 100;
+    /// <summary>
+    /// How many finished sign-ins may wait for their first request. A client sends that at once, so more than a few
+    /// are sign-ins nobody uses. The oldest of them makes room, not a client that works.
+    /// </summary>
+    internal const int MaxUnusedSignIns = 10;
     /// <summary>The two addresses of the local sign-in. Matched as a whole: under any other path there is no sign-in.</summary>
     private const string ChallengePath = "/mcp/local/challenge";
     private const string SessionPath = "/mcp/local/session";
@@ -68,15 +73,25 @@ public sealed class AssistantHttpServer : IDisposable
     private sealed class LocalClient(byte[] key)
     {
         private long _lastUsedTicks = DateTime.UtcNow.Ticks;
+        private volatile bool _used;
         public byte[] Key { get; } = key;
 
-        /// <summary>Set by every request of the client, which can be several at once.</summary>
+        /// <summary>When the client last sent a request, or signed in when it sent none yet. Several requests can set it at once.</summary>
         public DateTime LastUsedUtc
         {
             get => new(Interlocked.Read(ref _lastUsedTicks), DateTimeKind.Utc);
             set => Interlocked.Exchange(ref _lastUsedTicks, value.Ticks);
         }
+
+        /// <summary>Whether the client sent a request with its token since it signed in.</summary>
+        public bool Used { get => _used; set => _used = value; }
     }
+
+    /// <summary>
+    /// How long a finished sign-in waits for its first request. A client sends that at once; when it comes later
+    /// than this, the client is told to sign in again, which it does by itself. Tests shorten it.
+    /// </summary>
+    internal TimeSpan UnusedSignInLifetime { get; init; } = TimeSpan.FromMinutes(2);
 
     /// <param name="port">Another port, for tests.</param>
     /// <param name="host">"localhost" for tests, which run without administrator rights.</param>
@@ -372,7 +387,10 @@ public sealed class AssistantHttpServer : IDisposable
             var token = LocalSignIn.Token(challenge.Secret, clientSecret, _port, challenge.Nonce, clientNonceBytes, challenge.Sealed, clientSealed);
             var key = LocalSignIn.SessionKey(challenge.Secret, clientSecret, _port, challenge.Nonce, clientNonceBytes, challenge.Sealed, clientSealed);
             CryptographicOperations.ZeroMemory(clientSecret);
-            RemoveIdle(_localTokens);
+            RemoveIdleSignIns();
+            // Sign-ins that were never used make room first, so signing in over and over pushes out none that works.
+            while (_localTokens.Count(e => !e.Value.Used) >= MaxUnusedSignIns && OldestKey(_localTokens.Where(e => !e.Value.Used)) is { } unused)
+                _localTokens.TryRemove(unused, out _);
             while (_localTokens.Count >= MaxSessions && OldestKey(_localTokens) is { } oldest) _localTokens.TryRemove(oldest, out _);
             _localTokens[token] = new LocalClient(key);
             await ReplyAsync(response, 200, new JsonObject { ["agent_proof"] = Convert.ToBase64String(agentProof) });
@@ -428,8 +446,9 @@ public sealed class AssistantHttpServer : IDisposable
         var given = authorization[7..].Trim();
         if (_localTokens.TryGetValue(given, out var client))
         {
-            if (DateTime.UtcNow - client.LastUsedUtc <= IdleLifetime)
+            if (DateTime.UtcNow - client.LastUsedUtc <= LifetimeOf(client))
             {
+                client.Used = true;
                 client.LastUsedUtc = DateTime.UtcNow;
                 local = client;
                 return true;
@@ -441,14 +460,18 @@ public sealed class AssistantHttpServer : IDisposable
         return token.Length > 0 && CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(given), Encoding.UTF8.GetBytes(token));
     }
 
-    private static void RemoveIdle(ConcurrentDictionary<string, LocalClient> entries)
+    /// <summary>How long a sign-in is kept without a request: half a day once it was used, and only briefly before that.</summary>
+    private TimeSpan LifetimeOf(LocalClient client) => client.Used ? IdleLifetime : UnusedSignInLifetime;
+
+    private void RemoveIdleSignIns()
     {
         var now = DateTime.UtcNow;
-        foreach (var old in entries.Where(e => now - e.Value.LastUsedUtc > IdleLifetime).Select(e => e.Key).ToList()) entries.TryRemove(old, out _);
+        foreach (var old in _localTokens.Where(e => now - e.Value.LastUsedUtc > LifetimeOf(e.Value)).Select(e => e.Key).ToList()) _localTokens.TryRemove(old, out _);
     }
 
-    private static string? OldestKey(ConcurrentDictionary<string, LocalClient> entries)
-        => entries.IsEmpty ? null : entries.MinBy(e => e.Value.LastUsedUtc).Key;
+    /// <summary>The token of the sign-in that was used longest ago, or null when there is none.</summary>
+    private static string? OldestKey(IEnumerable<KeyValuePair<string, LocalClient>> entries)
+        => entries.OrderBy(e => e.Value.LastUsedUtc).Select(e => e.Key).FirstOrDefault();
 
     internal static bool IsLocalOrigin(string origin)
         => Uri.TryCreate(origin, UriKind.Absolute, out var uri)
