@@ -21,8 +21,9 @@ namespace RunnerManager;
 /// <para>
 /// The session token is not sent either: both sides work it out from the two secrets. Windows lets another program
 /// listen on a longer address under the agent's (http://127.0.0.1:47830/mcp/local/), which then gets the sign-in
-/// requests and can pass them on to the agent. Such a program learns no secret and so no token, and the requests
-/// that carry the token go to the agent's own address, which it cannot take while the agent listens.
+/// requests. The agent takes a sign-in on its own two addresses only, so that program has no other path to pass one
+/// on to the agent. If it found one, it would still learn no secret and so no token, and the requests that carry
+/// the token go to the agent's own address, which it cannot take while the agent listens.
 /// </para>
 /// <para>
 /// After the sign-in the agent shows on every answer that it has the session key (<see cref="AnswerProof"/>). So a

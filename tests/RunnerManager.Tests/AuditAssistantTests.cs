@@ -133,15 +133,47 @@ public class AuditAssistantTests
     }
 
     /// <summary>
-    /// Windows lets another program listen on a longer address under the agent's, on the same port. It then gets the
-    /// sign-in requests of this user's client and can pass them on to the agent, so both sides see a sign-in that
-    /// works. It must end up with nothing it can use.
+    /// Whoever sees every message of a sign-in that works has still nothing to use: the token is in none of them.
     /// </summary>
     [Fact]
-    public async Task SignIn_PassedOnByAnotherProgram_GivesThatProgramNoSession()
+    public async Task SignIn_ThatSomeoneSawGoBy_GivesThemNoSession()
     {
         using var server = StartEndpoint(out var url, out var port);
         using var http = new HttpClient();
+        var challengeText = await (await http.PostAsync($"{url}/local/challenge", null)).Content.ReadAsStringAsync();
+        var signIn = await SignInByHandAsync(http, url, port, challengeText);
+        Assert.Equal(HttpStatusCode.OK, signIn.Status);
+        Assert.Equal(HttpStatusCode.OK, (await PostMcpAsync(http, url, signIn.Token, Ping)).StatusCode);
+
+        // The challenge, the session request and its answer. No value in them is a token, as text or as the hex form a token has.
+        var values = new[] { challengeText, signIn.Request, signIn.Answer }
+            .SelectMany(message => JsonNode.Parse(message)!.AsObject().Select(p => p.Value!.GetValue<string>())).ToList();
+        Assert.Equal(7, values.Count);
+        foreach (var value in values)
+        {
+            Assert.Equal(HttpStatusCode.Unauthorized, (await PostMcpAsync(http, url, value, Ping)).StatusCode);
+            var hex = "rmai_" + Convert.ToHexString(Convert.FromBase64String(value)).ToLowerInvariant();
+            Assert.Equal(HttpStatusCode.Unauthorized, (await PostMcpAsync(http, url, hex, Ping)).StatusCode);
+        }
+        // Sent a second time, the session request does not sign anyone in.
+        Assert.Equal(HttpStatusCode.Forbidden, (await http.PostAsync($"{url}/local/session", Json(signIn.Request))).StatusCode);
+    }
+
+    /// <summary>
+    /// Windows lets another program listen on a longer address under the agent's, on the same port. It then gets the
+    /// sign-in requests of this user's client. The agent takes a sign-in on its own two addresses only, so that
+    /// program has no other path on which to pass one on to the agent.
+    /// </summary>
+    [Fact]
+    public async Task SignIn_IsTakenOnTheAgentsOwnAddressesOnly_SoItCannotBePassedOn()
+    {
+        using var server = StartEndpoint(out var url, out var port);
+        using var http = new HttpClient();
+        // Any other path that ends like a sign-in address is an ordinary request, which needs a token.
+        foreach (var path in new[] { "passed-on/local/challenge", "passed-on/local/session", "local/challenge/x", "x/mcp/local/session", "local" })
+            Assert.Equal(HttpStatusCode.Unauthorized, (await http.PostAsync($"{url}/{path}", null)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await http.PostAsync($"{url}/local/challenge/", null)).StatusCode);
+
         var seen = new List<string>();
         using var between = new HttpListener();
         between.Prefixes.Add($"http://localhost:{port}/mcp/local/");
@@ -157,11 +189,11 @@ public class AuditAssistantTests
                 {
                     using var reader = new StreamReader(context.Request.InputStream, Encoding.UTF8);
                     var asked = await reader.ReadToEndAsync();
-                    // Under another path the request reaches the agent itself.
+                    // The agent's sign-in addresses lead back here, so it tries the agent under another path.
                     var route = context.Request.Url!.AbsolutePath.Replace("/mcp/local/", "/mcp/passed-on/local/");
                     using var passedOn = await http.PostAsync($"http://localhost:{port}{route}", Json(asked));
                     var answered = await passedOn.Content.ReadAsStringAsync();
-                    lock (seen) { seen.Add(asked); seen.Add(answered); }
+                    lock (seen) seen.Add($"{context.Request.Url.AbsolutePath} {(int)passedOn.StatusCode}");
                     context.Response.StatusCode = (int)passedOn.StatusCode;
                     context.Response.ContentType = "application/json";
                     await context.Response.OutputStream.WriteAsync(Encoding.UTF8.GetBytes(answered));
@@ -171,28 +203,11 @@ public class AuditAssistantTests
             }
         });
 
-        // This user's client signs in through it without noticing, and its session works.
+        // This user's client reaches that program, and the agent signs nobody in through it.
         using var link = new AgentLink(url);
-        var answer = await link.SendAsync(Initialize);
-        Assert.Equal("runner-manager", JsonNode.Parse(answer!)!["result"]!["serverInfo"]!["name"]!.GetValue<string>());
-
-        List<string> messages;
-        lock (seen) messages = seen.ToList();
-        // It saw the whole sign-in: the challenge and its answer, the session request and its answer. Nothing else.
-        Assert.Equal(4, messages.Count);
-        Assert.Contains("client_challenge", messages[2]);
-        Assert.Contains("agent_proof", messages[3]);
-        // No value in any of it is a token, as text or as the hex form a token has.
-        var values = messages.Where(m => m.Length > 0).SelectMany(m => JsonNode.Parse(m)!.AsObject().Select(p => p.Value!.GetValue<string>())).ToList();
-        Assert.Equal(7, values.Count);
-        foreach (var value in values)
-        {
-            Assert.Equal(HttpStatusCode.Unauthorized, (await PostMcpAsync(http, url, value, Ping)).StatusCode);
-            var hex = "rmai_" + Convert.ToHexString(Convert.FromBase64String(value)).ToLowerInvariant();
-            Assert.Equal(HttpStatusCode.Unauthorized, (await PostMcpAsync(http, url, hex, Ping)).StatusCode);
-        }
-        // What it saw does not sign it in a second time either.
-        Assert.Equal(HttpStatusCode.Forbidden, (await http.PostAsync($"{url}/passed-on/local/session", Json(messages[2]))).StatusCode);
+        var refused = await Assert.ThrowsAsync<AgentLinkException>(() => link.SendAsync(Initialize));
+        Assert.True(refused.AgentUnavailable);
+        lock (seen) Assert.Equal(new[] { "/mcp/local/challenge 401" }, seen);
     }
 
     [Fact]

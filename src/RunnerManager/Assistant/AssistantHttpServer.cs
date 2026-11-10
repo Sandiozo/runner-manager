@@ -27,6 +27,9 @@ public sealed class AssistantHttpServer : IDisposable
     public const int MaxRequestBytes = 256 * 1024;
     private const int MaxSessions = 50;
     private const int MaxChallenges = 100;
+    /// <summary>The two addresses of the local sign-in. Matched as a whole: under any other path there is no sign-in.</summary>
+    private const string ChallengePath = "/mcp/local/challenge";
+    private const string SessionPath = "/mcp/local/session";
     private static readonly TimeSpan ChallengeLifetime = TimeSpan.FromSeconds(30);
     /// <summary>Sign-ins and sessions nobody used for this long are forgotten.</summary>
     private static readonly TimeSpan IdleLifetime = TimeSpan.FromHours(12);
@@ -159,8 +162,8 @@ public sealed class AssistantHttpServer : IDisposable
             { await ReplyAsync(response, 403, null); return; }
 
             var path = request.Url?.AbsolutePath.TrimEnd('/') ?? string.Empty;
-            if (path.EndsWith("/local/challenge", StringComparison.OrdinalIgnoreCase)) { await ChallengeAsync(request, response); return; }
-            if (path.EndsWith("/local/session", StringComparison.OrdinalIgnoreCase)) { await LocalSessionAsync(request, response); return; }
+            if (path.Equals(ChallengePath, StringComparison.OrdinalIgnoreCase)) { await ChallengeAsync(request, response); return; }
+            if (path.Equals(SessionPath, StringComparison.OrdinalIgnoreCase)) { await LocalSessionAsync(request, response); return; }
 
             if (!IsAuthorized(request.Headers["Authorization"], out var local))
             {
