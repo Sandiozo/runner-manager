@@ -223,6 +223,56 @@ public class AuditDialogTests
         finally { if (Directory.Exists(root)) Directory.Delete(root, recursive: true); }
     }
 
+    // ----- Add runner: the PC picker -----
+
+    private static MachineInfo Pc(string name, bool online = true, int protocol = 9) => new()
+    {
+        MachineKey = MachineRelay.Sanitize(name), MachineName = name, AgentProtocolVersion = protocol,
+        FleetAgentRunning = online, UpdatedUtc = DateTime.UtcNow
+    };
+
+    [Fact]
+    public void PcPicker_OffersThisPcFirst_ThenOnlinePcsThatCanCreateARunner()
+    {
+        // This PC is offered even when its own fleet agent is not running: the runner is created here directly.
+        var pcs = new[]
+        {
+            Pc("ZETA"), Pc("OFFLINE", online: false), Pc("OLD-AGENT", protocol: 8), Pc(Environment.MachineName, online: false, protocol: 0),
+            Pc("alpha"), Pc("ZETA"),
+            MachineInfo.Placeholder("ADDR_10_0_0_9", "10.0.0.9", DateTime.MinValue, "10.0.0.9", "Not reachable at 10.0.0.9:47821")
+        };
+        Assert.Equal(new[] { Environment.MachineName, "alpha", "ZETA" }, AddRunnerForm.TargetPcs(pcs).Select(m => m.MachineName));
+        Assert.Empty(AddRunnerForm.TargetPcs(Array.Empty<MachineInfo>()));
+    }
+
+    [Fact]
+    public void PcPicker_MarksThisPc_InTheLabelAndTheAccessibleName()
+    {
+        Assert.Equal(($"{Environment.MachineName} (this PC)", $"{Environment.MachineName}, this PC"), AddRunnerForm.PcLabel(Pc(Environment.MachineName)));
+        Assert.Equal(("OFFICE", "OFFICE"), AddRunnerForm.PcLabel(Pc("OFFICE")));
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("  ")]
+    [InlineData(@"D:\Runners\app")]
+    [InlineData(@"Z:\Runners")]
+    public void FolderForAnotherPc_EmptyOrAFullLocalPath_IsAccepted(string path)
+        => Assert.Null(AddRunnerForm.RemoteFolderProblem(path, "OFFICE"));
+
+    [Theory]
+    [InlineData("Runners")]
+    [InlineData(@"\\server\share\runner")]
+    [InlineData(@"\\?\UNC\server\share")]
+    [InlineData(@"D:\Runners\100%")]
+    [InlineData("D:\\Runners\\\"app\"")]
+    public void FolderForAnotherPc_ThatCannotWork_IsRefused(string path)
+        => Assert.NotNull(AddRunnerForm.RemoteFolderProblem(path, "OFFICE"));
+
+    [Fact]
+    public void FolderForAnotherPc_NetworkFolder_NamesThatPc()
+        => Assert.Contains("on a drive in OFFICE", AddRunnerForm.RemoteFolderProblem(@"\\server\share", "OFFICE"));
+
     [Fact]
     public void Labels_AreSplitTrimmedAndDeduplicated()
         => Assert.Equal(new[] { "gpu", "big" }, AddRunnerForm.ParseLabels(" gpu, ,big,GPU "));

@@ -22,9 +22,18 @@
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
         <StackPanel Margin="28,24,28,24">
-            <TextBlock Text="Add a self-hosted runner" FontSize="20" FontWeight="SemiBold"/>
-            <TextBlock Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,6,0,20"
+            <TextBlock x:Name="HeadingText" Text="Add a self-hosted runner" FontSize="20" FontWeight="SemiBold" TextWrapping="Wrap"/>
+            <TextBlock x:Name="DescriptionText" Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,6,0,20"
                        Text="Downloads the latest GitHub Actions runner, verifies its checksum, registers it with GitHub and installs it as a Windows service on this PC."/>
+
+            <!-- Shown when the runner can be added on more than one PC. -->
+            <StackPanel x:Name="PcPanel" Visibility="Collapsed" Margin="0,0,0,16">
+                <TextBlock Text="PC" Style="{StaticResource FieldLabel}"/>
+                <Border Style="{StaticResource SegmentHost}">
+                    <WrapPanel x:Name="PcChoices" AutomationProperties.Name="PC"/>
+                </Border>
+                <TextBlock x:Name="PcHint" Style="{StaticResource FieldHint}" Visibility="Collapsed"/>
+            </StackPanel>
 
             <TextBlock Text="Repository or organization" Style="{StaticResource FieldLabel}"/>
             <TextBox x:Name="RepositoryUrlBox" Tag="https://github.com/owner/repository" TextChanged="RepositoryUrlBox_TextChanged"
@@ -57,7 +66,7 @@
                     <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
                 <TextBox x:Name="InstallPathBox" AutomationProperties.Name="Install folder"/>
-                <Button Grid.Column="1" Content="Browse…" Margin="8,0,0,0" Click="Browse_Click" AutomationProperties.Name="Browse for the install folder"/>
+                <Button x:Name="BrowseButton" Grid.Column="1" Content="Browse…" Margin="8,0,0,0" Click="Browse_Click" AutomationProperties.Name="Browse for the install folder"/>
             </Grid>
             <TextBlock x:Name="InstallHint" Style="{StaticResource FieldHint}" Text="The folder must be empty or new."/>
 

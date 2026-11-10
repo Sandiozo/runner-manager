@@ -108,6 +108,35 @@ internal static class AddRunnerForm
         return null;
     }
 
+    /// <summary>
+    /// Null when the folder can be sent to another PC: empty (that PC's folder for new runners) or a full path that is
+    /// not a network folder. Whether it exists or has files is checked on that PC, and so are its mapped drives.
+    /// </summary>
+    internal static string? RemoteFolderProblem(string path, string pcName)
+    {
+        var folder = path.Trim();
+        if (folder.Length == 0) return null;
+        if (!Path.IsPathFullyQualified(folder)) return @"Choose a full folder path, such as D:\Runners, or leave it empty.";
+        if (folder.IndexOfAny(new[] { '"', '%', '!' }) >= 0 || folder.Any(char.IsControl)) return "The runner folder path cannot contain the characters \", % or !.";
+        return RunnerService.NetworkFolderProblem(folder, _ => false) != null
+            ? $"Choose a folder on a drive in {pcName}. Runners run as a Windows service, and services cannot use network folders."
+            : null;
+    }
+
+    /// <summary>
+    /// The PCs a runner can be added on: this PC, and online PCs whose fleet agent can create one (the same PCs a
+    /// runner can be moved to). This PC comes first.
+    /// </summary>
+    internal static List<MachineInfo> TargetPcs(IEnumerable<MachineInfo> pcs)
+        => pcs.Where(m => m.SupportsFleetTools)
+            .GroupBy(m => m.MachineKey).Select(g => g.First())
+            .OrderByDescending(m => m.IsLocal).ThenBy(m => m.MachineName, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+    /// <summary>The PC as the picker shows it, and as screen readers read it.</summary>
+    internal static (string Label, string AccessibleName) PcLabel(MachineInfo pc)
+        => pc.IsLocal ? ($"{pc.MachineName} (this PC)", $"{pc.MachineName}, this PC") : (pc.MachineName, pc.MachineName);
+
     /// <summary>A folder in <paramref name="root"/> named after <paramref name="name"/> that is new or empty.</summary>
     internal static string FreeFolder(string root, string name)
     {

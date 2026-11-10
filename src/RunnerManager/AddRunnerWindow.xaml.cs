@@ -1,5 +1,6 @@
 using System.IO;
 using System.Windows;
+using System.Windows.Automation;
 using System.Windows.Controls;
 using Microsoft.Win32;
 
@@ -10,25 +11,52 @@ public partial class AddRunnerWindow : Window
     private const string DefaultFolderName = "NewRunner";
     private const string FolderRule = "The folder must be empty or new.";
     private readonly List<(string Scope, string Name)> _existing;
-    private readonly string _alwaysAdded = $"The labels self-hosted, Windows and {RunnerService.ArchitectureLabel} are always added.";
+    private readonly Func<MachineInfo, bool> _canChooseFolder;
+    private string _alwaysAdded = string.Empty;
     private AddRunnerForm.RepositoryCheck _repository = AddRunnerForm.CheckRepository(string.Empty);
+    /// <summary>The PC to add the runner on; null is this PC, when no PCs were passed.</summary>
+    private MachineInfo? _target;
     private bool _pathEdited;
     private bool _nameEdited;
+    /// <summary>The folder last typed or chosen, kept while a PC without a folder box is selected.</summary>
+    private string _typedPath = string.Empty;
     public RunnerSetup? Setup { get; private set; }
+
+    /// <summary>
+    /// The PC to add the runner on, from the PCs passed in. Null or this PC: create it here with
+    /// <see cref="RunnerService.CreateRunnerAsync"/>. Another PC: send <see cref="Setup"/> to its fleet agent.
+    /// </summary>
+    public MachineInfo? TargetPc { get; private set; }
 
     /// <param name="existingRunners">
     /// Runners already registered, on any PC, so a name that is taken for the repository is caught here instead of
-    /// after the download.
+    /// after the download. Null: the runners of <paramref name="pcs"/>.
     /// </param>
-    public AddRunnerWindow(IEnumerable<MachineRunnerStatus>? existingRunners = null)
+    /// <param name="pcs">
+    /// The fleet's PCs. Those a runner can be added on are offered (this PC, and online PCs with a fleet agent that can
+    /// create runners). With none or one, the window works on this PC only.
+    /// </param>
+    /// <param name="selectedPc">The PC to select first, such as the one selected on the dashboard. Default: this PC.</param>
+    /// <param name="canChooseFolder">
+    /// Whether a folder typed for another PC reaches that PC. Null: no PC's does, so for another PC the folder box stays
+    /// empty and the runner goes in that PC's folder for new runners.
+    /// </param>
+    public AddRunnerWindow(IEnumerable<MachineRunnerStatus>? existingRunners = null, IEnumerable<MachineInfo>? pcs = null,
+        MachineInfo? selectedPc = null, Func<MachineInfo, bool>? canChooseFolder = null)
     {
         InitializeComponent();
         WindowTheme.Apply(this);
-        _existing = (existingRunners ?? Enumerable.Empty<MachineRunnerStatus>()).Select(r => (r.Scope, r.AgentName)).ToList();
-        LabelsHint.Text = _alwaysAdded;
-        RunnerNameBox.Text = Environment.MachineName;
-        InstallPathBox.Text = FreeFolder(DefaultFolderName);
-        // Typing in a box keeps what was typed; until then, the name and folder follow the repository.
+        var fleet = pcs?.ToList() ?? new List<MachineInfo>();
+        _existing = (existingRunners ?? fleet.SelectMany(m => m.Runners ?? Array.Empty<MachineRunnerStatus>()))
+            .Select(r => (r.Scope, r.AgentName)).ToList();
+        _canChooseFolder = canChooseFolder ?? (_ => false);
+
+        var targets = AddRunnerForm.TargetPcs(fleet);
+        _target = targets.FirstOrDefault(m => selectedPc != null && m.MachineKey == selectedPc.MachineKey)
+                  ?? targets.FirstOrDefault(m => m.IsLocal) ?? targets.FirstOrDefault();
+        if (targets.Count > 1) ShowPcChoices(targets, selectedPc);
+
+        // Typing in a box keeps what was typed; until then, the name and folder follow the repository and the PC.
         RunnerNameBox.TextChanged += (_, _) =>
         {
             if (RunnerNameBox.IsKeyboardFocused) _nameEdited = true;
@@ -37,12 +65,65 @@ public partial class AddRunnerWindow : Window
         InstallPathBox.TextChanged += (_, _) =>
         {
             if (InstallPathBox.IsKeyboardFocused) _pathEdited = true;
+            if (_pathEdited && InstallPathBox.IsEnabled) _typedPath = InstallPathBox.Text;
             Validate();
         };
         LabelsBox.TextChanged += (_, _) => Validate();
         Loaded += (_, _) => RepositoryUrlBox.Focus();
+        ShowTarget();
+    }
+
+    private bool IsRemote => _target is { IsLocal: false };
+    private string TargetName => IsRemote ? _target!.MachineName : Environment.MachineName;
+    /// <summary>Whether the folder box is used: always on this PC, on another PC only when the folder reaches it.</summary>
+    private bool UsesFolderBox => !IsRemote || _canChooseFolder(_target!);
+
+    private void ShowPcChoices(List<MachineInfo> targets, MachineInfo? selectedPc)
+    {
+        foreach (var pc in targets)
+        {
+            var (label, accessibleName) = AddRunnerForm.PcLabel(pc);
+            var choice = new RadioButton { Content = label, GroupName = "Pc", Style = (Style)FindResource("Segment"), IsChecked = pc == _target };
+            AutomationProperties.SetName(choice, accessibleName);
+            choice.Checked += (_, _) =>
+            {
+                if (_target == pc) return;
+                _target = pc;
+                ShowTarget();
+            };
+            PcChoices.Children.Add(choice);
+        }
+        PcPanel.Visibility = Visibility.Visible;
+        // The PC selected on the dashboard is missing when it is offline or its fleet agent cannot create runners.
+        if (selectedPc is { IsLocal: false } && targets.All(m => m.MachineKey != selectedPc.MachineKey))
+        {
+            PcHint.Text = $"{selectedPc.MachineName} is not in the list: it is offline, or its Runner Manager is too old to add runners from here.";
+            PcHint.Visibility = Visibility.Visible;
+        }
+    }
+
+    /// <summary>Names the chosen PC in the title and texts, and sets the default name and folder for it.</summary>
+    private void ShowTarget()
+    {
+        var remote = IsRemote;
+        Title = remote ? $"Add runner on {TargetName}" : "Add runner";
+        HeadingText.Text = remote ? $"Add a self-hosted runner on {TargetName}" : "Add a self-hosted runner";
+        DescriptionText.Text = "Downloads the latest GitHub Actions runner, verifies its checksum, registers it with GitHub and installs it " +
+                               $"as a Windows service on {(remote ? TargetName : "this PC")}.";
+        // Another PC may have another processor.
+        _alwaysAdded = remote
+            ? "The labels self-hosted, Windows and X64 or ARM64 are always added."
+            : $"The labels self-hosted, Windows and {RunnerService.ArchitectureLabel} are always added.";
+        BrowseButton.Visibility = remote ? Visibility.Collapsed : Visibility.Visible;
+
+        // Disabled first, so emptying the box for a PC without one does not replace the typed folder.
+        InstallPathBox.IsEnabled = UsesFolderBox;
+        InstallPathBox.Text = !UsesFolderBox ? string.Empty : _pathEdited ? _typedPath : remote ? string.Empty : DefaultLocalFolder();
+        if (!_nameEdited) RunnerNameBox.Text = AddRunnerForm.DefaultRunnerName(TargetName, _repository, IsTaken);
         Validate();
     }
+
+    private string DefaultLocalFolder() => _repository.IsValid ? SuggestFolder(_repository.Url) : FreeFolder(DefaultFolderName);
 
     private void RepositoryUrlBox_TextChanged(object sender, TextChangedEventArgs e)
     {
@@ -58,8 +139,9 @@ public partial class AddRunnerWindow : Window
         CheckWorkflowsToggle.IsEnabled = repositoryRunner;
         if (!repositoryRunner) CheckWorkflowsToggle.IsChecked = false;
 
-        if (!_nameEdited) RunnerNameBox.Text = AddRunnerForm.DefaultRunnerName(Environment.MachineName, _repository, IsTaken);
-        if (!_pathEdited && _repository.IsValid) InstallPathBox.Text = SuggestFolder(_repository.Url);
+        if (!_nameEdited) RunnerNameBox.Text = AddRunnerForm.DefaultRunnerName(TargetName, _repository, IsTaken);
+        // Another PC picks a free folder in its own folder for new runners.
+        if (!_pathEdited && !IsRemote && _repository.IsValid) InstallPathBox.Text = SuggestFolder(_repository.Url);
         Validate();
     }
 
@@ -84,6 +166,7 @@ public partial class AddRunnerWindow : Window
     /// <summary>Shows the problem of each field next to it, and enables Create only when there is none.</summary>
     private bool Validate()
     {
+        // GitHub names are unique for a repository or organization, so a name used on any PC is taken.
         var nameProblem = AddRunnerForm.NameProblem(RunnerNameBox.Text, _repository.Scope, _existing);
         NameHint.Text = nameProblem ?? string.Empty;
         NameHint.Foreground = Palette.Warning;
@@ -93,8 +176,14 @@ public partial class AddRunnerWindow : Window
         LabelsHint.Text = labelsProblem ?? _alwaysAdded;
         LabelsHint.Foreground = labelsProblem != null ? Palette.Warning : Palette.TextMuted;
 
-        var folderProblem = AddRunnerForm.FolderProblem(InstallPathBox.Text);
-        InstallHint.Text = folderProblem ?? FolderRule;
+        // Another PC's disk cannot be read from here: only the path itself is checked, and that PC checks the rest.
+        var folderProblem = !IsRemote ? AddRunnerForm.FolderProblem(InstallPathBox.Text)
+            : UsesFolderBox ? AddRunnerForm.RemoteFolderProblem(InstallPathBox.Text, TargetName)
+            : null;
+        InstallHint.Text = folderProblem
+                           ?? (!IsRemote ? FolderRule
+                               : UsesFolderBox ? $"Leave empty to use {TargetName}'s folder for new runners. {FolderRule}"
+                               : $"The runner is installed in {TargetName}'s folder for new runners.");
         InstallHint.Foreground = folderProblem != null ? Palette.Warning : Palette.TextMuted;
 
         var valid = _repository.IsValid && nameProblem == null && labelsProblem == null && folderProblem == null;
@@ -123,9 +212,11 @@ public partial class AddRunnerWindow : Window
             RepositoryUrl = _repository.Url,
             CheckWorkflows = CheckWorkflowsToggle.IsChecked == true,
             RunnerName = RunnerNameBox.Text.Trim(),
-            InstallPath = InstallPathBox.Text.Trim(),
+            // Empty for another PC: its folder for new runners.
+            InstallPath = UsesFolderBox ? InstallPathBox.Text.Trim() : string.Empty,
             Labels = AddRunnerForm.ParseLabels(LabelsBox.Text)
         };
+        TargetPc = _target;
         DialogResult = true;
     }
 
