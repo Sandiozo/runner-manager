@@ -643,6 +643,50 @@ public class AgentFileTests
     }
 }
 
+[Collection(FleetSettingsCollection.Name)]
+public class ReadFleetThreadTests
+{
+    /// <summary>Stands in for the dashboard's UI thread: counts the work sent back to it.</summary>
+    private sealed class CountingContext : SynchronizationContext
+    {
+        public int Posts;
+
+        public override void Post(SendOrPostCallback d, object? state)
+        {
+            Interlocked.Increment(ref Posts);
+            ThreadPool.QueueUserWorkItem(_ => d(state));
+        }
+
+        public override void Send(SendOrPostCallback d, object? state)
+        {
+            Interlocked.Increment(ref Posts);
+            d(state);
+        }
+    }
+
+    [Fact]
+    public async Task ReadingTheFleet_DoesNotRunOnTheCallersThread()
+    {
+        await AuditFleetConfig.WithConfigAsync(async () =>
+        {
+            using var agent = new TestAgent("POOLPC");
+            FleetConfig.SetFleetKey(agent.Key);
+            FleetConfig.Update(c => c.KnownPeers.Add(new PeerRecord { Name = "POOLPC", Address = agent.Address, LastSeenUtc = DateTime.UtcNow }));
+            var caller = new CountingContext();
+            var previous = SynchronizationContext.Current;
+            Task<List<MachineInfo>> read;
+            SynchronizationContext.SetSynchronizationContext(caller);
+            try { read = MachineRelay.ReadFleetAsync(); }
+            finally { SynchronizationContext.SetSynchronizationContext(previous); }
+
+            var machines = await read;
+
+            Assert.Contains(machines, m => m.MachineName == "POOLPC");
+            Assert.Equal(0, caller.Posts);
+        });
+    }
+}
+
 internal static class AuditFleetConfig
 {
     private static readonly string ConfigPath = Path.Combine(FleetConfig.StateDir, "fleet.json");

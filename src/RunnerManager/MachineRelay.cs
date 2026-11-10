@@ -56,7 +56,13 @@ public static class MachineRelay
     /// This PC plus every paired PC: found by broadcast on the local network, remembered addresses, or addresses
     /// added in Settings (e.g. Tailscale names). All traffic goes directly between the PCs, encrypted with the pairing code.
     /// </summary>
-    public static async Task<List<MachineInfo>> ReadFleetAsync(bool forceDiscovery = false)
+    /// <remarks>
+    /// Runs on the thread pool, not on the caller's thread: decrypting and reading the answers and saving fleet.json
+    /// (which can wait for the agent's write) would otherwise run on the dashboard's UI thread and make it stutter.
+    /// </remarks>
+    public static Task<List<MachineInfo>> ReadFleetAsync(bool forceDiscovery = false) => Task.Run(() => ReadFleetOnPoolAsync(forceDiscovery));
+
+    private static async Task<List<MachineInfo>> ReadFleetOnPoolAsync(bool forceDiscovery)
     {
         var machines = new List<MachineInfo> { await ReadThisPcAsync() };
         var config = FleetConfig.Current;
