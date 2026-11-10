@@ -403,7 +403,7 @@ public static partial class RunnerService
     /// registration (--replace): the old copy cannot connect to GitHub until it is registered again.
     /// </summary>
     public const string ReplacedRegistrationNote = "The runner's registration on GitHub was already replaced, so the old copy can no " +
-        "longer connect to GitHub. To keep the runner on the old PC, edit the old copy and save it to register it again, or move the runner again.";
+        "longer connect to GitHub. To fix this, move the runner again, or edit the old copy and change its name or labels.";
 
     public static async Task RepairRunnerAsync(RunnerInfo runner, Action<string> log)
     {
