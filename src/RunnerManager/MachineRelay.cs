@@ -1207,7 +1207,7 @@ public static class MachineRelay
     /// </summary>
     public static async Task<FleetCodeChange> ChangeFleetCodeAsync(IReadOnlyList<MachineInfo> keep, IReadOnlyList<MachineInfo> leaveOut, Action<string> log)
     {
-        var oldKey = FleetConfig.Current.FleetKey ?? throw new InvalidOperationException("This PC has no pairing code.");
+        var oldKey = FleetConfig.Current.FleetKey ?? throw new InvalidOperationException("This PC has no fleet code.");
         var newKey = CommandSigner.NewKey();
         var prepared = new List<MachineInfo>();
         var failed = new List<string>();

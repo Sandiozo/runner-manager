@@ -235,7 +235,7 @@ public static class FleetNetwork
         TimeSpan? timeout = null, CancellationToken cancellationToken = default, byte[]? pairingKey = null)
     {
         pairingKey ??= FleetConfig.Current.FleetKey
-            ?? throw new InvalidOperationException("This PC has no pairing code. Set one up in Settings → Fleet.");
+            ?? throw new InvalidOperationException("This PC has no fleet code. Set one up in Settings → Fleet.");
         var transportKey = KeysFor(pairingKey).Transport;
         var time = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         var body = FleetCrypto.Seal(transportKey, JsonSerializer.SerializeToUtf8Bytes(request),
@@ -257,7 +257,7 @@ public static class FleetNetwork
             if (response.StatusCode == HttpStatusCode.Forbidden)
                 throw new PairingMismatchException(RefusalMessage(reason, targetMachineKey), reason);
             if (response.StatusCode == HttpStatusCode.ServiceUnavailable)
-                throw new PairingMismatchException("The fleet agent on that PC has no pairing code.", reason);
+                throw new PairingMismatchException("The fleet agent on that PC has no fleet code.", reason);
             if (reason.Length > MaxRefusalLength) reason = reason[..MaxRefusalLength];
             throw new InvalidOperationException($"The fleet agent returned HTTP {(int)response.StatusCode}: {reason}");
         }
@@ -266,7 +266,7 @@ public static class FleetNetwork
         var bytes = await ReadLimitedAsync(await response.Content.ReadAsStreamAsync(cts.Token), MaxResponseBytes, truncate: false, cts.Token)
                     ?? throw new InvalidDataException("The fleet agent's answer is too large.");
         var plain = FleetCrypto.Open(transportKey, bytes, FleetCrypto.ResponseContext(FleetCrypto.NonceOf(body)))
-            ?? throw new PairingMismatchException("Could not verify the response with this PC's pairing code.");
+            ?? throw new PairingMismatchException("Could not verify the response with the code the request was sent with.");
         var result = JsonSerializer.Deserialize<FleetResponse>(plain, Json) ?? throw new InvalidOperationException("The fleet agent returned an empty response.");
         if (!result.Ok) throw new InvalidOperationException(result.Error);
         return result;
@@ -279,7 +279,7 @@ public static class FleetNetwork
     internal static string RefusalMessage(string reason)
     {
         if (reason.Length == 0 || reason.Equals("denied", StringComparison.OrdinalIgnoreCase))
-            return "The pairing code does not match. Use the same pairing code on every PC.";
+            return "The fleet code does not match. Use the same fleet code on every PC.";
         if (reason.Contains("clock", StringComparison.OrdinalIgnoreCase))
             return ClockMessage(reason);
         if (reason.Length > MaxRefusalLength) reason = reason[..MaxRefusalLength];
@@ -763,7 +763,9 @@ public sealed class AgentServer : IDisposable
             if (pending != null)
             {
                 _keys.UsePending(pending);
-                MachineRelay.AppendAgentLog("Switched to the new pairing code. The old one no longer works.");
+                // A managed PC's code is its own, not the fleet code.
+                MachineRelay.AppendAgentLog(_keys.IsManaged ? "Switched to the new pairing code. The old one no longer works."
+                    : "Switched to the new fleet code. The old one no longer works.");
             }
 
             // "*" is only accepted for status requests (used to identify a PC added by address).
@@ -864,7 +866,8 @@ public sealed class AgentServer : IDisposable
                 var newKey = FleetCrypto.Open(FleetCrypto.RekeyKey(shared), Convert.FromBase64String(request.NewKey), FleetCrypto.RekeyContext);
                 if (newKey is not { Length: 32 }) return new FleetResponse { Ok = false, Error = "Could not read the new fleet code." };
                 _keys.SetPending(newKey);
-                MachineRelay.AppendAgentLog($"Received a new pairing code{(request.From.Length > 0 ? $" from {request.From}" : "")}. It is used from the first request that comes with it.");
+                var from = request.From.Length > 0 ? $" from {request.From}" : "";
+                MachineRelay.AppendAgentLog($"Received a new {(_keys.IsManaged ? "pairing" : "fleet")} code{from}. It is used from the first request that comes with it.");
                 return new FleetResponse { Ok = true, KeyId = CommandSigner.KeyId(newKey) };
             }
         }
