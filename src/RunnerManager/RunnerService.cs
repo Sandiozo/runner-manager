@@ -487,8 +487,7 @@ public static partial class RunnerService
                 log("The runner took a job right after it was registered again, so it keeps running. Stop it when the job is done.");
                 return;
             }
-            // Marked first, so auto-recovery doesn't start it again.
-            MarkStopped(updated.Name, true);
+            // No mark is added: a runner that stopped without one (after a crash) stays under auto-recovery.
             log("Stopping the runner again, as it was stopped before…");
             await ControlServiceAsync(updated.Name, "Stop");
         }
