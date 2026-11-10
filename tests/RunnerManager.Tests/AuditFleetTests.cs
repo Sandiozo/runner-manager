@@ -599,6 +599,50 @@ public class ListenerRestartTests
     }
 }
 
+public class AgentFileTests
+{
+    [Fact]
+    public void AStateFile_IsReplacedWhole_AndNoTemporaryFileIsLeft()
+    {
+        var folder = Directory.CreateTempSubdirectory("rm-atomic-").FullName;
+        try
+        {
+            var path = Path.Combine(folder, "agent-state.json");
+            File.WriteAllText(path, "{\"old\":true}");
+
+            MachineRelay.WriteAtomically(path, "{\"processed\":[\"a\"]}");
+
+            Assert.Equal("{\"processed\":[\"a\"]}", File.ReadAllText(path));
+            Assert.Equal(new[] { path }, Directory.GetFiles(folder));
+        }
+        finally { Directory.Delete(folder, recursive: true); }
+    }
+
+    [Fact]
+    public async Task ALogLine_IsKept_WhenTheOtherProcessIsWritingTheLog()
+    {
+        var line = $"Log line {Guid.NewGuid():N}";
+        Directory.CreateDirectory(FleetConfig.StateDir);
+        Task append;
+        // As the other process does while it appends: the log is open for writing for a moment.
+        using (new FileStream(MachineRelay.AgentLogPath, FileMode.Append, FileAccess.Write, FileShare.Read))
+        {
+            append = Task.Run(() => MachineRelay.AppendAgentLog(line));
+            await Task.Delay(40);
+        }
+        await append;
+
+        // Another test's line may have rotated the log since.
+        var text = string.Empty;
+        foreach (var path in new[] { MachineRelay.AgentLogPath, MachineRelay.AgentLogPath + ".1" }.Where(File.Exists))
+        {
+            using var reader = new StreamReader(new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete));
+            text += await reader.ReadToEndAsync();
+        }
+        Assert.Contains(line, text);
+    }
+}
+
 internal static class AuditFleetConfig
 {
     private static readonly string ConfigPath = Path.Combine(FleetConfig.StateDir, "fleet.json");

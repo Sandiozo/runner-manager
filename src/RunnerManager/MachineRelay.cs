@@ -1533,7 +1533,7 @@ public static class MachineRelay
     private static void SaveAgentState(AgentState state)
     {
         Directory.CreateDirectory(FleetConfig.StateDir);
-        File.WriteAllText(AgentStatePath, JsonSerializer.Serialize(new
+        WriteAtomically(AgentStatePath, JsonSerializer.Serialize(new
         {
             lastCommandId = state.LastCommandId,
             processed = state.Recent,
@@ -1541,17 +1541,61 @@ public static class MachineRelay
         }));
     }
 
+    /// <summary>
+    /// Writes a file so a reader finds the old text or the new one, never a part: also after a crash or power cut while
+    /// writing. A broken agent-state.json would make the agent forget which commands it ran, and run a resent one twice.
+    /// </summary>
+    internal static void WriteAtomically(string path, string text)
+    {
+        var temp = $"{path}.{Environment.ProcessId}.tmp";
+        for (var attempt = 0; ; attempt++)
+        {
+            try
+            {
+                using (var stream = new FileStream(temp, FileMode.Create, FileAccess.Write, FileShare.None))
+                {
+                    stream.Write(Encoding.UTF8.GetBytes(text));
+                    stream.Flush(flushToDisk: true);
+                }
+                File.Move(temp, path, overwrite: true);
+                return;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException && attempt < 5) { Thread.Sleep(100); }
+            catch
+            {
+                try { File.Delete(temp); } catch { }
+                throw;
+            }
+        }
+    }
+
+    private static readonly object AgentLogGate = new();
+
     public static void AppendAgentLog(string message)
     {
-        try
+        var line = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss}  {message}{Environment.NewLine}";
+        lock (AgentLogGate)
         {
-            Directory.CreateDirectory(FleetConfig.StateDir);
-            var log = new FileInfo(AgentLogPath);
-            if (log.Exists && log.Length > MaxAgentLogBytes)
-                File.Move(AgentLogPath, AgentLogPath + ".1", overwrite: true);
-            File.AppendAllText(AgentLogPath, $"{DateTime.Now:yyyy-MM-dd HH:mm:ss}  {message}{Environment.NewLine}");
+            try
+            {
+                Directory.CreateDirectory(FleetConfig.StateDir);
+                var log = new FileInfo(AgentLogPath);
+                if (log.Exists && log.Length > MaxAgentLogBytes)
+                    File.Move(AgentLogPath, AgentLogPath + ".1", overwrite: true);
+            }
+            catch { } // The other process has the log open: it is rotated at a later line.
+            // The dashboard and the agent both write the log; while one appends, the other waits a moment.
+            for (var attempt = 0; attempt < 5; attempt++)
+            {
+                try
+                {
+                    File.AppendAllText(AgentLogPath, line);
+                    return;
+                }
+                catch (IOException) { Thread.Sleep(25); }
+                catch { return; }
+            }
         }
-        catch { }
     }
 
     /// <summary>The commands an agent processed (so one sent again is not run twice) and their latest results.</summary>
