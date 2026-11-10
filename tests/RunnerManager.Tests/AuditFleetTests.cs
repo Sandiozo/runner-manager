@@ -56,7 +56,7 @@ public class RunnerRecoveryTests
         Assert.Equal(RunnerRecovery.MaxAttempts, steps.Count(s => s == RunnerRecovery.Step.Start));
         Assert.Single(steps, s => s == RunnerRecovery.Step.GiveUp);
 
-        // An hour after the first attempt, it is tried again; the give-up is reported again when those run out.
+        // An hour after the first attempt, it is tried again, but a runner that never starts is not reported each hour.
         steps.Clear();
         now = Start.AddHours(1).AddSeconds(30);
         for (var i = 0; i < 60; i++)
@@ -65,7 +65,34 @@ public class RunnerRecoveryTests
             steps.Add(Check(recovery, now));
         }
         Assert.Contains(RunnerRecovery.Step.Start, steps);
+        Assert.DoesNotContain(RunnerRecovery.Step.GiveUp, steps);
+
+        // Once it ran again, a new give-up is reported.
+        Check(recovery, now.AddSeconds(10), running: true);
+        steps.Clear();
+        now = now.AddHours(2);
+        for (var i = 0; i < 60; i++)
+        {
+            now = now.AddSeconds(10);
+            steps.Add(Check(recovery, now));
+        }
         Assert.Single(steps, s => s == RunnerRecovery.Step.GiveUp);
+    }
+
+    [Fact]
+    public void AServiceStuckStartingOrStopping_CountsAsStopped()
+    {
+        var recovery = new RunnerRecovery();
+        Check(recovery, Start, running: true);
+
+        var steps = new List<RunnerRecovery.Step>();
+        for (var at = TimeSpan.FromSeconds(10); at < RunnerRecovery.PendingLimit; at += TimeSpan.FromSeconds(10))
+            steps.Add(Check(recovery, Start + at, pending: true));
+        Assert.All(steps, s => Assert.Equal(RunnerRecovery.Step.None, s));
+
+        // Still pending after the limit: stopped at two checks in a row, so it is started.
+        Assert.Equal(RunnerRecovery.Step.None, Check(recovery, Start + RunnerRecovery.PendingLimit + TimeSpan.FromSeconds(10), pending: true));
+        Assert.Equal(RunnerRecovery.Step.Start, Check(recovery, Start + RunnerRecovery.PendingLimit + TimeSpan.FromSeconds(20), pending: true));
     }
 
     [Fact]

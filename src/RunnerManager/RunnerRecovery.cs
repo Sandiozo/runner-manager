@@ -4,18 +4,21 @@ namespace RunnerManager;
 /// What auto-recovery remembers about each runner service: whether the agent has seen it running, and when it last
 /// restarted it. A runner is restarted when it is seen stopped at two checks in a row, at most
 /// <see cref="MaxAttempts"/> times in <see cref="Window"/>; older attempts expire, so recovery resumes after that.
+/// A service that stays starting or stopping for <see cref="PendingLimit"/> is stuck, and counts as stopped.
 /// </summary>
 internal sealed class RunnerRecovery
 {
     public const int MaxAttempts = 3;
     public static readonly TimeSpan Window = TimeSpan.FromHours(1);
+    /// <summary>Starting or stopping a runner service takes seconds; one still at it after this is stuck.</summary>
+    public static readonly TimeSpan PendingLimit = TimeSpan.FromMinutes(2);
 
     public enum Step
     {
         None,
         /// <summary>Start the runner's service.</summary>
         Start,
-        /// <summary>Report that recovery stopped for this runner (once, until it may recover again).</summary>
+        /// <summary>Report that recovery stopped for this runner (once, until it is seen running again).</summary>
         GiveUp
     }
 
@@ -25,6 +28,7 @@ internal sealed class RunnerRecovery
     private readonly HashSet<string> _seenStopped = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, List<DateTime>> _attempts = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _reported = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, DateTime> _pendingSince = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>The runner was stopped on purpose (a Stop command, or a move): leave it alone until it runs again.</summary>
     public void Forget(string key)
@@ -33,6 +37,7 @@ internal sealed class RunnerRecovery
         {
             _wantRunning.Remove(key);
             _seenStopped.Remove(key);
+            _pendingSince.Remove(key);
         }
     }
 
@@ -52,12 +57,23 @@ internal sealed class RunnerRecovery
             {
                 _wantRunning.Add(key);
                 _seenStopped.Remove(key);
+                _pendingSince.Remove(key);
                 // A later give-up is reported again. The attempts stay until they expire: a runner that stops soon
                 // after each start would otherwise be restarted without limit.
                 _reported.Remove(key);
                 return Step.None;
             }
-            if (pending || !mayRecover || !_wantRunning.Contains(key))
+            if (pending)
+            {
+                if (!_pendingSince.TryGetValue(key, out var since)) _pendingSince[key] = since = nowUtc;
+                if (nowUtc - since < PendingLimit)
+                {
+                    _seenStopped.Remove(key);
+                    return Step.None;
+                }
+            }
+            else _pendingSince.Remove(key);
+            if (!mayRecover || !_wantRunning.Contains(key))
             {
                 _seenStopped.Remove(key);
                 return Step.None;
@@ -67,7 +83,6 @@ internal sealed class RunnerRecovery
             if (!_attempts.TryGetValue(key, out var attempts)) _attempts[key] = attempts = new List<DateTime>();
             attempts.RemoveAll(t => nowUtc - t >= Window);
             if (attempts.Count >= MaxAttempts) return _reported.Add(key) ? Step.GiveUp : Step.None;
-            _reported.Remove(key);
             attempts.Add(nowUtc);
             return Step.Start;
         }
