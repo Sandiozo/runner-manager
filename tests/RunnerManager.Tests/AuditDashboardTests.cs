@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.IO;
 using System.Text.RegularExpressions;
 using System.Windows;
@@ -784,6 +785,75 @@ public class AuditDashboardTests
 
         var offline = MachineInfo.Placeholder("BUILD-09", "BUILD-09", DateTime.UtcNow.AddHours(-2), "192.168.1.29", "Not reachable at 192.168.1.29:47800");
         Assert.Equal("BUILD-09 is not connected, so its runners are not known.", offline.NoRunnersText);
+    }
+
+    // ----- Item 22: smaller points -----
+
+    [Fact]
+    public void Sidebar_WithManyPcs_KeepsAddAPcInView_AndTabsToThePcsFirst()
+    {
+        var window = NewDashboard();
+        WpfTestApp.Run(() =>
+        {
+            for (var i = 1; i <= 30; i++) window.NavItems.Add(PcWith($"BUILD-{i:D2}"));
+        });
+        WpfTestApp.Flush();
+        WpfTestApp.Run(() =>
+        {
+            var content = (UIElement)window.Content;
+            window.Content = null;
+            // The list's items come from the window, which is not around it any more.
+            var host = new Border { Child = content, DataContext = window };
+            host.Measure(new Size(1000, 560));
+            host.Arrange(new Rect(0, 0, 1000, 560));
+            host.UpdateLayout();
+            var bottom = window.AddPcRow.TranslatePoint(new Point(0, window.AddPcRow.ActualHeight), window.NavArea).Y;
+            Assert.True(bottom <= LayoutInformation.GetLayoutSlot(window.NavArea).Height + 0.5, $"Add a PC ends at {bottom}");
+            Assert.True(window.MachineNav.ActualHeight > 100, $"PC list: {window.MachineNav.ActualHeight}");
+        });
+        // The tab order follows the order in the file.
+        var xaml = Xaml("MainWindow.xaml");
+        Assert.True(xaml.IndexOf(@"x:Name=""MachineNav""", StringComparison.Ordinal) < xaml.IndexOf(@"Click=""OpenSettings_Click""", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void RunnerFacts_GiveWayToTheJobInASmallWindow()
+    {
+        var xaml = Xaml("MainWindow.xaml");
+        Assert.DoesNotMatch(@"\sWidth=""340""", xaml);
+        Assert.Contains(@"<ColumnDefinition Width=""*"" MinWidth=""220"" MaxWidth=""340""/>", xaml);
+    }
+
+    [Fact]
+    public void IconButtons_HaveANameForScreenReaders()
+    {
+        var icons = Regex.Matches(Xaml("MainWindow.xaml"), @"<Button\b[^>]*IconButton[^>]*>");
+        Assert.NotEmpty(icons);
+        Assert.All(icons, m => Assert.Contains("AutomationProperties.Name=", m.Value));
+        // A sidebar entry says which PC it is, not the name of a class.
+        Assert.Equal("BUILD-01, No runners", PcWith("BUILD-01").ToString());
+        Assert.Equal("All PCs, Loading…", new AllMachinesEntry().ToString());
+    }
+
+    [Theory]
+    [InlineData("en-US", "2:05:09", "PM")]
+    [InlineData("de-DE", "14:05:09", "")]
+    public void Times_FollowTheRegionSettings(string culture, string start, string end)
+    {
+        var before = CultureInfo.CurrentCulture;
+        try
+        {
+            CultureInfo.CurrentCulture = new CultureInfo(culture, useUserOverride: false);
+            var time = DateTime.Today.AddHours(14).AddMinutes(5).AddSeconds(9);
+            Assert.StartsWith(start, TimeFormat.WithSeconds(time));
+            Assert.EndsWith(end, TimeFormat.WithSeconds(time));
+            Assert.Equal(TimeFormat.WithSeconds(time), new ActivityEntry { Time = time }.TimeText);
+            // Today, the time alone; another day, with the date.
+            Assert.DoesNotContain(time.ToString("d", CultureInfo.CurrentCulture), TimeFormat.When(time));
+            var earlier = time.AddDays(-3);
+            Assert.Contains(earlier.ToString("d", CultureInfo.CurrentCulture), TimeFormat.When(earlier));
+        }
+        finally { CultureInfo.CurrentCulture = before; }
     }
 
     // ----- Bug 10: keyboard shortcuts -----

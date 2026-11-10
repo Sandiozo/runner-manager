@@ -549,6 +549,16 @@ public sealed class AppSettings
     }
 }
 
+/// <summary>Times as Windows' region settings write them (12- or 24-hour), the same everywhere in the dashboard.</summary>
+public static class TimeFormat
+{
+    /// <summary>A local time with seconds, such as when an activity entry was added.</summary>
+    public static string WithSeconds(DateTime local) => local.ToString("T", CultureInfo.CurrentCulture);
+
+    /// <summary>A local time, with the date when it is not today.</summary>
+    public static string When(DateTime local) => local.ToString(local.Date == DateTime.Today ? "t" : "g", CultureInfo.CurrentCulture);
+}
+
 public enum ActivityKind { Info, Success, Warning, Error }
 
 public sealed class ActivityEntry
@@ -556,7 +566,7 @@ public sealed class ActivityEntry
     public DateTime Time { get; init; } = DateTime.Now;
     public string Message { get; init; } = string.Empty;
     public ActivityKind Kind { get; init; }
-    public string TimeText => Time.ToString("HH:mm:ss");
+    public string TimeText => TimeFormat.WithSeconds(Time);
     public string Glyph => Kind switch
     {
         ActivityKind.Success => "",

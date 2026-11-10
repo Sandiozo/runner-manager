@@ -98,6 +98,7 @@ public partial class MainWindow : Window
         Closing += OnClosing;
         PreviewKeyDown += OnPreviewKeyDown;
         SizeChanged += ContentArea_SizeChanged;
+        SizeChanged += NavArea_SizeChanged;
     }
 
     public void ReportError(string message)
@@ -135,7 +136,7 @@ public partial class MainWindow : Window
             if (_operationRunning)
             {
                 ApplyFleet(await machinesTask, Runners.ToList(), localRunnersRead: false);
-                LastUpdatedText.Text = $"Updated {DateTime.Now:HH:mm:ss}  ·  Refreshes every {_settings.RefreshSeconds}s";
+                LastUpdatedText.Text = $"Updated {TimeFormat.WithSeconds(DateTime.Now)}  ·  Refreshes every {_settings.RefreshSeconds}s";
                 return;
             }
             var enrollmentTask = MachineRelay.IsAgentInstalledAsync();
@@ -184,7 +185,7 @@ public partial class MainWindow : Window
             ApplyFleet(machines, runners, refreshLocalRunners);
             await CheckRunnerHealthAsync();
             await RefreshFleetExtrasAsync();
-            LastUpdatedText.Text = $"Updated {DateTime.Now:HH:mm:ss}  ·  Refreshes every {_settings.RefreshSeconds}s";
+            LastUpdatedText.Text = $"Updated {TimeFormat.WithSeconds(DateTime.Now)}  ·  Refreshes every {_settings.RefreshSeconds}s";
             if (!_operationRunning && DateTime.UtcNow >= _noticeUntilUtc)
             {
                 if (_agentOwner != null) SetStatus($"The fleet agent on this PC runs for {_agentOwner}.", StatusKind.Warning);
@@ -762,6 +763,17 @@ public partial class MainWindow : Window
         GitHubCli.LaunchLogin();
         AddActivity("Opened GitHub sign-in. Complete it in the browser or terminal window.");
         WatchGitHubSignIn();
+    }
+
+    /// <summary>With many PCs, the list scrolls so that "Add a PC" under it stays in view.</summary>
+    private void NavArea_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        // The slot, not ActualHeight: an overfull panel is arranged at the size it wants.
+        var height = LayoutInformation.GetLayoutSlot(NavArea).Height;
+        if (height <= 0) return;
+        var others = NavHeader.ActualHeight + NavHeader.Margin.Top + NavHeader.Margin.Bottom
+                     + AddPcRow.ActualHeight + AddPcRow.Margin.Top + AddPcRow.Margin.Bottom;
+        MachineNav.MaxHeight = Math.Max(0, height - others);
     }
 
     private void ConnectGitHubButton_Click(object sender, RoutedEventArgs e)
@@ -1644,6 +1656,8 @@ public sealed class AllMachinesEntry : INotifyPropertyChanged
 {
     public event PropertyChangedEventHandler? PropertyChanged;
     public string Subtitle { get; private set; } = "Loading…";
+    /// <summary>What a screen reader says for the sidebar entry.</summary>
+    public override string ToString() => $"All PCs, {Subtitle}";
 
     public void Update(string subtitle)
     {

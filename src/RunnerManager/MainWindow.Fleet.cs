@@ -318,7 +318,7 @@ public partial class MainWindow
         ApplyRefreshInterval();
         UpdateSummary();
         _tray?.SyncSettings(_settings);
-        LastUpdatedText.Text = $"Updated {DateTime.Now:HH:mm:ss}  ·  Refreshes every {_settings.RefreshSeconds}s";
+        LastUpdatedText.Text = $"Updated {TimeFormat.WithSeconds(DateTime.Now)}  ·  Refreshes every {_settings.RefreshSeconds}s";
     }
 
     private async Task OnFleetSettingsChangedAsync()

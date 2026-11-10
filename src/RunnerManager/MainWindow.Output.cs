@@ -1,4 +1,5 @@
 using System.Windows;
+using System.Windows.Automation;
 using System.Windows.Controls;
 
 namespace RunnerManager;
@@ -95,6 +96,7 @@ public partial class MainWindow
         foreach (var (button, tab) in BottomTabsPanel.Children.OfType<RadioButton>().Where(t => t != ActivityTab).Zip(tabs))
         {
             ((TextBlock)button.Content).Text = tab.Finished ? $"Output · {tab.Copy.Title} (finished)" : $"Output · {tab.Copy.Title}";
+            AutomationProperties.SetName(button, ((TextBlock)button.Content).Text);
             button.ToolTip = tab.Finished
                 ? $"The last output of {tab.Copy.Title} on {tab.Copy.MachineName}. The job has finished."
                 : $"Live output of {tab.Copy.Title} on {tab.Copy.MachineName}";

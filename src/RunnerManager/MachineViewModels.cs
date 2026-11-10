@@ -524,7 +524,7 @@ public sealed class MachineInfo : INotifyPropertyChanged
             if (age.TotalMinutes < 1) return $"Updated {(int)age.TotalSeconds}s ago";
             if (age.TotalHours < 1) return $"Updated {(int)age.TotalMinutes}m ago";
             if (age.TotalDays < 1) return $"Updated {(int)age.TotalHours}h ago";
-            return $"Updated {UpdatedUtc.ToLocalTime():g}";
+            return $"Updated {TimeFormat.When(UpdatedUtc.ToLocalTime())}";
         }
     }
     public Visibility ThisPcVisibility => IsLocal ? Visibility.Visible : Visibility.Collapsed;
@@ -591,6 +591,8 @@ public sealed class MachineInfo : INotifyPropertyChanged
         }
     }
     public Visibility NoRunnersVisibility => Runners.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
+    /// <summary>What a screen reader says for the PC's sidebar entry.</summary>
+    public override string ToString() => $"{MachineName}, {SidebarSubtitle}";
     public string NoRunnersText => IsLocal ? "No runners on this PC."
         : IsReachable ? $"No runners on {MachineName}."
         : $"{MachineName} is not connected, so its runners are not known.";
@@ -603,7 +605,7 @@ public sealed class MachineInfo : INotifyPropertyChanged
         {
             var latestEvent = RecentEvents.LastOrDefault();
             return latestEvent != null && DateTime.UtcNow - latestEvent.Utc < TimeSpan.FromHours(1)
-                ? $"{latestEvent.Text} ({latestEvent.Utc.ToLocalTime():HH:mm})"
+                ? $"{latestEvent.Text} ({TimeFormat.When(latestEvent.Utc.ToLocalTime())})"
                 : LastCommandResult;
         }
     }
