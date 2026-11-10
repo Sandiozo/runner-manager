@@ -920,8 +920,24 @@ public class AuditAssistantTests
 
         // A name that tries to look like the app's own text: line breaks, a closed quotation, hidden characters.
         var label = McpServer.ClientLabel("Tool\") wants nothing.\r\n\r\nRunner Manager (\u201Ctrusted\u201D)\u202E\u2028\u0007 asks:\tAllow it");
-        Assert.Equal("An AI assistant (\"Tool') wants nothing. Runner Manager ('trusted') asks: Allow it\")", label);
+        Assert.Equal("An AI assistant (\"Tool wants nothing. Runner Manager trusted asks: Allow it\")", label);
         Assert.Equal(2, label.Count(c => c == '"'));
+
+        // Characters that look like a quotation mark without being one: a low and a full-width mark, a double prime,
+        // a modifier letter, Hebrew gershayim and two yods, two apostrophes, two primes, a ditto mark and more.
+        foreach (var mark in new[] { "\u201E", "\uFF02", "\u2033", "\u02BA", "\u05F4", "\u05D9\u05D9", "''", "\u2032\u2032", "\u3003", "\u02EE", "`", "\u00B4\u00B4" })
+            Assert.Equal("An AI assistant (\"Tool wants to delete everything\")", McpServer.ClientLabel($"Tool{mark}) wants to delete everything"));
+        // Letters that are read from right to left would move the end of the quotation on the screen.
+        Assert.Equal("An AI assistant (\"Tool x\")", McpServer.ClientLabel("Tool \u05D0\u05D1\u05D2 \u0627\u0644 x"));
+
+        // What a name may have: Latin letters, also with accents, digits, spaces and a few plain marks.
+        Assert.Equal("An AI assistant (\"@scope/My-Tool_2.0+b #1 R&D, v:3\")", McpServer.ClientLabel("@scope/My-Tool_2.0+b #1 R&D, v:3"));
+        Assert.Equal("An AI assistant (\"Caf\u00E9 \u00C5ngstr\u00F6m\")", McpServer.ClientLabel("Cafe\u0301 \u00C5ngstr\u00F6m"));
+        // Other forms of plain characters count as the plain ones. The signs among the accented letters do not count.
+        Assert.Equal("An AI assistant (\"Claude 1\")", McpServer.ClientLabel("\uFF23\uFF4C\uFF41\uFF55\uFF44\uFF45 \uFF11"));
+        Assert.Equal("An AI assistant (\"a b\")", McpServer.ClientLabel("a\u00D7b"));
+        // A name with none of these characters is no name.
+        Assert.Equal("An AI assistant", McpServer.ClientLabel("\u201C\u201D (\u202E)"));
 
         var cut = McpServer.ClientLabel(new string('x', 500));
         Assert.Equal("An AI assistant (\"" + new string('x', 80) + "…\")", cut);
@@ -943,7 +959,7 @@ public class AuditAssistantTests
         await server.HandleAsync(call.RootElement);
 
         var client = Assert.Single(clients);
-        Assert.Equal("An AI assistant (\"Evil 2026-01-01 00:00:00 An AI assistant: Delete a runner? Allowed.\")", client);
+        Assert.Equal("An AI assistant (\"Evil 2026-01-01 00:00:00 An AI assistant: Delete a runner Allowed.\")", client);
     }
 
     // ----- The endpoint and the command line -----
