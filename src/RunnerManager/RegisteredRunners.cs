@@ -14,30 +14,51 @@ public sealed record RegisteredRunner(long Id, string Name, IReadOnlySet<string>
 internal static class RegisteredRunners
 {
     private static readonly TimeSpan Lifetime = TimeSpan.FromMinutes(1);
+    /// <summary>
+    /// GitHub answers 404 for the organization list of a personal account, and for a scope the account cannot see.
+    /// That does not change soon, so the scope is not asked again for this long.
+    /// </summary>
+    private static readonly TimeSpan NotFoundLifetime = TimeSpan.FromHours(6);
     private static readonly object Gate = new();
     private static readonly Dictionary<string, (DateTime Time, Task<IReadOnlyList<RegisteredRunner>?> List)> Reads = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<string, (string ETag, IReadOnlyList<RegisteredRunner> Runners)> Known = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly Dictionary<string, DateTime> NotFound = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly Task<IReadOnlyList<RegisteredRunner>?> NoList = Task.FromResult<IReadOnlyList<RegisteredRunner>?>(null);
 
     /// <param name="scope">"repos/owner/repo" or "orgs/name".</param>
     /// <returns>The first 100 runners, or null when GitHub has not been read for this scope.</returns>
     public static Task<IReadOnlyList<RegisteredRunner>?> GetAsync(string scope)
+        => GetAsync(scope, GitHubCli.GetConditionalAsync, DateTime.UtcNow);
+
+    /// <param name="get">Reads an endpoint with an ETag; tests replace it.</param>
+    internal static Task<IReadOnlyList<RegisteredRunner>?> GetAsync(string scope, Func<string, string?, Task<ConditionalResult>> get, DateTime nowUtc)
     {
         lock (Gate)
         {
-            if (Reads.TryGetValue(scope, out var cached) && DateTime.UtcNow - cached.Time < Lifetime) return cached.List;
-            var task = Task.Run(() => ReadAsync(scope));
-            Reads[scope] = (DateTime.UtcNow, task);
+            if (NotFound.TryGetValue(scope, out var since) && nowUtc - since < NotFoundLifetime) return NoList;
+            if (Reads.TryGetValue(scope, out var cached) && nowUtc - cached.Time < Lifetime) return cached.List;
+            var task = Task.Run(() => ReadAsync(scope, get, nowUtc));
+            Reads[scope] = (nowUtc, task);
             return task;
         }
     }
 
-    private static async Task<IReadOnlyList<RegisteredRunner>?> ReadAsync(string scope)
+    private static async Task<IReadOnlyList<RegisteredRunner>?> ReadAsync(string scope, Func<string, string?, Task<ConditionalResult>> get, DateTime nowUtc)
     {
         (string ETag, IReadOnlyList<RegisteredRunner> Runners)? known;
         lock (Gate) known = Known.TryGetValue(scope, out var entry) ? entry : null;
         try
         {
-            var response = await GitHubCli.GetConditionalAsync($"{scope}/actions/runners?per_page=100", known?.ETag);
+            var response = await get($"{scope}/actions/runners?per_page=100", known?.ETag);
+            if (response.StatusCode == 404)
+            {
+                lock (Gate)
+                {
+                    NotFound[scope] = nowUtc;
+                    Known.Remove(scope);
+                }
+                return null;
+            }
             if (response.NotModified && known != null) return known.Value.Runners;
             if (response.Ok)
             {

@@ -185,7 +185,9 @@ public static class JobHealth
             }
         }
 
-        var fleetIds = runners.Select(x => x.Runner.AgentId).Where(id => id > 0).ToHashSet();
+        // Runner IDs are numbered per repository or organization, so an ID is compared within its own list only.
+        var fleetIds = runners.Where(x => x.Runner.AgentId > 0)
+            .Select(x => FleetId(x.Runner.Scope, x.Runner.AgentId)).ToHashSet(StringComparer.OrdinalIgnoreCase);
         foreach (var (repository, jobs) in jobsByRepository)
         {
             var owner = repository.Split('/')[0];
@@ -284,13 +286,19 @@ public static class JobHealth
         return labels.Any(l => l.Equals("self-hosted", StringComparison.OrdinalIgnoreCase) || fleet.Any(set => set.Contains(l)));
     }
 
-    /// <summary>Whether a runner outside the fleet (on a PC without Runner Manager) is registered with the labels a job needs.</summary>
-    private static async Task<bool> HasOtherRunnerAsync(GitHubReads github, string[] jobLabels, string repository, string owner, HashSet<long> fleetIds)
+    private static string FleetId(string scope, long id) => $"{scope}#{id}";
+
+    /// <summary>
+    /// Whether a runner outside the fleet (on a PC without Runner Manager) is registered with the labels a job needs, for
+    /// the repository or its owner. A personal account has no organization list: GitHub answers 404, which
+    /// <see cref="RegisteredRunners"/> remembers, so it is not asked again every minute.
+    /// </summary>
+    private static async Task<bool> HasOtherRunnerAsync(GitHubReads github, string[] jobLabels, string repository, string owner, HashSet<string> fleetIds)
     {
         foreach (var scope in new[] { $"repos/{repository}", $"orgs/{owner}" })
         {
             var list = await github.Runners(scope);
-            if (list != null && list.Any(r => !fleetIds.Contains(r.Id) && RunnerLabels.CanRun(jobLabels, r.Labels))) return true;
+            if (list != null && list.Any(r => !fleetIds.Contains(FleetId(scope, r.Id)) && RunnerLabels.CanRun(jobLabels, r.Labels))) return true;
         }
         return false;
     }

@@ -429,6 +429,38 @@ public class AuditRunnerTests
     }
 
     [Fact]
+    public async Task OtherRunner_WithTheSameIdAsAFleetRunnerOfAnotherRepository_StillCounts()
+    {
+        var now = DateTime.UtcNow;
+        // Runner IDs are numbered per repository: ID 21 in audit/ids-b is not the fleet's runner 21 of audit/ids-a.
+        var machine = Pc("PC-IDS", Runner("audit/ids-a", 21), Runner("audit/ids-b", 5));
+        var reads = Reads(repository => repository == "audit/ids-b" ? Work(Queued(801, now, "self-hosted", "gpu")) : Work(),
+            scope => scope == "repos/audit/ids-b" ? new[] { Registered(5, "self-hosted", "Windows", "X64"), Registered(21, "self-hosted", "gpu") } : null);
+
+        Assert.Empty((await JobHealth.EvaluateAsync(new[] { machine }, Quiet, null, reads, now)).Unserved);
+    }
+
+    [Fact]
+    public async Task OrganizationRunnerList_OfAPersonalAccount_IsNotAskedAgainSoon()
+    {
+        var scope = $"orgs/audit-personal-{Guid.NewGuid():N}";
+        var asked = 0;
+        Task<ConditionalResult> Get(string endpoint, string? etag)
+        {
+            asked++;
+            return Task.FromResult(new ConditionalResult(404, string.Empty, """{"message":"Not Found"}"""));
+        }
+        var now = DateTime.UtcNow;
+
+        Assert.Null(await RegisteredRunners.GetAsync(scope, Get, now));
+        // Past the one-minute cache, the 404 is still remembered.
+        Assert.Null(await RegisteredRunners.GetAsync(scope, Get, now.AddMinutes(30)));
+        Assert.Equal(1, asked);
+        Assert.Null(await RegisteredRunners.GetAsync(scope, Get, now.AddHours(7)));
+        Assert.Equal(2, asked);
+    }
+
+    [Fact]
     public async Task RunnerLabels_ComeFromGitHub_ForAnArm64PcAndForJobsWithoutSelfHosted()
     {
         var now = DateTime.UtcNow;
