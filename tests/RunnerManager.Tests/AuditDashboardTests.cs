@@ -613,6 +613,42 @@ public class AuditDashboardTests
             finally { Palette.Use(false); }
         });
 
+    // ----- Item 18: state in words -----
+
+    [Fact]
+    public void Sidebar_SaysWhenAPcIsOffline()
+    {
+        var online = PcWith("BUILD-01", RunnerWith("api"));
+        Assert.Equal("0/1 runner running", online.SidebarSubtitle);
+        var offline = MachineInfo.FromPayload("build-02", new MachineStatusPayload
+        {
+            MachineName = "BUILD-02", AgentProtocolVersion = 14, UpdatedUtc = DateTime.UtcNow.AddHours(-1), FleetAgentRunning = true,
+            Runners = new[] { RunnerWith("web") }
+        });
+        Assert.Equal("Offline  ·  0/1 runner running", offline.SidebarSubtitle);
+    }
+
+    [Fact]
+    public void CollapsedCard_SummarizesItsRunners()
+    {
+        var stuck = RunnerWith("api");
+        stuck.Health = new RunnerHealth(RunnerConcern.Stuck, "Stuck", "No output for 30 minutes.");
+        var pc = PcWith("BUILD-03", stuck, RunnerWith("web"));
+        Assert.Equal(Visibility.Collapsed, pc.CollapsedSummaryVisibility);
+        try
+        {
+            Assert.True(pc.ToggleCollapsed());
+            Assert.Equal(Visibility.Visible, pc.CollapsedSummaryVisibility);
+            Assert.Equal(Visibility.Visible, pc.ProblemBadgeVisibility);
+            Assert.Equal("1 runner needs attention", pc.ProblemBadgeText);
+            Assert.Equal("api: Stuck", pc.ProblemTip);
+            // A search that opens the card shows the runners instead.
+            pc.SetOpenForSearch(true);
+            Assert.Equal(Visibility.Collapsed, pc.CollapsedSummaryVisibility);
+        }
+        finally { MachineInfo.CollapsedPcs.Remove("BUILD-03"); }
+    }
+
     // ----- Bug 10: keyboard shortcuts -----
 
     [Theory]

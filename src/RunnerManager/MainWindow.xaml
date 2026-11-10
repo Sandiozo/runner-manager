@@ -142,7 +142,7 @@
                 <Grid HorizontalAlignment="Left" VerticalAlignment="Center">
                     <TextBlock Text="{Binding MachineGlyph}" Style="{StaticResource Icon}" Foreground="{DynamicResource TextMutedBrush}"/>
                     <Ellipse Width="8" Height="8" Fill="{Binding StatusBrush}" Stroke="{DynamicResource SidebarBrush}" StrokeThickness="1.5"
-                             HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0,0,-4,-3"/>
+                             HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0,0,-4,-3" ToolTip="{Binding StatusText}"/>
                 </Grid>
                 <StackPanel Grid.Column="1">
                     <TextBlock Text="{Binding MachineName}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" ToolTip="{Binding MachineName}"/>
@@ -377,6 +377,17 @@
                                                 <TextBlock Style="{StaticResource Caption}" FontSize="11" Margin="0,1,0,0" TextTrimming="CharacterEllipsis">
                                                     <Run Text="{Binding AgentText, Mode=OneWay}"/><Run Text="  ·  " Foreground="{DynamicResource TextFaintBrush}"/><Run Text="{Binding SyncText, Mode=OneWay}"/><Run Text="  ·  " Foreground="{DynamicResource TextFaintBrush}"/><Run Text="{Binding VersionText, Mode=OneWay}"/>
                                                 </TextBlock>
+                                                <!-- Collapsed: how the hidden runners are -->
+                                                <StackPanel Orientation="Horizontal" Margin="0,3,0,0" Visibility="{Binding CollapsedSummaryVisibility}">
+                                                    <TextBlock Text="{Binding RunnerSummary}" Style="{StaticResource Caption}" FontSize="11" VerticalAlignment="Center"/>
+                                                    <Border Style="{StaticResource Badge}" Background="{DynamicResource BadgeWarnBgBrush}" BorderBrush="{DynamicResource BadgeWarnBorderBrush}"
+                                                            Visibility="{Binding ProblemBadgeVisibility}" ToolTip="{Binding ProblemTip}">
+                                                        <StackPanel Orientation="Horizontal">
+                                                            <TextBlock Text="&#xE7BA;" Style="{StaticResource Icon}" FontSize="10" Foreground="{DynamicResource WarningBrush}" Margin="0,0,5,0"/>
+                                                            <TextBlock Text="{Binding ProblemBadgeText}" FontSize="11" Foreground="{DynamicResource WarningBrush}"/>
+                                                        </StackPanel>
+                                                    </Border>
+                                                </StackPanel>
                                             </StackPanel>
                                             <StackPanel Grid.Column="3" Orientation="Horizontal" VerticalAlignment="Center">
                                                 <Border Style="{StaticResource Pill}" Background="{Binding StatusTint}">
