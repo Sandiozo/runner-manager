@@ -706,6 +706,51 @@ public class AuditDashboardTests
         Assert.Contains(@"TextWrapping=""Wrap""", line.Value);
     }
 
+    // ----- Item 20: output after the job -----
+
+    private static MachineRunnerStatus JobRunner(string name, string output, bool busy = true, bool open = true) => new()
+    {
+        ServiceName = $"actions.runner.{name}", DisplayName = name, MachineKey = "BUILD-06", MachineName = "BUILD-06",
+        IsRunning = true, ActivityText = busy ? "Busy" : "Idle", IsExpanded = open,
+        LiveJob = busy ? new LiveJobView { Output = output } : null
+    };
+
+    [Fact]
+    public void JobOutput_StaysUntilTheNextJob()
+    {
+        var live = new Dictionary<string, MainWindow.OutputCopy>(StringComparer.OrdinalIgnoreCase);
+        var finished = new Dictionary<string, MainWindow.OutputCopy>(StringComparer.OrdinalIgnoreCase);
+        MainWindow.KeepFinishedOutput(new[] { JobRunner("api", "error CS1002: ; expected") }, live, finished);
+        Assert.Single(live);
+        Assert.Empty(finished);
+
+        // The job ends: the runner is idle and has no output to show.
+        MainWindow.KeepFinishedOutput(new[] { JobRunner("api", "", busy: false) }, live, finished);
+        Assert.Empty(live);
+        var kept = Assert.Single(finished).Value;
+        Assert.Equal("error CS1002: ; expected", kept.Text);
+        Assert.Equal("api", kept.Title);
+
+        // The next job replaces it.
+        MainWindow.KeepFinishedOutput(new[] { JobRunner("api", "Restoring packages") }, live, finished);
+        Assert.Empty(finished);
+        Assert.Equal("Restoring packages", Assert.Single(live).Value.Text);
+
+        // Closing a runner that is running a job hides its output, and it is not kept.
+        MainWindow.KeepFinishedOutput(new[] { JobRunner("api", "Restoring packages", open: false) }, live, finished);
+        Assert.Empty(live);
+        Assert.Empty(finished);
+    }
+
+    [Theory]
+    [InlineData(true, false, "Job finished")]
+    [InlineData(true, true, "Job finished")]
+    [InlineData(false, true, "Paused while text is selected")]
+    [InlineData(false, false, "")]
+    [InlineData(null, true, "")]
+    public void OutputNote_SaysWhyTheOutputDoesNotChange(bool? finished, bool held, string note)
+        => Assert.Equal(note, MainWindow.OutputNoteText(finished, held));
+
     // ----- Bug 10: keyboard shortcuts -----
 
     [Theory]

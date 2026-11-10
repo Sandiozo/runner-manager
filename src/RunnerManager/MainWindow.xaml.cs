@@ -1566,9 +1566,9 @@ public partial class MainWindow : Window
     {
         try
         {
-            if (OutputRunner is { } runner)
+            if (SelectedOutput is { } output)
             {
-                Clipboard.SetText(OutputBox.SelectionLength > 0 ? OutputBox.SelectedText : runner.OutputText.Replace("\n", Environment.NewLine));
+                Clipboard.SetText(OutputBox.SelectionLength > 0 ? OutputBox.SelectedText : output.Text.Replace("\n", Environment.NewLine));
                 SetStatus("Output copied to clipboard", StatusKind.Ok);
                 return;
             }

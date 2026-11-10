@@ -869,9 +869,13 @@
                         </Border>
                     </StackPanel>
                     <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                        <!-- That the output's job has finished, or that newer output waits while text is selected -->
+                        <TextBlock x:Name="OutputNote" Style="{StaticResource Caption}" FontSize="11" VerticalAlignment="Center" Margin="0,0,8,0" Visibility="Collapsed"/>
                         <Button x:Name="OpenOutputButton" Content="Open full output" Style="{StaticResource GhostButton}" Padding="6,1" FontSize="11"
                                 Margin="0,0,4,0" VerticalAlignment="Center" Visibility="Collapsed" Click="BottomOpenOutput_Click"/>
                         <Button x:Name="CopyBottomButton" Style="{StaticResource IconButton}" Content="&#xE8C8;" Click="CopyActivity_Click" ToolTip="Copy activity" Width="28" Height="28" FontSize="12"/>
+                        <Button x:Name="CloseOutputButton" Style="{StaticResource IconButton}" Content="&#xE711;" Click="CloseOutput_Click" ToolTip="Close this output"
+                                AutomationProperties.Name="Close this output" Width="28" Height="28" FontSize="12" Visibility="Collapsed"/>
                         <Button x:Name="ClearActivityButton" Style="{StaticResource IconButton}" Content="&#xE894;" Click="ClearActivity_Click" ToolTip="Clear activity" Width="28" Height="28" FontSize="12"/>
                     </StackPanel>
                 </DockPanel>
