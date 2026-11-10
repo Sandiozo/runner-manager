@@ -17,20 +17,30 @@ public static class Palette
     public static Brush Danger { get; private set; } = Brush("#F85149");
     public static Brush Warning { get; private set; } = Brush("#D29922");
     public static Brush Info { get; private set; } = Brush("#4493F8");
-    public static Brush Muted { get; private set; } = Brush("#6E7681");
+    public static Brush Muted { get; private set; } = Brush("#8F96A0");
     public static Brush Text { get; private set; } = Brush("#E6EDF3");
     public static Brush TextMuted { get; private set; } = Brush("#9198A1");
 
     private static readonly Dictionary<Color, Brush> Tints = new();
+    private static readonly Dictionary<Color, Brush> OnTints = new();
+    private const byte TintAlpha = 0x26;
+    /// <summary>WCAG AA for normal text.</summary>
+    internal const double MinContrast = 4.5;
+    private static bool _light;
+    /// <summary>What pills sit on: a card (Bg1Brush) and an expanded or hovered runner row (Bg2Brush).</summary>
+    internal static Color[] PillSurfaces { get; private set; } = { ParseColor("#161B22"), ParseColor("#1C2129") };
 
     public static void Use(bool light)
     {
         Tints.Clear();
+        OnTints.Clear();
+        _light = light;
+        PillSurfaces = light ? new[] { ParseColor("#FFFFFF"), ParseColor("#F3F5F8") } : new[] { ParseColor("#161B22"), ParseColor("#1C2129") };
         Success = Brush(light ? "#1A7F37" : "#3FB950");
         Danger = Brush(light ? "#CF222E" : "#F85149");
         Warning = Brush(light ? "#9A6700" : "#D29922");
         Info = Brush(light ? "#0969DA" : "#4493F8");
-        Muted = Brush(light ? "#818B98" : "#6E7681");
+        Muted = Brush(light ? "#606976" : "#8F96A0");
         Text = Brush(light ? "#1F2328" : "#E6EDF3");
         TextMuted = Brush(light ? "#59636E" : "#9198A1");
     }
@@ -43,11 +53,53 @@ public static class Palette
     {
         if (brush is not SolidColorBrush solid) return Brushes.Transparent;
         if (Tints.TryGetValue(solid.Color, out var cached)) return cached;
-        var tint = new SolidColorBrush(Color.FromArgb(0x26, solid.Color.R, solid.Color.G, solid.Color.B));
+        var tint = new SolidColorBrush(Color.FromArgb(TintAlpha, solid.Color.R, solid.Color.G, solid.Color.B));
         tint.Freeze();
         Tints[solid.Color] = tint;
         return tint;
     }
+
+    /// <summary>
+    /// Text in a status color on that color's <see cref="Tint"/>: the color made lighter (dark theme) or darker (light
+    /// theme) only as far as a contrast of 4.5:1 on every pill surface needs. Most status colors on their tint are below it.
+    /// </summary>
+    public static Brush OnTint(Brush brush)
+    {
+        if (brush is not SolidColorBrush solid) return brush;
+        if (OnTints.TryGetValue(solid.Color, out var cached)) return cached;
+        var backgrounds = PillSurfaces.Select(surface => Over(solid.Color, TintAlpha, surface)).ToArray();
+        var color = solid.Color;
+        var toward = _light ? Colors.Black : Colors.White;
+        for (var step = 1; step <= 100 && backgrounds.Any(bg => Contrast(color, bg) < MinContrast); step++)
+            color = Over(toward, (byte)Math.Round(step * 2.55), solid.Color);
+        var text = new SolidColorBrush(color);
+        text.Freeze();
+        OnTints[solid.Color] = text;
+        return text;
+    }
+
+    /// <summary>The WCAG contrast ratio of two opaque colors, from 1 to 21.</summary>
+    internal static double Contrast(Color a, Color b)
+    {
+        static double Channel(byte value)
+        {
+            var v = value / 255d;
+            return v <= 0.03928 ? v / 12.92 : Math.Pow((v + 0.055) / 1.055, 2.4);
+        }
+        static double Luminance(Color c) => 0.2126 * Channel(c.R) + 0.7152 * Channel(c.G) + 0.0722 * Channel(c.B);
+        var (la, lb) = (Luminance(a), Luminance(b));
+        return (Math.Max(la, lb) + 0.05) / (Math.Min(la, lb) + 0.05);
+    }
+
+    /// <summary><paramref name="color"/> at <paramref name="alpha"/> over an opaque background.</summary>
+    internal static Color Over(Color color, byte alpha, Color background)
+    {
+        var a = alpha / 255d;
+        byte Mix(byte fg, byte bg) => (byte)Math.Round(fg * a + bg * (1 - a));
+        return Color.FromRgb(Mix(color.R, background.R), Mix(color.G, background.G), Mix(color.B, background.B));
+    }
+
+    private static Color ParseColor(string hex) => (Color)ColorConverter.ConvertFromString(hex);
 
     private static Brush Brush(string hex)
     {

@@ -128,6 +128,7 @@ public sealed class MachineRunnerStatus : INotifyPropertyChanged
         : IsRunning ? Palette.Success
         : Palette.Danger;
     [JsonIgnore] public Brush StatusTint => Palette.Tint(StatusBrush);
+    [JsonIgnore] public Brush StatusTextBrush => Palette.OnTint(StatusBrush);
     [JsonIgnore] public string StatusTip => _health.IsProblem ? _health.Detail
         : IsInteractive && ServiceInstalled
         ? "Runs in a console window in your session. Its Windows service is not used; starting it would run the runner twice."
@@ -228,6 +229,7 @@ public sealed class MachineRunnerStatus : INotifyPropertyChanged
             Notify(nameof(HealthVisibility));
             Notify(nameof(StatusText));
             Notify(nameof(StatusBrush));
+            Notify(nameof(StatusTextBrush));
             Notify(nameof(StatusTint));
             Notify(nameof(StatusTip));
             Notify(nameof(StopJobVisibility));
@@ -497,6 +499,7 @@ public sealed class MachineInfo : INotifyPropertyChanged
     public Brush StatusBrush => _pendingAction.Length > 0 ? Palette.Warning
         : IsLocalOnly ? Palette.Info : IsPairingProblem ? Palette.Warning : IsOnline ? Palette.Success : Palette.Danger;
     public Brush StatusTint => Palette.Tint(StatusBrush);
+    public Brush StatusTextBrush => Palette.OnTint(StatusBrush);
     public string AgentText => ConnectionProblem.Length > 0 ? ConnectionProblem
         : IsLocalOnly
             ? (LocalAgentOutdated ? "Fleet agent outdated. Other PCs cannot reach this PC." : "This PC")
@@ -591,14 +594,14 @@ public sealed class MachineInfo : INotifyPropertyChanged
         nameof(UpdatedUtc), nameof(SyncText), nameof(CpuPercent), nameof(CpuText), nameof(CpuBrush),
         nameof(MemoryPercent), nameof(MemoryText), nameof(MemoryBrush), nameof(UptimeText),
         nameof(LastResultText), nameof(LastResultVisibility),
-        nameof(IsOnline), nameof(IsReachable), nameof(StatusText), nameof(StatusBrush), nameof(StatusTint),
+        nameof(IsOnline), nameof(IsReachable), nameof(StatusText), nameof(StatusBrush), nameof(StatusTint), nameof(StatusTextBrush),
         nameof(SupportsFleetTools), nameof(CanUpdateAgent)
     };
 
     /// <summary>Properties that depend on the pending PC action (an update or a restart).</summary>
     private static readonly string[] PendingProperties =
     {
-        nameof(PendingAction), nameof(StatusText), nameof(StatusBrush), nameof(StatusTint), nameof(CanUpdateAgent)
+        nameof(PendingAction), nameof(StatusText), nameof(StatusBrush), nameof(StatusTint), nameof(StatusTextBrush), nameof(CanUpdateAgent)
     };
 
     /// <summary>

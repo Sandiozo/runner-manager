@@ -16,7 +16,7 @@
     <SolidColorBrush x:Key="ScrollThumbHoverBrush" Color="#A6B0BB"/>
     <SolidColorBrush x:Key="TextBrush" Color="#1F2328"/>
     <SolidColorBrush x:Key="TextMutedBrush" Color="#59636E"/>
-    <SolidColorBrush x:Key="TextFaintBrush" Color="#818B98"/>
+    <SolidColorBrush x:Key="TextFaintBrush" Color="#606976"/>
     <SolidColorBrush x:Key="AccentBrush" Color="#0969DA"/>
     <SolidColorBrush x:Key="SuccessBrush" Color="#1A7F37"/>
     <SolidColorBrush x:Key="DangerBrush" Color="#CF222E"/>

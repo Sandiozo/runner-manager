@@ -382,7 +382,7 @@
                                                 <Border Style="{StaticResource Pill}" Background="{Binding StatusTint}">
                                                     <StackPanel Orientation="Horizontal">
                                                         <Ellipse Width="7" Height="7" Fill="{Binding StatusBrush}" Margin="0,0,7,0"/>
-                                                        <TextBlock Text="{Binding StatusText}" Foreground="{Binding StatusBrush}" FontSize="12" FontWeight="SemiBold"/>
+                                                        <TextBlock Text="{Binding StatusText}" Foreground="{Binding StatusTextBrush}" FontSize="12" FontWeight="SemiBold"/>
                                                     </StackPanel>
                                                 </Border>
                                                 <Button Style="{StaticResource IconButton}" Content="&#xE712;" Margin="6,0,0,0" ToolTip="PC actions" Click="OpenButtonMenu_Click">
@@ -474,7 +474,7 @@
                                                                                 ToolTip="{Binding StatusTip}">
                                                                             <StackPanel Orientation="Horizontal">
                                                                                 <Ellipse Width="6" Height="6" Fill="{Binding StatusBrush}" Margin="0,0,6,0"/>
-                                                                                <TextBlock Text="{Binding StatusText}" Foreground="{Binding StatusBrush}" FontSize="11" FontWeight="SemiBold"/>
+                                                                                <TextBlock Text="{Binding StatusText}" Foreground="{Binding StatusTextBrush}" FontSize="11" FontWeight="SemiBold"/>
                                                                             </StackPanel>
                                                                         </Border>
                                                                         <Button Grid.Column="3" Click="RunnerPower_Click" IsEnabled="{Binding CanControl}" Padding="10,4" MinWidth="76"

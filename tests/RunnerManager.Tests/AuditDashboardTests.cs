@@ -567,6 +567,52 @@ public class AuditDashboardTests
         Assert.DoesNotContain(@"<Setter Property=""FocusVisualStyle"" Value=""{x:Null}""/>", xaml);
     }
 
+    // ----- Item 17: contrast -----
+
+    private static Color ColorIn(ResourceDictionary colors, string key) => WpfTestApp.ColorOf((Brush)colors[key]);
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void FaintText_IsReadableOnEveryBackground(bool light)
+        => WpfTestApp.Run(() =>
+        {
+            var colors = WpfTestApp.Load(light ? "Colors.Light.xaml" : "Colors.Dark.xaml");
+            var faint = ColorIn(colors, "TextFaintBrush");
+            foreach (var background in new[] { "Bg0Brush", "Bg1Brush", "Bg2Brush", "Bg3Brush", "SidebarBrush", "SelectedBrush", "HoverBrush" })
+            {
+                var contrast = Palette.Contrast(faint, ColorIn(colors, background));
+                Assert.True(contrast >= Palette.MinContrast, $"{background}: {contrast:F2}");
+            }
+        });
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void StatusPills_AreReadableOnCardsAndRows(bool light)
+        => WpfTestApp.Run(() =>
+        {
+            var colors = WpfTestApp.Load(light ? "Colors.Light.xaml" : "Colors.Dark.xaml");
+            try
+            {
+                Palette.Use(light);
+                // Palette mirrors the color dictionaries.
+                Assert.Equal(new[] { ColorIn(colors, "Bg1Brush"), ColorIn(colors, "Bg2Brush") }, Palette.PillSurfaces);
+                Assert.Equal(ColorIn(colors, "TextFaintBrush"), WpfTestApp.ColorOf(Palette.Muted));
+                foreach (var status in new[] { Palette.Success, Palette.Danger, Palette.Warning, Palette.Info, Palette.Muted })
+                {
+                    var tint = WpfTestApp.ColorOf(Palette.Tint(status));
+                    var text = WpfTestApp.ColorOf(Palette.OnTint(status));
+                    foreach (var surface in Palette.PillSurfaces)
+                    {
+                        var contrast = Palette.Contrast(text, Palette.Over(tint, tint.A, surface));
+                        Assert.True(contrast >= Palette.MinContrast, $"{WpfTestApp.ColorOf(status)} on {surface}: {contrast:F2}");
+                    }
+                }
+            }
+            finally { Palette.Use(false); }
+        });
+
     // ----- Bug 10: keyboard shortcuts -----
 
     [Theory]
