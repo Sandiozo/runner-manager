@@ -465,17 +465,44 @@ public class ManagedNameTests
     }
 
     [Fact]
-    public async Task PairingOneWay_ForgetsTheFleetMemberWithTheName()
+    public async Task PairingOneWay_ForgetsTheFleetMemberWithTheMachineId_Only()
     {
         await AuditFleetConfig.WithConfigAsync(() =>
         {
             FleetConfig.SetFleetKey(CommandSigner.NewKey());
-            FleetConfig.Update(c => c.KnownPeers.Add(new PeerRecord { Name = "WASMEMBER", Address = "127.0.0.1:1", LastSeenUtc = DateTime.UtcNow }));
+            FleetConfig.Update(c =>
+            {
+                c.KnownPeers.Add(new PeerRecord { Name = "WASMEMBER", MachineId = "id-w", Address = "127.0.0.1:1", LastSeenUtc = DateTime.UtcNow });
+                c.KnownPeers.Add(new PeerRecord { Name = "TAKENNAME", MachineId = "id-t", Address = "127.0.0.1:3", LastSeenUtc = DateTime.UtcNow });
+            });
 
-            FleetConfig.AddManagedPc("WASMEMBER", "127.0.0.1:2", CommandSigner.NewKey());
+            FleetConfig.AddManagedPc("WASMEMBER", "127.0.0.1:2", CommandSigner.NewKey(), "id-w");
+            // Another PC that joins under a member's name, with or without its own ID: the member stays.
+            FleetConfig.AddManagedPc("TAKENNAME", "127.0.0.1:4", CommandSigner.NewKey(), "id-other");
+            FleetConfig.AddManagedPc("TAKENNAME", "127.0.0.1:5", CommandSigner.NewKey());
 
-            Assert.Empty(FleetConfig.Current.KnownPeers);
-            Assert.Equal("127.0.0.1:2", FleetConfig.Current.ManagedPc("WASMEMBER")!.Address);
+            Assert.Equal(new[] { "TAKENNAME" }, FleetConfig.Current.KnownPeers.Select(p => p.Name));
+            Assert.Equal("id-w", FleetConfig.Current.ManagedPc("WASMEMBER")!.MachineId);
+            return Task.CompletedTask;
+        });
+    }
+
+    [Fact]
+    public async Task JoiningTheFleet_EndsTheOneWayPairingWithTheMachineId_Only()
+    {
+        await AuditFleetConfig.WithConfigAsync(() =>
+        {
+            FleetConfig.SetFleetKey(CommandSigner.NewKey());
+            var same = CommandSigner.NewKey();
+            var other = CommandSigner.NewKey();
+            FleetConfig.AddManagedPc("JOINPC2", "127.0.0.1:1", same, "id-j");
+            FleetConfig.AddManagedPc("NAMEONLY", "127.0.0.1:2", other, "id-n");
+
+            MachineRelay.AddKnownPeer("JOINPC2", "127.0.0.1:3", "id-j");
+            MachineRelay.AddKnownPeer("NAMEONLY", "127.0.0.1:4", "id-x");
+
+            Assert.Equal(new[] { CommandSigner.KeyId(other) }, FleetConfig.Current.ManagedPcs.Select(p => p.KeyId));
+            Assert.Contains(FleetConfig.Current.RemovedManagedPcs, r => r.KeyId == CommandSigner.KeyId(same));
             return Task.CompletedTask;
         });
     }

@@ -354,8 +354,13 @@ public static class MachineRelay
         }
     }
 
-    /// <summary>Remembers a PC learned during pairing so it's contacted right away.</summary>
-    public static void AddKnownPeer(string name, string address) => RememberPeer(name, FleetNetwork.WithPort(address), string.Empty);
+    /// <summary>
+    /// Remembers a PC learned during pairing so it's contacted right away. With its machine ID, a one-way pairing of the
+    /// same PC ends here; a managed PC with only the same name is kept.
+    /// </summary>
+    /// <param name="machineId">The PC's machine ID, as its status reports it; null when the pairing did not say.</param>
+    public static void AddKnownPeer(string name, string address, string? machineId = null)
+        => RememberPeer(name, FleetNetwork.WithPort(address), string.Empty, machineId ?? string.Empty);
 
     public static void ForgetPeer(string name)
     {

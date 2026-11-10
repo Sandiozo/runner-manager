@@ -493,15 +493,21 @@ public sealed class FleetConfig
     });
 
     /// <summary>
-    /// A PC paired one way from this PC. Replaces an earlier pairing of a PC with the same name, either way: a fleet member
-    /// with the name is forgotten here, so the PC isn't known both ways (commands to it would be refused).
+    /// A PC paired one way from this PC. Replaces an earlier one-way pairing with the same name or machine ID. A fleet
+    /// member with the machine ID is the same PC paired again the other way: it is forgotten here, so the PC isn't known
+    /// both ways (commands to it would be refused). One with only the same name is kept, as the joining PC picks its name.
     /// </summary>
-    public static void AddManagedPc(string name, string address, byte[] key) => Update(c =>
+    /// <param name="machineId">The PC's machine ID, as its status reports it; null when the pairing did not say.</param>
+    public static void AddManagedPc(string name, string address, byte[] key, string? machineId = null) => Update(c =>
     {
-        foreach (var old in c.ManagedPcs.Where(p => MachineRelay.Sanitize(p.Name) == MachineRelay.Sanitize(name)).ToList())
+        var id = machineId ?? string.Empty;
+        foreach (var old in c.ManagedPcs.Where(p => MachineRelay.Sanitize(p.Name) == MachineRelay.Sanitize(name)
+                     || (id.Length > 0 && p.MachineId.Equals(id, StringComparison.OrdinalIgnoreCase))).ToList())
             c.ForgetManaged(old);
-        c.KnownPeers.RemoveAll(p => MachineRelay.Sanitize(p.Name) == MachineRelay.Sanitize(name));
-        c.ManagedPcs.Add(ManagedPcRecord.Create(name, address, key, DateTime.UtcNow));
+        if (id.Length > 0) c.KnownPeers.RemoveAll(p => p.MachineId.Equals(id, StringComparison.OrdinalIgnoreCase));
+        var record = ManagedPcRecord.Create(name, address, key, DateTime.UtcNow);
+        record.MachineId = id;
+        c.ManagedPcs.Add(record);
     });
 
     /// <summary>Forgets the managed PCs that match; the fleet PCs this PC syncs with forget them too. Returns how many.</summary>
