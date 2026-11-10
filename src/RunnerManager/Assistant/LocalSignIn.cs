@@ -24,6 +24,11 @@ namespace RunnerManager;
 /// requests and can pass them on to the agent. Such a program learns no secret and so no token, and the requests
 /// that carry the token go to the agent's own address, which it cannot take while the agent listens.
 /// </para>
+/// <para>
+/// After the sign-in the agent shows on every answer that it has the session key (<see cref="AnswerProof"/>). So a
+/// program that takes the agent's address once the agent has stopped is not taken for it by a client that signed
+/// in earlier.
+/// </para>
 /// </summary>
 internal static class LocalSignIn
 {
@@ -42,6 +47,14 @@ internal static class LocalSignIn
     private static readonly byte[] ClientLabel = Encoding.ASCII.GetBytes("Runner Manager local sign-in v2, client proof");
     private static readonly byte[] AgentLabel = Encoding.ASCII.GetBytes("Runner Manager local sign-in v2, agent proof");
     private static readonly byte[] TokenLabel = Encoding.ASCII.GetBytes("Runner Manager local sign-in v2, session token");
+    private static readonly byte[] KeyLabel = Encoding.ASCII.GetBytes("Runner Manager local sign-in v2, session key");
+    private static readonly byte[] AnswerLabel = Encoding.ASCII.GetBytes("Runner Manager local sign-in v2, answer proof");
+
+    /// <summary>On each request of a signed-in client: a fresh random value for the agent's proof on the answer.</summary>
+    public const string NonceHeader = "X-Runner-Manager-Nonce";
+
+    /// <summary>On the answer: the agent's proof for that random value.</summary>
+    public const string ProofHeader = "X-Runner-Manager-Proof";
 
     /// <summary>Seals a secret so that only this Windows user can open it, and only for this purpose.</summary>
     public static byte[] Seal(byte[] secret, byte[] purpose) => ProtectedData.Protect(secret, purpose, DataProtectionScope.CurrentUser);
@@ -74,13 +87,37 @@ internal static class LocalSignIn
     /// it and still has no token: it could open neither secret.
     /// </summary>
     public static string Token(byte[] agentSecret, byte[] clientSecret, int port, byte[] agentNonce, byte[] clientNonce, byte[] agentSealed, byte[] clientSealed)
+        => "rmai_" + Convert.ToHexString(FromBoth(TokenLabel, agentSecret, clientSecret, port, agentNonce, clientNonce, agentSealed, clientSealed)).ToLowerInvariant();
+
+    /// <summary>
+    /// The key for the agent's proof on each answer of the session (<see cref="AnswerProof"/>). Worked out by each
+    /// side like the token, and never sent at all.
+    /// </summary>
+    public static byte[] SessionKey(byte[] agentSecret, byte[] clientSecret, int port, byte[] agentNonce, byte[] clientNonce, byte[] agentSealed, byte[] clientSealed)
+        => FromBoth(KeyLabel, agentSecret, clientSecret, port, agentNonce, clientNonce, agentSealed, clientSealed);
+
+    /// <summary>
+    /// The agent's proof on one answer: a hash keyed with the session key over the random value that the request
+    /// carried. The token alone does not show who answers. When the agent stops, another program can listen in its
+    /// place and gets the client's next request, token included. It has no key, so the client does not take its answer.
+    /// </summary>
+    public static byte[] AnswerProof(byte[] sessionKey, byte[] requestNonce)
+    {
+        var text = new byte[AnswerLabel.Length + 1 + NonceBytes];
+        AnswerLabel.CopyTo(text, 0);
+        Fixed(requestNonce, NonceBytes).CopyTo(text, AnswerLabel.Length + 1);
+        return HMACSHA256.HashData(Fixed(sessionKey, SecretBytes), text);
+    }
+
+    /// <summary>A value that only someone with both secrets can work out, for one purpose and one exchange.</summary>
+    private static byte[] FromBoth(byte[] label, byte[] agentSecret, byte[] clientSecret, int port, byte[] agentNonce, byte[] clientNonce, byte[] agentSealed, byte[] clientSealed)
     {
         var key = new byte[SecretBytes * 2];
         Fixed(agentSecret, SecretBytes).CopyTo(key, 0);
         Fixed(clientSecret, SecretBytes).CopyTo(key, SecretBytes);
-        var token = HMACSHA256.HashData(key, Exchange(TokenLabel, port, agentNonce, clientNonce, agentSealed, clientSealed));
+        var value = HMACSHA256.HashData(key, Exchange(label, port, agentNonce, clientNonce, agentSealed, clientSealed));
         CryptographicOperations.ZeroMemory(key);
-        return "rmai_" + Convert.ToHexString(token).ToLowerInvariant();
+        return value;
     }
 
     /// <summary>What a proof or a token is made over: what it is for, and every value of the sign-in that both sides saw.</summary>

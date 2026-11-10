@@ -46,7 +46,7 @@ public sealed class AssistantHttpServer : IDisposable
     private readonly Func<McpServer> _newServer;
     private readonly ConcurrentDictionary<string, Session> _sessions = new();
     private readonly ConcurrentDictionary<string, Challenge> _challenges = new();
-    private readonly ConcurrentDictionary<string, DateTime> _localTokens = new();
+    private readonly ConcurrentDictionary<string, LocalClient> _localTokens = new();
     private readonly CancellationTokenSource _cts = new();
     private HttpListener? _http;
     /// <summary>Why the endpoint could not start at the last try; logged when it changes, not at every try.</summary>
@@ -60,6 +60,20 @@ public sealed class AssistantHttpServer : IDisposable
 
     /// <summary>A sign-in the agent started: its random value, and the secret only this Windows user can open.</summary>
     private sealed record Challenge(DateTime IssuedUtc, byte[] Nonce, byte[] Secret, byte[] Sealed);
+
+    /// <summary>A signed-in <c>--mcp</c> or <c>ai</c> process, by its token: the key for the proof on each answer to it.</summary>
+    private sealed class LocalClient(byte[] key)
+    {
+        private long _lastUsedTicks = DateTime.UtcNow.Ticks;
+        public byte[] Key { get; } = key;
+
+        /// <summary>Set by every request of the client, which can be several at once.</summary>
+        public DateTime LastUsedUtc
+        {
+            get => new(Interlocked.Read(ref _lastUsedTicks), DateTimeKind.Utc);
+            set => Interlocked.Exchange(ref _lastUsedTicks, value.Ticks);
+        }
+    }
 
     /// <param name="port">Another port, for tests.</param>
     /// <param name="host">"localhost" for tests, which run without administrator rights.</param>
@@ -115,6 +129,8 @@ public sealed class AssistantHttpServer : IDisposable
         if (http == null) return;
         try { http.Close(); } catch { }
         _sessions.Clear();
+        // A sign-in ends with the listener it was made on. Its token may go to whoever listens on the port next.
+        _localTokens.Clear();
     }
 
     private async Task AcceptLoopAsync(HttpListener http)
@@ -146,13 +162,16 @@ public sealed class AssistantHttpServer : IDisposable
             if (path.EndsWith("/local/challenge", StringComparison.OrdinalIgnoreCase)) { await ChallengeAsync(request, response); return; }
             if (path.EndsWith("/local/session", StringComparison.OrdinalIgnoreCase)) { await LocalSessionAsync(request, response); return; }
 
-            if (!IsAuthorized(request.Headers["Authorization"]))
+            if (!IsAuthorized(request.Headers["Authorization"], out var local))
             {
                 response.AddHeader("WWW-Authenticate", "Bearer");
                 await ReplyAsync(response, 401, McpServer.Error(null, -32001,
                     "Missing or wrong access token. Turn on Connect by URL in Runner Manager → Settings → AI assistants, and copy the setup from there."));
                 return;
             }
+            // Shows a signed-in client, on every answer from here on, that the answer comes from its agent.
+            if (local != null && LocalSignIn.TryDecode(request.Headers[LocalSignIn.NonceHeader], LocalSignIn.NonceBytes, out var asked))
+                response.AddHeader(LocalSignIn.ProofHeader, Convert.ToBase64String(LocalSignIn.AnswerProof(local.Key, asked)));
             if (request.HttpMethod == "DELETE")
             {
                 if (request.Headers["Mcp-Session-Id"] is { } ended) _sessions.TryRemove(ended, out _);
@@ -285,14 +304,20 @@ public sealed class AssistantHttpServer : IDisposable
     {
         if (request.HttpMethod != "POST") { await ReplyAsync(response, 405, null); return; }
         var now = DateTime.UtcNow;
-        foreach (var old in _challenges.Where(c => now - c.Value.IssuedUtc > ChallengeLifetime).Select(c => c.Key).ToList()) _challenges.TryRemove(old, out _);
-        while (_challenges.Count >= MaxChallenges && _challenges.MinBy(c => c.Value.IssuedUtc) is { Key: { } oldest }) _challenges.TryRemove(oldest, out _);
+        foreach (var old in _challenges.Where(c => now - c.Value.IssuedUtc > ChallengeLifetime).Select(c => c.Key).ToList()) Drop(old);
+        while (_challenges.Count >= MaxChallenges && _challenges.MinBy(c => c.Value.IssuedUtc) is { Key: { } oldest }) Drop(oldest);
         var nonce = RandomNumberGenerator.GetBytes(LocalSignIn.NonceBytes);
         var secret = RandomNumberGenerator.GetBytes(LocalSignIn.SecretBytes);
         var sealedSecret = LocalSignIn.Seal(secret, LocalSignIn.AgentChallenge);
         var id = Convert.ToBase64String(nonce);
         _challenges[id] = new Challenge(now, nonce, secret, sealedSecret);
         await ReplyAsync(response, 200, new JsonObject { ["nonce"] = id, ["challenge"] = Convert.ToBase64String(sealedSecret) });
+    }
+
+    /// <summary>Forgets a sign-in that was not finished, and its secret.</summary>
+    private void Drop(string id)
+    {
+        if (_challenges.TryRemove(id, out var challenge)) CryptographicOperations.ZeroMemory(challenge.Secret);
     }
 
     /// <summary>
@@ -314,37 +339,45 @@ public sealed class AssistantHttpServer : IDisposable
             clientChallenge = Text(document.RootElement, "client_challenge");
             proof = Text(document.RootElement, "proof");
         }
-        catch (JsonException) { }
+        // Text that is not valid JSON, or a string that cannot be read (half of a surrogate pair).
+        catch (Exception ex) when (ex is JsonException or InvalidOperationException) { }
         // A sign-in gets one answer, right or wrong.
         Challenge? challenge = null;
         if (nonce != null) _challenges.TryRemove(nonce, out challenge);
-        // Up to 2.8.2 the caller sent the random value back encrypted with DPAPI, which every Windows account can do
-        // in a way that decrypts here. That is not accepted any more: the program is told how to get the current one.
-        if (proof != null && clientChallenge == null)
+        try
         {
-            await ReplyAsync(response, 400, McpServer.Error(null, -32001, OlderProgram));
-            return;
+            // Up to 2.8.2 the caller sent the random value back encrypted with DPAPI, which every Windows account can
+            // do in a way that decrypts here. That is not accepted any more: the program is told how to get the current one.
+            if (proof != null && clientChallenge == null)
+            {
+                await ReplyAsync(response, 400, McpServer.Error(null, -32001, OlderProgram));
+                return;
+            }
+            if (challenge == null || DateTime.UtcNow - challenge.IssuedUtc > ChallengeLifetime
+                || !LocalSignIn.TryDecode(clientNonce, LocalSignIn.NonceBytes, out var clientNonceBytes)
+                || !LocalSignIn.TryDecodeSealed(clientChallenge, out var clientSealed)
+                || !LocalSignIn.TryDecode(proof, LocalSignIn.ProofBytes, out var proofBytes)
+                || !LocalSignIn.Matches(LocalSignIn.Proof(challenge.Secret, byAgent: false, _port, challenge.Nonce, clientNonceBytes, challenge.Sealed, clientSealed), proofBytes)
+                // Opened only now that the caller has shown that it runs as this user.
+                || LocalSignIn.Open(clientSealed, LocalSignIn.ClientChallenge) is not { } clientSecret)
+            {
+                await ReplyAsync(response, 403, McpServer.Error(null, -32001, "Runner Manager could not confirm that this program runs as your Windows user."));
+                return;
+            }
+            var agentProof = LocalSignIn.Proof(clientSecret, byAgent: true, _port, challenge.Nonce, clientNonceBytes, challenge.Sealed, clientSealed);
+            // The caller works out the same token and key, so the answer carries neither: see LocalSignIn.Token.
+            var token = LocalSignIn.Token(challenge.Secret, clientSecret, _port, challenge.Nonce, clientNonceBytes, challenge.Sealed, clientSealed);
+            var key = LocalSignIn.SessionKey(challenge.Secret, clientSecret, _port, challenge.Nonce, clientNonceBytes, challenge.Sealed, clientSealed);
+            CryptographicOperations.ZeroMemory(clientSecret);
+            RemoveIdle(_localTokens);
+            while (_localTokens.Count >= MaxSessions && OldestKey(_localTokens) is { } oldest) _localTokens.TryRemove(oldest, out _);
+            _localTokens[token] = new LocalClient(key);
+            await ReplyAsync(response, 200, new JsonObject { ["agent_proof"] = Convert.ToBase64String(agentProof) });
         }
-        if (challenge == null || DateTime.UtcNow - challenge.IssuedUtc > ChallengeLifetime
-            || !LocalSignIn.TryDecode(clientNonce, LocalSignIn.NonceBytes, out var clientNonceBytes)
-            || !LocalSignIn.TryDecodeSealed(clientChallenge, out var clientSealed)
-            || !LocalSignIn.TryDecode(proof, LocalSignIn.ProofBytes, out var proofBytes)
-            || !LocalSignIn.Matches(LocalSignIn.Proof(challenge.Secret, byAgent: false, _port, challenge.Nonce, clientNonceBytes, challenge.Sealed, clientSealed), proofBytes)
-            // Opened only now that the caller has shown that it runs as this user.
-            || LocalSignIn.Open(clientSealed, LocalSignIn.ClientChallenge) is not { } clientSecret)
+        finally
         {
-            await ReplyAsync(response, 403, McpServer.Error(null, -32001, "Runner Manager could not confirm that this program runs as your Windows user."));
-            return;
+            if (challenge != null) CryptographicOperations.ZeroMemory(challenge.Secret);
         }
-        var agentProof = LocalSignIn.Proof(clientSecret, byAgent: true, _port, challenge.Nonce, clientNonceBytes, challenge.Sealed, clientSealed);
-        // The caller works out the same token, so the answer does not carry it: see LocalSignIn.Token.
-        var token = LocalSignIn.Token(challenge.Secret, clientSecret, _port, challenge.Nonce, clientNonceBytes, challenge.Sealed, clientSealed);
-        CryptographicOperations.ZeroMemory(clientSecret);
-        CryptographicOperations.ZeroMemory(challenge.Secret);
-        RemoveIdle(_localTokens);
-        while (_localTokens.Count >= MaxSessions && OldestKey(_localTokens) is { } oldest) _localTokens.TryRemove(oldest, out _);
-        _localTokens[token] = DateTime.UtcNow;
-        await ReplyAsync(response, 200, new JsonObject { ["agent_proof"] = Convert.ToBase64String(agentProof) });
     }
 
     private static string? Text(JsonElement root, string name)
@@ -384,15 +417,18 @@ public sealed class AssistantHttpServer : IDisposable
     internal void ForgetSessions() => _sessions.Clear();
 
     /// <summary>A session token from the local sign-in, or the Connect by URL token while that is turned on.</summary>
-    private bool IsAuthorized(string? authorization)
+    /// <param name="local">The signed-in <c>--mcp</c> or <c>ai</c> process that the token belongs to; null for the Connect by URL token.</param>
+    private bool IsAuthorized(string? authorization, out LocalClient? local)
     {
+        local = null;
         if (authorization == null || !authorization.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase)) return false;
         var given = authorization[7..].Trim();
-        if (_localTokens.TryGetValue(given, out var lastUsed))
+        if (_localTokens.TryGetValue(given, out var client))
         {
-            if (DateTime.UtcNow - lastUsed <= IdleLifetime)
+            if (DateTime.UtcNow - client.LastUsedUtc <= IdleLifetime)
             {
-                _localTokens[given] = DateTime.UtcNow;
+                client.LastUsedUtc = DateTime.UtcNow;
+                local = client;
                 return true;
             }
             _localTokens.TryRemove(given, out _);
@@ -402,14 +438,14 @@ public sealed class AssistantHttpServer : IDisposable
         return token.Length > 0 && CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(given), Encoding.UTF8.GetBytes(token));
     }
 
-    private static void RemoveIdle(ConcurrentDictionary<string, DateTime> entries)
+    private static void RemoveIdle(ConcurrentDictionary<string, LocalClient> entries)
     {
         var now = DateTime.UtcNow;
-        foreach (var old in entries.Where(e => now - e.Value > IdleLifetime).Select(e => e.Key).ToList()) entries.TryRemove(old, out _);
+        foreach (var old in entries.Where(e => now - e.Value.LastUsedUtc > IdleLifetime).Select(e => e.Key).ToList()) entries.TryRemove(old, out _);
     }
 
-    private static string? OldestKey(ConcurrentDictionary<string, DateTime> entries)
-        => entries.IsEmpty ? null : entries.MinBy(e => e.Value).Key;
+    private static string? OldestKey(ConcurrentDictionary<string, LocalClient> entries)
+        => entries.IsEmpty ? null : entries.MinBy(e => e.Value.LastUsedUtc).Key;
 
     internal static bool IsLocalOrigin(string origin)
         => Uri.TryCreate(origin, UriKind.Absolute, out var uri)
