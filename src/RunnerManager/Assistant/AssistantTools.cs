@@ -497,14 +497,23 @@ public static class AssistantTools
                 result = stopped.Count == 0 ? "The job had no processes to stop" : $"Stopped the job's processes: {string.Join(", ", stopped)}";
             },
             TimeSpan.FromMinutes(2));
-        return new
-        {
-            pc = machine.MachineName,
-            runner = runner.TitleText,
-            target = TargetOf(runner),
-            result = Bounded(result ?? $"{machine.MachineName} did not say what it stopped.", 1000)
-        };
+        return StopJobResult(machine, runner, result);
     }
+
+    /// <summary>
+    /// What stop_job_processes answers once the fleet agent ran the command; a failure, or no answer in time, is an
+    /// error and not this. <c>done</c> is what AI tools read from the other change tools and from earlier versions
+    /// of this one. What the agent stopped is in <c>result</c>.
+    /// </summary>
+    /// <param name="result">The agent's own text, or null when it sent none.</param>
+    internal static object StopJobResult(MachineInfo machine, MachineRunnerStatus runner, string? result) => new
+    {
+        done = true,
+        pc = machine.MachineName,
+        runner = runner.TitleText,
+        target = TargetOf(runner),
+        result = Bounded(result ?? $"{machine.MachineName} did not say what it stopped.", 1000)
+    };
 
     private static async Task<object> CreateRunnerAsync(AssistantCall call)
     {

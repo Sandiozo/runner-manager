@@ -687,6 +687,24 @@ public class AuditAssistantTests
         Assert.Contains("no Windows service", Assert.Throws<AssistantException>(() => AssistantTools.RequireService(pc, noService, "Stop")).Message);
     }
 
+    /// <summary>An AI tool that reads <c>done</c>, as the other change tools and 2.8.2 give it, still finds it.</summary>
+    [Fact]
+    public void StopJobProcesses_SaysThatItIsDone_AndWhatTheAgentStopped()
+    {
+        var pc = Online("BUILD", Runner("a", "octocat/web"));
+
+        var stopped = JsonSerializer.SerializeToNode(AssistantTools.StopJobResult(pc, pc.Runners[0], "Stopped the job's processes: node (1234)"), McpServer.ResultJson)!;
+        Assert.True(stopped["done"]!.GetValue<bool>());
+        Assert.Equal("BUILD", stopped["pc"]!.GetValue<string>());
+        Assert.Equal("a", stopped["runner"]!.GetValue<string>());
+        Assert.Equal("Stopped the job's processes: node (1234)", stopped["result"]!.GetValue<string>());
+
+        // An agent that ran the command and sent no text: still done, and the result says so.
+        var silent = JsonSerializer.SerializeToNode(AssistantTools.StopJobResult(pc, pc.Runners[0], null), McpServer.ResultJson)!;
+        Assert.True(silent["done"]!.GetValue<bool>());
+        Assert.Equal("BUILD did not say what it stopped.", silent["result"]!.GetValue<string>());
+    }
+
     [Fact]
     public void Runners_OnAPcThatCannotBeReached_AreNotReportedAsCurrent()
     {
