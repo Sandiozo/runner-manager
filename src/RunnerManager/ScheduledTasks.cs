@@ -347,17 +347,33 @@ public static class ScheduledTasks
     /// Starts a task that is to run again after its instance ended (the fleet agent after a restart or a rollback). The
     /// start helper exits a moment after the RunnerManager.exe it started, and until then Task Scheduler counts the task
     /// as running and refuses a start of a task that runs one instance at a time. So this waits until the task no longer
-    /// runs, then starts it, and tries again while Task Scheduler refuses, for at most <paramref name="wait"/>. Returns
-    /// schtasks' result, or a failure when the task still ran at the end.
+    /// runs, then starts it, and tries again while Task Scheduler refuses, for at most <paramref name="wait"/>. A task that
+    /// runs for 15 seconds in a row was started by something else meanwhile (its keep-alive trigger, or a dashboard), which
+    /// counts as started too, as in <see cref="AppUpdater.RestartTaskScript"/>. Returns schtasks' result, or a failure when
+    /// the task still ran at the end without having run that long.
     /// </summary>
-    internal static async Task<(int ExitCode, string Output)> StartAgainAsync(string name, TimeSpan wait)
+    internal static Task<(int ExitCode, string Output)> StartAgainAsync(string name, TimeSpan wait)
+        => StartAgainAsync(name, wait, RunningCountsAsStarted);
+
+    /// <summary>How long a task must run in a row to count as started by something else (see <see cref="StartAgainAsync(string, TimeSpan)"/>).</summary>
+    internal static readonly TimeSpan RunningCountsAsStarted = TimeSpan.FromSeconds(15);
+
+    internal static async Task<(int ExitCode, string Output)> StartAgainAsync(string name, TimeSpan wait, TimeSpan countsAsStarted)
     {
         var deadline = DateTime.UtcNow + wait;
         (int ExitCode, string Output)? last = null;
+        DateTime? runningSince = null;
         while (true)
         {
-            if (await IsRunningAsync(name) != true)
+            if (await IsRunningAsync(name) == true)
             {
+                runningSince ??= DateTime.UtcNow;
+                if (DateTime.UtcNow - runningSince >= countsAsStarted)
+                    return (0, $"The scheduled task \"{name}\" runs: it was started again meanwhile.");
+            }
+            else
+            {
+                runningSince = null;
                 last = await RunTaskAsync(name);
                 if (last.Value.ExitCode == 0) return last.Value;
             }
@@ -511,12 +527,16 @@ public static class ScheduledTasks
 
     /// <summary>
     /// The account of another Windows user that a task belongs to, or null when the task does not exist or is this user's.
+    /// Only a task that runs with the highest rights counts, as Runner Manager registers all of its tasks: a task under the
+    /// name without them was not registered by Runner Manager (any user can create one under a free name), so it never
+    /// keeps this user's Runner Manager from registering its own.
     /// </summary>
     public static async Task<string?> OtherOwnerAsync(string name)
     {
-        var principal = PrincipalOf(await QueryXmlAsync(name));
-        if (principal.Length == 0) return null;
-        return IsCurrentUser(principal) ? null : DisplayName(principal);
+        var xml = await QueryXmlAsync(name);
+        var principal = PrincipalOf(xml);
+        if (principal.Length == 0 || IsCurrentUser(principal) || !RunsWithHighestRights(xml)) return null;
+        return DisplayName(principal);
     }
 
     /// <summary>Whether a task principal or process owner (a SID, DOMAIN\name or name) is the user running this process.</summary>

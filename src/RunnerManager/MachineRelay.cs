@@ -1896,7 +1896,9 @@ public static class MachineRelay
     /// <summary>
     /// Tasks created by older versions used schtasks defaults: they refuse to start on battery,
     /// are killed when a laptop unplugs, and are force-stopped after 72 hours. Re-register those
-    /// with always-on settings, keeping the executable path the task already points to.
+    /// with always-on settings, keeping the executable path the task already points to. A task whose exe is gone gets the
+    /// installed exe when there is one, never the exe of this process (which may be a build folder or a download), and is
+    /// otherwise left as it is.
     /// </summary>
     public static async Task<bool> RepairAgentTaskSettingsAsync()
     {
@@ -1913,12 +1915,17 @@ public static class MachineRelay
             AppendAgentLog(ScheduledTasks.NotRegisteredElevatedText(ScheduledTasks.AgentTaskName));
             return false;
         }
-        if (!File.Exists(exe)) exe = Environment.ProcessPath ?? string.Empty;
+        if (!File.Exists(exe))
+        {
+            if (!File.Exists(AppUpdater.InstalledExe)) return false;
+            exe = AppUpdater.InstalledExe;
+        }
         if (!exe.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) return false;
 
         await RegisterAgentTaskAsync(exe);
-        // If re-registering ended the running instance this starts it again; otherwise the task's
-        // IgnoreNew policy (and the agent's own mutex) make this a no-op.
+        // Registering again does not end a running agent on Windows 11 (measured; other versions were not), and the
+        // task's IgnoreNew policy (and the agent's own mutex) make this a no-op then. An agent that was not running, or
+        // one that a Windows version ended, starts again.
         await ScheduledTasks.RunTaskAsync(ScheduledTasks.AgentTaskName);
         return true;
     }

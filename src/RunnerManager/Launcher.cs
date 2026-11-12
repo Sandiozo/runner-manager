@@ -531,12 +531,17 @@ internal static class Launcher
             .Where(Path.IsPathFullyQualified)
             .ToList();
 
-    /// <summary>Whether a program has a file in the folder open (a loaded DLL is): the file cannot be opened for itself alone then.</summary>
-    private static bool IsInUse(DirectoryInfo folder)
+    /// <summary>
+    /// Whether a program uses a file in the folder: it has the file open, or has loaded it as a DLL. Either way the file
+    /// cannot be opened for writing by this process alone, which is tried without changing it. A loaded DLL has no open
+    /// file left, so opening it to read alone, or renaming the folder it is in, still works and does not tell (measured on
+    /// Windows 11).
+    /// </summary>
+    internal static bool IsInUse(DirectoryInfo folder)
     {
         foreach (var file in folder.EnumerateFiles("*", new EnumerationOptions { RecurseSubdirectories = true, AttributesToSkip = FileAttributes.ReparsePoint }))
         {
-            try { using (new FileStream(file.FullName, FileMode.Open, FileAccess.Read, FileShare.None)) { } }
+            try { using (new FileStream(file.FullName, FileMode.Open, FileAccess.ReadWrite, FileShare.None)) { } }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return true; }
         }
         return false;
