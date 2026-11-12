@@ -561,6 +561,34 @@ public class AuditRunnerTests
     }
 
     [Fact]
+    public async Task IdleRunner_CountsAsOnline_AsItWasBeforeGitHubWasRead_HoweverLongThatTakes()
+    {
+        var now = DateTime.UtcNow;
+        var machine = Pc("PC-SLOW", Runner("audit/slow", 15));
+        var key = JobHealth.Key(machine.Runners[0]);
+        var stale = MachineInfo.FromPayload("PC-SLOW", new MachineStatusPayload
+        {
+            MachineName = "PC-SLOW", UpdatedUtc = now.AddMinutes(-5), FleetAgentRunning = true, Runners = machine.Runners
+        });
+        Assert.True(machine.IsReachable);
+        // GitHub takes so long that, by the clock, the PC's last report is too old when the answer comes.
+        var reads = new JobHealth.GitHubReads(
+            _ =>
+            {
+                machine.Touch(stale);
+                return Task.FromResult<RepositoryWorkState?>(Work(Queued(901, now, "self-hosted")));
+            },
+            (_, _, _) => Task.FromResult<(bool, TimeSpan?)>((true, null)),
+            _ => Task.FromResult<IReadOnlyList<RegisteredRunner>?>(new[] { Registered(15, "self-hosted", "Windows", "X64") }));
+
+        var health = await JobHealth.EvaluateAsync(new[] { machine }, Quiet, null, reads, now);
+
+        Assert.False(machine.IsReachable);
+        Assert.Equal(RunnerConcern.IdleWithWaitingJobs, health.Runners[key].Concern);
+        Assert.Empty(health.Unserved);
+    }
+
+    [Fact]
     public async Task UnservedJob_IsReported_OnlyWhenItWasMeantForTheFleet()
     {
         var now = DateTime.UtcNow;

@@ -147,6 +147,9 @@ public static class JobHealth
         IReadOnlyDictionary<string, DateTime>? idleSince, GitHubReads? github, DateTime nowUtc)
     {
         var health = new FleetHealth();
+        // Asked once, before GitHub is read: a PC counts as online for 30 seconds after its last report, by the clock,
+        // and the reads below can take longer. Asked after them, every PC could look offline (as in the AI tools).
+        var online = machines.Where(m => m.IsReachable).ToHashSet<MachineInfo>(ReferenceEqualityComparer.Instance);
         var runners = machines.SelectMany(m => m.Runners.Select(r => (Machine: m, Runner: r))).ToList();
         var jobsByRepository = new Dictionary<string, List<GitHubJobState>>(StringComparer.OrdinalIgnoreCase);
         // Repositories whose jobs GitHub did not answer for this time.
@@ -183,7 +186,7 @@ public static class JobHealth
 
             if (runner.IsBusy)
                 health.Runners[key] = await ForBusyRunnerAsync(runner, active, unread.Contains(runner.RepositoryPath), github, quietLimit, nowUtc);
-            else if (runner.IsRunning && machine.IsReachable)
+            else if (runner.IsRunning && online.Contains(machine))
             {
                 var waiting = jobs.Where(j => j.Status.Equals("queued", StringComparison.OrdinalIgnoreCase)).ToList();
                 health.Runners[key] = ForIdleRunner(waiting, idleSince != null && idleSince.TryGetValue(key, out var idle) ? idle : null, nowUtc);
@@ -202,7 +205,7 @@ public static class JobHealth
                                                 && nowUtc - (j.CreatedUtc ?? nowUtc) >= WaitLimit))
             {
                 var able = candidates.Where(x => RunnerLabels.CanRun(job.Labels, labelsOf[Key(x.Runner)])).ToList();
-                if (able.Any(x => x.Runner.IsRunning && x.Machine.IsReachable)) continue;
+                if (able.Any(x => x.Runner.IsRunning && online.Contains(x.Machine))) continue;
                 if (able.Count == 0 && (!MeantForFleet(job.Labels, candidates.Select(x => labelsOf[Key(x.Runner)]))
                                         || await HasOtherRunnerAsync(github!, job.Labels, repository, owner, fleetIds))) continue;
                 var waited = Duration(nowUtc - (job.CreatedUtc ?? nowUtc));
