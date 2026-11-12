@@ -180,3 +180,86 @@ public class JoinNotSavedTests
         Assert.Contains("A PC named LAPTOP was allowed a moment ago", check.Warning);
     }
 }
+
+/// <summary>
+/// "Add a PC": a name with letters of another alphabet that look like Latin ones (a Cyrillic О for a Latin O), or a
+/// full-width form of this PC's name, is warned about. A name honestly written in one other alphabet is not.
+/// </summary>
+public class LookAlikeNameTests
+{
+    private static FleetConfig Fleet() => new()
+    {
+        KnownPeers = { new PeerRecord { Name = "OFFICE-PC", MachineId = "1111" }, new PeerRecord { Name = "DEV" } },
+        ManagedPcs = { new ManagedPcRecord { Name = "COM", MachineId = "2222" } }
+    };
+
+    private static PairingHostWindow.RequestCheck Check(string name, params (string Name, string? MachineId)[] allowed)
+        => PairingHostWindow.CheckRequest(Fleet(), name, "9999", allowed, "HOST-PC", "8888");
+
+    [Fact]
+    public void ACyrillicLetterInTheNameOfASavedPc_IsWarnedAbout()
+    {
+        // OFFICE-PC with a Cyrillic О.
+        var check = Check("\u041EFFICE-PC");
+        Assert.True(check.CanAllow);
+        Assert.Equal("\u041EFFICE-PC looks like OFFICE-PC, a PC in this fleet, but some of its letters only look alike, so it is not the same name. " +
+                     "Allow only if you expect a PC with this name.", check.Warning);
+    }
+
+    [Fact]
+    public void ALowercaseGreekLetter_IsReadAsTheLatinLetterItLooksLike()
+        // de + Greek nu, which looks like v.
+        => Assert.StartsWith("de\u03BD looks like DEV, a PC in this fleet", Check("de\u03BD").Warning);
+
+    [Fact]
+    public void AFullWidthFormOfThisPcsName_IsWarnedAbout_ButNotBlocked()
+    {
+        var check = Check("\uFF28\uFF2F\uFF33\uFF34-\uFF30\uFF23");
+        Assert.True(check.CanAllow);
+        Assert.Equal("\uFF28\uFF2F\uFF33\uFF34-\uFF30\uFF23 looks like HOST-PC, the name of this PC, but some of its letters only look alike, " +
+                     "so it is another PC. Allow only if you expect a PC with this name.", check.Warning);
+        // A Cyrillic С and Р in this PC's name.
+        Assert.Contains("the name of this PC", Check("HOST-\u0420\u0421").Warning);
+    }
+
+    [Fact]
+    public void ANameThatMixesAlphabets_IsWarnedAbout_ThoughItLooksLikeNoSavedName()
+        // LAPTOP with a Cyrillic Т.
+        => Assert.Equal("The name LAP\u0422OP mixes Latin and Cyrillic letters, so it can look like the name of another PC. " +
+                        "Allow only if you expect a PC with this name.", Check("LAP\u0422OP").Warning);
+
+    [Fact]
+    public void ANameThatLooksLikeAPcManagedOneWayOrAllowedAMomentAgo_NamesIt()
+    {
+        // COM in Cyrillic letters only: honestly written, but it looks like COM.
+        Assert.StartsWith("\u0421\u041E\u041C looks like COM, a PC that this fleet manages one way", Check("\u0421\u041E\u041C").Warning);
+        Assert.StartsWith("L\u0410PTOP looks like LAPTOP, which was allowed a moment ago", Check("L\u0410PTOP", ("LAPTOP", "3333")).Warning);
+    }
+
+    [Theory]
+    [InlineData("\u041E\u0424\u0418\u0421-\u041F\u041A")] // ОФИС-ПК: Cyrillic
+    [InlineData("\u0395\u03BB\u03BB\u03AC\u03B4\u03B1")] // Ελλάδα: Greek
+    [InlineData("\u6771\u4EAC-PC")]                       // Tokyo in Japanese, with Latin letters
+    [InlineData("J\u0100NIS-PC")]                         // JĀNIS-PC: Latin with a macron
+    [InlineData("LAPTOP")]
+    public void ANameInOneAlphabet_IsNotWarnedAbout(string name)
+        => Assert.Equal(new PairingHostWindow.RequestCheck(null, CanAllow: true), Check(name));
+
+    [Fact]
+    public void TheSameNameInAnotherForm_KeepsItsOwnWarning_AndIsNotWarnedAboutTwice()
+    {
+        // Full-width OFFICE-PC is the same name for the warnings already.
+        var warning = Check("\uFF2F\uFF26\uFF26\uFF29\uFF23\uFF25-PC").Warning;
+        Assert.Equal("A PC named \uFF2F\uFF26\uFF26\uFF29\uFF23\uFF25-PC is already in this fleet. Allow only if this is the same PC.", warning);
+    }
+
+    [Fact]
+    public void Alphabets_AreFoundByLetter()
+    {
+        Assert.Equal(new[] { LookAlikes.Alphabet.Latin, LookAlikes.Alphabet.Cyrillic }, LookAlikes.AlphabetsIn("PC-\u0430"));
+        Assert.Equal(new[] { LookAlikes.Alphabet.Latin }, LookAlikes.AlphabetsIn("\u6771\u4EAC-PC-2"));
+        Assert.Empty(LookAlikes.AlphabetsIn("123-_"));
+        Assert.Equal(LookAlikes.AsItLooks("OFFICE-PC"), LookAlikes.AsItLooks("\u043Effice-\u0440c"));
+        Assert.NotEqual(LookAlikes.AsItLooks("OFFICE-PC"), LookAlikes.AsItLooks("\u041E\u0424\u0418\u0421-\u041F\u041A"));
+    }
+}

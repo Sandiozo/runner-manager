@@ -210,7 +210,11 @@ public partial class PairingHostWindow : Window
         if (machineId is { Length: > 0 } && thisPcId.Length > 0 && machineId.Equals(thisPcId, StringComparison.OrdinalIgnoreCase))
             return new RequestCheck($"{name} sends the machine ID of this PC, so the fleet cannot tell the two PCs apart, and {name} cannot be added. " +
                                     "This happens when a PC is set up from a copy of the other PC's disk.", CanAllow: false);
-        var warnings = new[] { SameNameWarning(config, name, machineId, thisPc, pending), SameIdWarning(config, name, machineId, pending) }
+        var warnings = new[]
+            {
+                SameNameWarning(config, name, machineId, thisPc, pending), LookAlikeWarning(config, name, thisPc, pending),
+                SameIdWarning(config, name, machineId, pending)
+            }
             .OfType<string>().ToList();
         return new RequestCheck(warnings.Count > 0 ? string.Join("\n\n", warnings) : null, CanAllow: true);
     }
@@ -235,7 +239,8 @@ public partial class PairingHostWindow : Window
     /// Whether two names count as one for the warnings: as Runner Manager keys them (<see cref="MachineRelay.Sanitize"/>),
     /// or in Unicode normalization form KC, so that a decomposed and a composed form of one name (A with a combining
     /// macron, and Ā), or full-width letters, count as one name. Saving and the block on this PC's name use the key only.
-    /// Letters of other alphabets that look alike (a Cyrillic О for a Latin O) still count as other names.
+    /// Letters of other alphabets that look alike (a Cyrillic О for a Latin O) still count as other names; such a name
+    /// gets its own warning (<see cref="LookAlikeWarning"/>).
     /// </summary>
     internal static bool SameNameForWarning(string a, string b)
         => MachineRelay.Sanitize(a) == MachineRelay.Sanitize(b) || MachineRelay.Sanitize(FormKC(a)) == MachineRelay.Sanitize(FormKC(b));
@@ -245,6 +250,41 @@ public partial class PairingHostWindow : Window
         try { return name.Normalize(NormalizationForm.FormKC); }
         // Not valid Unicode (a lone surrogate, for example): compared as it is.
         catch (ArgumentException) { return name; }
+    }
+
+    /// <summary>
+    /// What to tell the user when the name of a joining PC only looks like another name: like the name of this PC (in
+    /// full-width letters, for example), or of a PC saved here or allowed a moment ago, once look-alike letters of the
+    /// Latin, Greek and Cyrillic alphabets are read as one (<see cref="LookAlikes.AsItLooks"/>). A name that is the same
+    /// for <see cref="SameNameForWarning"/> is left to <see cref="SameNameWarning"/>. Otherwise, a name that mixes these
+    /// alphabets is warned about, as it can look like a name that is not saved here. A name written in one alphabet
+    /// alone is not. Null when there is nothing to say.
+    /// </summary>
+    internal static string? LookAlikeWarning(FleetConfig config, string name, string thisPc, IEnumerable<(string Name, string? MachineId)>? allowed = null)
+    {
+        const string allowIf = "Allow only if you expect a PC with this name.";
+        var looks = LookAlikes.AsItLooks(name);
+        bool LooksLike(string other) => LookAlikes.AsItLooks(other) == looks && !SameNameForWarning(other, name);
+        if (MachineRelay.Sanitize(name) != MachineRelay.Sanitize(thisPc) && LookAlikes.AsItLooks(thisPc) == looks)
+            return $"{name} looks like {thisPc}, the name of this PC, but some of its letters only look alike, so it is another PC. {allowIf}";
+        var like = config.KnownPeers.Where(p => LooksLike(p.Name)).Select(p => (p.Name, What: "a PC in this fleet", Short: "in this fleet"))
+            .Concat(config.ManagedPcs.Where(p => LooksLike(p.Name))
+                .Select(p => (p.Name, What: "a PC that this fleet manages one way", Short: "managed one way")))
+            .Concat((allowed ?? []).Where(p => LooksLike(p.Name))
+                .Select(p => (p.Name, What: "which was allowed a moment ago", Short: "allowed a moment ago")))
+            .DistinctBy(p => (p.Name, p.Short))
+            .ToList();
+        if (like.Count == 1)
+            return $"{name} looks like {like[0].Name}, {like[0].What}, but some of its letters only look alike, so it is not the same name. {allowIf}";
+        if (like.Count > 1)
+        {
+            var list = like.Select(p => $"{p.Name} ({p.Short})").ToArray();
+            return $"{name} looks like the names of these PCs, but some of its letters only look alike: {string.Join(", ", list[..^1])} and {list[^1]}. {allowIf}";
+        }
+        var alphabets = LookAlikes.AlphabetsIn(name);
+        if (alphabets.Count < 2) return null;
+        var names = alphabets.Select(a => a.ToString()).ToArray();
+        return $"The name {name} mixes {string.Join(", ", names[..^1])} and {names[^1]} letters, so it can look like the name of another PC. {allowIf}";
     }
 
     /// <summary>
