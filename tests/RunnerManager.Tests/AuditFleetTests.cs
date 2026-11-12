@@ -909,6 +909,44 @@ public class StatusCacheBuildTests
     }
 
     [Fact]
+    public async Task ABuildQueuedBehindAHungOne_DoesNotRestartItsClock()
+    {
+        var now = new DateTime(2026, 11, 12, 8, 0, 0, DateTimeKind.Utc);
+        var builds = 0;
+        var hang = new TaskCompletionSource<MachineStatusPayload>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var log = new List<string>();
+        var cache = new StatusCache(() =>
+        {
+            var n = Interlocked.Increment(ref builds);
+            return n == 2 ? hang.Task : Task.FromResult(Payload(n));
+        }, message => { lock (log) log.Add(message); })
+        {
+            BuildTimeout = TimeSpan.FromSeconds(60),
+            ChangeWait = TimeSpan.Zero,
+            UtcNow = () => now
+        };
+        Assert.Equal("1", (await cache.GetAsync()).LastCommandId);
+
+        // A command ran: build 2 starts, and hangs.
+        cache.Invalidate();
+        await cache.GetAsync();
+        Assert.True(SpinWait.SpinUntil(() => Volatile.Read(ref builds) == 2, TimeSpan.FromSeconds(10)));
+
+        // Another command ran 50 seconds later: build 3 is queued behind build 2.
+        now += TimeSpan.FromSeconds(50);
+        cache.Invalidate();
+        await cache.GetAsync();
+        Assert.Equal(2, Volatile.Read(ref builds));
+
+        // 70 seconds after build 2 started, and 20 after build 3 was queued: build 2 counts as hung, so another starts.
+        now += TimeSpan.FromSeconds(20);
+        await cache.GetAsync();
+        Assert.True(SpinWait.SpinUntil(() => Volatile.Read(ref builds) == 3, TimeSpan.FromSeconds(10)));
+        lock (log) Assert.Contains(log, m => m.Contains("took more than 60 seconds"));
+        hang.SetResult(Payload(2));
+    }
+
+    [Fact]
     public async Task ASlowBuildThatFinishesInTime_RunsAlone_AndIsNotLogged()
     {
         var builds = 0;
