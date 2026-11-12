@@ -284,7 +284,7 @@ public sealed class McpServer
     /// U+E0100 to U+E01EF, and the Mongolian ones), the combining grapheme joiner (U+034F) and the Khmer inherent vowels,
     /// which count as marks. The rest of them are format characters or not assigned, which go anyway.
     /// </summary>
-    private static bool IsNotShown(int value)
+    internal static bool IsNotShown(int value)
         => value is 0x00AD or 0x034F or 0x061C or 0x115F or 0x1160 or 0x17B4 or 0x17B5 or >= 0x180B and <= 0x180F
                or >= 0x200B and <= 0x200F or >= 0x202A and <= 0x202E or >= 0x2060 and <= 0x206F or 0x3164
                or >= 0xFE00 and <= 0xFE0F or 0xFEFF or 0xFFA0 or >= 0xFFF0 and <= 0xFFF8

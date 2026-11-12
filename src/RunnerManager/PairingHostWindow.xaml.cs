@@ -213,13 +213,16 @@ public partial class PairingHostWindow : Window
     }
 
     /// <summary>
-    /// A character that cannot be seen in a name: a format or control character, a line or paragraph separator, a
-    /// combining mark, or a Hangul filler (a letter that shows as nothing).
+    /// A character that cannot be seen in a name: a format or control character, a line or paragraph separator, or one
+    /// that Unicode marks as not shown (<see cref="McpServer.IsNotShown"/>: the variation selectors, the combining
+    /// grapheme joiner, the Hangul fillers). Accents and vowel signs can be seen, and names in many scripts need them
+    /// (Thai, Devanagari, a decomposed Ā), so a combining mark as such is allowed; <see cref="SameNameForWarning"/>
+    /// compares such a name in its composed form.
     /// </summary>
     internal static bool IsInvisible(Rune rune)
         => Rune.GetUnicodeCategory(rune) is UnicodeCategory.Format or UnicodeCategory.Control or UnicodeCategory.LineSeparator
-               or UnicodeCategory.ParagraphSeparator or UnicodeCategory.NonSpacingMark or UnicodeCategory.EnclosingMark
-           || rune.Value is 0x115F or 0x1160 or 0x3164 or 0xFFA0;
+               or UnicodeCategory.ParagraphSeparator
+           || McpServer.IsNotShown(rune.Value);
 
     /// <summary>The name without the characters that cannot be seen, for messages.</summary>
     internal static string VisiblePart(string name)

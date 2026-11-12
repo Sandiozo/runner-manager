@@ -69,8 +69,9 @@ public class AddAPcCheckTests
     [InlineData("OFFICE-PC\u0007")]   // control
     [InlineData("OFFICE-\u2028PC")]   // line separator
     [InlineData("OFFICE-\u2029PC")]   // paragraph separator
-    [InlineData("OFFICE-PC\u034F")]   // combining grapheme joiner (non-spacing mark)
-    [InlineData("OFFICE-PC\u20DD")]   // combining enclosing circle (enclosing mark)
+    [InlineData("OFFICE-PC\u034F")]   // combining grapheme joiner (a mark that is not shown)
+    [InlineData("OFFICE-PC\uFE0F")]   // variation selector (a mark that is not shown)
+    [InlineData("OFFICE-PC\U000E0100")] // variation selector outside the first 65536 code points
     [InlineData("OFFICE-PC\u115F")]   // Hangul fillers
     [InlineData("OFFICE-PC\u1160")]
     [InlineData("OFFICE-PC\u3164")]
@@ -96,6 +97,10 @@ public class AddAPcCheckTests
     [InlineData("\u6771\u4EAC-PC")]                  // Tokyo in Japanese
     [InlineData("\u0395\u03BB\u03BB\u03AC\u03B4\u03B1")] // Greece in Greek, with a composed accent
     [InlineData("OFFICE PC 2")]
+    // Marks that can be seen: names in these scripts cannot be written without them.
+    [InlineData("JĀNIS-PC")]                   // JĀNIS-PC with A and a combining macron
+    [InlineData("กิน-PC")]            // Thai, with a vowel sign above
+    [InlineData("कुमार")]   // Devanagari, with a vowel sign below
     public void NamesInOtherAlphabets_CanStillBeAllowed(string name)
         => Assert.Equal(new PairingHostWindow.RequestCheck(null, CanAllow: true), Check(new FleetConfig(), name, null));
 
@@ -116,7 +121,7 @@ public class AddAPcCheckTests
     {
         var fleet = new FleetConfig { ManagedPcs = { new ManagedPcRecord { Name = "J\u0100NIS-PC" } } };
 
-        // Decomposed against composed: the request itself cannot be allowed, as it has a combining mark.
+        // Decomposed against composed.
         Assert.Equal("This fleet already manages a PC named JA\u0304NIS-PC. Allow only if this is the same PC.",
             PairingHostWindow.SameNameWarning(fleet, "JA\u0304NIS-PC", null, thisPc: "HOST-PC"));
         // Full-width letters.
