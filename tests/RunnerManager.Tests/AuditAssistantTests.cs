@@ -597,14 +597,33 @@ public class AuditAssistantTests
             }
         });
 
-        using var link = new AgentLink(url, signInTimeout: TimeSpan.FromSeconds(1));
-        var refused = await Assert.ThrowsAsync<AgentLinkException>(() => link.SendAsync(Initialize)).WaitAsync(TimeSpan.FromSeconds(30));
-        Assert.Contains("did not answer this program's sign-in in time", refused.Message);
-        Assert.True(refused.AgentUnavailable);
-        // Nothing is remembered about it. The next request asks again: a busy agent may only have been slow.
+        var now = DateTime.UtcNow;
+        using var link = new AgentLink(url, signInTimeout: TimeSpan.FromSeconds(1)) { UtcNow = () => now };
+        // Three requests at once: one signs in, the others wait for that sign-in.
+        foreach (var request in new[] { link.SendAsync(Ping), link.SendAsync(Ping), link.SendAsync(Ping) })
+        {
+            var refused = await Assert.ThrowsAsync<AgentLinkException>(() => request).WaitAsync(TimeSpan.FromSeconds(30));
+            Assert.Contains("did not answer this program's sign-in in time", refused.Message);
+            Assert.True(refused.AgentUnavailable);
+        }
+        // The ones that waited, and those that follow for a while, fail at once and do not each ask again.
+        await Assert.ThrowsAsync<AgentLinkException>(() => link.SendAsync(Ping)).WaitAsync(TimeSpan.FromSeconds(30));
+        await HeldAsync(1);
+
+        // Then the next request asks again: a busy agent may only have been slow.
+        now += TimeSpan.FromSeconds(31);
         var again = await Assert.ThrowsAsync<AgentLinkException>(() => link.SendAsync(Ping)).WaitAsync(TimeSpan.FromSeconds(30));
         Assert.Contains("did not answer this program's sign-in in time", again.Message);
-        lock (held) Assert.Equal(2, held.Count);
+        await HeldAsync(2);
+
+        async Task HeldAsync(int count)
+        {
+            // The silent program takes each request on a thread of its own; the count may lag behind, never run ahead.
+            for (var waited = 0; waited < 100 && Held() < count; waited++) await Task.Delay(100);
+            Assert.Equal(count, Held());
+        }
+
+        int Held() { lock (held) return held.Count; }
 
         // When the AI tool itself gives up, that is not reported as a sign-in that took too long.
         using var patient = new AgentLink(url, signInTimeout: TimeSpan.FromMinutes(5));
