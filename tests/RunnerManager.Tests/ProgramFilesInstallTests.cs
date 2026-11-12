@@ -134,8 +134,27 @@ public class ProgramFilesInstallTests
         Assert.Contains("update it to v2.9.1", SetupWindow.ExistingInstallText(false, "2.9.0", "2.9.1", true));
         Assert.Contains("use it for your Windows user too", SetupWindow.ExistingInstallText(false, "2.9.1", "2.9.1", true));
         Assert.Contains("setup keeps v3.0.0", SetupWindow.ExistingInstallText(false, "3.0.0", "2.9.1", true));
-        foreach (var text in new[] { shared, SetupWindow.ExistingInstallText(false, "3.0.0", "2.9.1", false)! })
+        // A copy that is neither recorded for this user nor used by another is replaced, never "used too".
+        var neither = SetupWindow.ExistingInstallText(false, "2.9.1", "2.9.1", false)!;
+        Assert.Contains("replace it with v2.9.1", neither);
+        Assert.DoesNotContain("too", neither);
+        Assert.Contains("go back", SetupWindow.ExistingInstallText(false, "3.0.0", "2.9.1", false));
+        foreach (var text in new[] { shared, neither, SetupWindow.ExistingInstallText(false, "3.0.0", "2.9.1", false)! })
             Assert.DoesNotContain("n't", text);
+    }
+
+    [Fact]
+    public void Setup_SaysAgainWhatItDoes_ForEachFolderThatIsChosen()
+    {
+        // The first-page text follows the chosen folder and is decided as the install decides it.
+        var source = File.ReadAllText(Path.Combine(InstallEvidenceTests.SourceDir, "SetupWindow.xaml.cs"));
+        var show = source[source.IndexOf("private void ShowInstallFolder()", StringComparison.Ordinal)..];
+        Assert.Contains("ShowExistingInstallAsync()", show[..show.IndexOf("InstallPathText", StringComparison.Ordinal)]);
+        var existing = source[source.IndexOf("private async Task ShowExistingInstallAsync()", StringComparison.Ordinal)..];
+        existing = existing[..existing.IndexOf("internal static string? ExistingInstallText", StringComparison.Ordinal)];
+        Assert.Contains("MachineInstall.OtherUsersOfAsync(folder)", existing);
+        Assert.Contains("Installer.OwnInstall(MachineInstall.ReadOwnRecord())", existing);
+        Assert.DoesNotContain("IsInstalled", existing);
     }
 
     [Fact]

@@ -29,16 +29,9 @@ public partial class SetupWindow : Window
         VersionText.Text = $"Setup · version {AppUpdater.CurrentVersion}";
         (_proposedFolder, _proposedUnconfirmed) = MachineInstall.SetupProposal();
         _installFolder = _proposedFolder;
-        // What setup says below is about the folder it offers.
-        AppUpdater.UseInstallDir(_installFolder);
+        // Also says what setup does with a copy that is already in the folder it offers.
         ShowInstallFolder();
         _presetDone = PresetFromInstallAsync();
-        var sharedWithOthers = MachineInstall.OtherRecords().Any(r => Path.IsPathFullyQualified(r.Folder) && AppUpdater.SameFolder(r.Folder, _installFolder));
-        if (ExistingInstallText(Installer.IsInstalled, AppUpdater.InstalledVersion, AppUpdater.CurrentVersion, sharedWithOthers) is { } existing)
-        {
-            ExistingText.Text = existing;
-            ExistingText.Visibility = Visibility.Visible;
-        }
         if (FleetConfig.Current.FleetKey != null)
         {
             SeveralPcsOption.IsChecked = true;
@@ -207,26 +200,53 @@ public partial class SetupWindow : Window
     }
 
     /// <summary>
-    /// What setup's first page says about a copy that is already in the folder it offers, or null when there is none.
-    /// <paramref name="ownInstall"/>: it is this user's install. <paramref name="sharedWithOthers"/>: other Windows users of
-    /// this PC use it, so setup never puts an older version in its place.
+    /// Says on the first page what setup does with a copy that is already in the chosen folder, decided as
+    /// <see cref="Installer.InstallAsync"/> decides it: this user's install is the recorded one, and other users are those
+    /// that the records and the scheduled tasks show. Shown again for each folder the user chooses.
+    /// </summary>
+    private async Task ShowExistingInstallAsync()
+    {
+        var folder = _installFolder;
+        var installedVersion = AppUpdater.InstalledVersion;
+        var ownInstall = Installer.OwnInstall(MachineInstall.ReadOwnRecord()) is { } own && AppUpdater.SameFolder(own, folder);
+        var sharedWithOthers = false;
+        if (installedVersion != null)
+        {
+            try { sharedWithOthers = (await MachineInstall.OtherUsersOfAsync(folder)).Names.Count > 0; }
+            catch (Exception ex) { MachineRelay.AppendAgentLog($"Setup could not read which other Windows users use {folder}: {ex.Message}"); }
+        }
+        // Another folder was chosen meanwhile; its own call shows the text.
+        if (!AppUpdater.SameFolder(folder, _installFolder)) return;
+        var text = ExistingInstallText(ownInstall, installedVersion, AppUpdater.CurrentVersion, sharedWithOthers);
+        ExistingText.Text = text ?? string.Empty;
+        ExistingText.Visibility = text == null ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    /// <summary>
+    /// What setup's first page says about a copy that is already in the chosen folder, or null when there is none.
+    /// <paramref name="ownInstall"/>: it is this user's recorded install. <paramref name="sharedWithOthers"/>: other Windows
+    /// users of this PC use it, so setup never puts an older version in its place (see <see cref="Installer.KeepsInstalledCopy"/>).
+    /// Any other copy is replaced by this setup's version.
     /// </summary>
     internal static string? ExistingInstallText(bool ownInstall, string? installedVersion, string setupVersion, bool sharedWithOthers)
     {
         if (installedVersion == null) return null;
         var older = AppUpdater.IsOlder(setupVersion, installedVersion);
+        var keeps = Installer.KeepsInstalledCopy(sharedWithOthers, installedVersion, setupVersion);
         if (ownInstall)
             return !older ? "Runner Manager is already installed. Continue to update it. Your settings are kept. To move it, choose another folder."
-                : sharedWithOthers
+                : keeps
                     ? $"Runner Manager v{installedVersion} is installed, which is newer than this setup (v{setupVersion}). Other Windows users on this PC use it, so setup keeps v{installedVersion}. Your settings are kept."
                     : $"Runner Manager v{installedVersion} is installed, which is newer than this setup (v{setupVersion}). Continue only to go back to the older version. Your settings are kept.";
-        if (!older)
-            return AppUpdater.IsNewer(setupVersion, installedVersion)
-                ? $"Runner Manager v{installedVersion} is already in this folder. Continue to update it to v{setupVersion} and to use it for your Windows user too."
-                : $"Runner Manager v{installedVersion} is already in this folder. Continue to use it for your Windows user too.";
-        return sharedWithOthers
-            ? $"Runner Manager v{installedVersion} is already in this folder, which is newer than this setup (v{setupVersion}). Other Windows users on this PC use it, so setup keeps v{installedVersion} and sets it up for your Windows user too."
-            : $"Runner Manager v{installedVersion} is already in this folder, which is newer than this setup (v{setupVersion}). Continue only to go back to the older version.";
+        if (sharedWithOthers)
+            return keeps
+                ? $"Runner Manager v{installedVersion} is already in this folder, which is newer than this setup (v{setupVersion}). Other Windows users on this PC use it, so setup keeps v{installedVersion} and sets it up for your Windows user too."
+                : AppUpdater.IsNewer(setupVersion, installedVersion)
+                    ? $"Runner Manager v{installedVersion} is already in this folder, and other Windows users on this PC use it. Continue to update it to v{setupVersion} and to use it for your Windows user too."
+                    : $"Runner Manager v{installedVersion} is already in this folder, and other Windows users on this PC use it. Continue to use it for your Windows user too.";
+        return older
+            ? $"Runner Manager v{installedVersion} is already in this folder, which is newer than this setup (v{setupVersion}). Continue only to go back to the older version."
+            : $"Runner Manager v{installedVersion} is already in this folder. Continue to replace it with v{setupVersion}.";
     }
 
     /// <summary>
@@ -251,6 +271,9 @@ public partial class SetupWindow : Window
 
     private void ShowInstallFolder()
     {
+        // What setup says about a copy in the folder is about this folder.
+        AppUpdater.UseInstallDir(_installFolder);
+        _ = ShowExistingInstallAsync();
         InstallPathText.Text = _installFolder;
         var (visible, label) = FolderResetButton(_installFolder, _proposedFolder, MachineInstall.ProgramFilesDir);
         DefaultInstallFolderButton.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
