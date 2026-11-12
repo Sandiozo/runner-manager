@@ -209,6 +209,55 @@ public class AuditR4RunnerTests
         Assert.False(health.IsProblem, health.Detail);
     }
 
+    // ----- Running long without the usual duration -----
+
+    [Fact]
+    public async Task JobThatKeepsPrinting_IsRunningLong_OnceItsUsualDurationStayedUnknownFor4Hours()
+    {
+        var worker = Noon.AddMinutes(-130);
+        var machine = Pc("PC-R4-UNKNOWN", Busy("audit-r4/unknown", 14, worker));
+        var key = JobHealth.Key(machine.Runners[0]);
+        // One of the earlier runs cannot be read, so the usual duration never becomes known.
+        var reads = Reads(() => Work(Running(601, worker)), () => (false, null));
+        async Task<RunnerHealth> At(DateTime now) => (await JobHealth.EvaluateAsync(new[] { machine }, Quiet, null, reads, now)).Runners[key];
+
+        Assert.False((await At(Noon)).IsProblem);
+        Assert.False((await At(Noon.AddHours(4).AddMinutes(-1))).IsProblem);
+        var health = await At(Noon.AddHours(4));
+
+        Assert.Equal(RunnerConcern.RunningLong, health.Concern);
+        Assert.Contains("run for 6 h 10 min, longer than 2 h", health.Detail);
+    }
+
+    [Fact]
+    public async Task JobThatKeepsPrinting_IsRunningLong_OnceGitHubCouldNotBeReadFor4Hours()
+    {
+        var worker = Noon.AddMinutes(-130);
+        var machine = Pc("PC-R4-UNREAD", Busy("audit-r4/unread", 14, worker));
+        var key = JobHealth.Key(machine.Runners[0]);
+        var reads = Reads(() => null, () => (false, null));
+        async Task<RunnerHealth> At(DateTime now) => (await JobHealth.EvaluateAsync(new[] { machine }, Quiet, null, reads, now)).Runners[key];
+
+        Assert.False((await At(Noon)).IsProblem);
+        Assert.False((await At(Noon.AddHours(3))).IsProblem);
+        Assert.Equal(RunnerConcern.RunningLong, (await At(Noon.AddHours(4))).Concern);
+    }
+
+    [Fact]
+    public async Task UsualDurationUnknownForLong_CountsAgainForTheNextJob()
+    {
+        var machine = Pc("PC-R4-NEXT", Busy("audit-r4/next", 14, Noon.AddMinutes(-130)));
+        var key = JobHealth.Key(machine.Runners[0]);
+        var reads = Reads(() => null, () => (false, null));
+
+        Assert.False((await JobHealth.EvaluateAsync(new[] { machine }, Quiet, null, reads, Noon)).Runners[key].IsProblem);
+        // The next job has run 3 hours when it is first seen, 4 hours after the first one was.
+        var next = Pc("PC-R4-NEXT", Busy("audit-r4/next", 14, Noon.AddHours(1)));
+        var health = (await JobHealth.EvaluateAsync(new[] { next }, Quiet, null, reads, Noon.AddHours(4))).Runners[key];
+
+        Assert.False(health.IsProblem, health.Detail);
+    }
+
     // ----- Editing a runner -----
 
     [Theory]
