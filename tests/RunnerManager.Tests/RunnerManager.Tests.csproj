@@ -28,12 +28,15 @@
   <!-- LauncherTests run RunnerManagerLauncher.exe with a stub in place of the app. Both are native and built by
        src\RunnerManagerLauncher\build.ps1 with the Visual C++ tools (it skips the work when they are up to date). Without
        the tools the build goes on and the launcher tests fail, saying why; with them (as on GitHub's windows-latest) the
-       tests run for real. The two exes are copied to launcher\ in the test output. -->
+       tests run for real. The two exes are copied to launcher\ in the test output. The app embeds the launcher too (see
+       RunnerManager.csproj). -->
   <PropertyGroup>
     <LauncherFolder>$(MSBuildThisFileDirectory)..\..\src\RunnerManagerLauncher\</LauncherFolder>
   </PropertyGroup>
 
-  <Target Name="BuildLauncherForTests" BeforeTargets="BeforeBuild">
+  <!-- After the app is built: the app's own build runs build.ps1 for the launcher too, and two runs at once in a parallel
+       build of the solution would write the same files. Here only the stub is left to build. -->
+  <Target Name="BuildLauncherForTests" AfterTargets="ResolveProjectReferences">
     <Exec Command="&quot;$(SystemRoot)\System32\WindowsPowerShell\v1.0\powershell.exe&quot; -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;$(LauncherFolder)build.ps1&quot; -TestStub -IfToolsPresent" />
   </Target>
 
