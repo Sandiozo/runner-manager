@@ -457,6 +457,18 @@ public class ProgramFilesInstallTests
     }
 
     [Fact]
+    public void TheGitHubSignInConsole_RunsNoAutoRunCommands()
+    {
+        // cmd.exe runs the AutoRun commands in HKCU\Software\Microsoft\Command Processor unless it is started with /d, and
+        // any program of the user can set them.
+        const string gh = @"C:\Program Files\GitHub CLI\gh.exe";
+        var start = GitHubCli.ConsoleStartInfo(gh, "auth login --web");
+        Assert.Equal(WindowsTools.FullPath("cmd.exe"), start.FileName);
+        Assert.Equal($"/d /k \"\"{gh}\" auth login --web\"", start.Arguments);
+        Assert.False(start.Environment.ContainsKey("GH_HOST"));
+    }
+
+    [Fact]
     public void Gh_FoundOnPath_IsStartedByItsFullPath_AndNeverFromTheAppOrTheCurrentFolder()
     {
         var root = Path.Combine(Path.GetTempPath(), "rm-gh-" + Guid.NewGuid().ToString("N"));

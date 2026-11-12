@@ -229,14 +229,23 @@ public static class GitHubCli
     /// </summary>
     private static void LaunchInConsole(string arguments)
     {
+        using var process = Process.Start(ConsoleStartInfo(ExecutablePath, arguments));
+    }
+
+    /// <summary>
+    /// How <see cref="LaunchInConsole"/> starts <paramref name="gh"/>: in cmd.exe with /d, so the AutoRun commands in the
+    /// registry (which any program of the user can set in HKCU) do not run in the console that Runner Manager opens.
+    /// </summary>
+    internal static ProcessStartInfo ConsoleStartInfo(string gh, string arguments)
+    {
         var startInfo = new ProcessStartInfo
         {
             FileName = WindowsTools.FullPath("cmd.exe"),
-            Arguments = $"/k \"\"{ExecutablePath}\" {arguments}\"",
+            Arguments = $"/d /k \"\"{gh}\" {arguments}\"",
             UseShellExecute = false
         };
         PrepareEnvironment(startInfo, environmentToken: false);
-        using var process = Process.Start(startInfo);
+        return startInfo;
     }
 
     /// <summary>
