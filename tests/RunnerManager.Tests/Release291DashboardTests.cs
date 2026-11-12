@@ -140,13 +140,25 @@ public class StillOnClickTests
         {
             var focused = new Button();
             var other = new Button();
-            Assert.True(StillOnClick.KeepsStill(focused, focused, Mouse.PrimaryDevice));
+            Assert.True(StillOnClick.KeepsStill(focused, focused, Mouse.PrimaryDevice, pointerDown: true));
             // Tab: the focused element is brought into view.
-            Assert.False(StillOnClick.KeepsStill(focused, focused, Keyboard.PrimaryDevice));
+            Assert.False(StillOnClick.KeepsStill(focused, focused, Keyboard.PrimaryDevice, pointerDown: false));
             // No input yet, or a request that is not for the focused element (code that shows a part of the list).
-            Assert.False(StillOnClick.KeepsStill(focused, focused, null));
-            Assert.False(StillOnClick.KeepsStill(other, focused, Mouse.PrimaryDevice));
-            Assert.False(StillOnClick.KeepsStill(null, null, Mouse.PrimaryDevice));
+            Assert.False(StillOnClick.KeepsStill(focused, focused, null, pointerDown: false));
+            Assert.False(StillOnClick.KeepsStill(other, focused, Mouse.PrimaryDevice, pointerDown: true));
+            Assert.False(StillOnClick.KeepsStill(null, null, Mouse.PrimaryDevice, pointerDown: true));
+        });
+
+    [Fact]
+    public void FocusAScreenReaderMovesAfterAClick_IsBroughtIntoView()
+        => WpfTestApp.Run(() =>
+        {
+            var focused = new Button();
+            // The mouse was used last, but no button is down any more: a screen reader (or code) moved the focus.
+            Assert.False(StillOnClick.KeepsStill(focused, focused, Mouse.PrimaryDevice, pointerDown: false));
+            Assert.False(StillOnClick.KeepsStill(focused, focused, Stylus.CurrentStylusDevice, pointerDown: false));
+            // It reads the mouse buttons and the pen without a window.
+            _ = StillOnClick.PointerDown();
         });
 
     [Fact]
@@ -161,27 +173,36 @@ public class StillOnClickTests
             outside.AddHandler(FrameworkElement.RequestBringIntoViewEvent, new RequestBringIntoViewEventHandler((_, _) => reached++));
             var lastInput = StillOnClick.LastInput;
             var focusedElement = StillOnClick.Focused;
+            var pointerDown = StillOnClick.PointerDown;
             try
             {
                 StillOnClick.Focused = () => header;
                 StillOnClick.LastInput = () => Mouse.PrimaryDevice;
+                StillOnClick.PointerDown = () => true;
                 header.BringIntoView();
                 Assert.Equal(0, reached);
 
                 StillOnClick.LastInput = () => Keyboard.PrimaryDevice;
+                StillOnClick.PointerDown = () => false;
                 header.BringIntoView();
                 Assert.Equal(1, reached);
 
-                // Turned off, every request goes on.
+                // After the click the mouse button is up: focus that a screen reader moves now is brought into view.
                 StillOnClick.LastInput = () => Mouse.PrimaryDevice;
-                StillOnClick.SetIsEnabled(panel, false);
                 header.BringIntoView();
                 Assert.Equal(2, reached);
+
+                // Turned off, every request goes on.
+                StillOnClick.PointerDown = () => true;
+                StillOnClick.SetIsEnabled(panel, false);
+                header.BringIntoView();
+                Assert.Equal(3, reached);
             }
             finally
             {
                 StillOnClick.LastInput = lastInput;
                 StillOnClick.Focused = focusedElement;
+                StillOnClick.PointerDown = pointerDown;
             }
         });
 
