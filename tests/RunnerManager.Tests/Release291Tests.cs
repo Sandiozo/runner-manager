@@ -1,3 +1,4 @@
+using System.IO;
 using System.Text.Json;
 
 namespace RunnerManager.Tests;
@@ -262,4 +263,92 @@ public class LookAlikeNameTests
         Assert.Equal(LookAlikes.AsItLooks("OFFICE-PC"), LookAlikes.AsItLooks("\u043Effice-\u0440c"));
         Assert.NotEqual(LookAlikes.AsItLooks("OFFICE-PC"), LookAlikes.AsItLooks("\u041E\u0424\u0418\u0421-\u041F\u041A"));
     }
+}
+
+/// <summary>The job view and the job log: options that hide a key, and a silent step when the processes cannot be read.</summary>
+public class JobOutputTests
+{
+    [Theory]
+    // Kept for every program on purpose: a harmless value costs only the arguments after it.
+    [InlineData("sort.exe --key 2 data.txt", "")]
+    [InlineData("sort.exe -r --key=2 data.txt", "-r")]
+    // A key for a program that no table lists.
+    [InlineData("uploader.exe publish --key ABC123 pkg", "publish")]
+    [InlineData("uploader.exe publish --api-key ABC123 pkg", "publish")]
+    public void KeyOptions_AreLeftOutForEveryProgram(string commandLine, string expected)
+    {
+        var shown = RunnerActivity.ShortArguments(commandLine);
+        Assert.Equal(expected, shown);
+        Assert.DoesNotContain("ABC123", shown);
+    }
+
+    private static string NewRunnerRoot()
+    {
+        var root = Directory.CreateTempSubdirectory("rm-291-").FullName;
+        Directory.CreateDirectory(Path.Combine(root, "_diag", "pages"));
+        return root;
+    }
+
+    private static void WritePage(string root, string name, string text, DateTime writtenUtc)
+    {
+        var path = Path.Combine(root, "_diag", "pages", name);
+        File.WriteAllText(path, text);
+        File.SetCreationTimeUtc(path, writtenUtc);
+        File.SetLastWriteTimeUtc(path, writtenUtc);
+    }
+
+    private static RunnerActivity.ProcessSnapshot Worker(string root, DateTime startedUtc) => new(new[]
+    {
+        new RunnerActivity.ProcessRow(1, 0, "Runner.Worker.exe", Path.Combine(root, "bin", "Runner.Worker.exe"), string.Empty, 0, 0,
+            System.Management.ManagementDateTimeConverter.ToDmtfDateTime(startedUtc.ToLocalTime()))
+    });
+
+    private static RunnerActivity.ProcessSnapshot NoProcessList() => throw new System.Runtime.InteropServices.COMException("WMI is not available.");
+
+    [Fact]
+    public void ASilentStep_KeepsItsOutput_WhenTheProcessListCannotBeReadLater()
+    {
+        var root = NewRunnerRoot();
+        try
+        {
+            var now = DateTime.UtcNow;
+            WritePage(root, "step_1.log", "Compiling\n", now.AddMinutes(-1));
+            // The process list shows the page as the running job's.
+            Assert.Equal(new[] { "Compiling", "" }, RunnerActivity.ReadJobOutput(root, 10, () => Worker(root, now.AddMinutes(-2)), now).Lines);
+
+            // Three hours later the step is still silent, and the process list cannot be read.
+            var later = RunnerActivity.ReadJobOutput(root, 10, NoProcessList, now.AddHours(3));
+            Assert.Equal(new[] { "Compiling", "" }, later.Lines);
+            Assert.False(later.ProcessesUnreadable);
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
+    public void AnOldPageThatWasNeverShownAsTheJobs_IsNotShown_AndTheLogSaysWhy()
+    {
+        var root = NewRunnerRoot();
+        try
+        {
+            var now = DateTime.UtcNow;
+            WritePage(root, "earlier_1.log", "an earlier job\n", now.AddHours(-1));
+            var output = RunnerActivity.ReadJobOutput(root, 10, NoProcessList, now);
+            Assert.Empty(output.Lines);
+            Assert.True(output.ProcessesUnreadable);
+            var text = LogReader.JobLogText(output);
+            Assert.StartsWith("(The processes on this PC could not be read", text);
+            Assert.Contains("older than 5 minutes is not shown", text);
+
+            // Once the runner runs no job, the page that was the job's is forgotten.
+            WritePage(root, "step_1.log", "this job\n", now.AddMinutes(-1));
+            Assert.Equal(new[] { "this job", "" }, RunnerActivity.ReadJobOutput(root, 10, () => Worker(root, now.AddMinutes(-2)), now).Lines);
+            Assert.Empty(RunnerActivity.ReadJobOutput(root, 10, () => new RunnerActivity.ProcessSnapshot([]), now).Lines);
+            Assert.True(RunnerActivity.ReadJobOutput(root, 10, NoProcessList, now.AddHours(1)).ProcessesUnreadable);
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
+    public void TheJobLog_WithProcessesThatCanBeRead_SaysThatThereIsNoOutputYet()
+        => Assert.StartsWith("(No output yet.", LogReader.JobLogText(new RunnerActivity.JobOutput([], ProcessesUnreadable: false)));
 }

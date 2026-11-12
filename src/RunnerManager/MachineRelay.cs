@@ -1823,11 +1823,11 @@ public static class LogReader
         {
             var key = logKey[4..];
             var root = await RunnerActivity.FindRootAsync(key);
-            var lines = RunnerActivity.ReadOutput(root, MaxLines);
+            var output = RunnerActivity.ReadJobOutput(root, MaxLines);
             return new LogPayload
             {
                 Title = $"{Path.GetFileName(root)} live output — {Environment.MachineName}",
-                Text = lines.Length > 0 ? Truncate(lines) : "(No output yet. The runner writes the output of the running step here while a job runs.)",
+                Text = JobLogText(output),
                 CreatedUtc = DateTime.UtcNow
             };
         }
@@ -1836,6 +1836,14 @@ public static class LogReader
         var text = path != null && File.Exists(path) ? Tail(path) : "(No log file yet.)";
         return new LogPayload { Title = title, Text = text, CreatedUtc = DateTime.UtcNow };
     }
+
+    /// <summary>The text of a job's live output log.</summary>
+    internal static string JobLogText(RunnerActivity.JobOutput output)
+        => output.Lines.Length > 0 ? Truncate(output.Lines)
+            : output.ProcessesUnreadable
+                ? "(The processes on this PC could not be read, so it is not known whether a step is running. Output older than " +
+                  $"{(int)RunnerActivity.RecentPage.TotalMinutes} minutes is not shown, because it can belong to an earlier job. Try again in a moment.)"
+                : "(No output yet. The runner writes the output of the running step here while a job runs.)";
 
     private static string? NewestLog(string folder)
     {

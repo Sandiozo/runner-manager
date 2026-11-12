@@ -205,6 +205,9 @@ public static class RunnerActivity
     /// <summary>The last lines of the running step's output, without timestamps and color codes. None when the runner runs no job.</summary>
     internal static string[] ReadOutput(string root, int lines) => ReadOutput(root, lines, () => ProcessSnapshot.Read(WorkerName));
 
+    /// <summary>The running step's output for the job log, and whether the processes on this PC could not be read.</summary>
+    internal static JobOutput ReadJobOutput(string root, int lines) => ReadJobOutput(root, lines, () => ProcessSnapshot.Read(WorkerName));
+
     /// <summary>
     /// Without the process list, the newest page is shown only when it was written this recently: then it is most often
     /// the running step's. An older one can be the last step of an earlier job, for an organization runner even
@@ -215,6 +218,21 @@ public static class RunnerActivity
     /// <param name="readWorkers">Reads the PC's Runner.Worker processes; tests replace it.</param>
     /// <param name="nowUtc">The time, which tests set.</param>
     internal static string[] ReadOutput(string root, int lines, Func<ProcessSnapshot> readWorkers, DateTime? nowUtc = null)
+        => ReadJobOutput(root, lines, readWorkers, nowUtc).Lines;
+
+    /// <summary>The last lines of the running step's output, and whether the processes on this PC could not be read.</summary>
+    /// <param name="ProcessesUnreadable">
+    /// The process list could not be read and no page could be shown, so it is not known whether a step runs and writes.
+    /// </param>
+    internal sealed record JobOutput(string[] Lines, bool ProcessesUnreadable);
+
+    /// <summary>
+    /// Like <see cref="ReadOutput(string, int, Func{ProcessSnapshot}, DateTime?)"/>. Without the process list, the newest
+    /// page is still shown when the process list showed it before as the running job's: a step can be silent for long.
+    /// Another page is shown only when it was written in the last <see cref="RecentPage"/>; otherwise nothing is, and
+    /// the result says that the processes could not be read.
+    /// </summary>
+    internal static JobOutput ReadJobOutput(string root, int lines, Func<ProcessSnapshot> readWorkers, DateTime? nowUtc = null)
     {
         ProcessSnapshot workers;
         try { workers = readWorkers(); }
@@ -222,19 +240,40 @@ public static class RunnerActivity
         {
             // Without the process list it is unknown whether a job runs and when it started.
             var page = CurrentOutputFile(root);
-            return page != null && (nowUtc ?? DateTime.UtcNow) - page.ChangedUtc <= RecentPage ? ReadLines(page, lines) : Array.Empty<string>();
+            if (page == null) return new JobOutput(Array.Empty<string>(), ProcessesUnreadable: true);
+            bool known;
+            lock (JobPages) known = JobPages.TryGetValue(root, out var shown) && shown.Equals(page.Path, StringComparison.OrdinalIgnoreCase);
+            return known || (nowUtc ?? DateTime.UtcNow) - page.ChangedUtc <= RecentPage
+                ? new JobOutput(ReadLines(page, lines), ProcessesUnreadable: false)
+                : new JobOutput(Array.Empty<string>(), ProcessesUnreadable: true);
         }
-        return ReadOutput(root, lines, workers);
+        return new JobOutput(ReadOutput(root, lines, workers), ProcessesUnreadable: false);
     }
+
+    /// <summary>
+    /// The page that the process list last showed to be the running job's, per runner folder. Without the process list,
+    /// that page is still shown while it is the newest, however long its step is silent.
+    /// </summary>
+    private static readonly Dictionary<string, string> JobPages = new(StringComparer.OrdinalIgnoreCase);
 
     /// <param name="processes">The PC's processes, or at least its Runner.Worker processes.</param>
     internal static string[] ReadOutput(string root, int lines, ProcessSnapshot processes)
     {
         var workers = processes.Rows.Where(p => IsWorkerOf(p, root)).ToList();
         // Without a job, files in _diag\pages are left over from an earlier one (a page the runner did not upload).
-        if (workers.Count == 0) return Array.Empty<string>();
+        if (workers.Count == 0)
+        {
+            lock (JobPages) JobPages.Remove(root);
+            return Array.Empty<string>();
+        }
         var workerStarted = workers.Select(p => ParseStarted(p.Started)).Where(s => s != null).Min();
-        return ReadLines(CurrentOutputFile(root, OutputNotBefore(workerStarted)), lines);
+        var page = CurrentOutputFile(root, OutputNotBefore(workerStarted));
+        lock (JobPages)
+        {
+            if (page != null) JobPages[root] = page.Path;
+            else JobPages.Remove(root);
+        }
+        return ReadLines(page, lines);
     }
 
     private static string[] ReadLines(OutputFile? file, int lines)
@@ -533,12 +572,18 @@ public static class RunnerActivity
            || PwOption.IsMatch(token)
            || (rules.PasswordP && token.Length >= 2 && token[0] == '-' && (token[1] is 'p' or 'P'))
            || IsSecretOption(token, rules.SecretOptions)
-           // --key and --api-key hold a key for every program.
            || IsSecretOption(token, LongKeyOptions)
            || AttachedUser.IsMatch(token)
            || ((token is "-u" or "--user" or "-U" or "--proxy-user") && (next.Contains(':') || next.Contains('%')))
            || token.Equals("/p", StringComparison.OrdinalIgnoreCase) || token.Equals("/rp", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// Options left out for every program, not only for the ones in <see cref="SecretOptions"/>. --api-key always holds
+    /// a key (the hint "api-key" finds it too). --key holds one for many upload and publishing tools that no table can
+    /// list (choco push --key, tool upload --key), and is harmless for others (sort --key 2). Kept for every program on
+    /// purpose: a harmless value costs only the arguments after it, as the view shows at most three, while a key would
+    /// be shown in the job view, which other PCs of the fleet and AI assistants (job_status) read.
+    /// </summary>
     private static readonly string[] LongKeyOptions = { "--key", "--api-key" };
 
     /// <summary>Output files written before the job's worker started belong to an earlier job (a minute of slack for clocks).</summary>
