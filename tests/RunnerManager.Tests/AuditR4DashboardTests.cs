@@ -153,6 +153,33 @@ public class AuditR4DashboardTests
         Assert.False(limitStarted);
     }
 
+    // ----- 9: adding a runner on another PC does not need this PC's GitHub sign-in -----
+
+    [Fact]
+    public void AddRunner_AsksForThisPcsSignInFirst_OnlyWhenNoOtherPcCanBeChosen()
+    {
+        var local = PcWith(Environment.MachineName);
+        var online = PcWith("BUILD-53");
+        var offline = MachineInfo.Placeholder("build-54", "BUILD-54", DateTime.UtcNow.AddHours(-1), "10.0.0.54", "No answer.");
+        Assert.True(MainWindow.OnlyThisPcToAddOn(new[] { local }));
+        Assert.True(MainWindow.OnlyThisPcToAddOn(new[] { local, offline }));
+        // Another PC can be chosen, and it registers its runner with its own sign-in.
+        Assert.False(MainWindow.OnlyThisPcToAddOn(new[] { local, online, offline }));
+    }
+
+    [Fact]
+    public void AddRunner_OnAnotherPc_SkipsTheWorkflowCheckWithoutThisPcsSignIn()
+    {
+        var (check, note) = MainWindow.WorkflowCheckAfterRemoteAdd(asked: true, "octo/api", signedIn: false);
+        Assert.False(check);
+        Assert.Equal("Warning: the workflow check was skipped because GitHub is not connected on this PC. The runner was created.", note);
+
+        Assert.Equal((true, ""), MainWindow.WorkflowCheckAfterRemoteAdd(asked: true, "octo/api", signedIn: true));
+        // Not asked for, or an organization runner: nothing to check or say.
+        Assert.Equal((false, ""), MainWindow.WorkflowCheckAfterRemoteAdd(asked: false, "octo/api", signedIn: false));
+        Assert.Equal((false, ""), MainWindow.WorkflowCheckAfterRemoteAdd(asked: true, "", signedIn: true));
+    }
+
     // ----- 10: a sign-in check that failed -----
 
     [Fact]

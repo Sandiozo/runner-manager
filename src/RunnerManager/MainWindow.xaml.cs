@@ -1045,16 +1045,8 @@ public partial class MainWindow : Window
 
     private async void AddRunner_Click(object sender, RoutedEventArgs e)
     {
-        // The first sign-in check runs beside the first refresh; until it answers, the sign-in is not known.
-        if (!_githubChecked && _gitHubCheck is { } check) await check;
-        if (!_githubAuthenticated)
-        {
-            if (DialogWindow.Show(this, DialogTone.Info, "Connect GitHub first",
-                    "Adding a runner requires a GitHub account. Runner Manager uses your GitHub CLI sign-in to request short-lived registration tokens and does not store them.",
-                    "Connect GitHub") == "Connect GitHub")
-                GitHubConnect_Click(sender, e);
-            return;
-        }
+        // Only this PC can be chosen: ask for its sign-in before the form is filled in.
+        if (OnlyThisPcToAddOn(Machines) && !await HasSignInToAddHereAsync(sender, e)) return;
         if (IsOperationRunning("Add runner")) return;
         // A PC card's button adds on that PC; the toolbar and Ctrl+N on the PC selected in the sidebar.
         var selected = ItemFrom<MachineInfo>(sender) ?? Machines.FirstOrDefault(m => m.MachineKey == _selectedMachineKey);
@@ -1062,22 +1054,55 @@ public partial class MainWindow : Window
         if (dialog.ShowDialog() != true || dialog.Setup is not { } setup) return;
         if (OtherPcToAddOn(dialog.TargetPc, Machines) is not { } pc)
         {
+            if (!await HasSignInToAddHereAsync(sender, e)) return;
             await RunOperationAsync("Add runner", log => RunnerService.CreateRunnerAsync(setup, log));
             return;
         }
+        // That PC registers the runner with its own GitHub sign-in: this PC's is needed only for the workflow check.
         if (!CanSendTo(pc.MachineKey)) return;
         await RunOperationAsync($"Add runner on {pc.MachineName}", async log =>
         {
             log(RemoteAddRunnerNote(pc.MachineName));
             await _fleetActions.CreateRunnerAsync(pc, setup.RepositoryUrl, setup.RunnerName, setup.Labels, log);
             var path = RunnerService.RepositoryPath(setup.RepositoryUrl);
-            if (!setup.CheckWorkflows || string.IsNullOrWhiteSpace(path)) return;
             // The workflows are on GitHub, so this PC checks them; the runner works either way.
+            var (checkWorkflows, note) = WorkflowCheckAfterRemoteAdd(setup.CheckWorkflows, path, _githubAuthenticated);
+            if (note.Length > 0) log(note);
+            if (!checkWorkflows) return;
             log("Checking repository workflows…");
             try { await WorkflowManager.CheckAndUpdateAsync(path, setup.Labels, log); }
             catch (Exception ex) { log($"Warning: the workflow check failed: {ex.Message.Split('\n')[0].Trim()} The runner was created."); }
         }, onOtherPcOnly: true);
     }
+
+    /// <summary>
+    /// Adding a runner on this PC registers it with this PC's GitHub sign-in. True when there is one; otherwise says so,
+    /// offers to connect, and returns false.
+    /// </summary>
+    private async Task<bool> HasSignInToAddHereAsync(object sender, RoutedEventArgs e)
+    {
+        // The first sign-in check runs beside the first refresh; until it answers, the sign-in is not known.
+        if (!_githubChecked && _gitHubCheck is { } check) await check;
+        if (_githubAuthenticated) return true;
+        if (DialogWindow.Show(this, DialogTone.Info, "Connect GitHub first",
+                "Adding a runner on this PC requires a GitHub account. Runner Manager uses your GitHub CLI sign-in to request short-lived registration tokens and does not store them.",
+                "Connect GitHub") == "Connect GitHub")
+            GitHubConnect_Click(sender, e);
+        return false;
+    }
+
+    /// <summary>Whether the Add runner window can offer only this PC: no other PC is online with a fleet agent that adds runners.</summary>
+    internal static bool OnlyThisPcToAddOn(IEnumerable<MachineInfo> machines) => AddRunnerForm.TargetPcs(machines).All(m => m.IsLocal);
+
+    /// <summary>
+    /// After a runner was added on another PC: whether this PC checks the repository's workflows, which needs its GitHub
+    /// sign-in. Not asked for, or an organization runner: no check and no note. Not connected on this PC: the check is
+    /// skipped, and the note says so, as when the check fails.
+    /// </summary>
+    internal static (bool Check, string Note) WorkflowCheckAfterRemoteAdd(bool asked, string repositoryPath, bool signedIn)
+        => !asked || string.IsNullOrWhiteSpace(repositoryPath) ? (false, string.Empty)
+            : signedIn ? (true, string.Empty)
+            : (false, "Warning: the workflow check was skipped because GitHub is not connected on this PC. The runner was created.");
 
     /// <summary>
     /// The PC the Add runner window chose, as the dashboard knows it now, when it is another PC; null for this PC.
