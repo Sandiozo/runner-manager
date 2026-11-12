@@ -116,7 +116,7 @@ public sealed class FleetActions
         // 2. Register it on the target, replacing the old registration.
         try
         {
-            log($"Installing and registering the runner on {target.MachineName}. The download takes about 1–3 minutes…");
+            log($"Installing and registering the runner on {target.MachineName}. The download usually takes 1–3 minutes, and longer on a slow connection…");
             await RunOnMachineAsync(target, "runner", url, "Create", log,
                 () => RunnerService.CreateRunnerAsync(new RunnerSetup
                 {

@@ -218,7 +218,7 @@ public partial class MainWindow
         }
         else
         {
-            var (read, job) = await GitHubApi.GetCurrentJobAsync(runner.RepositoryPath, runner.AgentId);
+            var (read, job) = await GitHubApi.GetCurrentJobAsync(runner.RepositoryPath, runner.AgentId, runner.AgentName, runner.JobStartedUtc);
             if (!read) state.JobNote = GitHubNotes.Describe(GitHubNotes.JobLead, GitHubApi.ProblemFor(runner.RepositoryPath), DateTime.UtcNow);
             else
             {

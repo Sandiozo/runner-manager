@@ -1064,7 +1064,7 @@ public static class MachineRelay
             // A runner that runs from a console window is left alone: when that closes (sign-out), starting the
             // service would run it twice at the next sign-in.
             var step = Recovery.Check(runner.Name, runner.IsInteractive, runner.IsRunning, IsPending(runner),
-                config.Watchdog && !IsManuallyStopped(runner.Name), DateTime.UtcNow);
+                watchdogOn: config.Watchdog, held: IsManuallyStopped(runner.Name), DateTime.UtcNow);
             if (step == RunnerRecovery.Step.GiveUp)
                 AddEvent($"Auto-recovery stopped for runner {runner.AgentName} after {RunnerRecovery.MaxAttempts} attempts in one hour", warning: true);
             if (step != RunnerRecovery.Step.Start) continue;

@@ -277,7 +277,8 @@ public partial class MainWindow : Window
             if (authenticated && (!wasAuthenticated || login.Length == 0))
             {
                 var user = await GitHubCli.RunAsync("api user --jq .login");
-                login = user.ExitCode == 0 ? user.Output.Trim() : string.Empty;
+                // Without an answer (no network, for example) the name read before stays.
+                if (user.ExitCode == 0) login = user.Output.Trim();
             }
         }
         catch (Exception ex)
@@ -826,9 +827,15 @@ public partial class MainWindow : Window
         GitHubAccountText.Text = _githubAuthenticated
             ? string.IsNullOrEmpty(_githubLogin) ? "GitHub" : _githubLogin
             : "GitHub";
-        GitHubStatusText.Text = _githubAuthenticated ? "Connected" : WaitingForSignIn ? "Waiting for sign-in"
+        // GitHub gave no answer to the last check (no network, for example): the sign-in it confirmed before still counts.
+        var noAnswer = _githubAuthenticated && GitHubCli.SignInUnconfirmed;
+        GitHubStatusText.Text = noAnswer ? "No answer from GitHub" : _githubAuthenticated ? "Connected" : WaitingForSignIn ? "Waiting for sign-in"
             : _githubChecked ? "Not connected" : "Checking…";
-        GitHubStatusText.Foreground = _githubAuthenticated ? Palette.Success : _githubChecked ? Palette.Warning : Palette.TextMuted;
+        GitHubStatusText.ToolTip = noAnswer
+            ? "GitHub could not be reached, so the sign-in could not be checked. Runner Manager uses the last sign-in until GitHub answers again."
+            : null;
+        GitHubStatusText.Foreground = noAnswer ? Palette.Warning
+            : _githubAuthenticated ? Palette.Success : _githubChecked ? Palette.Warning : Palette.TextMuted;
         ConnectGitHubButton.Visibility = _githubChecked && !_githubAuthenticated ? Visibility.Visible : Visibility.Collapsed;
         AvatarText.Text = _githubAuthenticated && _githubLogin.Length > 0 ? _githubLogin[..1].ToUpperInvariant() : "?";
         AvatarBadge.Background = _githubAuthenticated ? Palette.Tint(Palette.Info) : (Brush)FindResource("Bg3Brush");
@@ -845,12 +852,19 @@ public partial class MainWindow : Window
         var count = Machines.Count;
         FleetHeaderText.Text = count > 1 ? $"FLEET  ·  {count} PCs" : "THIS PC";
         FleetSecureIcon.Visibility = InFleet && count > 1 ? Visibility.Visible : Visibility.Collapsed;
+        var managedBy = InFleet ? FleetConfig.Current.ManagedBy : string.Empty;
         AddPcRowText.Text = InFleet ? "Add a PC" : "Connect another PC";
-        AddPcRowHint.Text = InFleet ? "Pair with a 6-digit code" : "Manage several PCs together";
-        AddPcRow.ToolTip = InFleet
-            ? "Add a new PC to the fleet. It finds this PC on the network, and you confirm the 6-digit code on both PCs."
+        AddPcRowHint.Text = managedBy.Length > 0 ? $"Managed by {managedBy}'s fleet"
+            : InFleet ? "Pair with a 6-digit code" : "Manage several PCs together";
+        AddPcRow.ToolTip = managedBy.Length > 0 ? ManagedCannotAddText(managedBy)
+            : InFleet ? "Add a new PC to the fleet. It finds this PC on the network, and you confirm the 6-digit code on both PCs."
             : "Create or join a fleet to view and control several PCs from one place.";
     }
+
+    /// <summary>Why "Add a PC" does nothing on a PC that is managed one way.</summary>
+    internal static string ManagedCannotAddText(string managedBy)
+        => $"{managedBy}'s fleet manages this PC one way, so this PC cannot add PCs. " +
+           "To start or join a fleet with this PC, open Settings → Fleet and click Disconnect first.";
 
     private async void GitHubConnect_Click(object sender, RoutedEventArgs e)
     {
@@ -1343,11 +1357,12 @@ public partial class MainWindow : Window
             return;
         }
         if (IsOperationRunning(runner, $"Edit {runner.TitleText}")) return;
-        var dialog = new EditRunnerWindow(runner) { Owner = this };
+        // Only a runner on this PC can lose every custom label: the fleet's Edit command has no field for it.
+        var dialog = new EditRunnerWindow(runner, canClearLabels: runner.IsLocalMachine) { Owner = this };
         if (dialog.ShowDialog() != true || dialog.Edit == null) return;
         var edit = dialog.Edit;
         await RunRunnerActionAsync(runner, "Edit", $"Edit {runner.TitleText}",
-            log => RunnerService.EditRunnerAsync(runner.CommandKey, edit.RunnerName, edit.Labels, log),
+            log => RunnerService.EditRunnerAsync(runner.CommandKey, edit.RunnerName, edit.Labels, log, clearLabels: edit.ClearLabels),
             edit.RunnerName, edit.Labels, showLocalPending: false);
     }
 
@@ -1493,7 +1508,14 @@ public partial class MainWindow : Window
 
     private async void AddAnotherPc_Click(object sender, RoutedEventArgs e)
     {
-        if (FleetConfig.Current.FleetKey is not { } key) return;
+        var config = FleetConfig.Current;
+        if (config.FleetKey is not { } key) return;
+        // A PC managed one way has only its access code. Pairing with it would hand that code out as a fleet code.
+        if (config.ManagedBy.Length > 0)
+        {
+            DialogWindow.Info(this, "This PC is managed one way", ManagedCannotAddText(config.ManagedBy));
+            return;
+        }
         var window = new PairingHostWindow(key) { Owner = this };
         window.ShowDialog();
         foreach (var name in window.JoinedPcs) AddActivity($"{name} joined the fleet.");

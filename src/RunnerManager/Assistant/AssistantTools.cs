@@ -389,7 +389,7 @@ public static class AssistantTools
     private static async Task<object?> CurrentJobAsync(MachineRunnerStatus runner)
     {
         if (string.IsNullOrEmpty(runner.RepositoryPath) || runner.AgentId == 0) return null;
-        var (read, current) = await GitHubApi.GetCurrentJobAsync(runner.RepositoryPath, runner.AgentId);
+        var (read, current) = await GitHubApi.GetCurrentJobAsync(runner.RepositoryPath, runner.AgentId, runner.AgentName, runner.JobStartedUtc);
         if (!read || current == null) return null;
         return new
         {
@@ -530,7 +530,7 @@ public static class AssistantTools
         var name = call.Text("name") ?? DefaultRunnerName(target, machine);
         var labels = call.TextList("labels");
         if (RunnerService.RunnerNameProblem(name) is { } nameProblem) throw new AssistantException(nameProblem);
-        if (name.Length > MaxRunnerNameLength) throw new AssistantException($"The runner name is too long: GitHub allows at most {MaxRunnerNameLength} characters.");
+        if (name.Length > MaxRunnerNameLength) throw new AssistantException($"The runner name is too long. Use at most {MaxRunnerNameLength} characters.");
         if (RunnerService.LabelsProblem(labels) is { } labelProblem) throw new AssistantException(labelProblem);
 
         // One create per repository and PC at a time, so a client that gives up and asks again gets no duplicate.
@@ -549,7 +549,7 @@ public static class AssistantTools
         RequireAgent(machine, manageable.Contains(machine));
         call.CancellationToken.ThrowIfCancellationRequested();
 
-        call.Log($"Creating {name} for {target.Display} on {machine.MachineName}. The download takes about 1–3 minutes…");
+        call.Log($"Creating {name} for {target.Display} on {machine.MachineName}. The download usually takes 1–3 minutes, and longer on a slow connection…");
         await Actions.CreateRunnerAsync(machine, target.Url, name, labels, call.Log);
         claim.Succeeded();
         var runsOn = DefaultLabels.Concat(labels).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();

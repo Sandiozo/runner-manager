@@ -512,7 +512,7 @@ public sealed class MachineInfo : INotifyPropertyChanged
     public Visibility ForgetVisibility => IsLocal ? Visibility.Collapsed : Visibility.Visible;
     /// <summary>This PC, reported by its own agent, i.e. it's in a fleet it can leave.</summary>
     public Visibility LeaveVisibility => IsLocal && !IsLocalOnly ? Visibility.Visible : Visibility.Collapsed;
-    public bool IsPairingProblem => ConnectionProblem.Contains("airing", StringComparison.OrdinalIgnoreCase);
+    public bool IsPairingProblem => FleetNetwork.IsCodeProblem(ConnectionProblem);
 
     // ----- Collapsed to its header -----
     public bool IsCollapsed => CollapsedPcs.Contains(MachineName);
