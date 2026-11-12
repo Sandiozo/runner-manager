@@ -3,20 +3,47 @@
 Runner Manager updates itself from [Releases](https://github.com/Sandiozo/runner-manager/releases): open
 **Settings → Updates**, or click **Update** on a PC's card.
 
-## 2.9.1
+## 2.10.0
 
-- Fix: an update could cut off work that started while it waited for the fleet agent's work to end, such as an AI
-  assistant's change or a runner that another PC creates behind a long queue. When the fleet agent installs an update
-  itself (**Update** on the card of another PC), AI assistants' changes on that PC are refused while it waits to
-  restart, with a message that says to try again in a few minutes, and a request that arrives in the seconds while it
-  restarts is refused with a message. With **Settings → Updates** or **Update** on this PC's card, the restart also
-  waits for work that starts while it waits, but work that starts just before the fleet agent is stopped can still be
-  cut off.
-- Fix: an update switched the fleet agent's task to the new version before the agent's work was done, which could stop
-  that work. The task is now switched when the agent restarts. When the switch fails, the PC's card shows the error as
-  the result of the update.
-- When the fleet agent cannot restart to finish an update, for example because PowerShell cannot be started, it keeps
-  running the version it has, takes commands again, and the PC's card says why.
+New installs go to Program Files. There, Runner Manager's program files cannot be changed without administrator rights.
+A runner that runs twice on a PC, as its Windows service and in a console window, is now shown as **Runs twice**, and
+Runner Manager no longer starts a runner's service next to its console window.
+
+### After updating
+
+- An install in `%LOCALAPPDATA%\Programs\RunnerManager` or in a folder chosen in setup stays where it is, and updates
+  keep it there. To move it to Program Files, run the setup again, click **Change…** and choose `C:\Program Files`.
+- On its first start with administrator rights, also in setup, Runner Manager records the folder that its own
+  scheduled tasks start it from, and the fleet agent's log says so (see **Security**).
+- The setup of AI tools does not change. Copy it again from **Settings → AI assistants** only after a move to another
+  folder.
+- A runner that has a Windows service and also opens in a console window when you sign in is no longer started as a
+  service from Runner Manager, also not by auto-recovery. To use its service, turn off **Start when you sign in** on
+  the runner first (see **Runners and jobs**).
+
+### Security
+
+- The folder Runner Manager is installed in is now recorded for each Windows user where only an administrator can
+  change it. The parts that run with administrator rights, such as updates and the fleet agent's task, take the folder
+  from there or from the folder the installed copy runs in, never from the Settings → Apps entry alone, which another
+  program of the user can change. An install of an earlier version is recorded once, from the scheduled tasks of the
+  Windows user that run with administrator rights. A program without administrator rights cannot register such a task.
+- Runner Manager uses, registers again or repairs only the scheduled tasks of the Windows user that run with
+  administrator rights. It leaves any other task as it is, and the fleet agent's log says so.
+- Updates are prepared in a `RunnerManager.update-<number>` folder in the install folder instead of in the user's data
+  folder. In Program Files, the new files cannot be changed between the checksum check and the copy without
+  administrator rights. Old update folders are removed only when they hold nothing but files, and never through a link
+  to another folder. A missing or half-written RunnerManager.exe is still put back, and rollback still works.
+- The signature check of the .NET runtime download, the scripts that setup and uninstall run, and the check whether a
+  scheduled task runs take folder, file and task names from the environment instead of from the script text, so a name
+  with quotes cannot run commands. PowerShell is always started from the Windows folder.
+- The release build no longer loads the assemblies that `DOTNET_STARTUP_HOOKS` names, which any program of the user
+  can set.
+- Uninstall and a move to another folder remove the whole folder only in Program Files. From any other folder, also
+  the default of earlier versions, they remove only Runner Manager's own files.
+
+### Fleet and pairing
+
 - Fix: **Add a PC** said nothing when a PC joined the fleet but this PC could not save it. It now says so and how to
   add the PC again, and a PC that confirms the 6-digit codes is told that it was not added.
 - **Add a PC** warns about a name whose letters only look like the letters of another PC's name or of this PC's name,
@@ -24,21 +51,13 @@ Runner Manager updates itself from [Releases](https://github.com/Sandiozo/runner
   about a name that mixes Latin, Greek or Cyrillic letters with each other, or with letters of another alphabet that
   has letters like Latin ones, such as Armenian or Cherokee. A name without such a mix is not warned about, unless it
   looks like the name of another PC.
-- Fix: when the processes on a PC could not be read, the live output of a step that printed nothing for 5 minutes was
-  no longer shown. It is shown now when Runner Manager saw earlier, while it could read the processes, that it is the
-  running job's output. Otherwise the output says that the processes could not be read.
-- Fix: a GitHub answer that could not be read paused its request again when it arrived after **Refresh** or
-  **Connect GitHub** had cleared the pauses.
 - Fix: while this PC joined or left the fleet, **Change fleet code** and the address check in Settings still read the
   other PCs, and could add back a PC that leaving had just removed. **Change fleet code** now says to try again when it
   is done, and the address check in Settings does not read the other PCs then, so it shows what the last refresh
   found. A PC that is not in a fleet does not save other PCs.
-- Fix: a click on a PC card header, a runner header or a row could scroll the card list. The list now stays where it
-  is while the mouse button is down or a pen or a touch is on the screen. When Tab or a screen reader moves the focus,
-  the list still scrolls to it.
-- The job, the repository and the current job in a runner's details are now buttons, so Tab and screen readers reach
-  them. A job or a run without an address on GitHub, there and in the queue and the recent runs, is plain text and not a
-  button, and so is **Repository unknown**.
+
+### Runners and jobs
+
 - Fix: a runner could run twice on a PC, as its Windows service and in a console window that a startup entry opens when
   you sign in, and look healthy. Only one copy gets jobs, and in the service they failed because git refused the work
   folder of the console window's user. Such a runner now shows **Runs twice**, and its details say why jobs fail or wait
@@ -68,6 +87,51 @@ Runner Manager updates itself from [Releases](https://github.com/Sandiozo/runner
   is now disabled again after the edit, also when a failed edit registers the runner again with its old name and
   labels. While the console window runs such a runner, an edit is refused, and nothing is changed. The old copy of a
   moved runner is handled as before.
+- Fix: when the processes on a PC could not be read, the live output of a step that printed nothing for 5 minutes was
+  no longer shown. It is shown now when Runner Manager saw earlier, while it could read the processes, that it is the
+  running job's output. Otherwise the output says that the processes could not be read.
+
+### GitHub
+
+- Fix: a GitHub answer that could not be read paused its request again when it arrived after **Refresh** or
+  **Connect GitHub** had cleared the pauses.
+
+### Setup and updates
+
+- On a PC without Runner Manager, setup installs it to `C:\Program Files\RunnerManager`. On a PC with an install,
+  setup shows the folder it is in, and **Default** or **Current folder** goes back to that folder.
+- When setup finds an install only from the Settings → Apps entry or in the default folder of earlier versions, it
+  offers that folder but says that it could not confirm the install. A move to another folder then leaves that copy
+  where it is.
+- For a folder outside Program Files, setup says to check that only administrators can change the files in it.
+- The first page says what setup does with a copy that is already in the chosen folder, also after **Change…**.
+- Several Windows users on one PC share one install. When a second user runs the setup, it offers the folder that is
+  already there. Setup never puts an older version in place of one that another user runs, and keeps the installed
+  version instead. Uninstall and a move to another folder keep the program files while another user still uses them,
+  and also when setup cannot read the scheduled tasks that show who uses them. The record of a Windows user whose
+  account was removed no longer counts.
+- Setup and uninstall close only the dashboards of the Windows user who runs them.
+- Fix: an update could cut off work that started while it waited for the fleet agent's work to end, such as an AI
+  assistant's change or a runner that another PC creates behind a long queue. When the fleet agent installs an update
+  itself (**Update** on the card of another PC), AI assistants' changes on that PC are refused while it waits to
+  restart, with a message that says to try again in a few minutes, and a request that arrives in the seconds while it
+  restarts is refused with a message. With **Settings → Updates** or **Update** on this PC's card, the restart also
+  waits for work that starts while it waits, but work that starts just before the fleet agent is stopped can still be
+  cut off.
+- Fix: an update switched the fleet agent's task to the new version before the agent's work was done, which could stop
+  that work. The task is now switched when the agent restarts. When the switch fails, the PC's card shows the error as
+  the result of the update.
+- When the fleet agent cannot restart to finish an update, for example because PowerShell cannot be started, it keeps
+  running the version it has, takes commands again, and the PC's card says why.
+
+### Dashboard and windows
+
+- Fix: a click on a PC card header, a runner header or a row could scroll the card list. The list now stays where it
+  is while the mouse button is down or a pen or a touch is on the screen. When Tab or a screen reader moves the focus,
+  the list still scrolls to it.
+- The job, the repository and the current job in a runner's details are now buttons, so Tab and screen readers reach
+  them. A job or a run without an address on GitHub, there and in the queue and the recent runs, is plain text and not a
+  button, and so is **Repository unknown**.
 
 ## 2.9.0
 

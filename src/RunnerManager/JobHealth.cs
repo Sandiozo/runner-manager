@@ -116,7 +116,7 @@ public static class JobHealth
     /// <summary>
     /// The concern that the runner's own status shows, without the job checks: its Windows service runs and a console
     /// window runs it too or opens it at sign-in, or its running service's work folder has folders of another account,
-    /// which git refuses. Healthy otherwise, and for runners from agents before 2.9.1, which do not tell. See
+    /// which git refuses. Healthy otherwise, and for runners from agents before 2.10.0, which do not tell. See
     /// <see cref="Shown"/> for how it ranks with the job checks.
     /// </summary>
     public static RunnerHealth ForSetup(MachineRunnerStatus runner)

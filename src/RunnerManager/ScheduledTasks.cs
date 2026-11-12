@@ -306,8 +306,12 @@ public static class ScheduledTasks
         var xml = await QueryXmlAsync(AgentTaskName);
         if (string.IsNullOrWhiteSpace(xml) || IsCurrentAgentDefinition(xml)) return false;
         if (await OtherOwnerAsync(AgentTaskName) != null) return false;
-        var exe = CommandOf(xml);
-        if (string.IsNullOrWhiteSpace(exe) || !File.Exists(exe) || !exe.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) return false;
+        if (ExeOfOwnElevatedTask(xml) is not { } exe)
+        {
+            MachineRelay.AppendAgentLog(NotRegisteredElevatedText(AgentTaskName));
+            return false;
+        }
+        if (!File.Exists(exe) || !exe.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) return false;
         if (fromAgent) AppUpdater.ScheduleAgentTaskRestart(AgentTaskName);
         await MachineRelay.RegisterAgentTaskAsync(exe);
         if (!fromAgent) await RunTaskAsync(AgentTaskName);
@@ -339,22 +343,27 @@ public static class ScheduledTasks
     /// </summary>
     public static async Task<bool?> IsRunningAsync(string name)
     {
-        var (code, output) = await RunAsync("powershell.exe", $"-NoLogo -NoProfile -NonInteractive -Command \"{TaskStateScript(name)}\"", ShortTimeout);
+        var (code, output) = await RunAsync(AppUpdater.PowerShellExe, $"-NoLogo -NoProfile -NonInteractive -Command \"{TaskStateScript}\"", ShortTimeout,
+            new Dictionary<string, string> { [TaskNameVariable] = name });
         return code == 0 ? ParseTaskState(output) : null;
     }
 
     /// <summary>The COM error Task Scheduler gives for a task that does not exist (HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)).</summary>
     internal const int TaskNotFound = unchecked((int)0x80070002);
 
+    /// <summary>The environment variable that gives <see cref="TaskStateScript"/> the task name, which is never part of the script.</summary>
+    internal const string TaskNameVariable = "RUNNER_MANAGER_TASK";
+
     /// <summary>
-    /// Prints the task's TASK_STATE; -1 when the task does not exist, and "unknown" for any other error (Task Scheduler
-    /// not reachable, access denied), so such an error is never taken for a missing task.
+    /// Prints the TASK_STATE of the task named in <see cref="TaskNameVariable"/>; -1 when the task does not exist, and
+    /// "unknown" for any other error (Task Scheduler not reachable, access denied), so such an error is never taken for a
+    /// missing task.
     /// </summary>
-    internal static string TaskStateScript(string name)
-        => "$s = New-Object -ComObject Schedule.Service; " +
-           $"try {{ $s.Connect(); [int]$s.GetFolder('\\').GetTask('{name.Replace("'", "''")}').State }} " +
-           "catch { $e = $_.Exception; while ($e.InnerException) { $e = $e.InnerException }; " +
-           $"if ($e.HResult -eq {TaskNotFound}) {{ -1 }} else {{ 'unknown' }} }}";
+    internal static readonly string TaskStateScript =
+        "$s = New-Object -ComObject Schedule.Service; " +
+        $"try {{ $s.Connect(); [int]$s.GetFolder('\\').GetTask($env:{TaskNameVariable}).State }} " +
+        "catch { $e = $_.Exception; while ($e.InnerException) { $e = $e.InnerException }; " +
+        $"if ($e.HResult -eq {TaskNotFound}) {{ -1 }} else {{ 'unknown' }} }}";
 
     /// <summary>
     /// Task Scheduler's state of a task (TASK_STATE): 4 running and 2 queued count as running, 1 disabled and 3 ready do
@@ -396,6 +405,30 @@ public static class ScheduledTasks
         var ns = task.Name.Namespace;
         return task.Element(ns + "Principals")?.Element(ns + "Principal")?.Element(ns + "UserId")?.Value.Trim() ?? string.Empty;
     }
+
+    /// <summary>
+    /// Whether the task runs with the highest rights of its account (RunLevel HighestAvailable), as every Runner Manager
+    /// task is registered. Only a program with administrator rights can register such a task for an administrator.
+    /// </summary>
+    internal static bool RunsWithHighestRights(string xml)
+    {
+        if (ParseTask(xml) is not { } task) return false;
+        var ns = task.Name.Namespace;
+        return task.Element(ns + "Principals")?.Element(ns + "Principal")?.Element(ns + "RunLevel")?.Value.Trim() == "HighestAvailable";
+    }
+
+    /// <summary>
+    /// The exe that a task starts, when it is this user's task and runs with the highest rights; otherwise null. Any
+    /// program of the user can create a task under a name that does not exist yet, such as the fleet agent's on a PC
+    /// without one, but not one that runs with the highest rights. So only such a task tells which exe is the install,
+    /// and only its exe is ever registered again with administrator rights.
+    /// </summary>
+    internal static string? ExeOfOwnElevatedTask(string xml)
+        => RunsWithHighestRights(xml) && IsCurrentUser(PrincipalOf(xml)) && CommandOf(xml) is { Length: > 0 } exe ? exe : null;
+
+    /// <summary>The log line for a task that <see cref="ExeOfOwnElevatedTask"/> does not trust, so it is left as it is.</summary>
+    internal static string NotRegisteredElevatedText(string name)
+        => $"The scheduled task \"{name}\" was not registered with administrator rights for {Elevation.CurrentUserName}, so Runner Manager left it as it is.";
 
     /// <summary>Whether the task is turned on (Settings → Enabled is not false).</summary>
     internal static bool IsEnabled(string xml)
@@ -463,12 +496,15 @@ public static class ScheduledTasks
     /// Runs a program hidden and returns its exit code with its output (or its error text when it failed).
     /// When it does not finish within the timeout, its process tree is killed and the exit code is -1.
     /// </summary>
-    public static async Task<(int ExitCode, string Output)> RunAsync(string fileName, string arguments, TimeSpan? timeout = null)
+    public static async Task<(int ExitCode, string Output)> RunAsync(string fileName, string arguments, TimeSpan? timeout = null,
+        IReadOnlyDictionary<string, string>? environment = null)
     {
         var limit = timeout ?? DefaultTimeout;
         try
         {
-            var result = await ProcessRunner.RunAsync(new ProcessStartInfo { FileName = fileName, Arguments = arguments }, limit);
+            var start = new ProcessStartInfo { FileName = fileName, Arguments = arguments };
+            foreach (var (key, value) in environment ?? new Dictionary<string, string>()) start.Environment[key] = value;
+            var result = await ProcessRunner.RunAsync(start, limit);
             if (result == null) return (-1, $"{Path.GetFileName(fileName)} did not finish within {ProcessRunner.Describe(limit)}.");
             return (result.ExitCode, result.ExitCode == 0 ? result.Output
                 : string.IsNullOrWhiteSpace(result.Error) ? result.Output : result.Error);

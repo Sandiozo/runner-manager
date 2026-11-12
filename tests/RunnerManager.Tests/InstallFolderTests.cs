@@ -56,8 +56,8 @@ public class InstallFolderTests
             File.WriteAllText(Path.Combine(own, "RunnerManager.exe"), string.Empty);
             File.WriteAllText(Path.Combine(own, "RunnerManager.123.old.exe"), string.Empty);
 
-            RunPowerShell(Installer.RemoveProgramFilesScript(shared));
-            RunPowerShell(Installer.RemoveProgramFilesScript(own));
+            RunPowerShell(Installer.RemoveProgramFilesScript(shared), Installer.FolderEnvironment(shared));
+            RunPowerShell(Installer.RemoveProgramFilesScript(own), Installer.FolderEnvironment(own));
 
             Assert.False(File.Exists(Path.Combine(shared, "RunnerManager.exe")));
             Assert.True(File.Exists(Path.Combine(shared, "notes.txt")));
@@ -66,14 +66,16 @@ public class InstallFolderTests
         finally { Directory.Delete(root, recursive: true); }
     }
 
-    private static void RunPowerShell(string script)
+    internal static void RunPowerShell(string script, IReadOnlyDictionary<string, string>? environment = null)
     {
-        using var process = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("powershell.exe")
+        var start = new System.Diagnostics.ProcessStartInfo(AppUpdater.PowerShellExe)
         {
             ArgumentList = { "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script },
             UseShellExecute = false,
             CreateNoWindow = true
-        })!;
+        };
+        foreach (var (name, value) in environment ?? new Dictionary<string, string>()) start.Environment[name] = value;
+        using var process = System.Diagnostics.Process.Start(start)!;
         Assert.True(process.WaitForExit(30_000), "The removal script did not finish within 30 seconds.");
     }
 

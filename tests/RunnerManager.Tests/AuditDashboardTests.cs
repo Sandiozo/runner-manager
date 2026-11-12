@@ -564,7 +564,7 @@ public class AuditDashboardTests
     public void ClickableElements_CanBeUsedFromTheKeyboard()
     {
         var xaml = Xaml("MainWindow.xaml");
-        // No element takes only mouse clicks: what is clicked is a button, which Enter and Space press. Since 2.9.1 the
+        // No element takes only mouse clicks: what is clicked is a button, which Enter and Space press. Since 2.10.0 the
         // links in a runner's details are buttons too.
         Assert.Empty(Regex.Matches(xaml, @"<\w+\b[^>]*MouseLeftButtonUp=""[^""]+""[^>]*>"));
         // Keyboard focus is always visible.

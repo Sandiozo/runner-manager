@@ -136,16 +136,27 @@ public class TaskStateTests
     [Fact]
     public void TheScript_SaysMinusOneOnlyForATaskThatDoesNotExist()
     {
-        var script = ScheduledTasks.TaskStateScript("Runner Manager's task");
+        var script = ScheduledTasks.TaskStateScript;
         // Only Task Scheduler's "not found" gives -1; everything else, also a failed Connect, gives "unknown".
         Assert.Contains("try { $s.Connect();", script);
         Assert.Contains($"if ($e.HResult -eq {ScheduledTasks.TaskNotFound}) {{ -1 }} else {{ 'unknown' }}", script);
         Assert.Equal(-2147024894, ScheduledTasks.TaskNotFound);
         Assert.DoesNotContain("catch { -1 }", script);
-        // A quote in the name is doubled, as PowerShell reads it inside single quotes.
-        Assert.Contains("GetTask('Runner Manager''s task')", script);
+        // The name comes from the environment and is never part of the script.
+        Assert.Contains($"GetTask($env:{ScheduledTasks.TaskNameVariable})", script);
         // Inside the double quotes of -Command.
         Assert.DoesNotContain("\"", script);
+    }
+
+    [Fact]
+    public void TheTaskState_IsReadByWindowsPowerShell_WithTheNameInTheEnvironment()
+    {
+        var code = System.IO.File.ReadAllText(System.IO.Path.Combine(InstallEvidenceTests.SourceDir, "ScheduledTasks.cs"));
+        var method = code[code.IndexOf("public static async Task<bool?> IsRunningAsync", StringComparison.Ordinal)..];
+        method = method[..method.IndexOf("\n    }", StringComparison.Ordinal)];
+        Assert.Contains("RunAsync(AppUpdater.PowerShellExe,", method);
+        Assert.Contains("[TaskNameVariable] = name", method);
+        Assert.DoesNotContain("TaskStateScript(", method);
     }
 
     [Fact]

@@ -10,14 +10,92 @@ internal static class TestSetup
 
     /// <summary>
     /// Keeps tests away from the real settings in %LOCALAPPDATA%\RunnerManager, and from the real AI assistant switches
-    /// in HKLM\SOFTWARE\RunnerManager. Runner Manager itself always keeps the switches in the registry: only code sets
-    /// another store, never the environment.
+    /// and install records in HKLM\SOFTWARE\RunnerManager. Runner Manager itself always keeps them in the registry: only
+    /// code sets another store, never the environment.
     /// </summary>
     [ModuleInitializer]
     internal static void UseTemporaryStateDir()
     {
         Environment.SetEnvironmentVariable("RUNNER_MANAGER_STATE_DIR", StateDir);
         AssistantSwitches.Store = new FileSwitchStore(Path.Combine(StateDir, "assistant-switches.json"));
+        MachineInstall.Records = new MemoryInstallRecords();
+        MachineInstall.Tasks = new MemoryTasks();
+        MachineInstall.HasProfile = _ => true;
+    }
+}
+
+/// <summary>Scheduled tasks in memory, in place of Task Scheduler. Only in the tests.</summary>
+internal sealed class MemoryTasks : ITaskReader
+{
+    /// <summary>The tasks by name. A null definition stands for a task that exists but cannot be read.</summary>
+    public Dictionary<string, string?> Definitions { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>False stands for a list of tasks that cannot be read.</summary>
+    public bool NamesReadable { get; set; } = true;
+
+    public IReadOnlyList<string>? Names() => NamesReadable ? Definitions.Keys.ToList() : null;
+
+    public Task<string?> ReadAsync(string name) => Task.FromResult(Definitions.TryGetValue(name, out var xml) ? xml : string.Empty);
+}
+
+/// <summary>
+/// Gives a test install records and scheduled tasks of its own, in memory, and puts back the ones before it when
+/// disposed. For tests in <see cref="InstallStateCollection"/>, which run one at a time.
+/// </summary>
+internal sealed class TestInstallState : IDisposable
+{
+    private readonly IInstallRecordStore _records = MachineInstall.Records;
+    private readonly ITaskReader _tasks = MachineInstall.Tasks;
+    private readonly Func<string, bool> _hasProfile = MachineInstall.HasProfile;
+
+    public TestInstallState()
+    {
+        MachineInstall.Records = Records;
+        MachineInstall.Tasks = Tasks;
+        MachineInstall.HasProfile = sid => !WithoutProfile.Contains(sid);
+        MachineInstall.Forget();
+    }
+
+    public MemoryInstallRecords Records { get; } = new();
+
+    public MemoryTasks Tasks { get; } = new();
+
+    /// <summary>The SIDs of Windows users who have no profile on this PC (their account was removed).</summary>
+    public HashSet<string> WithoutProfile { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    public void Dispose()
+    {
+        MachineInstall.Records = _records;
+        MachineInstall.Tasks = _tasks;
+        MachineInstall.HasProfile = _hasProfile;
+        MachineInstall.Forget();
+    }
+}
+
+/// <summary>The install records and scheduled tasks are process-wide, so tests that set their own run on their own.</summary>
+[CollectionDefinition(Name, DisableParallelization = true)]
+public class InstallStateCollection
+{
+    public const string Name = "Install state";
+}
+
+/// <summary>Install records in memory, in place of HKLM\SOFTWARE\RunnerManager\Installs. Only in the tests.</summary>
+internal sealed class MemoryInstallRecords : IInstallRecordStore
+{
+    private readonly List<InstallRecord> _records = new();
+
+    public IReadOnlyList<InstallRecord> ReadAll()
+    {
+        lock (_records) return _records.ToList();
+    }
+
+    public void Write(string sid, string? folder)
+    {
+        lock (_records)
+        {
+            _records.RemoveAll(r => r.Sid.Equals(sid, StringComparison.OrdinalIgnoreCase));
+            if (folder != null) _records.Add(new InstallRecord(sid, folder));
+        }
     }
 }
 

@@ -69,13 +69,13 @@ public sealed class MachineRunnerStatus : INotifyPropertyChanged
     public bool MovedAway { get; init; }
     /// <summary>What starts the runner after a restart (a <see cref="RunnerStart"/> value; empty from agents before protocol 13).</summary>
     public string StartsAt { get => _startsAt; init => _startsAt = value ?? RunnerStart.Unknown; }
-    /// <summary>Its Windows service runs, and a console window runs it too or opens it at sign-in (false from agents before 2.9.1).</summary>
+    /// <summary>Its Windows service runs, and a console window runs it too or opens it at sign-in (false from agents before 2.10.0).</summary>
     public bool RunsTwice { get; init; }
-    /// <summary>It has a service, and a startup entry that is turned on opens it in a console window at sign-in (false before 2.9.1).</summary>
+    /// <summary>It has a service, and a startup entry that is turned on opens it in a console window at sign-in (false before 2.10.0).</summary>
     public bool ConsoleAtSignIn { get; init; }
-    /// <summary>The account its Windows service runs as (empty without a service, and from agents before 2.9.1).</summary>
+    /// <summary>The account its Windows service runs as (empty without a service, and from agents before 2.10.0).</summary>
     public string ServiceAccount { get => _serviceAccount; init => _serviceAccount = value ?? string.Empty; }
-    /// <summary>The account that owns folders in its work folder although its service runs as another (empty when none does, and before 2.9.1).</summary>
+    /// <summary>The account that owns folders in its work folder although its service runs as another (empty when none does, and before 2.10.0).</summary>
     public string WorkFolderOwner { get => _workFolderOwner; init => _workFolderOwner = value ?? string.Empty; }
     public string RunnerVersion { get => _runnerVersion; init => _runnerVersion = value ?? string.Empty; }
     public long? WorkFolderBytes { get; init; }

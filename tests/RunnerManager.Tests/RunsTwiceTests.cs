@@ -613,7 +613,7 @@ public class RunsTwiceTests : IDisposable
         Assert.True(read.RunsTwice);
         Assert.Equal(@"SANDIS\sandis", read.WorkFolderOwner);
 
-        // From a fleet agent before 2.9.1, or with JSON null.
+        // From a fleet agent before 2.10.0, or with JSON null.
         var older = JsonSerializer.Deserialize<MachineStatusPayload>(
             $$"""{"MachineName":"OLD","Runners":[{"ServiceName":"{{ServiceName}}","ServiceInstalled":true,"IsRunning":true,"ServiceAccount":null,"WorkFolderOwner":null}]}""", wire)!.Runners[0];
         Assert.False(older.RunsTwice);
