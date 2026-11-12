@@ -23,7 +23,7 @@ public partial class PairingHostWindow : Window
     private bool _listening;
     private bool _closed;
     // Allowed requests that are not added yet: the code is on its way, or the other PC's user has not confirmed it.
-    // A PC allowed one way has its own code here until it is saved.
+    // A PC allowed one way has its access code here until it is saved.
     private readonly Dictionary<Pairing.JoinRequest, byte[]?> _sending = new();
     // Those of them that have their code and ask their user whether the codes match.
     private readonly List<Pairing.JoinRequest> _confirming = new();
@@ -104,8 +104,8 @@ public partial class PairingHostWindow : Window
         {
             _notAdded.Add(request.CheckFailed ? $"{request.Name} was not added. The pairing check failed. Try again."
                 : request.CodeSent ? $"{request.Name} did not confirm the codes. It was not added."
-                // A PC allowed one way gets a code of its own, which is not the fleet code.
-                : ownCode != null ? $"{request.Name} left before it got its code. It was not added."
+                // A PC allowed one way gets an access code of its own, which is not the fleet code.
+                : ownCode != null ? $"{request.Name} left before it got its access code. It was not added."
                 : $"{request.Name} left before it got the fleet code. It was not added.");
             ShowResults();
         }
@@ -328,9 +328,9 @@ public partial class PairingHostWindow : Window
             }
             catch (Exception ex)
             {
-                // An older PC has kept its code already.
+                // An older PC has kept its access code already.
                 DialogWindow.Error(this, "Could not save the PC",
-                    $"{request.Name} has its code, but this PC could not save it, so the fleet cannot manage {request.Name}.\n\n{ex.Message}\n\n" +
+                    $"{request.Name} has its access code, but this PC could not save it, so the fleet cannot manage {request.Name}.\n\n{ex.Message}\n\n" +
                     $"On {request.Name}, open Settings → Fleet and click Disconnect. Then add it again.");
                 ShowResults();
                 return;

@@ -74,7 +74,7 @@
                     <StackPanel>
                         <TextBlock Text="Manage it one way" Style="{StaticResource OptionTitle}"/>
                         <TextBlock Style="{StaticResource OptionText}"
-                                   Text="It gets a code of its own. The fleet's PCs and AI assistants can view and control it, but it cannot see or control them. For a PC that belongs to someone else."/>
+                                   Text="It gets an access code of its own, not the fleet code. The fleet's PCs and AI assistants can view and control it, but it cannot see or control them. For a PC that belongs to someone else."/>
                     </StackPanel>
                 </RadioButton>
                 <TextBlock x:Name="ManagedUnavailableText" Style="{StaticResource Caption}" FontSize="11" TextWrapping="Wrap" Margin="0,2,0,0" Visibility="Collapsed"
