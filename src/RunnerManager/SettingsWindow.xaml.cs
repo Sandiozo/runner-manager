@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.IO;
 using System.Windows;
+using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Input;
 
@@ -245,13 +246,17 @@ public partial class SettingsWindow : Window
         ManagedRow.Description = $"By {managedBy}'s fleet. Its PCs and AI assistants can view and control this PC. This PC cannot see or control theirs.";
         // Set, but the fleet agent was never installed (the code was entered here, or installing it failed).
         var notJoined = key != null && _agentInstalled == false;
+        // A PC managed one way has its access code here, which is not the fleet code.
+        KeyRow.Title = CodeRowText.Title(managedBy);
+        AutomationProperties.SetName(CopyKeyButton, CodeRowText.CopyName(managedBy));
+        RemoveKeyItem.Header = CodeRowText.RemoveItem(managedBy);
         KeyRow.Description = key == null
             ? "Not set. Start a new fleet here, or enter the code from a PC that is already in one."
             : notJoined
                 ? $"Set (fingerprint {CommandSigner.KeyId(key)}), but this PC has not joined yet: its fleet agent is not installed, so other PCs cannot reach it."
                   + (_finishJoining == null ? " To join, click “Connect another PC” in the sidebar of the dashboard." : string.Empty)
             : managedBy.Length > 0
-                ? $"This PC's own code (fingerprint {CommandSigner.KeyId(key)}), known only to the fleet that manages it."
+                ? CodeRowText.ManagedStatus(managedBy, CommandSigner.KeyId(key))
                 : $"Set. Fingerprint {CommandSigner.KeyId(key)}, the same on every PC in the fleet.";
         GenerateKeyButton.Visibility = key == null ? Visibility.Visible : Visibility.Collapsed;
         FinishJoiningButton.Visibility = notJoined && _finishJoining != null ? Visibility.Visible : Visibility.Collapsed;
@@ -264,9 +269,9 @@ public partial class SettingsWindow : Window
 
     private async void GenerateKey_Click(object sender, RoutedEventArgs e)
     {
-        if (FleetConfig.Current.FleetKey != null && !DialogWindow.Confirm(this, "Give only this PC a new fleet code?",
-                "Your other PCs keep the current code, and cannot connect to this PC until you enter the new code on them. " +
-                "To give every PC a new code, use “Change the fleet code on every PC”.", "New code", danger: true))
+        var config = FleetConfig.Current;
+        if (config.FleetKey != null && !DialogWindow.Confirm(this, "Give only this PC a new fleet code?",
+                CodeRowText.NewCodeMessage(config.ManagedBy), "New code", danger: true))
             return;
         FleetConfig.SetFleetKey(CommandSigner.NewKey());
         await JoinWithCodeAsync();
@@ -305,15 +310,15 @@ public partial class SettingsWindow : Window
 
     private void CopyKey_Click(object sender, RoutedEventArgs e)
     {
-        var key = FleetConfig.Current.FleetKey;
-        if (key == null) return;
+        var config = FleetConfig.Current;
+        if (config.FleetKey is not { } key) return;
+        var managedBy = config.ManagedBy;
         try
         {
             Clipboard.SetText(CommandSigner.FormatKey(key));
-            DialogWindow.Info(this, "Fleet code copied",
-                "On another PC, open Settings → Fleet → ⋯ → Enter fleet code, and paste it. Keep the code private, like a password: anyone on your network with it can control your PCs.");
+            DialogWindow.Info(this, CodeRowText.CopiedHeading(managedBy), CodeRowText.CopiedMessage(managedBy));
         }
-        catch (Exception ex) { DialogWindow.Error(this, "Could not copy the fleet code", ex.Message); }
+        catch (Exception ex) { DialogWindow.Error(this, CodeRowText.CopyFailed(managedBy), ex.Message); }
     }
 
     private void PasteKey_Click(object sender, RoutedEventArgs e)
@@ -350,8 +355,8 @@ public partial class SettingsWindow : Window
 
     private async void RemoveKey_Click(object sender, RoutedEventArgs e)
     {
-        if (!DialogWindow.Confirm(this, "Remove the fleet code?",
-                "This PC and your other PCs cannot connect to each other until you set a fleet code again.", "Remove code", danger: true)) return;
+        var managedBy = FleetConfig.Current.ManagedBy;
+        if (!DialogWindow.Confirm(this, CodeRowText.RemoveHeading(managedBy), CodeRowText.RemoveMessage(managedBy), "Remove code", danger: true)) return;
         FleetConfig.SetFleetKey(null);
         UpdateKeyStatus();
         await _fleetChanged();
@@ -538,8 +543,7 @@ public partial class SettingsWindow : Window
         }
         if (FleetConfig.Current.ManagedBy.Length > 0)
         {
-            DialogWindow.Info(this, "This PC is managed one way",
-                $"Only {FleetConfig.Current.ManagedBy}'s fleet changes this PC's code. To stop it from managing this PC, click Disconnect.");
+            DialogWindow.Info(this, "This PC is managed one way", CodeRowText.ManagedCannotChange(FleetConfig.Current.ManagedBy));
             return;
         }
         List<MachineInfo> pcs;
@@ -575,8 +579,8 @@ public partial class SettingsWindow : Window
         if (result.NotConfirmed.Count > 0) lines.Add($"Got the new code and switch when contacted next: {string.Join(", ", result.NotConfirmed)}.");
         if (result.Failed.Count > 0) lines.Add($"Did not get it, and must be paired again:\n{string.Join("\n", result.Failed)}");
         if (result.LeftOut.Count > 0) lines.Add($"Left out and forgotten: {string.Join(", ", result.LeftOut)}. Pair them again to bring them back.");
-        if (result.ManagedSwitched.Count > 0) lines.Add($"Managed PCs with a new code of their own: {string.Join(", ", result.ManagedSwitched)}.");
-        if (result.ManagedFailed.Count > 0) lines.Add($"Managed PCs that kept their old code:\n{string.Join("\n", result.ManagedFailed)}\nA PC that was left out may still reach them. Stop managing them and pair them again.");
+        if (result.ManagedSwitched.Count > 0) lines.Add($"Managed PCs with a new access code: {string.Join(", ", result.ManagedSwitched)}.");
+        if (result.ManagedFailed.Count > 0) lines.Add($"Managed PCs that kept their old access code:\n{string.Join("\n", result.ManagedFailed)}\nA PC that was left out may still reach them. Stop managing them and pair them again.");
         if (lines.Count == 0) lines.Add("No other PCs are in the fleet.");
         DialogWindow.Show(this, result.Failed.Count + result.ManagedFailed.Count > 0 ? DialogTone.Warning : DialogTone.Info, "The fleet code was changed",
             string.Join("\n\n", lines), "OK", cancel: null);

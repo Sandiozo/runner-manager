@@ -333,4 +333,38 @@ public class AuditDialogTests
         Assert.Contains("still has the fleet code", ForgetPc.Message("OFFICE", online: true));
         Assert.Contains("appears again when it is found", ForgetPc.Message("OFFICE", online: false));
     }
+
+    // ----- Settings → Fleet: the code row -----
+
+    [Fact]
+    public void CodeRow_OnAPcManagedOneWay_NamesTheAccessCode()
+    {
+        Assert.Equal("Access code", CodeRowText.Title("BUILD-PC"));
+        Assert.Equal("Copy access code", CodeRowText.CopyName("BUILD-PC"));
+        Assert.Equal("Access code copied", CodeRowText.CopiedHeading("BUILD-PC"));
+        Assert.Equal("Could not copy the access code", CodeRowText.CopyFailed("BUILD-PC"));
+        Assert.Equal("Remove access code…", CodeRowText.RemoveItem("BUILD-PC"));
+        Assert.Equal("Remove the access code?", CodeRowText.RemoveHeading("BUILD-PC"));
+        Assert.Contains("BUILD-PC's fleet", CodeRowText.ManagedStatus("BUILD-PC", "ab12"));
+        Assert.Contains("access code", CodeRowText.ManagedCannotChange("BUILD-PC"));
+        Assert.Contains("access code", CodeRowText.NewCodeMessage("BUILD-PC"));
+        // A managed PC's code gives full control of that PC only: it is not entered on another PC as a fleet code.
+        Assert.DoesNotContain("Enter fleet code", CodeRowText.CopiedMessage("BUILD-PC"));
+        foreach (var text in new[] { CodeRowText.CopiedMessage("BUILD-PC"), CodeRowText.RemoveMessage("BUILD-PC"), CodeRowText.ManagedStatus("BUILD-PC", "ab12") })
+            Assert.DoesNotContain("fleet code", text);
+    }
+
+    [Fact]
+    public void CodeRow_OnAFleetMember_NamesTheFleetCode()
+    {
+        Assert.Equal("Fleet code", CodeRowText.Title(""));
+        Assert.Equal("Copy fleet code", CodeRowText.CopyName(""));
+        Assert.Equal("Fleet code copied", CodeRowText.CopiedHeading(""));
+        Assert.Equal("Could not copy the fleet code", CodeRowText.CopyFailed(""));
+        Assert.Equal("Remove fleet code…", CodeRowText.RemoveItem(""));
+        Assert.Equal("Remove the fleet code?", CodeRowText.RemoveHeading(""));
+        Assert.Contains("Enter fleet code", CodeRowText.CopiedMessage(""));
+        Assert.Contains("Change the fleet code on every PC", CodeRowText.NewCodeMessage(""));
+        Assert.DoesNotContain("access code", CodeRowText.RemoveMessage("") + CodeRowText.NewCodeMessage("") + CodeRowText.CopiedMessage(""));
+    }
 }

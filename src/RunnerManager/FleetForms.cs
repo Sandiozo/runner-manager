@@ -63,6 +63,49 @@ internal static class FleetAddressRules
         => string.IsNullOrWhiteSpace(problem) ? "No PC in this fleet answered." : $"No PC in this fleet answered. {problem.Trim().TrimEnd('.')}.";
 }
 
+/// <summary>
+/// The Settings row for this PC's code. On a PC managed one way, the code is its access code: it belongs to this PC
+/// only, and the fleet that manages it has it. Everywhere else it is the fleet code, the same on every PC of the fleet.
+/// </summary>
+internal static class CodeRowText
+{
+    /// <param name="managedBy">The fleet PC that manages this PC; empty on a fleet member.</param>
+    internal static string Title(string managedBy) => managedBy.Length > 0 ? "Access code" : "Fleet code";
+
+    internal static string Noun(string managedBy) => managedBy.Length > 0 ? "access code" : "fleet code";
+
+    internal static string CopyName(string managedBy) => $"Copy {Noun(managedBy)}";
+
+    internal static string ManagedStatus(string managedBy, string keyId)
+        => $"This PC's own code (fingerprint {keyId}). Only {managedBy}'s fleet has it.";
+
+    internal static string CopiedHeading(string managedBy) => managedBy.Length > 0 ? "Access code copied" : "Fleet code copied";
+
+    /// <summary>An access code is not entered on another PC: that PC would get full control of this one, not a fleet.</summary>
+    internal static string CopiedMessage(string managedBy) => managedBy.Length > 0
+        ? $"{managedBy}'s fleet has this code already. Keep it private, like a password: anyone on your network with it can control this PC."
+        : "On another PC, open Settings → Fleet → ⋯ → Enter fleet code, and paste it. Keep the code private, like a password: anyone on your network with it can control your PCs.";
+
+    internal static string CopyFailed(string managedBy) => $"Could not copy the {Noun(managedBy)}";
+
+    internal static string RemoveItem(string managedBy) => managedBy.Length > 0 ? "Remove access code…" : "Remove fleet code…";
+
+    internal static string RemoveHeading(string managedBy) => $"Remove the {Noun(managedBy)}?";
+
+    internal static string RemoveMessage(string managedBy) => managedBy.Length > 0
+        ? $"{managedBy}'s fleet can no longer view or control this PC. To connect it again, pair it again."
+        : "This PC and your other PCs cannot connect to each other until you set a fleet code again.";
+
+    /// <summary>"New fleet code for this PC only": on a managed PC it replaces the access code, which ends the pairing.</summary>
+    internal static string NewCodeMessage(string managedBy) => managedBy.Length > 0
+        ? $"The new fleet code replaces this PC's access code, so {managedBy}'s fleet can no longer view or control this PC."
+        : "Your other PCs keep the current code, and cannot connect to this PC until you enter the new code on them. " +
+          "To give every PC a new code, use “Change the fleet code on every PC”.";
+
+    internal static string ManagedCannotChange(string managedBy)
+        => $"Only {managedBy}'s fleet changes this PC's access code. To stop it from managing this PC, click Disconnect.";
+}
+
 /// <summary>Forgetting a PC, worded and done the same way on the dashboard and in Settings.</summary>
 internal static class ForgetPc
 {
