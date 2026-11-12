@@ -16,7 +16,10 @@ internal static class TestSetup
     [ModuleInitializer]
     internal static void UseTemporaryStateDir()
     {
-        Environment.SetEnvironmentVariable("RUNNER_MANAGER_STATE_DIR", StateDir);
+        // In code first: a process with administrator rights (the tests on GitHub's runners) ignores the variable. The
+        // variable stays for the copies of RunnerManager.exe that tests start.
+        AppPaths.TestStateDir = StateDir;
+        Environment.SetEnvironmentVariable(AppPaths.StateDirVariable, StateDir);
         AssistantSwitches.Store = new FileSwitchStore(Path.Combine(StateDir, "assistant-switches.json"));
         MachineInstall.Records = new MemoryInstallRecords();
         var tasks = new MemoryTasks();

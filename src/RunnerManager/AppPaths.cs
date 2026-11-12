@@ -14,15 +14,39 @@ public static class AppPaths
     private static string LocalAppData => Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
     internal static string LegacyStateDir => Path.Combine(LocalAppData, "RunnerWidget");
 
+    /// <summary>The environment variable that moves the data folder of a process without administrator rights (development).</summary>
+    internal const string StateDirVariable = "RUNNER_MANAGER_STATE_DIR";
+
     /// <summary>
-    /// Settings, logs and state: %LOCALAPPDATA%\RunnerManager. RUNNER_MANAGER_STATE_DIR overrides it (used by tests).
+    /// Settings, logs and state: %LOCALAPPDATA%\RunnerManager. <see cref="StateDirVariable"/> overrides it only for a
+    /// process without administrator rights (see <see cref="StateDirOverride"/>). Read on first use.
     /// </summary>
-    public static readonly string StateDir = PrepareStateDir();
+    public static string StateDir => _stateDir ??= PrepareStateDir();
+
+    private static string? _stateDir;
+
+    /// <summary>
+    /// The data folder that the tests use, set by the test assembly before anything reads <see cref="StateDir"/>. Code,
+    /// not the environment: GitHub's runners run the tests with administrator rights, where the variable does not count.
+    /// Runner Manager itself never sets it.
+    /// </summary>
+    internal static string? TestStateDir { get; set; }
+
+    /// <summary>
+    /// The folder that replaces %LOCALAPPDATA%\RunnerManager, or null for none: the tests' folder, otherwise the value of
+    /// <see cref="StateDirVariable"/> in a process without administrator rights. Any program of the user can set that
+    /// variable for the user, and the elevated parts (the fleet agent, the dashboard) would then read their settings and
+    /// write their logs where it says, so a process with administrator rights ignores it.
+    /// </summary>
+    internal static string? StateDirOverride(string? variable, bool elevated, string? testStateDir)
+        => !string.IsNullOrWhiteSpace(testStateDir) ? testStateDir
+            : !elevated && !string.IsNullOrWhiteSpace(variable) ? variable
+            : null;
 
     private static string PrepareStateDir()
     {
-        var overridden = Environment.GetEnvironmentVariable("RUNNER_MANAGER_STATE_DIR");
-        if (!string.IsNullOrWhiteSpace(overridden)) return overridden;
+        if (StateDirOverride(Environment.GetEnvironmentVariable(StateDirVariable), Elevation.IsElevated, TestStateDir) is { } overridden)
+            return overridden;
 
         var dir = Path.Combine(LocalAppData, "RunnerManager");
         if (Directory.Exists(dir) || !Directory.Exists(LegacyStateDir)) return dir;
