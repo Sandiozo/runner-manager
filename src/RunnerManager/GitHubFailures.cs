@@ -95,6 +95,24 @@ internal static class GitHubFailures
         }
     }
 
+    /// <summary>What a poll says when GitHub's answer is not what was asked for.</summary>
+    internal const string UnreadableAnswer = "GitHub's answer could not be read.";
+
+    /// <summary>
+    /// A poll of this endpoint was answered, but the answer could not be read (it is not the JSON that was asked
+    /// for). The endpoint is left alone for a while, as after a failure: asking again at once would most likely get
+    /// the same answer.
+    /// </summary>
+    internal static void Unreadable(string endpoint)
+    {
+        var now = UtcNow();
+        lock (Gate)
+        {
+            if (!Endpoints.ContainsKey(endpoint)) MakeRoom(now);
+            Endpoints[endpoint] = new GitHubProblem(UnreadableAnswer, now + EndpointPause, RateLimited: false, Detail: string.Empty);
+        }
+    }
+
     /// <summary>
     /// Keeps the memory within its size. The failures that nothing reads any more go first, then the ones that are
     /// asked again soonest. Dropping all of them would start gh again for every endpoint that still fails.
@@ -179,7 +197,7 @@ internal static class GitHubFailures
         if (status == 0)
         {
             // gh printed an answer without a status line: not what gh api -i does, so only this request is doubted.
-            if (result.ExitCode == 0) return (Problem("GitHub's answer could not be read.", EndpointPause), FailureScope.Endpoint);
+            if (result.ExitCode == 0) return (Problem(UnreadableAnswer, EndpointPause), FailureScope.Endpoint);
             if (result.Error.StartsWith(GhMissingMessage, StringComparison.Ordinal)) return (Problem(GhMissingMessage, EndpointPause), FailureScope.Everything);
             if (result.Error.StartsWith(TimedOutStart, StringComparison.Ordinal))
                 // One request that hangs while others are answered is that request's problem. When nothing was

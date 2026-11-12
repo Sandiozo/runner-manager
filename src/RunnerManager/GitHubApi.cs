@@ -87,7 +87,8 @@ public static class GitHubApi
         lock (CacheLock)
             if (UsualDurations.TryGetValue(key, out var known) && DateTime.UtcNow < known.Until) return known.Usual;
 
-        var body = await GetPolledAsync($"repos/{repositoryPath}/actions/runs?status=success&per_page=30");
+        var endpoint = $"repos/{repositoryPath}/actions/runs?status=success&per_page=30";
+        var body = await GetPolledAsync(endpoint);
         if (body == null) return null;
         List<WorkflowRunState> runs;
         try
@@ -96,7 +97,11 @@ public static class GitHubApi
             runs = json.RootElement.GetProperty("workflow_runs").EnumerateArray().Select(ReadRun)
                 .Where(r => r.WorkflowName.Equals(workflowName, StringComparison.Ordinal)).Take(6).ToList();
         }
-        catch { return null; }
+        catch
+        {
+            Unreadable(endpoint);
+            return null;
+        }
 
         var durations = new List<TimeSpan>();
         foreach (var run in runs)
@@ -214,6 +219,19 @@ public static class GitHubApi
         return response.Body;
     }
 
+    /// <summary>
+    /// GitHub answered a poll with something that could not be read. The answer is not kept (its ETag would bring the
+    /// same answer back as 304), and the request is paused like a failed one, so the job view does not start the
+    /// whole read of the repository again on every tick only to fail at the same answer.
+    /// </summary>
+    /// <param name="unanswered">Gets the endpoint, so the failed read is kept while the request is paused.</param>
+    private static void Unreadable(string endpoint, ConcurrentBag<string>? unanswered = null)
+    {
+        lock (CacheLock) PolledBodies.Remove(endpoint);
+        GitHubFailures.Unreadable(endpoint);
+        unanswered?.Add(endpoint);
+    }
+
     /// <summary>Room for the run and job lists of several busy repositories, so their ETags are not dropped at every refresh.</summary>
     private const int MaxPolledBodies = 1000;
     /// <summary>
@@ -257,8 +275,8 @@ public static class GitHubApi
     private static async Task<(int Total, List<WorkflowRunState> Runs)?> GetRunPageAsync(
         string repositoryPath, string status, int page, ConcurrentBag<string> unanswered)
     {
-        var body = await GetPolledAsync(
-            $"repos/{repositoryPath}/actions/runs?status={status}&per_page={RunPageSize}{PageParameter(page)}", unanswered);
+        var endpoint = $"repos/{repositoryPath}/actions/runs?status={status}&per_page={RunPageSize}{PageParameter(page)}";
+        var body = await GetPolledAsync(endpoint, unanswered);
         if (body == null) return null;
         try
         {
@@ -268,7 +286,11 @@ public static class GitHubApi
                 list.Add(ReadRun(run));
             return (TotalCount(json.RootElement, list.Count), list);
         }
-        catch { return null; }
+        catch
+        {
+            Unreadable(endpoint, unanswered);
+            return null;
+        }
     }
 
     /// <summary>Empty for the first page, which needs no page number.</summary>
@@ -305,9 +327,8 @@ public static class GitHubApi
     private static async Task<(int Total, List<GitHubJobState> Jobs)?> GetJobPageAsync(
         string repositoryPath, WorkflowRunState run, int page, ConcurrentBag<string>? unanswered = null)
     {
-        var body = await GetPolledAsync(
-            $"repos/{repositoryPath}/actions/runs/{GitHubNames.Id(run.Id)}/jobs?filter=latest&per_page={JobPageSize}{PageParameter(page)}",
-            unanswered);
+        var endpoint = $"repos/{repositoryPath}/actions/runs/{GitHubNames.Id(run.Id)}/jobs?filter=latest&per_page={JobPageSize}{PageParameter(page)}";
+        var body = await GetPolledAsync(endpoint, unanswered);
         if (body == null) return null;
         try
         {
@@ -318,7 +339,11 @@ public static class GitHubApi
             // Without a count, the jobs read so far are taken as all of them.
             return (TotalCount(json.RootElement, (page - 1) * JobPageSize + list.Count), list);
         }
-        catch { return null; }
+        catch
+        {
+            Unreadable(endpoint, unanswered);
+            return null;
+        }
     }
     private static DateTime? ReadTime(JsonElement element, string property)
         => element.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.String && value.TryGetDateTime(out var time)
@@ -380,8 +405,8 @@ public static class GitHubApi
         lock (CacheLock)
             cached = RecentRunsCache.TryGetValue(repositoryPath, out var entry) ? entry : (string.Empty, new List<WorkflowRunSummary>());
 
-        var response = await GitHubCli.GetConditionalAsync(
-            $"repos/{repositoryPath}/actions/runs?per_page={RecentRunCount}&exclude_pull_requests=true", cached.ETag);
+        var endpoint = $"repos/{repositoryPath}/actions/runs?per_page={RecentRunCount}&exclude_pull_requests=true";
+        var response = await GitHubCli.GetConditionalAsync(endpoint, cached.ETag);
         if (response.NotModified) return cached.Runs;
         if (!response.Ok) return null;
         try
@@ -408,7 +433,11 @@ public static class GitHubApi
             lock (CacheLock) RecentRunsCache[repositoryPath] = (response.ETag, runs);
             return runs;
         }
-        catch { return null; }
+        catch
+        {
+            GitHubFailures.Unreadable(endpoint);
+            return null;
+        }
     }
 
     public static async Task RerunFailedJobsAsync(string repositoryPath, long runId)

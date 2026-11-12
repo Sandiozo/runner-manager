@@ -958,6 +958,45 @@ public class GitHubBackOffTests
     }
 
     [Fact]
+    public async Task JobView_WithAnAnswerThatCannotBeRead_IsPausedLikeAFailedRead()
+    {
+        var repository = NewRepository();
+        using var gh = new FakeGh(arguments => arguments[1].Contains("/jobs?", StringComparison.Ordinal)
+            ? FakeGh.Http(200, "<html>Unicorn</html>")
+            : arguments[1].Contains("status=in_progress", StringComparison.Ordinal)
+                ? FakeGh.Http(200, """{"total_count":1,"workflow_runs":[{"id":11,"name":"CI","run_number":3}]}""")
+                : FakeGh.Http(200, """{"total_count":0,"workflow_runs":[]}"""));
+
+        for (var tick = 0; tick < 5; tick++)
+        {
+            Assert.False((await GitHubApi.GetCurrentJobAsync(repository, 7)).Read);
+            gh.Now += TimeSpan.FromSeconds(3);
+        }
+        Assert.Equal(3, gh.Calls.Length);
+        Assert.Equal("GitHub's answer could not be read.", GitHubApi.ProblemFor(repository)!.Reason);
+
+        gh.Now = Noon.AddSeconds(46);
+        await GitHubApi.GetCurrentJobAsync(repository, 7);
+        Assert.Equal(6, gh.Calls.Length);
+        // The answer that could not be read was not kept, so its ETag is not sent: a 304 would only bring it back.
+        var jobRequest = gh.Calls.Last(c => c[1].Contains("/jobs?", StringComparison.Ordinal));
+        Assert.DoesNotContain("-H", jobRequest);
+    }
+
+    [Fact]
+    public async Task RunnerList_ThatCannotBeRead_IsAskedOncePerRunner_NotOnEveryRefresh()
+    {
+        var scope = $"repos/{NewRepository()}";
+        using var gh = new FakeGh(_ => FakeGh.Http(200, "Service temporarily unavailable"));
+
+        for (var refresh = 0; refresh < 4; refresh++)
+            foreach (var runner in new long[] { 1, 2 })
+                Assert.Null(await GitHubCli.GetRunnerStateAsync(scope, runner));
+
+        Assert.Equal(new[] { $"{scope}/actions/runners?per_page=100", $"{scope}/actions/runners/1", $"{scope}/actions/runners/2" }, gh.Endpoints);
+    }
+
+    [Fact]
     public async Task RateLimitedRunnerList_DoesNotFallBackToALookupPerRunner()
     {
         var scope = $"orgs/b{Guid.NewGuid():N}";

@@ -233,14 +233,20 @@ public static class GitHubCli
     /// </summary>
     private static async Task<RemoteRunnerState?> PollRunnerAsync(string scope, long agentId)
     {
-        var response = await GetConditionalAsync($"{scope}/actions/runners/{GitHubNames.Id(agentId)}", null);
+        var endpoint = $"{scope}/actions/runners/{GitHubNames.Id(agentId)}";
+        var response = await GetConditionalAsync(endpoint, null);
         if (!response.Ok) return null;
         try
         {
             using var json = JsonDocument.Parse(response.Body);
             return ReadRunnerState(json.RootElement);
         }
-        catch { return null; }
+        catch
+        {
+            // Paused like a failed poll, so it is not asked again at every refresh.
+            GitHubFailures.Unreadable(endpoint);
+            return null;
+        }
     }
 
     private sealed record RunnerList(Dictionary<long, RemoteRunnerState> Runners, bool Complete);
@@ -268,7 +274,8 @@ public static class GitHubCli
     {
         (string ETag, RunnerList List)? previous;
         lock (RunnerListLock) previous = RunnerListETags.TryGetValue(scope, out var entry) ? entry : null;
-        var response = await GetConditionalAsync($"{scope}/actions/runners?per_page=100", previous?.ETag);
+        var endpoint = $"{scope}/actions/runners?per_page=100";
+        var response = await GetConditionalAsync(endpoint, previous?.ETag);
         if (response.NotModified && previous != null) return previous.Value.List;
         if (!response.Ok) return null;
         try
@@ -278,7 +285,11 @@ public static class GitHubCli
             lock (RunnerListLock) RunnerListETags[scope] = (response.ETag, list);
             return list;
         }
-        catch { return null; }
+        catch
+        {
+            GitHubFailures.Unreadable(endpoint);
+            return null;
+        }
     }
 
     /// <summary>The runners in a list response by ID; Complete is false when GitHub has more than this page holds.</summary>
