@@ -137,7 +137,7 @@ public sealed class FleetActions
                 $"If {runner.TitleText} appears on {target.MachineName}, remove the old copy from {source.MachineName}; otherwise move it again.");
             throw;
         }
-        catch
+        catch (Exception ex)
         {
             if (!runner.IsInteractive)
             {
@@ -149,6 +149,11 @@ public sealed class FleetActions
                 }
                 catch (Exception restartError) { log($"Could not start the runner again: {restartError.Message}"); }
             }
+            // config.cmd on the target replaced the registration before the install failed. The old copy is still enabled
+            // and started, so it can be edited, but GitHub no longer accepts it.
+            if (ex.Message.Contains(RunnerService.ReplacedRegistrationNote, StringComparison.Ordinal))
+                log($"{runner.TitleText} on {source.MachineName} must be registered again before it can take jobs. " +
+                    "Move it again, or edit it and change its name or labels.");
             throw;
         }
 

@@ -654,7 +654,7 @@ public class RunnerMoveTests
 {
     /// <summary>Runs a move between two test agents that answer each command with <paramref name="answer"/>.</summary>
     private static async Task<(List<MachineCommand> Source, List<MachineCommand> Target, Exception? Error)> MoveAsync(
-        Func<MachineCommand, string> answer)
+        Func<MachineCommand, string> answer, List<string>? log = null)
     {
         var key = CommandSigner.NewKey();
         var previous = MachineRelay.CommandPollInterval;
@@ -688,7 +688,8 @@ public class RunnerMoveTests
             try
             {
                 await new FleetActions(viaLocalAgent: true).MoveRunnerAsync(new MachineInfo { MachineKey = "SOURCEPC", MachineName = "SOURCEPC" }, runner,
-                    new MachineInfo { MachineKey = "TARGETPC", MachineName = "TARGETPC" }, deleteOldFiles: false, null, _ => { });
+                    new MachineInfo { MachineKey = "TARGETPC", MachineName = "TARGETPC" }, deleteOldFiles: false, null,
+                    line => log?.Add(line));
             }
             catch (Exception ex) { error = ex; }
             return (source.Commands, target.Commands, error);
@@ -723,6 +724,23 @@ public class RunnerMoveTests
         var (source, _, error) = await MoveAsync(c => c.Action == "Create" ? "runner Create failed: no token" : $"Runner {c.Action} completed");
         Assert.IsType<InvalidOperationException>(error);
         Assert.Equal("Stop:disable Start:enable", Steps(source));
+    }
+
+    [Fact]
+    public async Task WhenTheTargetReplacedTheRegistrationAndFailed_TheOldCopyIsStartedAgain_AndTheLogSaysToRegisterItAgain()
+    {
+        var log = new List<string>();
+        var (source, _, error) = await MoveAsync(c => c.Action == "Create"
+            ? $"runner Create failed: config.cmd exited with code 1\n{RunnerService.ReplacedRegistrationNote}"
+            : $"Runner {c.Action} completed", log);
+        Assert.Contains(RunnerService.ReplacedRegistrationNote, error!.Message);
+        Assert.Equal("Stop:disable Start:enable", Steps(source));
+        Assert.Contains(log, line => line.Contains("must be registered again before it can take jobs"));
+
+        // Any other failure: started again, nothing more to do.
+        log.Clear();
+        await MoveAsync(c => c.Action == "Create" ? "runner Create failed: no token" : $"Runner {c.Action} completed", log);
+        Assert.DoesNotContain(log, line => line.Contains("registered again"));
     }
 
     [Fact]
