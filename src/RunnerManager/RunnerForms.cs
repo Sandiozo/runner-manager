@@ -149,7 +149,7 @@ internal static class AddRunnerForm
     /// </summary>
     internal static string? MissingPcHint(MachineInfo? selectedPc, IReadOnlyCollection<MachineInfo> targets)
     {
-        if (selectedPc is not { IsLocal: false } || targets.Any(m => m.MachineKey == selectedPc.MachineKey)) return null;
+        if (selectedPc is not { MachineName: not null, IsLocal: false } || targets.Any(m => m.MachineKey == selectedPc.MachineKey)) return null;
         const string reason = "it is offline, or its Runner Manager is too old to add runners from here.";
         if (targets.Count > 1) return $"{selectedPc.MachineName} is not in the list: {reason}";
         var addedOn = targets.FirstOrDefault() is { IsLocal: false } only ? only.MachineName : "this PC";
