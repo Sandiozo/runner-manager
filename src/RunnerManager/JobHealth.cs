@@ -152,7 +152,7 @@ public static class JobHealth
         }
         if (runner.TwoConsoleWindows)
             return new RunnerHealth(RunnerConcern.TwoConsoleWindows, "Two console windows",
-                "A second console window runs the same runner, for example in another Windows session on this PC. " +
+                "A second console window runs the same runner, for example in another Windows session on its PC. " +
                 "Both use one registration, so only one of them gets jobs, and the other keeps trying to connect. " +
                 "Close one of the console windows, or sign out of the other Windows session.",
                 SetupSubject + "consoles");

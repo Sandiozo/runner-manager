@@ -906,7 +906,8 @@
                                                                             </DockPanel>
                                                                             <DockPanel Style="{StaticResource KeyRow}">
                                                                                 <TextBlock Text="Windows service" Style="{StaticResource KeyText}"/>
-                                                                                <TextBlock Text="{Binding ServiceText}" Style="{StaticResource ValueText}" Foreground="{DynamicResource TextMutedBrush}"/>
+                                                                                <TextBlock Text="{Binding ServiceText}" Style="{StaticResource ValueText}" Foreground="{DynamicResource TextMutedBrush}"
+                                                                                           ToolTip="{Binding ServiceTip}" AutomationProperties.HelpText="{Binding ServiceTip}"/>
                                                                             </DockPanel>
                                                                             <DockPanel Style="{StaticResource KeyRow}">
                                                                                 <TextBlock Text="Starts" Style="{StaticResource KeyText}"/>

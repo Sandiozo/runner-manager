@@ -142,7 +142,7 @@
                 <Button x:Name="CancelButton" Content="Cancel" Style="{StaticResource GhostButton}" Click="Cancel_Click" MinWidth="80" IsCancel="True"/>
                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
                     <Button x:Name="BackButton" Content="Back" Style="{StaticResource GhostButton}" Click="Back_Click" MinWidth="80" Visibility="Collapsed"/>
-                    <Button x:Name="NextButton" Content="Next" Style="{StaticResource PrimaryButton}" Click="Next_Click" MinWidth="110" Margin="8,0,0,0" IsDefault="True"/>
+                    <Button x:Name="NextButton" Content="Next" Style="{StaticResource PrimaryButton}" Click="Next_Click" MinWidth="110" Margin="8,0,0,0" Padding="11,6" IsDefault="True"/>
                 </StackPanel>
             </DockPanel>
         </Border>

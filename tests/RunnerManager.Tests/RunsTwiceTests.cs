@@ -70,6 +70,35 @@ public class RunsTwiceTests : IDisposable
         AgentProtocolVersion = MachineRelay.ProtocolVersion
     };
 
+    /// <summary>
+    /// The "Windows service" row fits its narrow column; the service's name, its account and the reason are in the
+    /// row's tooltip, which screen readers read too.
+    /// </summary>
+    [Theory]
+    [InlineData(true, true, false, false, RunnerStart.WithWindows, "Not used (console window)", "(not used: the runner runs in a console window)")]
+    [InlineData(true, false, true, true, RunnerStart.SignIn, "Runs, and a console window too", "(runs, and the runner also opens in a console window when you sign in)")]
+    [InlineData(true, false, false, true, RunnerStart.WithWindows, "Runs, and a console window too", "(runs, and a console window runs the runner too)")]
+    [InlineData(true, false, true, false, RunnerStart.SignIn, "Not used (console window)", "(not used: the runner opens in a console window when you sign in)")]
+    [InlineData(true, false, false, false, RunnerStart.WithWindows, "Installed", "  ·  runs as NT AUTHORITY\\NETWORK SERVICE")]
+    [InlineData(false, true, false, false, RunnerStart.SignIn, "None (console window)", "None. Runs in a console window that closes when you sign out.")]
+    [InlineData(false, false, false, false, RunnerStart.Off, "None (console window)", "None. Runs in a console window that closes when you sign out.")]
+    [InlineData(false, false, false, false, RunnerStart.WithWindows, "Not installed", "Not installed")]
+    public void TheWindowsServiceRow_IsShort_AndItsTooltipSaysTheRest(bool serviceInstalled, bool interactive, bool consoleAtSignIn,
+        bool runsTwice, string startsAt, string text, string tip)
+    {
+        var status = new MachineRunnerStatus
+        {
+            ServiceName = ServiceName, ServiceInstalled = serviceInstalled, IsInteractive = interactive, ConsoleAtSignIn = consoleAtSignIn,
+            RunsTwice = runsTwice, StartsAt = startsAt, ServiceAccount = serviceInstalled ? @"NT AUTHORITY\NETWORK SERVICE" : string.Empty,
+            MachineName = "SANDIS", MachineKey = "sandis", IsLocalMachine = true, MachineOnline = true
+        };
+
+        Assert.Equal(text, status.ServiceText);
+        Assert.True(status.ServiceText.Length <= 30, status.ServiceText);
+        Assert.Contains(tip, status.ServiceTip);
+        if (serviceInstalled) Assert.StartsWith(ServiceName, status.ServiceTip);
+    }
+
     private static MachineInfo Pc(params MachineRunnerStatus[] runners)
         => MachineInfo.FromPayload("sandis", new MachineStatusPayload
         {
@@ -116,7 +145,9 @@ public class RunsTwiceTests : IDisposable
         Assert.Contains("Stop the Windows service", status.Health.Detail);
         Assert.Contains("turn off “Start when you sign in”", status.Health.Detail);
         Assert.Contains("git refuses", status.Health.Detail);
-        Assert.Contains("console window", status.ServiceText);
+        // The row is short; pointing at it tells why.
+        Assert.Equal("Runs, and a console window too", status.ServiceText);
+        Assert.Contains("also opens in a console window when you sign in", status.ServiceTip);
         Assert.DoesNotContain("belong to", status.WorkFolderText);
         var pc = Pc(status);
         var attention = FleetAttention.Count(new[] { pc });
@@ -783,6 +814,8 @@ public class RunsTwiceTests : IDisposable
         Assert.Equal("Two console windows", status.StatusText);
         Assert.StartsWith("livonia-core, Two console windows.", status.HeaderName);
         Assert.Contains("A second console window runs the same runner", status.Health.Detail);
+        // The details are also shown on the card of another PC, so they do not say "this PC".
+        Assert.Contains("in another Windows session on its PC.", status.Health.Detail);
         Assert.Contains("only one of them gets jobs", status.Health.Detail);
         Assert.Contains("Close one of the console windows, or sign out of the other Windows session.", status.Health.Detail);
         Assert.Equal(status.Health.Detail, status.StatusTip);
