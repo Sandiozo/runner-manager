@@ -27,6 +27,12 @@
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
   </PropertyGroup>
 
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <!-- Runner Manager runs with administrator rights. Any program of the user can set DOTNET_STARTUP_HOOKS for the user,
+         so the runtime must not load the assemblies it names. Debug builds keep them for Hot Reload. -->
+    <StartupHookSupport>false</StartupHookSupport>
+  </PropertyGroup>
+
   <ItemGroup>
     <Using Remove="System.Windows.Forms" />
     <Using Remove="System.Drawing" />

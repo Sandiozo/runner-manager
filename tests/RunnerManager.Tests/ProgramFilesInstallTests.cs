@@ -377,6 +377,16 @@ public class ProgramFilesInstallTests
     }
 
     [Fact]
+    public void TheReleaseBuild_LoadsNoStartupHooks()
+    {
+        // The user's DOTNET_STARTUP_HOOKS would otherwise load an assembly into a process with administrator rights.
+        var project = System.Xml.Linq.XDocument.Load(Path.Combine(InstallEvidenceTests.SourceDir, "RunnerManager.csproj"));
+        var setting = project.Descendants("StartupHookSupport").Single();
+        Assert.Equal("false", setting.Value.Trim());
+        Assert.Equal("'$(Configuration)' == 'Release'", setting.Parent!.Attribute("Condition")?.Value);
+    }
+
+    [Fact]
     public void PowerShell_IsNeverStartedByItsBareName()
     {
         // A bare name is looked for in the program's folder and the current folder before the Windows folder.
