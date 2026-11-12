@@ -9,7 +9,10 @@
  * one, which holds exactly:
  *   - the system variables from CreateEnvironmentBlock(NULL), less the names in IsLeftOutSystemName;
  *   - USERNAME, USERDOMAIN, USERPROFILE, HOMEDRIVE, HOMEPATH, APPDATA and LOCALAPPDATA, from the process token and
- *     Windows functions, never from the environment;
+ *     Windows functions, never from the environment; USERNAME and USERDOMAIN only when the account's name can be
+ *     looked up (see AddIdentity);
+ *   - PSModulePath=<System32>\WindowsPowerShell\v1.0\Modules, so that Windows PowerShell started by the app does not
+ *     load modules from the user's Documents folder (see AddModulePath);
  *   - DOTNET_EnableDiagnostics=0 and DOTNET_BUNDLE_EXTRACT_BASE_DIR=<launcher folder>\.net;
  *   - HTTP_PROXY, HTTPS_PROXY, ALL_PROXY, NO_PROXY, GH_TOKEN and GITHUB_TOKEN from the launcher's own environment, as
  *     data, when set, at most 8,192 characters and without control characters. ReadPassThroughValue is the only
@@ -19,17 +22,19 @@
  *
  * The child's arguments are the launcher's command line after its own program name, unchanged. Its current folder is
  * the launcher's folder (System32 when that folder is too long for Windows to start a process in). The launcher waits
- * for the child and exits with the child's exit code. It shows no window, writes no file or registry value and opens no
- * network connection. It has the rights it was started with and gives the child the same: started without
- * administrator rights, it starts the app without them (CreateProcessW passes the launcher's own token on).
+ * for the child and exits with the child's exit code; at sign-out Windows ends it after the child (see Run). It shows
+ * no window, writes no file or registry value and opens no network connection. It has the rights it was started with
+ * and gives the child the same: started without administrator rights, it starts the app without them (CreateProcessW
+ * passes the launcher's own token on).
  *
  * Exit codes of the launcher itself. Task Scheduler shows them in hex. Runner Manager's own exit codes are 0, 1 and 2,
  * so a child's code is not mistaken for one of these.
  *   0x524C0001  its own path (or, for a very long folder, the System32 path) could not be read
  *   0x524C0002  out of memory
  *   0x524C0003  the DLL search could not be limited to System32
- *   0x524C0004  the system variables could not be read (the Windows folder, or CreateEnvironmentBlock)
- *   0x524C0005  the user's name, profile folder or AppData folders could not be read
+ *   0x524C0004  the system variables could not be read (the Windows or System32 folder, or CreateEnvironmentBlock)
+ *   0x524C0005  the token's user, the user's profile folder or the AppData folders could not be read (the user's name
+ *               may be missing: see AddIdentity)
  *   0x524C0006  the environment block could not be put together (a size overflowed, or a name came twice)
  *   0x524C0007  the child's command line would be longer than 32,767 characters
  *   0x524C0008  RunnerManager.exe is not in the launcher's folder
@@ -39,7 +44,8 @@
  * In none of these cases is anything started with the environment the launcher was given.
  *
  * Built without the C runtime (see build.ps1): none of the launcher's own code runs before LauncherStart, and no
- * runtime code reads the environment on the launcher's behalf.
+ * runtime code reads the environment on the launcher's behalf. Code under #ifdef LAUNCHER_TEST_BUILD is only in the
+ * copy built for the tests (see TestSystemEntries), never in RunnerManagerLauncher.exe.
  */
 
 #define WIN32_LEAN_AND_MEAN
@@ -64,6 +70,8 @@
 
 #define CHILD_FILE_NAME          L"RunnerManager.exe"
 #define EXTRACT_FOLDER_NAME      L".net"
+/* Windows PowerShell's own modules, in the System32 folder. */
+#define POWERSHELL_MODULES       L"\\WindowsPowerShell\\v1.0\\Modules"
 
 /* The largest buffer GetModuleFileNameW is given: Windows paths are at most 32,767 characters. */
 #define OWN_PATH_BUFFER_MAX      32768u
@@ -75,8 +83,8 @@
 #define PASS_THROUGH_MAX_CHARS   8192u
 /* Names are compared with CompareStringOrdinal, which takes int lengths. No real name comes near this. */
 #define NAME_MAX_CHARS           32767u
-/* Entries the launcher makes itself: 7 for the user, 2 for .NET, 6 passed through. */
-#define OWN_ENTRY_COUNT          15u
+/* Entries the launcher makes itself: 7 for the user, 1 for Windows PowerShell, 2 for .NET, 6 passed through. */
+#define OWN_ENTRY_COUNT          16u
 
 /* One "NAME=value" string of the child's environment. */
 typedef struct Entry {
@@ -99,7 +107,7 @@ static const WCHAR *const PassThroughNames[] = {
 
 /* The names the launcher sets itself. The system block's value of any of them is left out, so each is there once. */
 static const WCHAR *const OwnNames[] = {
-    L"USERNAME", L"USERDOMAIN", L"USERPROFILE", L"HOMEDRIVE", L"HOMEPATH", L"APPDATA", L"LOCALAPPDATA",
+    L"USERNAME", L"USERDOMAIN", L"USERPROFILE", L"HOMEDRIVE", L"HOMEPATH", L"APPDATA", L"LOCALAPPDATA", L"PSModulePath",
     L"HTTP_PROXY", L"HTTPS_PROXY", L"ALL_PROXY", L"NO_PROXY", L"GH_TOKEN", L"GITHUB_TOKEN"
 };
 
@@ -112,6 +120,34 @@ static const WCHAR *const OwnNames[] = {
  * DOTNET_BUNDLE_EXTRACT_BASE_DIR come from the launcher instead.
  */
 static const WCHAR *const LeftOutPrefixes[] = { L"DOTNET_", L"COMPlus_", L"CORECLR_", L"COR_", L"COREHOST_" };
+
+#ifdef LAUNCHER_TEST_BUILD
+/*
+ * The test build only: bin\LauncherTestBuild.exe, which build.ps1 -TestStub compiles from this file with
+ * LAUNCHER_TEST_BUILD defined, for LauncherTests. It is never embedded or shipped, and RunnerManagerLauncher.exe is
+ * compiled without the define. It acts as on a PC that a test cannot set up, in three places: these system variables,
+ * a machine value of PSModulePath equal to the launcher's own (AddModulePath), and an account whose name cannot be
+ * looked up (AddIdentity).
+ * These strings are added to the system variables as if CreateEnvironmentBlock had returned them, so the tests can
+ * check the filter with names that only an administrator can set machine-wide. Only RM_LAUNCHER_TEST_BUILD=kept may
+ * reach the app.
+ */
+static const WCHAR TestSystemEntries[] =
+    L"DOTNET_ROOT=C:\\RM_LAUNCHER_TEST_BUILD\\dotnet\0"
+    L"dotnet_gcServer=1\0"
+    L"COMPlus_EnableDiagnostics=1\0"
+    L"CORECLR_PROFILER_PATH=C:\\RM_LAUNCHER_TEST_BUILD\\profiler.dll\0"
+    L"COR_ENABLE_PROFILING=1\0"
+    L"COREHOST_TRACE=1\0"
+    L"__COMPAT_LAYER=RunAsInvoker\0"
+    L"USERNAME=RM_LAUNCHER_TEST_BUILD\0"
+    L"USERPROFILE=C:\\RM_LAUNCHER_TEST_BUILD\0"
+    L"PSModulePath=C:\\RM_LAUNCHER_TEST_BUILD\\Modules\0"
+    L"GH_TOKEN=RM_LAUNCHER_TEST_BUILD\0"
+    L"=C:=C:\\RM_LAUNCHER_TEST_BUILD\0"
+    L"RM_LAUNCHER_TEST_BUILD_WITHOUT_EQUALS_SIGN\0"
+    L"RM_LAUNCHER_TEST_BUILD=kept\0";   /* and the null that ends the block */
+#endif
 
 /* ---- Memory and text. No C runtime, so no memset, memcpy or wcslen; these do the same with compiler intrinsics. */
 
@@ -240,6 +276,17 @@ static SIZE_T CountStrings(const WCHAR *block)
     return count;
 }
 
+/* The length of the value of name (any letter case) in an environment block, or (SIZE_T)-1 when the block has none. */
+static SIZE_T ValueLength(const WCHAR *block, const WCHAR *name)
+{
+    SIZE_T nameLength = TextLength(name);
+    for (const WCHAR *p = block; *p != 0; p += TextLength(p) + 1) {
+        SIZE_T textLength = TextLength(p);
+        if (textLength > nameLength && p[nameLength] == L'=' && IsName(p, nameLength, name)) return textLength - nameLength - 1;
+    }
+    return (SIZE_T)-1;
+}
+
 /*
  * Adds the system variables, except the names left out. Strings without a name are left out too: Windows keeps the
  * current folder of each drive as "=C:=C:\...", and CreateEnvironmentBlock makes none; a string without '=' is no
@@ -265,16 +312,30 @@ static DWORD AddSystemEntries(EntryList *list, const WCHAR *block)
     return 0;
 }
 
+#ifdef LAUNCHER_TEST_BUILD
+/* The test build looks up the name of S-1-5-21-1-2-3-1001 instead of the user's: shaped like a domain account's SID,
+   but no account has it, so the lookup fails as it does for a domain account whose name cannot be found. */
+__declspec(align(4)) static const BYTE TestUnknownSid[] = {
+    1, 5,                                                                 /* revision 1, 5 subauthorities */
+    0, 0, 0, 0, 0, 5,                                                     /* SECURITY_NT_AUTHORITY */
+    21, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 0xE9, 0x03, 0, 0     /* 21, 1, 2, 3, 1001 */
+};
+#endif
+
 /*
  * The user's identity, from the token and from Windows, never from the environment: USERNAME and USERDOMAIN from the
  * token's account, USERPROFILE from the profile list, HOMEDRIVE and HOMEPATH split from USERPROFILE, APPDATA and
  * LOCALAPPDATA from the known folders. The token is passed to SHGetKnownFolderPath so that it resolves the folders for
  * that user's profile rather than with this process's environment.
+ * Only the account's name may be missing: looking it up fails for a domain account whose domain controller cannot be
+ * reached and whose name Windows has not cached. The child then gets neither USERNAME nor USERDOMAIN (the system
+ * block's are left out all the same) rather than not being started. Everything else here must work, or the launch stops.
  */
 static DWORD AddIdentity(EntryList *list, HANDLE token)
 {
     DWORD result = EXIT_IDENTITY;
     TOKEN_USER *user = NULL;
+    PSID sid = NULL;
     WCHAR *name = NULL;
     WCHAR *domain = NULL;
     WCHAR *profile = NULL;
@@ -284,6 +345,7 @@ static DWORD AddIdentity(EntryList *list, HANDLE token)
     DWORD nameChars = 0;
     DWORD domainChars = 0;
     SIZE_T profileLength = 0;
+    BOOL named = FALSE;
     SID_NAME_USE use;
 
     /* Each of these Windows functions is called first without a buffer to learn the size it needs. */
@@ -292,13 +354,18 @@ static DWORD AddIdentity(EntryList *list, HANDLE token)
     if (user == NULL) { result = EXIT_OUT_OF_MEMORY; goto done; }
     if (!GetTokenInformation(token, TokenUser, user, size, &size)) goto done;
 
-    if (LookupAccountSidW(NULL, user->User.Sid, NULL, &nameChars, NULL, &domainChars, &use)
-        || GetLastError() != ERROR_INSUFFICIENT_BUFFER) goto done;
-    /* The sizes include the terminating null; one more character keeps a zero at the end whatever the call writes. */
-    name = Allocate((SIZE_T)nameChars + 1, sizeof(WCHAR));
-    domain = Allocate((SIZE_T)domainChars + 1, sizeof(WCHAR));
-    if (name == NULL || domain == NULL) { result = EXIT_OUT_OF_MEMORY; goto done; }
-    if (!LookupAccountSidW(NULL, user->User.Sid, name, &nameChars, domain, &domainChars, &use)) goto done;
+    sid = user->User.Sid;
+#ifdef LAUNCHER_TEST_BUILD
+    sid = (PSID)TestUnknownSid;
+#endif
+    /* Any other failure than a too small buffer means there is no name to be had. */
+    if (!LookupAccountSidW(NULL, sid, NULL, &nameChars, NULL, &domainChars, &use) && GetLastError() == ERROR_INSUFFICIENT_BUFFER) {
+        /* The sizes include the terminating null; one more character keeps a zero at the end whatever the call writes. */
+        name = Allocate((SIZE_T)nameChars + 1, sizeof(WCHAR));
+        domain = Allocate((SIZE_T)domainChars + 1, sizeof(WCHAR));
+        if (name == NULL || domain == NULL) { result = EXIT_OUT_OF_MEMORY; goto done; }
+        named = LookupAccountSidW(NULL, sid, name, &nameChars, domain, &domainChars, &use);
+    }
 
     size = 0;
     if (GetUserProfileDirectoryW(token, NULL, &size) || GetLastError() != ERROR_INSUFFICIENT_BUFFER) goto done;
@@ -311,8 +378,10 @@ static DWORD AddIdentity(EntryList *list, HANDLE token)
     if (FAILED(SHGetKnownFolderPath(&FOLDERID_LocalAppData, KF_FLAG_DONT_VERIFY, token, &local))) goto done;
 
     profileLength = TextLength(profile);
-    if ((result = AddOwnEntry(list, L"USERNAME", name, TextLength(name))) != 0) goto done;
-    if ((result = AddOwnEntry(list, L"USERDOMAIN", domain, TextLength(domain))) != 0) goto done;
+    if (named) {
+        if ((result = AddOwnEntry(list, L"USERNAME", name, TextLength(name))) != 0) goto done;
+        if ((result = AddOwnEntry(list, L"USERDOMAIN", domain, TextLength(domain))) != 0) goto done;
+    }
     if ((result = AddOwnEntry(list, L"USERPROFILE", profile, profileLength)) != 0) goto done;
     /* "C:\Users\Name" gives HOMEDRIVE=C: and HOMEPATH=\Users\Name. A profile not on a drive letter (a network path)
        has no such split, and the child then gets neither: better none than a wrong one. */
@@ -331,6 +400,52 @@ done:
     Free(domain);
     Free(name);
     Free(user);
+    return result;
+}
+
+/*
+ * PSModulePath: Windows PowerShell's own modules folder, <System32>\WindowsPowerShell\v1.0\Modules, which only
+ * administrators can change. System32 comes from GetSystemDirectoryW, which reads no variable.
+ * Why not the system value: the app starts Windows PowerShell 5.1 with administrator rights, and PowerShell puts the
+ * user's own modules folder (<Documents>\WindowsPowerShell\Modules, which programs without administrator rights can
+ * write) first when the value it is given equals the machine value, as the system block's value does. A module there
+ * named like a command of the app's scripts would then run with administrator rights. A value that differs from the
+ * machine value PowerShell keeps, adding only <Program Files>\WindowsPowerShell\Modules. A user-level value
+ * (HKCU\Environment\PSModulePath) adds nothing either: PowerShell uses it only when the value it is given equals the
+ * machine value, the user-level value itself, or the two joined, so here it can only bring in this value and the
+ * machine value. (ModuleIntrinsics.GetModulePath of Windows PowerShell 5.1, read and measured on Windows 11 24H2.)
+ * 32-bit Windows PowerShell (SysWOW64) does put the user's folder before this value when no user-level value is set;
+ * the app starts the 64-bit one.
+ * PowerShell compares with String.Equals(OrdinalIgnoreCase), which is false for strings of different lengths. So when
+ * the machine value has as many characters as the folder (it may be the folder itself), the child gets the folder
+ * twice, "<folder>;<folder>": the same modules, and never equal to the machine value.
+ */
+static DWORD AddModulePath(EntryList *list, const WCHAR *systemBlock)
+{
+    SIZE_T modulesLength = TextLength(POWERSHELL_MODULES);
+    UINT size = GetSystemDirectoryW(NULL, 0);   /* the size it needs, with the terminating null */
+    if (size == 0) return EXIT_SYSTEM_ENVIRONMENT;
+    /* Room for the folder twice and a ';' between: size counts a null, so this is a character more than that. */
+    WCHAR *value = Allocate(((SIZE_T)size + modulesLength) * 2, sizeof(WCHAR));
+    if (value == NULL) return EXIT_OUT_OF_MEMORY;
+    DWORD result = EXIT_SYSTEM_ENVIRONMENT;
+    UINT length = GetSystemDirectoryW(value, size);
+    if (length != 0 && length < size) {
+        SIZE_T folderLength = length + modulesLength;
+        SIZE_T valueLength = folderLength;
+        SIZE_T machineLength = ValueLength(systemBlock, L"PSModulePath");
+#ifdef LAUNCHER_TEST_BUILD
+        machineLength = folderLength;   /* as on a PC whose machine value is the folder itself, which no test can set */
+#endif
+        CopyChars(value + length, POWERSHELL_MODULES, modulesLength);
+        if (machineLength == folderLength) {
+            value[folderLength] = L';';
+            CopyChars(value + folderLength + 1, value, folderLength);
+            valueLength = folderLength * 2 + 1;
+        }
+        result = AddOwnEntry(list, L"PSModulePath", value, valueLength);
+    }
+    Free(value);
     return result;
 }
 
@@ -603,6 +718,12 @@ static DWORD Run(void)
        launcher's folder. The DLLs in the import table are limited the same way by /DEPENDENTLOADFLAG:0x800. */
     if (!SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32)) { result = EXIT_DLL_SEARCH; goto done; }
 
+    /* At sign-out Windows ends processes from the highest shutdown level to the lowest, and those of one level in any
+       order. Every process starts at 0x280. At 0x100, the lowest an application may use, the launcher is ended after
+       the app, so its job (PutInJob) cannot end the app before the app has been sent WM_ENDSESSION. A failure changes
+       nothing else, so it is ignored. */
+    (void)SetProcessShutdownParameters(0x100, 0);
+
     if ((result = ReadOwnPath(&ownPath, &ownLength)) != 0) goto done;
     folderLength = ownLength;
     while (folderLength > 0 && ownPath[folderLength - 1] != L'\\') folderLength--;
@@ -628,6 +749,9 @@ static DWORD Run(void)
     if (!CreateEnvironmentBlock(&systemBlock, NULL, FALSE)) { systemBlock = NULL; result = EXIT_SYSTEM_ENVIRONMENT; goto done; }
 
     capacity = CountStrings(systemBlock);
+#ifdef LAUNCHER_TEST_BUILD
+    capacity += CountStrings(TestSystemEntries);
+#endif
     if (!AddSize(&capacity, OWN_ENTRY_COUNT)) { result = EXIT_BLOCK; goto done; }
     list.items = Allocate(capacity, sizeof(Entry));
     if (list.items == NULL) { result = EXIT_OUT_OF_MEMORY; goto done; }
@@ -639,12 +763,16 @@ static DWORD Run(void)
         goto done;
     }
     if ((result = AddIdentity(&list, token)) != 0) goto done;
+    if ((result = AddModulePath(&list, systemBlock)) != 0) goto done;
     /* The elevated app must not offer the .NET diagnostics pipe, profiler attach or debugger hooks. */
     if ((result = AddOwnEntry(&list, L"DOTNET_EnableDiagnostics", L"0", 1)) != 0) goto done;
     /* A self-contained single-file build then never unpacks its native DLLs into a temp folder and loads them there. */
     if ((result = AddOwnEntry(&list, L"DOTNET_BUNDLE_EXTRACT_BASE_DIR", extractFolder, TextLength(extractFolder))) != 0) goto done;
     if ((result = AddPassThrough(&list, passThrough)) != 0) goto done;
     if ((result = AddSystemEntries(&list, systemBlock)) != 0) goto done;
+#ifdef LAUNCHER_TEST_BUILD
+    if ((result = AddSystemEntries(&list, TestSystemEntries)) != 0) goto done;
+#endif
     SortEntries(list.items, list.count);
     if ((result = WriteBlock(&list, &block)) != 0) goto done;
 
