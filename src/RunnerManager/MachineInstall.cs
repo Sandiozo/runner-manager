@@ -16,9 +16,8 @@ public sealed record TaskUse(string Account, bool IsOwn, string Command);
 /// <param name="UserEntry">The folder in this user's Settings → Apps entry, when it exists. Any program of the user can change it.</param>
 /// <param name="RunningExe">The exe of this process.</param>
 /// <param name="Elevated">Whether this process runs with administrator rights.</param>
-/// <param name="OwnTaskExes">The exes this user's own Runner Manager tasks start. Only administrators can change those tasks.</param>
 public sealed record InstallFacts(string? OwnRecord, string? UserEntry, string RunningExe, bool Elevated,
-    string ProgramFilesDir, string OldDefaultDir, Func<string, bool> HasExe, IReadOnlyCollection<string>? OwnTaskExes = null);
+    string ProgramFilesDir, string OldDefaultDir, Func<string, bool> HasExe);
 
 /// <summary>Where the install records are kept: the registry, except in tests.</summary>
 internal interface IInstallRecordStore
@@ -37,7 +36,7 @@ internal interface IInstallRecordStore
 /// <item>New installs go to Program Files\RunnerManager, where only administrators can change files.</item>
 /// <item>Each Windows user's install folder is recorded under HKLM\SOFTWARE\RunnerManager\Installs (value name: the user's
 /// SID), which only administrators can change. Setup writes it. Installs of earlier versions get it once, on an elevated
-/// start, from the folder the running exe really is in.</item>
+/// start, from the folder of the exe that this user's own scheduled tasks with the highest rights start.</item>
 /// <item>Installs that exist stay where they are. Nothing is moved unless the user chooses another folder in setup.</item>
 /// <item>Program Files is shared by the Windows users of the PC: a second user's setup uses the install that is there.</item>
 /// </list>
@@ -80,10 +79,10 @@ public static class MachineInstall
     }
 
     /// <summary>
-    /// The folder of the running RunnerManager.exe when it is an install: Program Files\RunnerManager, the default of earlier
-    /// versions, the folder named in this user's Settings → Apps entry, or the folder of the exe that this user's own
-    /// scheduled tasks start (which only administrators can change, so a changed Settings → Apps entry cannot hide it). A
-    /// build folder or a downloaded setup is none.
+    /// The folder of the running RunnerManager.exe when it may be taken for the install of this process: Program
+    /// Files\RunnerManager, the default of earlier versions, or the folder named in this user's Settings → Apps entry. A
+    /// build folder or a downloaded setup is none. Only <see cref="Resolve"/> uses this; the record needs more (see
+    /// <see cref="FolderToRecord"/>).
     /// </summary>
     internal static string? RunningInstallFolder(InstallFacts f)
     {
@@ -91,8 +90,7 @@ public static class MachineInstall
         var folder = Path.GetDirectoryName(f.RunningExe);
         if (string.IsNullOrEmpty(folder) || !Path.IsPathFullyQualified(folder)) return null;
         var isInstall = AppUpdater.SameFolder(folder, f.ProgramFilesDir) || AppUpdater.SameFolder(folder, f.OldDefaultDir)
-                        || f.UserEntry != null && AppUpdater.SameFolder(folder, f.UserEntry)
-                        || (f.OwnTaskExes ?? Array.Empty<string>()).Any(exe => SamePath(exe, f.RunningExe));
+                        || f.UserEntry != null && AppUpdater.SameFolder(folder, f.UserEntry);
         return isInstall ? Path.TrimEndingDirectorySeparator(folder) : null;
     }
 
@@ -101,11 +99,25 @@ public static class MachineInstall
            && string.Equals(Path.GetFullPath(a), Path.GetFullPath(b), StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
-    /// The folder to record for this user on an elevated start: the folder the running copy is installed in, when nothing
-    /// is recorded yet (an install of an earlier version). Null when there is nothing to record.
+    /// The folder to record for this user, who has no record yet (an install of an earlier version): the folder of the
+    /// exe that this user's own tasks with the highest rights start (<paramref name="ownTaskExes"/>, see
+    /// <see cref="OwnTaskExesAsync"/>). Only administrators can change those tasks; the Settings → Apps entry, the default
+    /// of earlier versions and Program Files say nothing about which copy is this user's install. The running exe comes
+    /// first when the tasks start it; otherwise (a build folder, a downloaded copy) the first of the tasks' exes whose
+    /// folder exists. Null when there is no such task.
     /// </summary>
-    internal static string? FolderToRecord(InstallFacts f)
-        => f.Elevated && f.OwnRecord == null ? RunningInstallFolder(f) : null;
+    internal static string? FolderToRecord(string runningExe, IEnumerable<string> ownTaskExes, Func<string, bool> folderExists)
+    {
+        var installed = ownTaskExes.Where(IsInstalledExePath).ToList();
+        var exe = installed.Any(e => SamePath(e, runningExe)) ? runningExe
+            : installed.FirstOrDefault(e => folderExists(Path.GetDirectoryName(e)!));
+        return exe == null ? null : Path.TrimEndingDirectorySeparator(Path.GetDirectoryName(Path.GetFullPath(exe))!);
+    }
+
+    /// <summary>A full path to RunnerManager.exe, or to RunnerWidget.exe of the versions before 2.2.</summary>
+    private static bool IsInstalledExePath(string exe)
+        => Path.IsPathFullyQualified(exe) && Path.GetFileName(exe) is var name
+           && (name.Equals(AppPaths.ExeName, StringComparison.OrdinalIgnoreCase) || name.Equals(AppPaths.LegacyExeName, StringComparison.OrdinalIgnoreCase));
 
     private static string? _resolved;
     private static readonly Lazy<bool> ElevatedProcess = new(() => Elevation.IsElevated);
@@ -119,22 +131,19 @@ public static class MachineInstall
         ElevatedProcess.Value, ProgramFilesDir, OldDefaultDir, HasExe);
 
     /// <summary>
-    /// Records the folder of an install of an earlier version once, on an elevated start of the dashboard or the fleet
-    /// agent: the folder the running exe is in (see <see cref="FolderToRecord"/>). This user's scheduled tasks are read
-    /// only when nothing else shows that the running exe is the install.
+    /// Records the folder of an install of an earlier version once, on an elevated start, before anything takes the
+    /// install folder: the folder of the exe that this user's own tasks start (see <see cref="FolderToRecord"/>), also
+    /// when this copy is not the install (a build folder or a downloaded copy). Without such a task nothing is recorded.
     /// </summary>
-    internal static async Task RecordRunningInstallAsync(Action<string> log)
+    internal static Task RecordRunningInstallAsync(Action<string> log)
+        => RecordRunningInstallAsync(ElevatedProcess.Value, Environment.ProcessPath ?? string.Empty, log);
+
+    internal static async Task RecordRunningInstallAsync(bool elevated, string runningExe, Action<string> log)
     {
         try
         {
-            var facts = CurrentFacts();
-            if (!facts.Elevated || facts.OwnRecord != null) return;
-            if (FolderToRecord(facts) is not { } folder)
-            {
-                if (!Path.GetFileName(facts.RunningExe).Equals(AppPaths.ExeName, StringComparison.OrdinalIgnoreCase)) return;
-                if (FolderToRecord(facts with { OwnTaskExes = await OwnTaskExesAsync() }) is not { } started) return;
-                folder = started;
-            }
+            if (!elevated || ReadOwnRecord() != null) return;
+            if (FolderToRecord(runningExe, await OwnTaskExesAsync(), Directory.Exists) is not { } folder) return;
             WriteOwnRecord(folder);
             log($"Recorded {folder} as the install folder of Runner Manager for {Elevation.CurrentUserName}.");
         }

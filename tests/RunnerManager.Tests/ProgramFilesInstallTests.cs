@@ -117,7 +117,8 @@ public class ProgramFilesInstallTests
         Assert.Equal(OldDefault, MachineInstall.Resolve(Facts(running, userEntry: OldDefault)));
         Assert.Equal(OldDefault, MachineInstall.Resolve(Facts(running)));
         Assert.Equal(OldDefault, MachineInstall.Resolve(Facts(running, ownRecord: OldDefault)));
-        Assert.Equal(OldDefault, MachineInstall.FolderToRecord(Facts(running, userEntry: OldDefault)));
+        // Recorded once, from the tasks that start it.
+        Assert.Equal(OldDefault, MachineInstall.FolderToRecord(running, [running], _ => true));
         // Uninstall there removes Runner Manager's own files only, never recursively: the folder is in the user's profile.
         var removal = Installer.RemoveProgramFilesScript(OldDefault);
         Assert.DoesNotContain("-Recurse", removal);
@@ -140,7 +141,6 @@ public class ProgramFilesInstallTests
         const string evil = @"C:\Users\me\Evil";
         // The installed copy runs from the old default; the entry was changed to point elsewhere.
         Assert.Equal(OldDefault, MachineInstall.Resolve(Facts(ExeIn(OldDefault), userEntry: evil, hasExe: _ => true)));
-        Assert.Null(MachineInstall.FolderToRecord(Facts(ExeIn(Chosen), userEntry: evil)));
         // A copy that is not installed (a build folder), and an exe in the folder the entry names.
         Assert.Equal(ProgramFiles, MachineInstall.Resolve(Facts(@"D:\src\bin\Release\RunnerManager.exe", userEntry: evil, hasExe: f => f == evil)));
         Assert.Equal(OldDefault, MachineInstall.Resolve(Facts(@"D:\src\bin\Release\RunnerManager.exe", userEntry: evil,
@@ -154,23 +154,32 @@ public class ProgramFilesInstallTests
         // (here in other letter case and with a trailing backslash). A copy left in the old default must not win.
         var facts = Facts(ExeIn(Chosen), userEntry: @"d:\apps\runnermanager\", hasExe: _ => true);
         Assert.Equal(Chosen, MachineInstall.Resolve(facts));
-        Assert.Equal(Chosen, MachineInstall.FolderToRecord(facts));
         // Once recorded, it stays, also when the entry is changed later.
         Assert.Equal(Chosen, MachineInstall.Resolve(Facts(ExeIn(Chosen), ownRecord: Chosen, userEntry: @"C:\Users\me\Evil", hasExe: _ => true)));
-        Assert.Null(MachineInstall.FolderToRecord(Facts(ExeIn(Chosen), ownRecord: Chosen, userEntry: Chosen)));
     }
 
     [Fact]
-    public void Elevated_CopyInAChosenFolder_IsRecognisedByItsTasks_WhenSettingsAppsWasChanged()
+    public void TheRecord_ComesFromTheTasks_WhenSettingsAppsWasChanged()
     {
-        // The Settings → Apps entry can be changed without administrator rights; this user's scheduled tasks cannot.
-        var changed = Facts(ExeIn(Chosen), userEntry: @"C:\Users\me\Evil");
-        Assert.Null(MachineInstall.FolderToRecord(changed));
-        Assert.Equal(Chosen, MachineInstall.FolderToRecord(changed with { OwnTaskExes = [@"d:\apps\runnermanager\RunnerManager.exe"] }));
-        Assert.Equal(Chosen, MachineInstall.Resolve(changed with { OwnTaskExes = [ExeIn(Chosen)] }));
-        // Tasks that start another exe, or a name without a folder, do not make this copy the install.
-        Assert.Null(MachineInstall.FolderToRecord(changed with { OwnTaskExes = [ExeIn(ProgramFiles), AppPaths.ExeName] }));
-        Assert.Null(MachineInstall.FolderToRecord(Facts(@"D:\src\bin\Release\RunnerManager.exe") with { OwnTaskExes = [ExeIn(Chosen)] }));
+        // The Settings → Apps entry can be changed without administrator rights; this user's scheduled tasks cannot. The
+        // folder keeps the letter case of the running exe.
+        Assert.Equal(Chosen, MachineInstall.FolderToRecord(ExeIn(Chosen), [@"d:\apps\runnermanager\RunnerManager.exe"], _ => true));
+        // A name without a folder, or another program's exe, is no install.
+        Assert.Null(MachineInstall.FolderToRecord(ExeIn(Chosen), [AppPaths.ExeName, @"D:\Apps\RunnerManager\Other.exe"], _ => true));
+    }
+
+    [Fact]
+    public void TheRecord_OfACopyThatIsNotTheInstall_IsTheFolderItsTasksStart()
+    {
+        // A 2.9.0 install in a chosen folder, and a build folder or a downloaded copy started with administrator rights.
+        const string build = @"D:\src\bin\Release\RunnerManager.exe";
+        Assert.Equal(Chosen, MachineInstall.FolderToRecord(build, [ExeIn(Chosen)], f => f == Chosen));
+        Assert.Equal(Chosen, MachineInstall.FolderToRecord(@"C:\Users\me\Downloads\RunnerManagerSetup.exe", [ExeIn(Chosen)], f => f == Chosen));
+        // The first task whose folder is still there; none, when no folder is.
+        Assert.Equal(Chosen, MachineInstall.FolderToRecord(build, [ExeIn(@"E:\Gone\RunnerManager"), ExeIn(Chosen)], f => f == Chosen));
+        Assert.Null(MachineInstall.FolderToRecord(build, [ExeIn(Chosen)], _ => false));
+        // RunnerWidget, the name of the versions before 2.2.
+        Assert.Equal(OldDefault, MachineInstall.FolderToRecord(build, [Path.Combine(OldDefault, AppPaths.LegacyExeName)], _ => true));
     }
 
     [Fact]
@@ -182,36 +191,20 @@ public class ProgramFilesInstallTests
     }
 
     [Fact]
-    public void ARecordIsWritten_OnlyForAnElevatedInstalledCopyWithoutOne()
+    public void WithoutATask_NothingIsRecorded_WhereverTheCopyRuns()
     {
-        Assert.Equal(ProgramFiles, MachineInstall.FolderToRecord(Facts(ExeIn(ProgramFiles))));
-        Assert.Null(MachineInstall.FolderToRecord(Facts(ExeIn(ProgramFiles), elevated: false)));
-        Assert.Null(MachineInstall.FolderToRecord(Facts(ExeIn(ProgramFiles), ownRecord: ProgramFiles)));
-        // A downloaded setup and a build folder are no install.
-        Assert.Null(MachineInstall.FolderToRecord(Facts(@"C:\Users\me\Downloads\RunnerManagerSetup.exe", userEntry: @"C:\Users\me\Downloads")));
-        Assert.Null(MachineInstall.FolderToRecord(Facts(@"D:\src\bin\Release\RunnerManager.exe")));
-        Assert.Null(MachineInstall.FolderToRecord(Facts("RunnerManager.exe")));
+        // Program Files, the old default and the folder of the Settings → Apps entry say nothing about whose install it is:
+        // one approved UAC prompt for a copy in Downloads must not make Downloads the install folder.
+        foreach (var running in new[] { ExeIn(ProgramFiles), ExeIn(OldDefault), ExeIn(Chosen), @"C:\Users\me\Downloads\RunnerManager.exe", "RunnerManager.exe" })
+            Assert.Null(MachineInstall.FolderToRecord(running, [], _ => true));
     }
 
     [Fact]
-    public void Records_HoldOneFolderPerWindowsUser()
+    public void Tests_NeverUseTheRealRecordsOrTasks()
     {
-        var store = new MemoryInstallRecords();
-        store.Write(MySid, OldDefault);
-        store.Write(OtherSid, ProgramFiles);
-        store.Write(MySid, ProgramFiles);
-        Assert.Equal(ProgramFiles, MachineInstall.RecordOf(store.ReadAll(), MySid));
-        Assert.Equal(ProgramFiles, MachineInstall.RecordOf(store.ReadAll(), OtherSid.ToLowerInvariant()));
-        store.Write(MySid, null);
-        Assert.Null(MachineInstall.RecordOf(store.ReadAll(), MySid));
-        Assert.Single(store.ReadAll());
-        // Where only administrators can change it, beside the AI assistant switches.
-        Assert.Equal(@"SOFTWARE\RunnerManager\Installs", RegistryInstallRecordStore.KeyPath);
+        Assert.IsType<MemoryInstallRecords>(MachineInstall.Records);
+        Assert.IsType<MemoryTasks>(MachineInstall.Tasks);
     }
-
-    [Fact]
-    public void Tests_NeverUseTheRealRecords()
-        => Assert.IsType<MemoryInstallRecords>(MachineInstall.Records);
 
     // ================= 3. Where an update is prepared =================
 
@@ -560,5 +553,91 @@ public class InstallEvidenceTests
         state.Tasks.Definitions["OneDrive Standalone Update Task"] = TaskOf("S-1-5-21-1-2-3-1006", ProgramFilesExe);
         var uses = await MachineInstall.RunnerManagerTasksAsync();
         Assert.Equal(new[] { OtherSid }, uses.Select(u => u.Account));
+    }
+
+    // ================= 2 and 4. The record of an install of an earlier version =================
+
+    /// <summary>A new, empty folder in %TEMP% that the test deletes again.</summary>
+    internal static string NewFolder(string name = "install")
+    {
+        var folder = Path.Combine(Path.GetTempPath(), $"rm-{name}-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(folder);
+        return folder;
+    }
+
+    [Fact]
+    public async Task ACopyThatIsNotTheInstall_RecordsTheFolderThatItsTasksStart()
+    {
+        // 2.9.0 in a chosen folder (no record yet), and a build folder or a downloaded copy started with administrator rights.
+        using var state = new TestInstallState();
+        var chosen = NewFolder("chosen");
+        try
+        {
+            state.Tasks.Definitions[ScheduledTasks.LaunchTaskName] = TaskOf(Me, Path.Combine(chosen, AppPaths.ExeName));
+            var log = new List<string>();
+            await MachineInstall.RecordRunningInstallAsync(elevated: true, @"D:\src\bin\Release\RunnerManager.exe", log.Add);
+            Assert.Equal(chosen, MachineInstall.ReadOwnRecord());
+            Assert.Equal($"Recorded {chosen} as the install folder of Runner Manager for {Elevation.CurrentUserName}.", Assert.Single(log));
+        }
+        finally { Directory.Delete(chosen, recursive: true); }
+    }
+
+    [Fact]
+    public async Task TheRunningCopy_IsRecorded_OnlyWhenItsOwnTasksWithTheHighestRightsStartIt()
+    {
+        using var state = new TestInstallState();
+        var folder = NewFolder("downloads");
+        var other = NewFolder("other");
+        var running = Path.Combine(folder, AppPaths.ExeName);
+        try
+        {
+            // A copy in a folder the user can write, started once with a UAC prompt: nothing to record.
+            await MachineInstall.RecordRunningInstallAsync(elevated: true, running, _ => { });
+            Assert.Null(MachineInstall.ReadOwnRecordRaw());
+            // A task that any program of the user can create does not count.
+            state.Tasks.Definitions[ScheduledTasks.AgentTaskName] = TaskOf(Me, running, highest: false);
+            await MachineInstall.RecordRunningInstallAsync(elevated: true, running, _ => { });
+            Assert.Null(MachineInstall.ReadOwnRecordRaw());
+            // Only a copy with administrator rights records.
+            state.Tasks.Definitions[ScheduledTasks.LaunchTaskName] = TaskOf(Me, running);
+            await MachineInstall.RecordRunningInstallAsync(elevated: false, running, _ => { });
+            Assert.Null(MachineInstall.ReadOwnRecordRaw());
+            await MachineInstall.RecordRunningInstallAsync(elevated: true, running, _ => { });
+            Assert.Equal(folder, MachineInstall.ReadOwnRecord());
+            // Once recorded, it stays.
+            state.Tasks.Definitions[ScheduledTasks.LaunchTaskName] = TaskOf(Me, Path.Combine(other, AppPaths.ExeName));
+            await MachineInstall.RecordRunningInstallAsync(elevated: true, running, _ => { });
+            Assert.Equal(folder, MachineInstall.ReadOwnRecord());
+        }
+        finally
+        {
+            Directory.Delete(folder, recursive: true);
+            Directory.Delete(other, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void TheRecords_HoldOneFolderPerWindowsUser()
+    {
+        using var state = new TestInstallState();
+        var folder = NewFolder();
+        try
+        {
+            state.Records.Write(OtherSid, ProgramFilesExe);
+            MachineInstall.WriteOwnRecord(folder + Path.DirectorySeparatorChar);
+            Assert.Equal(folder, MachineInstall.ReadOwnRecordRaw());
+            Assert.Equal(folder, MachineInstall.ReadOwnRecord());
+            Assert.Equal(new[] { new InstallRecord(OtherSid, ProgramFilesExe) }, MachineInstall.OtherRecords());
+            // A record whose folder is gone is no install, but setup can still put it back after a failure.
+            Directory.Delete(folder);
+            Assert.Null(MachineInstall.ReadOwnRecord());
+            Assert.Equal(folder, MachineInstall.ReadOwnRecordRaw());
+            MachineInstall.WriteOwnRecord(null);
+            Assert.Null(MachineInstall.ReadOwnRecordRaw());
+            Assert.Single(state.Records.ReadAll());
+        }
+        finally { if (Directory.Exists(folder)) Directory.Delete(folder); }
+        // Where only administrators can change it, beside the AI assistant switches.
+        Assert.Equal(@"SOFTWARE\RunnerManager\Installs", RegistryInstallRecordStore.KeyPath);
     }
 }
