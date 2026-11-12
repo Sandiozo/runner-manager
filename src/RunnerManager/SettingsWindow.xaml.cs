@@ -103,22 +103,10 @@ public partial class SettingsWindow : Window
     private const string StartupDescription = "Opens in the notification area when you sign in.";
 
     /// <summary>
-    /// Runs an operation through the dashboard, one at a time on this PC. The dashboard shows a failure itself; an
-    /// operation skipped because another one is running is reported here, or the click would seem to do nothing.
+    /// Runs an operation through the dashboard, one at a time on this PC. True only when it ran without an error. The
+    /// dashboard shows both other cases itself: the error of a failed operation, and that another operation is running.
     /// </summary>
-    private async Task<bool> RunOperationAsync(string title, Func<Action<string>, Task> operation)
-    {
-        var started = false;
-        var succeeded = await _runOperation(title, log =>
-        {
-            started = true;
-            return operation(log);
-        });
-        if (!started)
-            DialogWindow.Info(this, "Another operation is running",
-                $"“{title}” did not start. Try again when the current operation is done. Its progress is shown in the activity list.");
-        return succeeded;
-    }
+    private Task<bool> RunOperationAsync(string title, Func<Action<string>, Task> operation) => _runOperation(title, operation);
 
     // ----- Navigation -----
 
