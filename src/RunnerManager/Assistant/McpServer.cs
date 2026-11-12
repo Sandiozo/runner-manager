@@ -225,7 +225,9 @@ public sealed class McpServer
     /// accents and vowel signs, spaces and a few plain marks. Every other character becomes a space. A list of
     /// characters to take out would not do: many look like a quotation mark (low, full-width and prime marks), and
     /// letters written from right to left turn the reading order around, so that the name seems to end where it does
-    /// not. Control and format characters go too, and the few letters that look like a quotation mark.
+    /// not. Control and format characters go too, and the few letters that look like a quotation mark. So do the
+    /// characters that are not shown at all (<see cref="IsNotShown"/>): blank letters would make long gaps, and invisible
+    /// marks would make two names that look the same differ.
     /// </summary>
     private static string PlainName(string? name)
     {
@@ -242,7 +244,12 @@ public sealed class McpServer
         foreach (var rune in text.EnumerateRunes())
         {
             var category = Rune.GetUnicodeCategory(rune);
-            if (IsNameLetter(rune, category))
+            if (IsNotShown(rune.Value))
+            {
+                plain.Append(' ');
+                marks = -1;
+            }
+            else if (IsNameLetter(rune, category))
             {
                 plain.Append(rune.ToString());
                 marks = 0;
@@ -270,6 +277,18 @@ public sealed class McpServer
                and not 0x0559 // Armenian half ring, an apostrophe
                and not 0x1426 // Canadian syllabics double strokes, a quotation mark
                and not (0xA78B or 0xA78C); // saltillo, an apostrophe
+
+    /// <summary>
+    /// The characters Unicode marks as default ignorable, which are not shown: among them the Hangul fillers, which
+    /// count as letters but show as blanks (U+115F, U+1160, U+3164, U+FFA0), the variation selectors (U+FE00 to U+FE0F,
+    /// U+E0100 to U+E01EF, and the Mongolian ones), the combining grapheme joiner (U+034F) and the Khmer inherent vowels,
+    /// which count as marks. The rest of them are format characters or not assigned, which go anyway.
+    /// </summary>
+    private static bool IsNotShown(int value)
+        => value is 0x00AD or 0x034F or 0x061C or 0x115F or 0x1160 or 0x17B4 or 0x17B5 or >= 0x180B and <= 0x180F
+               or >= 0x200B and <= 0x200F or >= 0x202A and <= 0x202E or >= 0x2060 and <= 0x206F or 0x3164
+               or >= 0xFE00 and <= 0xFE0F or 0xFEFF or 0xFFA0 or >= 0xFFF0 and <= 0xFFF8
+               or >= 0x1BCA0 and <= 0x1BCA3 or >= 0x1D173 and <= 0x1D17A or >= 0xE0000 and <= 0xE0FFF;
 
     /// <summary>The scripts written from right to left: Hebrew, Arabic, Syriac, Thaana, N'Ko and others, with their forms and digits.</summary>
     private static bool IsRightToLeft(int value)

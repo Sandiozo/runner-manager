@@ -211,3 +211,29 @@ public class PeerStatusLogTests
         Assert.Contains($"more than {PeerStatus.MaxRunners} runners", Assert.Single(log));
     }
 }
+
+/// <summary>Characters in a client's name that are not shown are left out of it.</summary>
+public class ClientNameTests
+{
+    [Fact]
+    public void HangulFillers_WhichShowAsBlanks_AreLeftOut()
+    {
+        Assert.Equal("An AI assistant (\"Tool x\")", McpServer.ClientLabel("Tool\u3164\u3164\u3164\u3164\u3164x"));
+        // U+FFA0 is a half-width form of U+3164.
+        Assert.Equal("An AI assistant (\"Tool x\")", McpServer.ClientLabel("Tool\uFFA0\u115F\u1160x"));
+        Assert.Equal("An AI assistant", McpServer.ClientLabel("\u3164\u115F\u1160\uFFA0"));
+    }
+
+    [Fact]
+    public void InvisibleMarks_AreLeftOut_SoNamesThatLookTheSameAreTheSame()
+    {
+        Assert.Equal(McpServer.ClientLabel("Claude"), McpServer.ClientLabel("Claude\uFE0F"));
+        Assert.Equal(McpServer.ClientLabel("Claude"), McpServer.ClientLabel("Claude\uDB40\uDD00"));
+        // Variation selectors, also the supplement and the Mongolian ones, the combining grapheme joiner, the Khmer
+        // inherent vowels, and format characters such as a soft hyphen.
+        foreach (var mark in new[] { "\uFE00", "\uFE0F", "\uDB40\uDD00", "\uDB40\uDDEF", "\u034F", "\u180B", "\u180D", "\u180F", "\u17B4", "\u17B5", "\u00AD" })
+            Assert.Equal("An AI assistant (\"Cl aude\")", McpServer.ClientLabel($"Cl{mark}aude"));
+        // Accents and vowel signs stay.
+        Assert.Equal("An AI assistant (\"Caf\u00E9 \u0939\u093F\")", McpServer.ClientLabel("Cafe\u0301 \u0939\u093F"));
+    }
+}
