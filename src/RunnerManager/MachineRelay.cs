@@ -1373,7 +1373,9 @@ public static class MachineRelay
             ?? throw new InvalidOperationException($"No Runner Manager release found in {AppUpdater.ReleaseRepository}.");
         if (!force && !AppUpdater.IsNewer(release.Version, AppUpdater.CurrentVersion) && AppUpdater.IsRunningInstalledCopy)
             return $"Already up to date (v{AppUpdater.CurrentVersion})";
-        // The task is switched to the new copy when the agent exits, after its work: registering may end this agent.
+        // The task is switched to the new copy when the agent exits, after its work: the new copy runs only from the next
+        // start of the task, because registering it again does not end this agent on Windows 11 (measured; other Windows
+        // versions were not), and on a version where it does, the agent would stop in the middle of its work.
         _agentExeAfterUpdate = await AppUpdater.DownloadAndInstallAsync(release, message => AppendAgentLog($"Update: {message}"));
         _agentUpdateCommandId = commandId;
         AgentWork.AskRestart();
@@ -1729,8 +1731,9 @@ public static class MachineRelay
 
     /// <summary>
     /// The last step before the agent exits to finish an update: starts the helper that starts the task again once this
-    /// agent has exited, and only then registers the task for <paramref name="exe"/>, since registering may end this
-    /// agent. Returns whether the agent is to exit. When the helper cannot be started (PowerShell is blocked or
+    /// agent has exited, and only then registers the task for <paramref name="exe"/>: registering it again does not end
+    /// this agent on Windows 11 (measured; other Windows versions were not), but the helper must be there in case a Windows
+    /// version does. Returns whether the agent is to exit. When the helper cannot be started (PowerShell is blocked or
     /// missing), nothing would start the agent again, so it stays as it is and takes commands again
     /// (<see cref="TakeCommandsAgain"/>). After a failed registration it exits, and the helper starts the task as it
     /// was. A failure is given to <paramref name="failed"/>.
@@ -1812,8 +1815,10 @@ public static class MachineRelay
 
     /// <summary>
     /// Waits for the agent's work, stops the agent, registers its task for <paramref name="switchTo"/> (when given),
-    /// and starts it. Registering may end a running agent, so it comes only after the wait. When registering fails,
-    /// the agent is still started (with the task as it was), and then the failure is thrown.
+    /// and starts it. Registering comes only after the wait: it does not end a running agent on Windows 11 (measured;
+    /// other Windows versions were not), but Task Scheduler refuses to start the task again until the agent that runs
+    /// has exited. When registering fails, the agent is still started (with the task as it was), and then the failure is
+    /// thrown.
     /// </summary>
     internal static async Task RestartAgentAsync(AgentRestartSteps steps, string? switchTo, Action<string>? log)
     {

@@ -40,6 +40,10 @@ public partial class MainWindow
         AddActivity($"Runner Manager v{AppUpdater.CurrentVersion} started.");
         try
         {
+            // After a restart through the start helper, the task instance of the dashboard before ends a moment after it.
+            // The tasks are looked at once it did, so they can move to the start helper now (see StartHelperRestart).
+            if (App.RestartedThroughStartHelper)
+                await StartHelperRestart.WaitForTasksAsync(AppUpdater.InstalledExe, StartHelperRestart.TaskEndWait, MachineRelay.AppendAgentLog);
             await LegacyInstall.MigrateAsync(AddActivity);
             await Installer.EnsureLaunchTaskAsync(force: App.ElevatedByPrompt);
             if (Elevation.IsElevated)

@@ -846,7 +846,7 @@ internal static class Launcher
     [DllImport("ntdll.dll")]
     private static extern int NtQueryInformationProcess(IntPtr process, int informationClass, ref ProcessBasicInformation information, int length, out int returned);
 
-    private static bool SamePath(string a, string b)
+    internal static bool SamePath(string a, string b)
     {
         try
         {

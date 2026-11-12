@@ -41,6 +41,12 @@ public partial class App : Application
     /// </summary>
     internal static bool ElevatedByPrompt { get; private set; }
 
+    /// <summary>
+    /// This dashboard was started by the restart through the start helper of a dashboard that a task started as
+    /// RunnerManager.exe itself (see <see cref="StartHelperRestart"/>), so it checks the tasks once that task's instance ended.
+    /// </summary>
+    internal static bool RestartedThroughStartHelper { get; private set; }
+
     protected override async void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
@@ -202,6 +208,16 @@ public partial class App : Application
             }
         }
 
+        // A dashboard that one of this user's tasks started as RunnerManager.exe itself, not through the start helper,
+        // starts again through the start helper, once, before it opens a window, so the task can move to the start helper
+        // (see StartHelperRestart). The new dashboard waits until this one has exited.
+        RestartedThroughStartHelper = StartHelperRestart.IsRestart(startArgs);
+        if (await StartHelperRestart.TryAsync(startArgs, AppUpdater.InstallDir, MachineRelay.AppendAgentLog))
+        {
+            ExitApplication();
+            return;
+        }
+
         DispatcherUnhandledException += OnUiUnhandledException;
 
         var window = new MainWindow();
@@ -230,7 +246,9 @@ public partial class App : Application
             return 1;
         }
         // A task registered by an older version lacks the keep-alive trigger or runs below normal priority. Checked once
-        // the agent has proven itself, because re-registering may restart it.
+        // the agent has proven itself: registering the task again does not end the running agent on Windows 11 (measured;
+        // other Windows versions were not), but a restart is scheduled in case it does (see
+        // ScheduledTasks.UpdateAgentTaskIfOutdatedAsync).
         if (!another)
             _ = Task.Run(async () =>
             {

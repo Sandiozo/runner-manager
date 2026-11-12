@@ -118,7 +118,9 @@ public static class ScheduledTasks
 
     /// <summary>
     /// Repairs this user's Runner Manager tasks that Task Scheduler cannot run (see <see cref="RepairIfUnindexedAsync"/>).
-    /// The agent leaves its own task alone: registering it again could end the running agent. Returns the repaired tasks.
+    /// The agent leaves its own task alone: the repair deletes the task and creates it again, and what that does to the
+    /// agent that runs it was not measured (registering a running task again does not end it on Windows 11). Returns the
+    /// repaired tasks.
     /// </summary>
     public static async Task<List<string>> RepairOwnTasksAsync(bool fromAgent)
     {
@@ -284,8 +286,10 @@ public static class ScheduledTasks
 
     /// <summary>
     /// Registers the agent task again when its definition is from an older version, keeping the exe it runs (a task that
-    /// runs the start helper keeps the exe beside it, see <see cref="ExeOfOwnElevatedTask"/>). Re-registering may end the
-    /// running agent, so it is started again afterwards (by a helper when the agent does this itself). Registrations take
+    /// runs the start helper keeps the exe beside it, see <see cref="ExeOfOwnElevatedTask"/>). Registering it again does
+    /// not end the running agent on Windows 11 (measured; other Windows versions were not): the agent keeps running as it
+    /// was started, and the new definition counts from the next start. In case a Windows version ends it, the task is
+    /// started again afterwards (by a helper when the agent does this itself). Registrations take
     /// <see cref="LockAsync"/>, so the agent and the dashboard doing this at once register it one at a time.
     /// </summary>
     public static async Task<bool> UpdateAgentTaskIfOutdatedAsync(bool fromAgent)
@@ -311,8 +315,9 @@ public static class ScheduledTasks
     internal static bool? IsRegistered(string name) => Scheduler.IsRegistered(name);
 
     /// <summary>
-    /// Whether an instance of the task runs: true, false, or null when that cannot be told. Registering a task again can
-    /// end its running instance, so a task is registered again only when this is false.
+    /// Whether an instance of the task runs: true, false, or null when that cannot be told. A task is registered again
+    /// only when this is false (see <see cref="Installer.RegisterIfIdleAsync"/>): on Windows 11 its running instance goes
+    /// on, and Task Scheduler refuses a new start of the task until that instance ends.
     /// </summary>
     public static Task<bool?> IsRunningAsync(string name) => Scheduler.IsRunningAsync(name);
 

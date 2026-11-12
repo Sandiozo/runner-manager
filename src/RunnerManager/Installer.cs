@@ -313,13 +313,22 @@ public static class Installer
     /// otherwise.
     /// </summary>
     internal static async Task<bool> SkipsStartHelperAsync(string exe)
+        => string.Equals(Launcher.CommandFor(exe), Launcher.PathBeside(exe), StringComparison.OrdinalIgnoreCase)
+           && (await TasksStartingExeAsync(exe)).Count > 0;
+
+    /// <summary>
+    /// This user's own launch task and turned-on startup task, with the highest rights, that start <paramref name="exe"/>
+    /// itself rather than the start helper beside it.
+    /// </summary>
+    internal static async Task<List<string>> TasksStartingExeAsync(string exe)
     {
-        if (!string.Equals(Launcher.CommandFor(exe), Launcher.PathBeside(exe), StringComparison.OrdinalIgnoreCase)) return false;
+        var names = new List<string>();
         bool StartsExe(string xml) => ScheduledTasks.CommandOfOwnElevatedTask(xml) is { } command
                                       && string.Equals(command, exe, StringComparison.OrdinalIgnoreCase);
-        if (StartsExe(await ScheduledTasks.QueryXmlAsync(ScheduledTasks.LaunchTaskName))) return true;
+        if (StartsExe(await ScheduledTasks.QueryXmlAsync(ScheduledTasks.LaunchTaskName))) names.Add(ScheduledTasks.LaunchTaskName);
         var startup = await ScheduledTasks.QueryXmlAsync(ScheduledTasks.DashboardTaskName);
-        return startup.Length > 0 && ScheduledTasks.IsEnabled(startup) && StartsExe(startup);
+        if (startup.Length > 0 && ScheduledTasks.IsEnabled(startup) && StartsExe(startup)) names.Add(ScheduledTasks.DashboardTaskName);
+        return names;
     }
 
     /// <summary>
@@ -336,8 +345,10 @@ public static class Installer
     }
 
     /// <summary>
-    /// Changes a task (<paramref name="change"/> registers it again or deletes it) only while no instance of it runs:
-    /// that can end the running instance, and the dashboard that asks may be one. Returns false when it was left for later.
+    /// Changes a task (<paramref name="change"/> registers it again or deletes it) only while no instance of it runs.
+    /// Registering a running task again does not end its instance on Windows 11 (measured; other Windows versions were
+    /// not), but Task Scheduler then refuses a new start of the task until that instance ends. The dashboard that asks may
+    /// be such an instance itself (see <see cref="StartHelperRestart"/>). Returns false when it was left for later.
     /// </summary>
     internal static async Task<bool> RegisterIfIdleAsync(string name, Func<Task> change)
     {

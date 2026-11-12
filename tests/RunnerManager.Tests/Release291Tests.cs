@@ -243,8 +243,9 @@ public class AgentUpdateExitTests
 }
 
 /// <summary>
-/// After an update, the fleet agent's task is registered for the new copy only once the agent finished its work:
-/// registering may end the running agent, and with it a runner create it runs for another PC.
+/// After an update, the fleet agent's task is registered for the new copy only once the agent finished its work: the
+/// agent then restarts to run the new copy, which would end a runner create it runs for another PC. (Registering the task
+/// again does not end the running agent itself on Windows 11; other Windows versions were not measured.)
 /// </summary>
 public class AgentTaskSwitchTests
 {

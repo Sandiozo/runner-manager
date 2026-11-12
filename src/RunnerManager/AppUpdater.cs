@@ -931,8 +931,9 @@ public static class AppUpdater
     /// Installs a release on this PC, as "Install update" does: downloads and verifies it, refreshes the Start menu
     /// shortcut, and switches the start-up task to the new copy. Returns the exe the fleet agent is to run, or null when
     /// it is not restarted. The caller restarts it (<see cref="MachineRelay.RestartLocalAgentAsync"/> with that exe),
-    /// which switches the agent's task to the new copy only after the agent finished its work: registering the task
-    /// may end the running agent, and with it a runner create it runs for another PC.
+    /// which switches the agent's task to the new copy only after the agent finished its work: the agent restarts to run
+    /// the new copy, which would end a runner create it runs for another PC. Registering the task again does not end the
+    /// running agent itself on Windows 11 (measured; other Windows versions were not).
     /// </summary>
     public static async Task<string?> InstallReleaseAsync(ReleaseInfo release, Action<string> log)
     {
@@ -945,8 +946,9 @@ public static class AppUpdater
     }
 
     /// <summary>
-    /// Starts a detached helper that waits for this process to exit, then starts the task again. Launched before
-    /// the task is re-registered, so the agent comes back even if re-registering ends the running instance. The helper
+    /// Starts a detached helper that waits for this process to exit, then starts the task again. Launched before the task
+    /// is registered again, so the agent comes back also on a Windows version where that ends the running instance (on
+    /// Windows 11 it does not: measured; other versions were not), and when the agent exits for another reason. The helper
     /// also waits for the start helper that started this process (see <see cref="RunAfterExit"/>), and then until Task
     /// Scheduler no longer counts the task as running, since it refuses to start a running task of the fleet agent's
     /// kind; a start it refuses is tried again (see <see cref="RestartTaskScript"/>).
