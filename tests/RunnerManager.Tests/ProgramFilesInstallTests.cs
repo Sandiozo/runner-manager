@@ -837,6 +837,23 @@ public class InstallEvidenceTests
         Assert.NotNull(MachineInstall.RecordOf(state.Records.ReadAll(), OtherSid));
     }
 
+    [Fact]
+    public async Task TheTasksOfARemovedAccount_DoNotCount()
+    {
+        // The account had installed (a record and its launch task) and was removed; its task can stay.
+        using var state = new TestInstallState();
+        const string gone = "S-1-5-21-1-2-3-1007";
+        state.Records.Write(gone, MachineInstall.ProgramFilesDir);
+        state.Tasks.Definitions["Runner Manager (gone)"] = TaskOf(gone, ProgramFilesExe);
+        state.WithoutProfile.Add(gone);
+        var others = await MachineInstall.OtherUsersOfAsync(MachineInstall.ProgramFilesDir);
+        Assert.Empty(others.Names);
+        Assert.False(others.KeepFiles);
+        // A user who still has a profile counts by the task alone.
+        state.Tasks.Definitions["Runner Manager (bob)"] = TaskOf(OtherSid, ProgramFilesExe);
+        Assert.Equal(new[] { MachineInstall.AccountOf(OtherSid) }, (await MachineInstall.OtherUsersOfAsync(MachineInstall.ProgramFilesDir)).Names);
+    }
+
     // ================= 2 and 4. The record of an install of an earlier version =================
 
     /// <summary>A new, empty folder in %TEMP% that the test deletes again.</summary>

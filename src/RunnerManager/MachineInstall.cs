@@ -278,10 +278,11 @@ public static class MachineInstall
     // ================= Other Windows users =================
 
     /// <summary>
-    /// The other Windows users who use the install in <paramref name="folder"/>: those whose record names it (when they
-    /// still have a profile on this PC, see <paramref name="hasProfile"/>), and those whose own Runner Manager tasks
-    /// (dashboard, startup or fleet agent) start an exe in it. Account names, each once; unknown when some tasks could not
-    /// be read.
+    /// The other Windows users who use the install in <paramref name="folder"/>: those whose record names it, and those
+    /// whose own Runner Manager tasks (dashboard, startup or fleet agent) start an exe in it. Both only when they still
+    /// have a profile on this PC (see <paramref name="hasProfile"/>): the record and the tasks of a removed account can
+    /// stay, and would keep the program files and stop older setups for ever. Account names, each once; unknown when some
+    /// tasks could not be read.
     /// </summary>
     internal static OtherUsers OtherUsersOf(string folder, string ownSid, IEnumerable<InstallRecord> records, TaskScan tasks,
         Func<string, string> accountOfSid, Func<string, bool> hasProfile)
@@ -298,7 +299,7 @@ public static class MachineInstall
         }
         foreach (var task in tasks.Uses)
         {
-            if (task.IsOwn || !Path.IsPathFullyQualified(task.Command)) continue;
+            if (task.IsOwn || !Path.IsPathFullyQualified(task.Command) || !hasProfile(task.Account)) continue;
             if (Path.GetDirectoryName(task.Command) is { Length: > 0 } dir && AppUpdater.SameFolder(dir, folder)) Add(accountOfSid(task.Account));
         }
         return new OtherUsers(users, tasks.Unreadable);
