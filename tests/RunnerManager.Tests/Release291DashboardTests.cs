@@ -290,6 +290,46 @@ public class DetailLinkTests
         });
     }
 
+    [Fact]
+    public void QueueAndRecentRunRows_AreLinksOnlyWithAnAddress()
+    {
+        var runner = Busy(repositoryPath: "octocat/web", LiveJobView.Build(null, string.Empty, null, string.Empty, DateTime.UtcNow));
+        var waiting = new QueueEntry("CI → build  ·  run #7", "Waiting  ·  2m", string.Empty, Running: false);
+        var queued = new QueueEntry("CI → test  ·  run #8", "Waiting  ·  1m", "https://github.com/octocat/web/actions/runs/8/job/9", Running: false);
+        var failed = new WorkflowRunSummary
+        {
+            Id = 5, RepositoryPath = "octocat/web", WorkflowName = "Nightly", RunNumber = 5, Status = "completed", Conclusion = "failure",
+            UpdatedUtc = DateTime.UtcNow
+        };
+        var passed = new WorkflowRunSummary
+        {
+            Id = 6, RepositoryPath = "octocat/web", WorkflowName = "CI", RunNumber = 6, Status = "completed", Conclusion = "success",
+            HtmlUrl = "https://github.com/octocat/web/actions/runs/6", UpdatedUtc = DateTime.UtcNow
+        };
+        Assert.Equal(Visibility.Collapsed, waiting.LinkVisibility);
+        Assert.Equal(Visibility.Visible, waiting.TextVisibility);
+        Assert.Equal(Visibility.Visible, passed.LinkVisibility);
+        Assert.Equal(Visibility.Collapsed, passed.TextVisibility);
+        runner.Queue = new[] { waiting, queued };
+        runner.RecentRuns = new[] { failed, passed };
+        WithCard(runner, host =>
+        {
+            // Only the rows with an address are buttons that are shown; the others are plain text.
+            var rows = WpfTestApp.Descendants<Button>(host).Where(b => b.DataContext is QueueEntry or WorkflowRunSummary && b.Tag is string).ToList();
+            Assert.Equal(4, rows.Count);
+            Assert.Equal(new[] { "https://github.com/octocat/web/actions/runs/6", "https://github.com/octocat/web/actions/runs/8/job/9" },
+                rows.Where(b => b.ActualWidth > 0).Select(b => (string)b.Tag).Order());
+            Assert.True(ShownAsText(waiting, host, waiting.Title));
+            Assert.True(ShownAsText(failed, host, failed.TitleText));
+            Assert.False(ShownAsText(queued, host, queued.Title));
+            Assert.False(ShownAsText(passed, host, passed.TitleText));
+            // A failed run without an address can still be re-run.
+            var rerun = WpfTestApp.Descendants<Button>(host).Single(b => ReferenceEquals(b.DataContext, failed) && b.Tag == null);
+            Assert.True(rerun.ActualWidth > 0);
+            Assert.Equal("Re-run the failed jobs of " + failed.Title, System.Windows.Automation.AutomationProperties.GetName(rerun));
+        });
+    }
+
     private static MachineRunnerStatus Busy(string repositoryPath, LiveJobView job) => new()
     {
         ServiceName = "actions.runner.web", DisplayName = "web", ServiceInstalled = true, IsRunning = true, ActivityText = "Busy",
@@ -303,19 +343,28 @@ public class DetailLinkTests
             MachineName = "BUILD-60", AgentProtocolVersion = 14, UpdatedUtc = DateTime.UtcNow, FleetAgentRunning = true, Runners = new[] { runner }
         });
         var window = WpfTestApp.Run(() => new MainWindow());
-        WpfTestApp.Run(() =>
+        var (queueCollapsed, runsCollapsed) = (MachineRunnerStatus.QueueCollapsed, MachineRunnerStatus.RecentRunsCollapsed);
+        try
         {
-            runner.IsExpanded = true;
-            window.Machines.Add(pc);
-            var content = (UIElement)window.Content;
-            window.Content = null;
-            var host = new Border { Child = content, DataContext = window };
-            host.Measure(new Size(1200, 900));
-            host.Arrange(new Rect(0, 0, 1200, 900));
-            host.UpdateLayout();
-            Assert.Equal(Visibility.Visible, runner.LiveJobVisibility);
-            check(host);
-        });
+            WpfTestApp.Run(() =>
+            {
+                MachineRunnerStatus.QueueCollapsed = MachineRunnerStatus.RecentRunsCollapsed = false;
+                runner.IsExpanded = true;
+                window.Machines.Add(pc);
+                var content = (UIElement)window.Content;
+                window.Content = null;
+                var host = new Border { Child = content, DataContext = window };
+                host.Measure(new Size(1200, 900));
+                host.Arrange(new Rect(0, 0, 1200, 900));
+                host.UpdateLayout();
+                Assert.Equal(Visibility.Visible, runner.LiveJobVisibility);
+                check(host);
+            });
+        }
+        finally
+        {
+            (MachineRunnerStatus.QueueCollapsed, MachineRunnerStatus.RecentRunsCollapsed) = (queueCollapsed, runsCollapsed);
+        }
     }
 
     /// <summary>The link buttons in the runner's details: the job title, the repository and the current job of a runner on this PC.</summary>
@@ -325,9 +374,9 @@ public class DetailLinkTests
                         && System.Windows.Automation.AutomationProperties.GetHelpText(b) is "Open the job on GitHub" or "Open the repository on GitHub")
             .ToList();
 
-    /// <summary>The text is laid out outside any button.</summary>
-    private static bool ShownAsText(MachineRunnerStatus runner, FrameworkElement host, string text)
-        => WpfTestApp.Descendants<TextBlock>(host).Any(t => t.Text == text && t.ActualWidth > 0 && ReferenceEquals(t.DataContext, runner) && !InAButton(t));
+    /// <summary>The text of <paramref name="item"/> (a runner, or a row of its lists) is laid out outside any button.</summary>
+    private static bool ShownAsText(object item, FrameworkElement host, string text)
+        => WpfTestApp.Descendants<TextBlock>(host).Any(t => t.Text == text && t.ActualWidth > 0 && ReferenceEquals(t.DataContext, item) && !InAButton(t));
 
     private static bool InAButton(DependencyObject element)
     {

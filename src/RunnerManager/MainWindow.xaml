@@ -127,6 +127,60 @@
                 </Trigger>
             </Style.Triggers>
         </Style>
+        <!-- What a row of the queue and of the recent runs shows, as a link or as plain text -->
+        <DataTemplate x:Key="QueueRowContent" DataType="{x:Type local:QueueEntry}">
+            <DockPanel>
+                <TextBlock FontSize="11" Margin="0,0,10,0" VerticalAlignment="Center">
+                    <TextBlock.Style>
+                        <Style TargetType="TextBlock" BasedOn="{StaticResource Icon}">
+                            <Setter Property="Text" Value="&#xE823;"/>
+                            <Setter Property="Foreground" Value="{DynamicResource WarningBrush}"/>
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding Running}" Value="True">
+                                    <Setter Property="Text" Value="&#xE768;"/>
+                                    <Setter Property="Foreground" Value="{DynamicResource AccentBrush}"/>
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </TextBlock.Style>
+                </TextBlock>
+                <TextBlock DockPanel.Dock="Right" Text="{Binding Detail}" Style="{StaticResource Caption}" FontSize="11" Margin="12,0,6,0" VerticalAlignment="Center"/>
+                <TextBlock Text="{Binding Title}" FontSize="12" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" local:TrimmedText.ToolTip="True"/>
+            </DockPanel>
+        </DataTemplate>
+        <DataTemplate x:Key="RecentRunContent" DataType="{x:Type local:WorkflowRunSummary}">
+            <DockPanel>
+                <!-- Colors come from the theme resources, so they follow theme changes. -->
+                <TextBlock Text="{Binding Glyph}" FontSize="11" Margin="0,0,10,0">
+                    <TextBlock.Style>
+                        <Style TargetType="TextBlock" BasedOn="{StaticResource Icon}">
+                            <Setter Property="Foreground" Value="{DynamicResource TextFaintBrush}"/>
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding Conclusion}" Value="success">
+                                    <Setter Property="Foreground" Value="{DynamicResource SuccessBrush}"/>
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding IsFailure}" Value="True">
+                                    <Setter Property="Foreground" Value="{DynamicResource DangerBrush}"/>
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding IsCompleted}" Value="False">
+                                    <Setter Property="Foreground" Value="{DynamicResource WarningBrush}"/>
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </TextBlock.Style>
+                </TextBlock>
+                <Button DockPanel.Dock="Right" Style="{StaticResource GhostButton}" Padding="6,2" FontSize="11"
+                        Visibility="{Binding RerunVisibility}" Click="RerunFailed_Click" ToolTip="Re-run failed jobs"
+                        AutomationProperties.Name="{Binding Title, StringFormat='Re-run the failed jobs of {0}'}">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="&#xE72C;" Style="{StaticResource Icon}" FontSize="10" Margin="0,0,5,0"/>
+                        <TextBlock Text="Re-run"/>
+                    </StackPanel>
+                </Button>
+                <TextBlock DockPanel.Dock="Right" Text="{Binding DetailText}" Style="{StaticResource Caption}" FontSize="11" Margin="12,0,6,0" VerticalAlignment="Center"/>
+                <TextBlock Text="{Binding TitleText}" FontSize="12" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
+            </DockPanel>
+        </DataTemplate>
         <!-- A runner; its header is a flat button that shows or hides the details -->
         <Style x:Key="RunnerRow" TargetType="Border">
             <Setter Property="Background" Value="Transparent"/>
@@ -773,32 +827,20 @@
                                                                                 <ItemsControl ItemsSource="{Binding Queue}" Visibility="{Binding QueueListVisibility}">
                                                                                     <ItemsControl.ItemTemplate>
                                                                                         <DataTemplate DataType="{x:Type local:QueueEntry}">
-                                                                                            <Button Style="{StaticResource RunRow}" Tag="{Binding Url}" Click="LinkButton_Click" ToolTip="Open the job on GitHub">
-                                                                                                <AutomationProperties.Name>
-                                                                                                    <MultiBinding StringFormat="{}{0}, {1}">
-                                                                                                        <Binding Path="Title"/>
-                                                                                                        <Binding Path="Detail"/>
-                                                                                                    </MultiBinding>
-                                                                                                </AutomationProperties.Name>
-                                                                                                <DockPanel>
-                                                                                                    <TextBlock FontSize="11" Margin="0,0,10,0" VerticalAlignment="Center">
-                                                                                                        <TextBlock.Style>
-                                                                                                            <Style TargetType="TextBlock" BasedOn="{StaticResource Icon}">
-                                                                                                                <Setter Property="Text" Value="&#xE823;"/>
-                                                                                                                <Setter Property="Foreground" Value="{DynamicResource WarningBrush}"/>
-                                                                                                                <Style.Triggers>
-                                                                                                                    <DataTrigger Binding="{Binding Running}" Value="True">
-                                                                                                                        <Setter Property="Text" Value="&#xE768;"/>
-                                                                                                                        <Setter Property="Foreground" Value="{DynamicResource AccentBrush}"/>
-                                                                                                                    </DataTrigger>
-                                                                                                                </Style.Triggers>
-                                                                                                            </Style>
-                                                                                                        </TextBlock.Style>
-                                                                                                    </TextBlock>
-                                                                                                    <TextBlock DockPanel.Dock="Right" Text="{Binding Detail}" Style="{StaticResource Caption}" FontSize="11" Margin="12,0,6,0" VerticalAlignment="Center"/>
-                                                                                                    <TextBlock Text="{Binding Title}" FontSize="12" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" local:TrimmedText.ToolTip="True"/>
-                                                                                                </DockPanel>
-                                                                                            </Button>
+                                                                                            <!-- A link when GitHub gave the job's address. Plain text otherwise, since the click would do nothing. -->
+                                                                                            <Grid>
+                                                                                                <Border Padding="6,4" Margin="-6,0,0,0" Visibility="{Binding TextVisibility}">
+                                                                                                    <ContentPresenter Content="{Binding}" ContentTemplate="{StaticResource QueueRowContent}"/>
+                                                                                                </Border>
+                                                                                                <Button Style="{StaticResource RunRow}" Tag="{Binding Url}" Click="LinkButton_Click" ToolTip="Open the job on GitHub" Visibility="{Binding LinkVisibility}" Content="{Binding}" ContentTemplate="{StaticResource QueueRowContent}">
+                                                                                                    <AutomationProperties.Name>
+                                                                                                        <MultiBinding StringFormat="{}{0}, {1}">
+                                                                                                            <Binding Path="Title"/>
+                                                                                                            <Binding Path="Detail"/>
+                                                                                                        </MultiBinding>
+                                                                                                    </AutomationProperties.Name>
+                                                                                                </Button>
+                                                                                            </Grid>
                                                                                         </DataTemplate>
                                                                                     </ItemsControl.ItemTemplate>
                                                                                 </ItemsControl>
@@ -815,45 +857,20 @@
                                                                                 <ItemsControl ItemsSource="{Binding RecentRuns}" Visibility="{Binding RecentRunsListVisibility}">
                                                                                     <ItemsControl.ItemTemplate>
                                                                                         <DataTemplate DataType="{x:Type local:WorkflowRunSummary}">
-                                                                                            <Button Style="{StaticResource RunRow}" Tag="{Binding HtmlUrl}" Click="LinkButton_Click" ToolTip="{Binding Title}">
-                                                                                                <AutomationProperties.Name>
-                                                                                                    <MultiBinding StringFormat="{}{0}, {1}">
-                                                                                                        <Binding Path="TitleText"/>
-                                                                                                        <Binding Path="StateText"/>
-                                                                                                    </MultiBinding>
-                                                                                                </AutomationProperties.Name>
-                                                                                                <DockPanel>
-                                                                                                    <!-- Colors come from the theme resources, so they follow theme changes. -->
-                                                                                                    <TextBlock Text="{Binding Glyph}" FontSize="11" Margin="0,0,10,0">
-                                                                                                        <TextBlock.Style>
-                                                                                                            <Style TargetType="TextBlock" BasedOn="{StaticResource Icon}">
-                                                                                                                <Setter Property="Foreground" Value="{DynamicResource TextFaintBrush}"/>
-                                                                                                                <Style.Triggers>
-                                                                                                                    <DataTrigger Binding="{Binding Conclusion}" Value="success">
-                                                                                                                        <Setter Property="Foreground" Value="{DynamicResource SuccessBrush}"/>
-                                                                                                                    </DataTrigger>
-                                                                                                                    <DataTrigger Binding="{Binding IsFailure}" Value="True">
-                                                                                                                        <Setter Property="Foreground" Value="{DynamicResource DangerBrush}"/>
-                                                                                                                    </DataTrigger>
-                                                                                                                    <DataTrigger Binding="{Binding IsCompleted}" Value="False">
-                                                                                                                        <Setter Property="Foreground" Value="{DynamicResource WarningBrush}"/>
-                                                                                                                    </DataTrigger>
-                                                                                                                </Style.Triggers>
-                                                                                                            </Style>
-                                                                                                        </TextBlock.Style>
-                                                                                                    </TextBlock>
-                                                                                                    <Button DockPanel.Dock="Right" Style="{StaticResource GhostButton}" Padding="6,2" FontSize="11"
-                                                                                                            Visibility="{Binding RerunVisibility}" Click="RerunFailed_Click" ToolTip="Re-run failed jobs"
-                                                                                                            AutomationProperties.Name="{Binding Title, StringFormat='Re-run the failed jobs of {0}'}">
-                                                                                                        <StackPanel Orientation="Horizontal">
-                                                                                                            <TextBlock Text="&#xE72C;" Style="{StaticResource Icon}" FontSize="10" Margin="0,0,5,0"/>
-                                                                                                            <TextBlock Text="Re-run"/>
-                                                                                                        </StackPanel>
-                                                                                                    </Button>
-                                                                                                    <TextBlock DockPanel.Dock="Right" Text="{Binding DetailText}" Style="{StaticResource Caption}" FontSize="11" Margin="12,0,6,0" VerticalAlignment="Center"/>
-                                                                                                    <TextBlock Text="{Binding TitleText}" FontSize="12" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
-                                                                                                </DockPanel>
-                                                                                            </Button>
+                                                                                            <!-- A link when GitHub gave the run's address. Plain text otherwise, since the click would do nothing. -->
+                                                                                            <Grid>
+                                                                                                <Border Padding="6,4" Margin="-6,0,0,0" ToolTip="{Binding Title}" Visibility="{Binding TextVisibility}">
+                                                                                                    <ContentPresenter Content="{Binding}" ContentTemplate="{StaticResource RecentRunContent}"/>
+                                                                                                </Border>
+                                                                                                <Button Style="{StaticResource RunRow}" Tag="{Binding HtmlUrl}" Click="LinkButton_Click" ToolTip="{Binding Title}" Visibility="{Binding LinkVisibility}" Content="{Binding}" ContentTemplate="{StaticResource RecentRunContent}">
+                                                                                                    <AutomationProperties.Name>
+                                                                                                        <MultiBinding StringFormat="{}{0}, {1}">
+                                                                                                            <Binding Path="TitleText"/>
+                                                                                                            <Binding Path="StateText"/>
+                                                                                                        </MultiBinding>
+                                                                                                    </AutomationProperties.Name>
+                                                                                                </Button>
+                                                                                            </Grid>
                                                                                         </DataTemplate>
                                                                                     </ItemsControl.ItemTemplate>
                                                                                 </ItemsControl>

@@ -689,6 +689,9 @@ public sealed class WorkflowRunSummary
         }
     }
     public System.Windows.Visibility RerunVisibility => CanRerun ? System.Windows.Visibility.Visible : System.Windows.Visibility.Collapsed;
+    /// <summary>The row is a link (a button) when GitHub gave the run's address, and plain text otherwise.</summary>
+    public System.Windows.Visibility LinkVisibility => string.IsNullOrWhiteSpace(HtmlUrl) ? System.Windows.Visibility.Collapsed : System.Windows.Visibility.Visible;
+    public System.Windows.Visibility TextVisibility => string.IsNullOrWhiteSpace(HtmlUrl) ? System.Windows.Visibility.Visible : System.Windows.Visibility.Collapsed;
 }
 
 public sealed class RepositoryFile

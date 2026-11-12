@@ -37,7 +37,8 @@ Runner Manager updates itself from [Releases](https://github.com/Sandiozo/runner
   is while the mouse button is down or a pen or a touch is on the screen. When Tab or a screen reader moves the focus,
   the list still scrolls to it.
 - The job, the repository and the current job in a runner's details are now buttons, so Tab and screen readers reach
-  them. A job without an address on GitHub, or **Repository unknown**, is plain text and not a button.
+  them. A job or a run without an address on GitHub, there and in the queue and the recent runs, is plain text and not a
+  button, and so is **Repository unknown**.
 
 ## 2.9.0
 
