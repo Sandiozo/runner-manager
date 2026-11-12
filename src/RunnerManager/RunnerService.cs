@@ -444,6 +444,8 @@ public static partial class RunnerService
         // ones" (unless clearLabels), and a failed registration is rolled back to them.
         var current = await ReadRegistrationBeforeRemovalAsync(local);
         var wanted = current with { Name = newName.Trim(), Labels = LabelsAfterEdit(current.Labels, labels, clearLabels) };
+        if (LabelEditProblem(clearLabels, wanted.Labels, current.Options.NoDefaultLabels) is { } labelProblem)
+            throw new InvalidOperationException(labelProblem);
         EnsureValidConfigInput(wanted.Url, wanted.Name, wanted.Labels);
         await EnsureNameIsFreeAsync(local, wanted.Name);
         var wasRunning = local.IsRunning;
@@ -482,6 +484,19 @@ public static partial class RunnerService
     /// </summary>
     internal static string[] LabelsAfterEdit(string[] current, string[] requested, bool clearLabels)
         => requested.Length > 0 || clearLabels ? requested : current;
+
+    internal const string NoLabelsLeftMessage = "This runner has no default labels, so it needs at least one label.";
+
+    /// <summary>
+    /// Null when an edit may leave the runner with these custom labels, otherwise the message to show. A runner set up
+    /// without the default labels (self-hosted, Windows and its architecture) has only its custom labels: with none left
+    /// it could not take a job, and config.cmd would give it the default labels instead (--no-default-labels needs a
+    /// label), so it would start taking ordinary self-hosted jobs. Removing every label of such a runner is refused.
+    /// </summary>
+    /// <param name="labelsAfterEdit">The custom labels the edit gives the runner (see <see cref="LabelsAfterEdit"/>).</param>
+    /// <param name="noDefaultLabels">The runner has no default labels, as GitHub lists it.</param>
+    internal static string? LabelEditProblem(bool clearLabels, string[] labelsAfterEdit, bool noDefaultLabels)
+        => clearLabels && noDefaultLabels && labelsAfterEdit.Length == 0 ? NoLabelsLeftMessage : null;
 
     /// <summary>
     /// The service name config.cmd gives a runner that is renamed: actions.runner.{owner-repo}.{name}. The old runner

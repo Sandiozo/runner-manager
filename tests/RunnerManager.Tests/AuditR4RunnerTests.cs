@@ -225,4 +225,20 @@ public class AuditR4RunnerTests
     [InlineData("actions.runner.build-01", "build-01", "gpu", "")]
     public void RenamedRunner_WithDotsInItsNames_GetsTheServiceNameThatConfigCmdGives(string serviceName, string oldName, string newName, string expected)
         => Assert.Equal(expected, RunnerService.ServiceNameAfterRename(serviceName, oldName, newName));
+
+    [Fact]
+    public void RemovingEveryLabel_OfARunnerWithoutDefaultLabels_IsRefused()
+    {
+        var current = new[] { "gpu" };
+        string? Problem(string[] requested, bool clearLabels, bool noDefaultLabels)
+            => RunnerService.LabelEditProblem(clearLabels, RunnerService.LabelsAfterEdit(current, requested, clearLabels), noDefaultLabels);
+
+        // config.cmd would register it with self-hosted, Windows and X64, and it would take ordinary jobs.
+        Assert.Equal("This runner has no default labels, so it needs at least one label.", Problem(Array.Empty<string>(), clearLabels: true, noDefaultLabels: true));
+        // Other labels instead of the old ones, or a runner that keeps its default labels.
+        Assert.Null(Problem(new[] { "cuda" }, clearLabels: true, noDefaultLabels: true));
+        Assert.Null(Problem(Array.Empty<string>(), clearLabels: true, noDefaultLabels: false));
+        // An empty list without clearLabels keeps the labels it has.
+        Assert.Null(Problem(Array.Empty<string>(), clearLabels: false, noDefaultLabels: true));
+    }
 }
