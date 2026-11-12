@@ -54,8 +54,9 @@ internal static class AddRunnerForm
     /// "PC-repository", so a second runner for a repository does not get the name of the first. A name that is taken
     /// for the same repository or organization gets a number.
     /// </summary>
-    internal static string DefaultRunnerName(string machineName, RepositoryCheck repository, Func<string, bool> taken)
+    internal static string DefaultRunnerName(string? machineName, RepositoryCheck repository, Func<string, bool> taken)
     {
+        machineName ??= string.Empty;
         var target = repository.RepositoryPath.Length > 0 ? repository.RepositoryPath.Split('/').Last() : repository.Organization;
         var name = Clean(target.Length > 0 && repository.IsValid ? $"{machineName}-{target}" : machineName);
         if (name.Length == 0) name = "runner";
@@ -74,25 +75,28 @@ internal static class AddRunnerForm
         => new string(value.Select(c => char.IsAsciiLetterOrDigit(c) || c is '-' or '_' or '.' ? c : '-').ToArray()).Trim('-', '.');
 
     /// <summary>Null when the name has only allowed characters and is not longer than <see cref="MaxNameLength"/>.</summary>
-    internal static string? NameRuleProblem(string name) => RunnerService.RunnerNameProblem(name) ?? LengthProblem(name);
+    internal static string? NameRuleProblem(string? name) => RunnerService.RunnerNameProblem(name) ?? LengthProblem(name);
 
     /// <summary>Null when the name is not longer than <see cref="MaxNameLength"/>.</summary>
-    internal static string? LengthProblem(string name)
-        => name.Trim().Length > MaxNameLength ? $"The name is too long. Use at most {MaxNameLength} characters." : null;
+    internal static string? LengthProblem(string? name)
+        => (name ?? string.Empty).Trim().Length > MaxNameLength ? $"The name is too long. Use at most {MaxNameLength} characters." : null;
 
-    /// <summary>Null when the name can be registered for this repository or organization.</summary>
-    internal static string? NameProblem(string name, string scope, IEnumerable<(string Scope, string Name)> existing)
+    /// <summary>
+    /// Null when the name can be registered for this repository or organization. A runner that another PC reports
+    /// without a scope or a name (null, whatever the type says) takes no name.
+    /// </summary>
+    internal static string? NameProblem(string? name, string? scope, IEnumerable<(string Scope, string Name)>? existing)
     {
         if (NameRuleProblem(name) is { } problem) return problem;
-        var trimmed = name.Trim();
-        return scope.Length > 0 && existing.Any(r => r.Scope.Equals(scope, StringComparison.OrdinalIgnoreCase)
-                                                     && r.Name.Equals(trimmed, StringComparison.OrdinalIgnoreCase))
+        var trimmed = name!.Trim();
+        return !string.IsNullOrEmpty(scope) && (existing ?? []).Any(r => string.Equals(r.Scope, scope, StringComparison.OrdinalIgnoreCase)
+                                                                         && string.Equals(r.Name, trimmed, StringComparison.OrdinalIgnoreCase))
             ? "A runner with this name is already registered for this repository. Choose another name."
             : null;
     }
 
-    internal static string[] ParseLabels(string text)
-        => text.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+    internal static string[] ParseLabels(string? text)
+        => (text ?? string.Empty).Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
 
     /// <summary>Null when a runner can be installed in the folder: a full local path that is new or empty.</summary>
@@ -132,8 +136,8 @@ internal static class AddRunnerForm
     /// The PCs a runner can be added on: this PC, and online PCs whose fleet agent can create one (the same PCs a
     /// runner can be moved to). This PC comes first.
     /// </summary>
-    internal static List<MachineInfo> TargetPcs(IEnumerable<MachineInfo> pcs)
-        => pcs.Where(m => m.SupportsFleetTools)
+    internal static List<MachineInfo> TargetPcs(IEnumerable<MachineInfo?>? pcs)
+        => (pcs ?? []).OfType<MachineInfo>().Where(m => m.MachineName != null && m.SupportsFleetTools)
             .GroupBy(m => m.MachineKey).Select(g => g.First())
             .OrderByDescending(m => m.IsLocal).ThenBy(m => m.MachineName, StringComparer.OrdinalIgnoreCase)
             .ToList();
@@ -179,14 +183,26 @@ internal static class EditRunnerForm
     }
 
     /// <param name="canClearLabels">Whether the PC of the runner can remove every custom label (an empty list keeps them otherwise).</param>
-    internal static Result Check(string currentName, IReadOnlyCollection<string> currentLabels, string name, string labelsText, bool canClearLabels)
+    /// <summary>
+    /// The custom labels the runner has: those its status reports, or else those read from GitHub for a runner on this
+    /// PC. Another PC can send null for the list or for an entry.
+    /// </summary>
+    internal static string[] CurrentLabels(IEnumerable<string?>? reported, IEnumerable<string?>? local)
+        => Labels(reported) is { Length: > 0 } labels ? labels : Labels(local);
+
+    private static string[] Labels(IEnumerable<string?>? labels)
+        => (labels ?? []).Where(l => !string.IsNullOrWhiteSpace(l)).Select(l => l!.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+
+    /// <param name="currentName">The runner's name; another PC can report none.</param>
+    /// <param name="currentLabels">The runner's custom labels; another PC can report none, or a list with empty entries.</param>
+    internal static Result Check(string? currentName, IEnumerable<string?>? currentLabels, string? name, string? labelsText, bool canClearLabels)
     {
-        var newName = name.Trim();
+        var newName = (name ?? string.Empty).Trim();
         var labels = AddRunnerForm.ParseLabels(labelsText);
-        var current = currentLabels.Where(l => !string.IsNullOrWhiteSpace(l)).Select(l => l.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        var current = Labels(currentLabels);
         var clears = labels.Length == 0 && current.Length > 0;
         var labelsChanged = !new HashSet<string>(labels, StringComparer.Ordinal).SetEquals(current);
-        var nameChanged = !newName.Equals(currentName.Trim(), StringComparison.Ordinal);
+        var nameChanged = !newName.Equals((currentName ?? string.Empty).Trim(), StringComparison.Ordinal);
         var changed = nameChanged || labelsChanged;
 
         // The name a runner has stays allowed, whatever its length: only a new name must keep to the limit.

@@ -360,6 +360,37 @@ public class AuditDialogTests
         Assert.False(badLabel.CanSave);
     }
 
+    // ----- Runners and PCs as another PC reports them -----
+
+    [Fact]
+    public void RunnerForms_AcceptNullStringsAndListsFromAnotherPc()
+    {
+        // "Scope": null and "AgentName": null in another PC's status override the empty defaults.
+        var existing = new (string, string)[] { (null!, "BUILD-PC-repo"), ("repos/owner/repo", null!), (null!, null!) };
+        Assert.Null(AddRunnerForm.NameProblem("BUILD-PC-repo", "repos/owner/repo", existing));
+        Assert.Null(AddRunnerForm.NameProblem("BUILD-PC-repo", "repos/owner/repo", null));
+        Assert.Null(AddRunnerForm.NameProblem("BUILD-PC-repo", null, existing));
+        Assert.NotNull(AddRunnerForm.NameProblem(null, "repos/owner/repo", existing));
+        Assert.NotNull(AddRunnerForm.NameProblem("build-pc-repo", "repos/owner/repo", new[] { ("REPOS/owner/repo", "BUILD-PC-repo") }));
+
+        Assert.Equal("runner", AddRunnerForm.DefaultRunnerName(null, AddRunnerForm.CheckRepository(""), _ => false));
+        Assert.Equal("app", AddRunnerForm.DefaultRunnerName(null, AddRunnerForm.CheckRepository("owner/app"), _ => false));
+        Assert.Empty(AddRunnerForm.ParseLabels(null));
+        Assert.Equal(new[] { Environment.MachineName },
+            AddRunnerForm.TargetPcs(new MachineInfo?[] { null, Pc(Environment.MachineName), new() { MachineKey = "NONAME", MachineName = null!, FleetAgentRunning = true } })
+                .Select(m => m.MachineName));
+        Assert.Empty(AddRunnerForm.TargetPcs(null));
+
+        // Edit runner on a runner without a reported name or labels.
+        var edit = EditRunnerForm.Check(null, null, "pc-app", "gpu", canClearLabels: false);
+        Assert.True(edit.CanSave);
+        Assert.Equal(new[] { "gpu" }, edit.Request!.Labels);
+        Assert.False(EditRunnerForm.Check(null, new string?[] { null, " " }, null, null, canClearLabels: false).CanSave);
+        Assert.Equal(new[] { "gpu" }, EditRunnerForm.CurrentLabels(new string?[] { null, " gpu ", "GPU" }, new[] { "local" }));
+        Assert.Equal(new[] { "local" }, EditRunnerForm.CurrentLabels(new string?[] { null }, new[] { "local" }));
+        Assert.Empty(EditRunnerForm.CurrentLabels(null, null));
+    }
+
     [Fact]
     public void ForgetWording_MatchesTheDashboard()
     {

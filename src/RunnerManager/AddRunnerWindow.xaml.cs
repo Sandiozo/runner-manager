@@ -46,9 +46,10 @@ public partial class AddRunnerWindow : Window
     {
         InitializeComponent();
         WindowTheme.Apply(this);
-        var fleet = pcs?.ToList() ?? new List<MachineInfo>();
+        var fleet = pcs?.OfType<MachineInfo>().ToList() ?? new List<MachineInfo>();
+        // Runners that other PCs report can have a null scope or name, which AddRunnerForm.NameProblem allows for.
         _existing = (existingRunners ?? fleet.SelectMany(m => m.Runners ?? Array.Empty<MachineRunnerStatus>()))
-            .Select(r => (r.Scope, r.AgentName)).ToList();
+            .OfType<MachineRunnerStatus>().Select(r => (r.Scope, r.AgentName)).ToList();
         _canChooseFolder = canChooseFolder ?? (_ => false);
 
         var targets = AddRunnerForm.TargetPcs(fleet);
