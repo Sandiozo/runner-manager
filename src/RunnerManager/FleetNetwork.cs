@@ -14,7 +14,7 @@ public sealed record FleetRequest
 {
     /// <summary>
     /// "status", "command", "log", "leave", "job" (protocol 11: a runner's live output and processes), "rekey"
-    /// (protocol 12: a new pairing code from Change fleet code), "managed" (protocol 15: the PCs this fleet manages one
+    /// (protocol 12: a new code from Change fleet code), "managed" (protocol 15: the PCs this fleet manages one
     /// way, for the other fleet PCs) or "release" (protocol 15: the fleet stops managing this PC).
     /// </summary>
     public string Op { get; init; } = "status";
@@ -29,7 +29,7 @@ public sealed record FleetRequest
     public string TargetId { get; init; } = string.Empty;
     /// <summary>"rekey": the sender's ECDH public key for this change (base64 SubjectPublicKeyInfo).</summary>
     public string RekeyPublicKey { get; init; } = string.Empty;
-    /// <summary>"rekey", second step: the new pairing code, sealed with the key from the exchange (base64).</summary>
+    /// <summary>"rekey", second step: the new code, sealed with the key from the exchange (base64).</summary>
     public string NewKey { get; init; } = string.Empty;
 }
 
@@ -51,13 +51,13 @@ public sealed record FleetResponse
     public List<RemovedManagedPc>? RemovedManagedPcs { get; init; }
 }
 
-/// <summary>Where an agent finds its pairing code, and the new one from "Change fleet code" until it is first used.</summary>
+/// <summary>Where an agent finds its code (the fleet code, or a managed PC's access code), and the new one from "Change fleet code" until it is first used.</summary>
 public interface IAgentKeys
 {
     byte[]? Current { get; }
     byte[]? Pending { get; }
     void SetPending(byte[] key);
-    /// <summary>A request came with the pending code: it becomes the pairing code, and the old one stops working.</summary>
+    /// <summary>A request came with the pending code: it becomes the code, and the old one stops working.</summary>
     void UsePending(byte[] key);
     /// <summary>This PC is managed one way: its code is its own, known only to the fleet that manages it.</summary>
     bool IsManaged { get; }
@@ -90,7 +90,7 @@ internal sealed class ConfigAgentKeys(Func<DateTime>? clock = null) : IAgentKeys
     }
 
     /// <summary>
-    /// The copy in memory, while it is fresh and the code it replaces is still in use: Replace code or Enter pairing code
+    /// The copy in memory, while it is fresh and the code it replaces is still in use: Replace code or Enter fleet code
     /// on this PC ends it, so a code sent earlier by a PC that has left the fleet since can't switch this PC.
     /// </summary>
     private byte[]? Kept(FleetConfig config)
@@ -146,7 +146,7 @@ internal sealed class MemoryAgentKeys(Func<byte[]?> current, bool managed = fals
 /// <param name="MachineId">The PC's machine ID; empty from agents before protocol 12.</param>
 public sealed record DiscoveredPeer(string Name, string Address, string Version, string MachineId = "");
 
-/// <summary>Thrown when a PC answers but refuses the request (different pairing code, wrong PC, clocks apart).</summary>
+/// <summary>Thrown when a PC answers but refuses the request (different code, wrong PC, clocks apart).</summary>
 public sealed class PairingMismatchException(string message, string reason = "") : Exception(message)
 {
     /// <summary>The agent's short reason, for example "denied" or "wrong PC"; empty when it gave none.</summary>
@@ -181,7 +181,7 @@ public static class FleetNetwork
     internal const int MaxResponseBytes = 8 * 1024 * 1024;
     private const int MaxErrorBodyBytes = 4 * 1024;
 
-    /// <summary>The keys derived from one pairing code (HKDF runs once per code, not once per request).</summary>
+    /// <summary>The keys derived from one code (HKDF runs once per code, not once per request).</summary>
     internal sealed record DerivedKeys(byte[] Transport, byte[] Discovery);
 
     private static readonly ConcurrentDictionary<string, DerivedKeys> KeyCache = new(StringComparer.Ordinal);
@@ -575,7 +575,7 @@ public sealed class AgentServer : IDisposable
 
     /// <param name="prefix">HTTP prefix to listen on (tests use a localhost one; the agent listens on all interfaces).</param>
     /// <param name="machineId">This PC's machine ID; by default the one in fleet.json for the real agent, none for tests.</param>
-    /// <param name="keys">Where the pairing codes are kept; by default fleet.json, or memory when <paramref name="pairingKey"/> is given.</param>
+    /// <param name="keys">Where the codes are kept; by default fleet.json, or memory when <paramref name="pairingKey"/> is given.</param>
     public AgentServer(Func<Task<MachineStatusPayload>> status, Func<MachineCommand, string> enqueue, Func<string, Task<LogPayload>> log,
         Func<byte[]?>? pairingKey = null, string? prefix = null, int discoveryPort = FleetNetwork.DiscoveryPort, string? machineKey = null,
         Func<string, Task<RunnerJobActivity>>? job = null, string? machineId = null, IAgentKeys? keys = null)

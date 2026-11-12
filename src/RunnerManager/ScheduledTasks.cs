@@ -469,7 +469,7 @@ public static class ScheduledTasks
 
 /// <summary>
 /// One Windows user per PC runs the fleet agent: its task name, ports and single-instance lock are shared by everyone
-/// on the PC, and it uses that user's pairing code. Other users of the PC can use the dashboard for this PC's runners,
+/// on the PC, and it uses that user's fleet code. Other users of the PC can use the dashboard for this PC's runners,
 /// but never take the agent over.
 /// </summary>
 public static class AgentOwnership

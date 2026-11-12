@@ -336,7 +336,7 @@ public class PendingCodeTests
             FleetConfig.Update(c => c.ProtectedPendingFleetKey = string.Empty);
             Assert.Equal(sent, keys.Pending);
 
-            // Replace code, or Enter pairing code, on this PC.
+            // Replace code, or Enter fleet code, on this PC.
             FleetConfig.SetFleetKey(replaced);
             Assert.Null(keys.Pending);
             keys.UsePending(sent);

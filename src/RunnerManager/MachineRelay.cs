@@ -54,7 +54,7 @@ public static class MachineRelay
 
     /// <summary>
     /// This PC plus every paired PC: found by broadcast on the local network, remembered addresses, or addresses
-    /// added in Settings (e.g. Tailscale names). All traffic goes directly between the PCs, encrypted with the pairing code.
+    /// added in Settings (e.g. Tailscale names). All traffic goes directly between the PCs, encrypted with the fleet code.
     /// </summary>
     /// <remarks>
     /// Runs on the thread pool, not on the caller's thread: decrypting and reading the answers and saving fleet.json
@@ -154,7 +154,7 @@ public static class MachineRelay
         return await ReadLocalMachineAsync(outdated, running);
     }
 
-    /// <summary>Whether the agent task runs this exact build (used before a pairing code exists).</summary>
+    /// <summary>Whether the agent task runs this exact build (used before a fleet code exists).</summary>
     private static async Task<bool> LocalAgentIsCurrentAsync()
     {
         var exe = await AgentTaskExecutableAsync();
@@ -1136,7 +1136,7 @@ public static class MachineRelay
     }
 
     /// <summary>
-    /// Leaves the fleet: tells the other PCs to forget this one, removes the agent, and clears the pairing code and
+    /// Leaves the fleet: tells the other PCs to forget this one, removes the agent, and clears the fleet code and
     /// remembered PCs, so adding it again goes through pairing. Returns the PCs that were told.
     /// </summary>
     public static async Task<List<string>> LeaveFleetAsync(Action<string> log)
@@ -1182,7 +1182,7 @@ public static class MachineRelay
         return told;
     }
 
-    /// <summary>The first protocol whose agents can receive a new pairing code from Change fleet code.</summary>
+    /// <summary>The first protocol whose agents can receive a new fleet code from Change fleet code.</summary>
     public const int RekeyProtocolVersion = 12;
 
     /// <summary>What Change fleet code did, by PC name.</summary>
@@ -1196,7 +1196,7 @@ public static class MachineRelay
         List<string> ManagedSwitched, List<string> ManagedFailed);
 
     /// <summary>
-    /// Change fleet code: makes a new pairing code and gives it to the PCs in <paramref name="keep"/>, encrypted with
+    /// Change fleet code: makes a new fleet code and gives it to the PCs in <paramref name="keep"/>, encrypted with
     /// the current code and a fresh key exchange. This PC switches only after at least one of them confirmed it (or
     /// when there are none to give it to). Each of them switches at the first request that uses the new code; this
     /// sends one to each right away. PCs that are left out, offline or too old keep the old code, so they can no
@@ -1776,7 +1776,7 @@ public sealed record MachineStatusPayload
     public bool RebootPending { get; init; }
     public DiskStatus[] Disks { get; init; } = Array.Empty<DiskStatus>();
     public bool WatchdogEnabled { get; init; }
-    /// <summary>Short fingerprint of this PC's pairing code, so dashboards can spot a PC with a different code.</summary>
+    /// <summary>Short fingerprint of this PC's code, so dashboards can spot a PC with a different code.</summary>
     public string SigningKeyId { get; init; } = string.Empty;
     public AgentEvent[] RecentEvents { get; init; } = Array.Empty<AgentEvent>();
     public MachineRunnerStatus[] Runners { get; init; } = Array.Empty<MachineRunnerStatus>();
