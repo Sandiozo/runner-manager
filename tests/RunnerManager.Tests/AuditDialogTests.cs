@@ -399,6 +399,80 @@ public class AuditDialogTests
         Assert.Contains("appears again when it is found", ForgetPc.Message("OFFICE", online: false));
     }
 
+    // ----- Add a PC: what is checked before Allow -----
+
+    private const string OfficeId = "0123456789abcdef0123456789abcdef";
+    private const string HostId = "fedcba9876543210fedcba9876543210";
+
+    private static FleetConfig PairingFleet() => new()
+    {
+        KnownPeers = { new PeerRecord { Name = "OFFICE-PC", MachineId = OfficeId }, new PeerRecord { Name = "OLD-PC" } },
+        ManagedPcs = { new ManagedPcRecord { Name = "GUEST-PC", MachineId = "aaaa1111" } }
+    };
+
+    private static PairingHostWindow.RequestCheck CheckJoin(string name, string? machineId, params (string Name, string? MachineId)[] allowed)
+        => PairingHostWindow.CheckRequest(PairingFleet(), name, machineId, allowed, "HOST-PC", HostId);
+
+    [Fact]
+    public void AddAPc_Warns_WhenAPcOfThatNameWasAllowedAMomentAgo()
+    {
+        const string warning = "A PC named LAPTOP was allowed a moment ago and is not added yet. Allow only if this is the same PC.";
+        Assert.Equal(new PairingHostWindow.RequestCheck(warning, CanAllow: true), CheckJoin("LAPTOP", "1111", ("LAPTOP", "2222")));
+        // Older PCs send no ID, so they cannot be told apart.
+        Assert.Equal(warning, CheckJoin("LAPTOP", null, ("laptop", null)).Warning);
+        Assert.Equal(warning, CheckJoin("LAPTOP", "1111", ("LAPTOP", null)).Warning);
+        // The same PC asking again, and another name.
+        Assert.Null(CheckJoin("LAPTOP", "1111", ("LAPTOP", "1111")).Warning);
+        Assert.Null(CheckJoin("LAPTOP", "1111", ("DESKTOP", "2222")).Warning);
+        Assert.Null(CheckJoin("LAPTOP", null).Warning);
+    }
+
+    [Fact]
+    public void AddAPc_CannotAllowAPcWithTheNameOfThisPc()
+    {
+        var check = CheckJoin("HOST-PC", OfficeId);
+        Assert.False(check.CanAllow);
+        Assert.StartsWith("This PC is also named HOST-PC.", check.Warning);
+        Assert.False(CheckJoin("host_pc", null).CanAllow);
+        Assert.True(CheckJoin("LAPTOP", null).CanAllow);
+    }
+
+    [Fact]
+    public void AddAPc_CannotAllowAPcThatSendsTheMachineIdOfThisPc()
+    {
+        var check = CheckJoin("LAPTOP", HostId.ToUpperInvariant());
+        Assert.False(check.CanAllow);
+        Assert.Equal("LAPTOP sends the machine ID of this PC, so the fleet cannot tell the two PCs apart, and LAPTOP cannot be added. " +
+                     "This happens when a PC is set up from a copy of the other PC's disk.", check.Warning);
+        // This PC's ID is not known: nothing to compare.
+        Assert.True(PairingHostWindow.CheckRequest(PairingFleet(), "LAPTOP", HostId, [], "HOST-PC", "").CanAllow);
+    }
+
+    [Fact]
+    public void AddAPc_Warns_WhenTheMachineIdIsSavedUnderAnotherName_AndNamesThePcItReplaces()
+    {
+        Assert.Equal(new PairingHostWindow.RequestCheck(
+                "LAPTOP says it is OFFICE-PC, a PC in this fleet, with a new name. If you allow it, it takes the place of OFFICE-PC. " +
+                "Allow only if OFFICE-PC was renamed to LAPTOP.", CanAllow: true),
+            CheckJoin("LAPTOP", OfficeId.ToUpperInvariant()));
+        Assert.StartsWith("LAPTOP says it is GUEST-PC, a PC that this fleet manages one way, with a new name.", CheckJoin("LAPTOP", "AAAA1111").Warning);
+        Assert.StartsWith("LAPTOP says it is DESKTOP, which was allowed a moment ago, with a new name.", CheckJoin("LAPTOP", "3333", ("DESKTOP", "3333")).Warning);
+        // The PC that has the name and the ID, joining again.
+        Assert.Null(CheckJoin("OFFICE-PC", OfficeId).Warning);
+        Assert.Null(CheckJoin("office_pc", OfficeId).Warning);
+        // No ID, or one that no saved PC has.
+        Assert.Null(CheckJoin("LAPTOP", null).Warning);
+        Assert.Null(CheckJoin("LAPTOP", "4444").Warning);
+        Assert.Null(PairingHostWindow.SameIdWarning(PairingFleet(), "LAPTOP", ""));
+    }
+
+    [Fact]
+    public void AddAPc_ShowsBothWarnings_WhenTheNameAndTheMachineIdBelongToTwoOtherPcs()
+        => Assert.Equal(
+            "This fleet already manages a PC named GUEST-PC. Allow only if this is the same PC.\n\n" +
+            "GUEST-PC says it is OFFICE-PC, a PC in this fleet, with a new name. If you allow it, it takes the place of OFFICE-PC. Allow only if OFFICE-PC was renamed to GUEST-PC.",
+            CheckJoin("GUEST-PC", OfficeId).Warning);
+
     // ----- Settings → Fleet: the code row -----
 
     [Fact]
