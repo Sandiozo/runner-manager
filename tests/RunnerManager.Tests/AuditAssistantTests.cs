@@ -955,6 +955,35 @@ public class AuditAssistantTests
     }
 
     [Fact]
+    public async Task ATool_IsRefused_WhileAssistantAccessIsOff()
+    {
+        using var switches = new TestSwitches(enabled: false);
+        using var document = JsonDocument.Parse("{}");
+        var refused = await Assert.ThrowsAsync<AssistantException>(() =>
+            AssistantTools.CallAsync("list_pcs", document.RootElement, (_, _) => Task.FromResult(true)));
+        Assert.Contains("turned off", refused.Message);
+    }
+
+    [Theory]
+    [InlineData(true, AssistantToolKind.Change, true)]
+    [InlineData(false, AssistantToolKind.Change, false)]
+    [InlineData(false, AssistantToolKind.Destructive, true)]
+    [InlineData(true, AssistantToolKind.Read, false)]
+    public async Task AChange_AsksFirst_OnlyWhileAskBeforeChangesIsOn_AndMovingOrRemovingAlwaysAsks(bool askBeforeChanges, AssistantToolKind kind, bool asks)
+    {
+        using var switches = new TestSwitches(enabled: true, askBeforeChanges: askBeforeChanges);
+        var asked = 0;
+        using var document = JsonDocument.Parse("{}");
+        var call = new AssistantCall(document.RootElement, (_, _) =>
+        {
+            Interlocked.Increment(ref asked);
+            return Task.FromResult(true);
+        }, _ => { });
+        await call.ConfirmAsync(kind, "Start a runner?", "message");
+        Assert.Equal(asks ? 1 : 0, asked);
+    }
+
+    [Fact]
     public async Task Approval_SaysThatItWaits_WhileTheUserHasNotAnswered()
     {
         var progress = new List<string>();

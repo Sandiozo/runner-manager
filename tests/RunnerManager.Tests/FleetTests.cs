@@ -388,6 +388,8 @@ public class FleetConfigRobustnessTests
     [Fact]
     public void NullsInAHandEditedFile_BecomeDefaults()
     {
+        // Its own switches, so turning "Ask before changes" off below does not stay for the next test.
+        using var switches = new TestSwitches();
         try
         {
             WriteRaw("{\"Assistant\":null,\"KnownPeers\":[null,{\"Name\":\"PC2\",\"Address\":null}],\"ManualAddresses\":null}");

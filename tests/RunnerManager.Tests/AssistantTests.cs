@@ -365,9 +365,9 @@ public class AssistantTests
     public async Task HttpEndpoint_NeedsTheTokenAndAnswersMcp()
     {
         var token = AssistantHttpServer.NewToken();
+        using var switches = new TestSwitches(enabled: true);
         FleetConfig.Update(c =>
         {
-            c.Assistant.Enabled = true;
             c.Assistant.HttpEnabled = true;
             c.Assistant.ProtectedHttpToken = AssistantOptions.ProtectToken(token);
         });
@@ -377,11 +377,7 @@ public class AssistantTests
         }
         finally
         {
-            FleetConfig.Update(c =>
-            {
-                c.Assistant = new AssistantOptions();
-                c.Assistant.Enabled = false;
-            });
+            FleetConfig.Update(c => c.Assistant = new AssistantOptions());
         }
     }
 
@@ -579,7 +575,7 @@ public class AssistantTests
     [Fact]
     public async Task StdioServer_ForwardsAnMcpSessionToTheAgent()
     {
-        FleetConfig.Update(c => c.Assistant.Enabled = true);
+        using var switches = new TestSwitches(enabled: true);
         try
         {
             using var server = StartEndpoint(out var url);
@@ -603,11 +599,7 @@ public class AssistantTests
         }
         finally
         {
-            FleetConfig.Update(c =>
-            {
-                c.Assistant = new AssistantOptions();
-                c.Assistant.Enabled = false;
-            });
+            FleetConfig.Update(c => c.Assistant = new AssistantOptions());
         }
     }
 
