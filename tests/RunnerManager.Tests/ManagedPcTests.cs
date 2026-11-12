@@ -378,14 +378,18 @@ public class StatusCacheTests
         // Old by now: answered right away with the last status, while the next one is built.
         Assert.Equal("1", (await cache.GetAsync()).LastCommandId);
         Assert.True(watch.ElapsedMilliseconds < 500, $"took {watch.ElapsedMilliseconds} ms");
-        // The next build runs on the thread pool, so on a busy PC it can start only after that answer.
-        Assert.True(SpinWait.SpinUntil(() => Volatile.Read(ref builds) == 2, TimeSpan.FromSeconds(1)));
+        // The next build runs on the thread pool, so on a busy PC it can start well after that answer.
+        Assert.True(SpinWait.SpinUntil(() => Volatile.Read(ref builds) == 2, TimeSpan.FromSeconds(10)));
         // Requests meanwhile don't start more builds.
         await cache.GetAsync();
         Assert.Equal(2, builds);
 
-        await Task.Delay(2000);
-        Assert.Equal("2", (await cache.GetAsync()).LastCommandId);
+        // The second status arrives once its build is done: about 1.5 s on a quiet PC, later on a busy one. A third
+        // build starts only with a request that itself still gets the second status, so none is skipped.
+        var last = "1";
+        for (var wait = System.Diagnostics.Stopwatch.StartNew(); last == "1" && wait.Elapsed < TimeSpan.FromSeconds(10); await Task.Delay(50))
+            last = (await cache.GetAsync()).LastCommandId;
+        Assert.Equal("2", last);
     }
 
     [Fact]

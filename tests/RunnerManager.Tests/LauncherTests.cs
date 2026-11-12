@@ -68,7 +68,10 @@ public class LauncherTests
         var child = folder.Launch(environment: new Dictionary<string, string> { ["SystemRoot"] = @"C:\x-root", ["SystemDrive"] = @"C:\x-drive" }).ChildOrFail();
 
         var system = SystemBlock();
-        foreach (var name in system.Names.Where(name => !IdentityNames.Contains(name, StringComparer.OrdinalIgnoreCase) && name != "PSModulePath"))
+        // Less the system variables the launcher leaves out on purpose (GitHub's build machines set DOTNET_ ones for all users).
+        foreach (var name in system.Names.Where(name => !IdentityNames.Contains(name, StringComparer.OrdinalIgnoreCase) && name != "PSModulePath"
+                     && !LeftOutPrefixes.Any(prefix => name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                     && !name.Equals("__COMPAT_LAYER", StringComparison.OrdinalIgnoreCase)))
             Assert.Equal(system.Value(name), child.Value(name));
         Assert.Equal(ExpectedModulePath(system.Value("PSModulePath")), child.Value("PSModulePath"));
         Assert.DoesNotContain(child.Block, entry => entry.Contains(@"C:\x-", StringComparison.OrdinalIgnoreCase));

@@ -70,8 +70,14 @@ jobs:
           if (-not (Test-Path -LiteralPath $helper)) { throw "$helper is missing after the build." }
           Write-Host "RunnerManagerLauncher.exe SHA-256: $((Get-FileHash $helper -Algorithm SHA256).Hash.ToLowerInvariant())"
 
+      # With the machine's PSModulePath, as in ci.yml: the tests start Windows PowerShell as the app does, and started
+      # from PowerShell 7 it would not load its own modules.
       - name: Test
-        run: dotnet test tests/RunnerManager.Tests -c Release
+        shell: pwsh
+        run: |
+          $env:PSModulePath = [Environment]::GetEnvironmentVariable('PSModulePath', 'Machine')
+          dotnet test tests/RunnerManager.Tests -c Release
+          exit $LASTEXITCODE
 
       # The tag sets the version. It overrides <Version> in RunnerManager.csproj, which local builds use.
       - name: Publish single-file exe

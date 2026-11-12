@@ -22,5 +22,12 @@ jobs:
       - name: Build
         run: dotnet build RunnerManager.sln -c Release
 
+      # The tests start Windows PowerShell as the app does. Started from PowerShell 7 (this step's shell) it would inherit
+      # a PSModulePath with which it does not load its own modules, which no PC gives the app: Windows starts the app
+      # with the machine's value, so the tests get that one.
       - name: Test
-        run: dotnet test RunnerManager.sln -c Release --no-build --logger "console;verbosity=normal"
+        shell: pwsh
+        run: |
+          $env:PSModulePath = [Environment]::GetEnvironmentVariable('PSModulePath', 'Machine')
+          dotnet test RunnerManager.sln -c Release --no-build --logger "console;verbosity=normal"
+          exit $LASTEXITCODE
