@@ -75,6 +75,46 @@ public class ProcessImageTests
         return Process.Start(start)!;
     }
 
+    /// <summary>
+    /// The path that <paramref name="process"/> was started by, from its list of modules. Right after the start, Windows
+    /// may not have filled in that list yet on a busy PC, so it is read again for a few seconds.
+    /// </summary>
+    private static string StartedBy(Process process)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                process.Refresh();
+                return process.MainModule!.FileName;
+            }
+            catch (Win32Exception) when (attempt < 50)
+            {
+                Thread.Sleep(100);
+            }
+        }
+    }
+
+    /// <summary>
+    /// A change of a file that was just written, tried again for a few seconds: antivirus software opens a new exe to scan
+    /// it, and while it has it open, the file cannot be moved or deleted.
+    /// </summary>
+    private static void Retried(Action change)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                change();
+                return;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException && attempt < 50)
+            {
+                Thread.Sleep(100);
+            }
+        }
+    }
+
     [Fact]
     public void ARunningProgram_IsTheFileItRunsFrom_NotThePathItWasStartedBy()
     {
@@ -89,17 +129,17 @@ public class ProcessImageTests
             // An update renames the running exe out of the way and puts another at its path: here a build with the same
             // bytes, so also the same version.
             var aside = Path.Combine(folder, "RunnerManager.638000000000000000.old.exe");
-            File.Move(installed, aside);
-            File.Copy(Ping, installed);
+            Retried(() => File.Move(installed, aside));
+            Retried(() => File.Copy(Ping, installed));
             Assert.False(ProcessImage.RunsFrom(running.SafeHandle, installed));
             Assert.True(ProcessImage.RunsFrom(running.SafeHandle, aside));
             // The path it was started by still names the installed exe, so a path says nothing.
-            Assert.Equal(installed, running.MainModule!.FileName, ignoreCase: true);
+            Assert.Equal(installed, StartedBy(running), ignoreCase: true);
             Assert.Equal(aside, ProcessImage.CurrentPath(running.SafeHandle), ignoreCase: true);
 
             // A rollback puts it back: it is the installed file again.
-            File.Delete(installed);
-            File.Move(aside, installed);
+            Retried(() => File.Delete(installed));
+            Retried(() => File.Move(aside, installed));
             Assert.True(ProcessImage.RunsFrom(running.SafeHandle, installed));
             Assert.True(ProcessImage.RunsFrom(running.SafeHandle, installed.ToUpperInvariant()));
             Assert.False(ProcessImage.RunsFrom(running.SafeHandle, Path.Combine(folder, "missing.exe")));
@@ -109,7 +149,7 @@ public class ProcessImageTests
             try { running.Kill(); } catch (InvalidOperationException) { }
             running.WaitForExit(5000);
             running.Dispose();
-            Directory.Delete(folder, recursive: true);
+            Retried(() => Directory.Delete(folder, recursive: true));
         }
     }
 
@@ -126,7 +166,7 @@ public class ProcessImageTests
             Assert.Null(ProcessImage.IdOf(Path.Combine(folder, "missing.exe")));
             Assert.Null(ProcessImage.IdOf("relative.exe"));
         }
-        finally { Directory.Delete(folder, recursive: true); }
+        finally { Retried(() => Directory.Delete(folder, recursive: true)); }
     }
 }
 
