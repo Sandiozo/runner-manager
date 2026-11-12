@@ -3,6 +3,201 @@
 Runner Manager updates itself from [Releases](https://github.com/Sandiozo/runner-manager/releases): open
 **Settings → Updates**, or click **Update** on a PC's card.
 
+## 2.9.0
+
+A large release with many fixes from a review of 2.8.2, most of them for security and for the fleet.
+
+### After updating
+
+- Restart AI tools that were open during the update. Their old sign-in to the fleet agent is refused on purpose, and
+  the tool's error says so.
+- A **Stuck** or **Running long** alert that was open during the update may show once more.
+- PCs whose names have letters outside A-Z, such as Ö or Ā, can reach each other when both run 2.9.0. An older fleet
+  agent refuses such a name, and the message says to update it.
+
+### Security
+
+- The sign-in between an AI tool and the fleet agent on this PC no longer accepts programs of other Windows accounts.
+  An AI tool also no longer takes an answer from another program that listens on the fleet agent's port while the
+  agent is stopped, and shows no text from a program that has not signed in.
+- The connection between an AI tool and the fleet agent on this PC uses no proxy, and a sign-in that is not used
+  within 2 minutes is forgotten.
+- **Allow AI assistants** and **Ask before changes** are now stored where only an administrator can change them, so
+  another program of the user cannot turn AI assistants on or approvals off. They are moved over once, and each change
+  is written to the fleet agent's log.
+- Joining a fleet: a device on the network can no longer answer as one of your PCs and take a joining PC into its own
+  fleet. The joining PC now uses the code it was sent only after its user confirms that the 6-digit codes match (see
+  **Fleet and pairing**).
+- Pairing between two updated PCs also protects the host's name, the **Manage it one way** choice and the joining
+  PC's name, so a device on the path cannot change them. A joining PC can also no longer prepare several keys for one
+  request, which made the 6-digit code easier to match.
+- A PC in the fleet, or a PC managed one way, can no longer make the dashboard send other requests to GitHub with
+  your GitHub sign-in through the repository names it reports. Such names are checked before gh runs.
+- A new fleet code from **Change the fleet code on every PC** that is not used within 10 minutes expires, so a former
+  member cannot switch a PC to it later.
+- A PC that becomes managed one way forgets its old fleet: its PCs, and the codes of the PCs that fleet manages.
+- Process arguments that other PCs and AI assistants see hide more passwords and tokens: -p and -P of programs that
+  take a password there, --pass, --passphrase, user:password in URLs, GitHub, GitLab and Slack tokens, Cookie headers
+  and more. A port, mkdir -p and Unity's -projectPath stay visible.
+- Approvals and the action log show an AI tool's name on one line, with plain letters, digits and a few marks only,
+  so a name cannot look like Runner Manager's own text. The action log keeps one line per entry, and assistant.log
+  starts again at 1 MB.
+
+### Fleet and pairing
+
+- **Joining a fleet:** after the other PC allows, this PC asks **Do the codes match?**. Cancel, Back or closing the
+  window discards the code. After **The codes match** the window shows **Finishing…** for at most 30 seconds and
+  cannot be left meanwhile.
+- **Add a PC** adds a PC only once its user has confirmed the codes there, and waits up to 3 minutes for it. Until then
+  it shows who has not confirmed, with the 6-digit code, and asks before it closes. A PC that does not confirm, or that
+  the host cannot save, is not added and does not keep the code. This works when both PCs run 2.9.0; older PCs pair as
+  before.
+- **Add a PC** asks for a choice on every request: no option is pre-selected, and Allow does not get the focus, so a
+  stray Enter cannot hand over the fleet code. Esc denies the request. The window stays open while a request is on
+  screen and says that it closes by itself after 10 minutes without one.
+- **Add a PC** warns before Allow when a PC asks to join under the name of a PC that is already in the fleet or managed
+  by it, unless it is that same PC, and when it has the name of this PC.
+- The pairing windows, Settings and the fleet agent's messages call the fleet's long code the fleet code. In
+  **Settings → Fleet**, the item that gives only this PC a new code is now **New fleet code for this PC only**, and
+  **Change fleet code** is **Change the fleet code on every PC**. **Copy fleet code instead** says that the code gives
+  full access.
+- The list of PCs to join keeps its rows between searches, keeps a PC through two missed answers, and lists what to
+  check when no PC is found after about 10 seconds. Enter submits the address and the fleet code.
+- Fix: a PC no longer shows offline because its clock is a little behind, or because its status takes long to build on
+  a busy PC. A PC whose status can no longer be built no longer shows "Updated just now" with old runner states.
+- Fix: requests to other PCs no longer go through a proxy set up in Windows, which made every PC "Not reachable", and
+  a PC that is off is reported sooner: connecting to it takes at most 4 seconds.
+- Fix: the fleet agent listens again when Windows stops its listener, keeps running commands when a read of this PC's
+  runners hangs, no longer runs a command twice after a crash, and no longer drops lines from its log. Unexpected
+  errors are written to the log, and a fleet agent that fails at start is started again.
+- Fix: settings that can still be read from a damaged fleet.json are saved, so the PC no longer leaves the fleet
+  without a word.
+- Fix: pairing a PC one way no longer removes a different fleet PC with the same name. A PC that was a fleet member and
+  is paired again one way, or the other way round, is no longer known both ways once it has reported. A managed PC
+  renamed to another managed PC's name is shown with a problem instead of taking that PC's place.
+- **Settings → Fleet:** **Forget** asks first and also removes the address the PC was added by. **Add a PC by
+  address** is now **Look for a paired PC at an address**: it says that it does not pair a PC, refuses IPv6 addresses,
+  URLs, invalid ports and this PC's own address, accepts PC names in any alphabet, and shows which PC answers at each
+  address.
+- **Settings → Fleet** says when a fleet code is set but this PC has not joined yet, because its fleet agent is not
+  installed, and **Leave fleet** is disabled then.
+
+### Runners and jobs
+
+- Fix: auto-recovery tries a runner again an hour after it gave up, and reports giving up only once, until the runner
+  is seen running. It leaves a runner alone while it starts or stops, and restarts it only when it is stopped at two
+  checks in a row, so a Start, Stop or Restart on this PC no longer counts as a stop.
+- A runner service that stays starting or stopping for more than 2 minutes now counts as stopped: auto-recovery tries
+  it 3 times and then reports it once. Auto-recovery is disabled, with the reason, when the fleet agent is not
+  installed.
+- Fix: stuck detection no longer misses a step that has printed nothing for more than 30 minutes, no longer shows
+  **Stuck** after the PC wakes from sleep, and one failed GitHub read no longer raises **Running long**.
+- Fix: health checks use the runners' real labels from GitHub, so runners on ARM64 PCs and runners without default
+  labels are matched, and jobs without self-hosted in runs-on are checked too. "No runner in the fleet has the labels"
+  is no longer raised for Linux, macOS or GitHub-hosted jobs, or for jobs that a runner outside the fleet can take.
+- Fix: **Stop the job's processes** no longer stops an older process, such as explorer.exe, whose parent had the
+  same process ID as the job. Job checks read the process list once for all busy runners.
+- The live job output of an idle runner no longer shows a page left over from an earlier job.
+- A runner download that stops getting data now fails after 60 seconds, or after 45 minutes in all, with a clear
+  message. Before, it could block the fleet agent's commands for good.
+- Fix: the fleet agent refuses **Start**, **Stop** and **Restart** for a runner that runs in a console window, instead
+  of starting it a second time or reporting a stop that did not happen.
+- Fix: deleting a runner on this PC no longer stops after the runner was unregistered and before its files are
+  deleted.
+- Fix: editing a stopped runner leaves it stopped, and a renamed runner keeps its stopped mark. Editing a runner that
+  stopped by itself does not mark it as stopped on purpose.
+- **Add runner** and **Edit runner** check every field before they close. Each field shows its problem, **Create
+  runner** stays disabled until the form can be used, and a name longer than 64 characters is refused. The name and
+  folder default to free ones, and owner/repo, github.com/owner/repo and git@github.com:owner/repo.git are accepted.
+- Creating a runner checks that the name is free before the download. A failed workflow check after creating a runner
+  is a warning: the runner was created.
+- **Edit runner** fills in the labels of runners on other PCs, enables **Save changes** only when the name or labels
+  changed, and says when it cannot remove every custom label instead of keeping them silently.
+- Fix: **Start with Windows** in a runner's menu shows its check mark, and sets the delayed start that GitHub's setup
+  gives runner services. A service turned on again after a failed move also starts delayed.
+- When a move fails after the runner's registration was replaced, the error says that the old copy must be registered
+  again.
+
+### GitHub
+
+- Fix: a second GitHub account with a problem no longer shows GitHub as not connected when the active account works.
+- While GitHub is rate-limited or cannot be reached, Runner Manager waits before it asks again (until the rate limit
+  resets, or 30 to 45 seconds) instead of starting gh every few seconds. Actions you start are never held back.
+- A repository with many queued runs shows the longest-waiting ones, and a run with more than 100 jobs is read further
+  when the refresh has requests left.
+- After **Connect GitHub** or **Reconnect**, the dashboard notices the finished sign-in within seconds and says
+  "Waiting for sign-in" meanwhile.
+- Other PCs are read from their fleet agents, so the dashboard no longer says that they need GitHub on this PC.
+
+### AI assistants
+
+- Turning on **Allow AI assistants** asks first when it would create a fleet code, install the fleet agent or open
+  its firewall ports, and says that it starts a fleet with only this PC.
+- list_runners, find_runner_for_repo and job_status say when a runner's PC is offline, with its last known state.
+  find_runner_for_repo and create_runner say when every runner for a repository is on an offline PC.
+- create_runner without a PC picks a managed PC only when no other PC can take the runner, and the approval names it
+  as the managed PC.
+- control_runner refuses a runner that runs in a console window. stop_job_processes says which processes it stopped.
+- When GitHub cannot be reached, the tools say so with gh's reason instead of "Could not find" the repository.
+- A call that waits for an approval reports that it waits every 20 seconds, so an AI tool with a short timeout does not
+  give up. A call made before the fleet agent was running names the AI tool in its approval and can be cancelled.
+- `RunnerManager.exe ai` writes UTF-8 when another program reads its output. The fleet agent log says once, not every
+  30 seconds, that the AI assistant port is taken.
+
+### Setup and updates
+
+- The fleet agent and the dashboard run at normal priority, so a build that uses every core no longer slows them down.
+  Tasks that older versions registered are updated automatically.
+- Setup keeps your desktop shortcut and **Start with Windows** choices when you install again. After a failure, Back
+  returns to the options so you can try again, and Esc closes setup. Setup no longer stops AI tools that use Runner
+  Manager, unless you uninstall or install to another folder.
+- An update is marked as working only after its fleet agent answers on this PC. An update whose agent stays up without
+  answering is kept, not rolled back later, and rollback messages say what happened.
+- Updates leave RunnerManager.exe missing for a shorter time, and put it back when an update was cut off. Otherwise a
+  missing exe is not replaced, and the dashboard asks you to run setup again.
+- Downloads of updates stop when no data arrives for 60 seconds, and the .NET runtime download also has an overall
+  limit, with a clear message. Updates remove only Runner Manager's own old files.
+- When a dashboard does not respond, starting Runner Manager again offers to end it.
+- After **Later**, the update banner says "Restart Runner Manager to finish the update" and restarts the dashboard.
+- Runner Manager no longer changes its own scheduled tasks while they run. A path with spaces but without quotes, for
+  example in an AI tool's configuration, is no longer taken for arguments.
+- Uninstall waits until its message is closed, so RunnerManager.exe is always removed. Setup ignores Back and Next
+  while it installs, shows "Step 2 of 3", and its options have names for screen readers.
+
+### Dashboard and windows
+
+- Danger dialogs (Delete runner, Leave fleet, Uninstall and the like) start on **Cancel**, so a repeated Enter no
+  longer deletes anything. Long dialogs scroll, and their text can be selected and copied with Ctrl+C.
+- Fix: actions on other PCs show their result. A command that could not be sent shows a dialog, and a failed start or
+  stop ends the runner's pending state at once and shows the reason as an alert. Results stay in the status bar for 30
+  seconds.
+- An action started while another operation runs on this PC, also from Settings, says which one is still running.
+- Other PCs are shown without waiting for GitHub and keep refreshing while an operation runs on this PC. Reading them
+  no longer makes the dashboard stutter.
+- The window fits a scaled screen, opens where and as large as it was, and comes back from the notification area
+  maximized when it was.
+- Runners on other PCs show their labels and can be found by label. Search opens collapsed cards with matches, and
+  says when the selected PC has none but other PCs do.
+- A PC's state is not shown by color alone, and a collapsed card shows how many of its runners run and are busy, with
+  a badge when one needs attention. The reason a PC cannot be reached has its own line, and cut-off text shows in full
+  as a tooltip.
+- The Output tab keeps a job's last output after the job ends, marked "Job finished", until the runner's next job, and
+  says when updates are paused because text is selected.
+- Card headers, runner rows and links work with Tab, Enter and Space, and Tab starts at the PCs. Buttons, Settings
+  pages, the pairing windows and setup have names for screen readers.
+- Faint text and status pills reach a contrast of 4.5:1, and text in buttons, menus and segments shows its style's
+  color again, for example red Danger buttons.
+- Fix: Ctrl shortcuts no longer fire with AltGr, which opened search or settings while typing @ on some keyboards.
+  Ctrl with a number pad digit selects a PC.
+- The activity and output panel can no longer squeeze the PC cards to nothing, and runner details and the sidebar
+  fit a small window.
+- The first load says that it is loading, a PC without runners offers **Add runner**, and **Connect GitHub** is a
+  button. Texts count correctly ("1 runner"), and times follow the Windows region settings.
+- The log viewer no longer shows old text after a failed refresh. Esc clears the filter and then closes it, and Ctrl+F
+  goes to the filter.
+- Settings: **Theme**, **Refresh every** and **Stuck after** apply at once, Enter saves the inline forms, and Copy
+  in **AI assistants** shows "Copied".
+
 ## 2.8.2
 
 - Fix: a busy PC, or one reached over the internet, kept dropping offline although its runners worked. Its fleet agent
