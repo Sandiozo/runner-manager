@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -23,10 +22,22 @@ internal static class PeerStatus
     /// </summary>
     internal const int MaxRepositories = 100;
 
-    private static readonly ConcurrentDictionary<string, byte> Logged = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>The most PCs remembered as logged already. When full, the one logged longest ago is forgotten.</summary>
+    internal const int MaxLogged = 200;
+
+    /// <summary>How much of the name a PC sends about itself goes into the log line.</summary>
+    private const int MaxLoggedName = 80;
+
+    // The PCs whose problems were logged, by where their status came from (see Checked), and the same oldest first.
+    private static readonly HashSet<string> Logged = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly Queue<string> LoggedOrder = new();
 
     /// <summary>The status as it may be used. <paramref name="log"/> gets what was wrong, the first time for each PC.</summary>
-    internal static MachineStatusPayload Checked(MachineStatusPayload payload, Action<string> log)
+    /// <param name="from">
+    /// Where the status came from, in terms the other PC cannot choose: the address it answered at, or the key ID of
+    /// a managed PC's record. Not the name it sends, which it can change at each poll or take from another PC.
+    /// </param>
+    internal static MachineStatusPayload Checked(MachineStatusPayload payload, string from, Action<string> log)
     {
         var runners = new List<MachineRunnerStatus>();
         var repositories = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -62,11 +73,25 @@ internal static class PeerStatus
         var notes = new List<string>();
         if (payload.UnreadableRunners > 0) notes.Add($"{Count(payload.UnreadableRunners, "runner")} could not be read");
         if (blanked > 0) notes.Add($"{Count(blanked, "runner")} had a repository or organization that is not a GitHub name");
-        if (overRunners > 0) notes.Add($"it sent more than {MaxRunners} runners");
+        // Entries that could not be read count too: RunnerListConverter stops after MaxRunners + 1 of any kind.
+        if (overRunners > 0 || payload.Runners.Length + payload.UnreadableRunners > MaxRunners) notes.Add($"it sent more than {MaxRunners} runners");
         if (overRepositories > 0) notes.Add($"it sent runners for more than {MaxRepositories} repositories and organizations");
-        if (notes.Count > 0 && Logged.TryAdd(MachineRelay.Sanitize(payload.MachineName), 0))
-            log($"The status of {payload.MachineName} was not used in full: {string.Join("; ", notes)}. The rest of it is shown.");
+        // The name is the other PC's own text: on one line, so it cannot write lines of its own into the log.
+        if (notes.Count > 0 && FirstTime(from))
+            log($"The status of {AssistantLog.OneLine(payload.MachineName, MaxLoggedName)} was not used in full: {string.Join("; ", notes)}. The rest of it is shown.");
         return blanked == 0 && overRunners == 0 && overRepositories == 0 ? payload : payload with { Runners = runners.ToArray() };
+    }
+
+    /// <summary>Whether nothing was logged yet for <paramref name="from"/>; it then counts as logged.</summary>
+    private static bool FirstTime(string from)
+    {
+        lock (Logged)
+        {
+            if (!Logged.Add(from)) return false;
+            LoggedOrder.Enqueue(from);
+            if (LoggedOrder.Count > MaxLogged) Logged.Remove(LoggedOrder.Dequeue());
+            return true;
+        }
     }
 
     private static string Count(int count, string what) => count == 1 ? $"1 {what}" : $"{count} {what}s";
@@ -81,13 +106,23 @@ internal static class PeerStatus
     }
 
     /// <summary>For tests: logs again for each PC.</summary>
-    internal static void ForgetLogged() => Logged.Clear();
+    internal static void ForgetLogged()
+    {
+        lock (Logged)
+        {
+            Logged.Clear();
+            LoggedOrder.Clear();
+        }
+    }
 }
 
 /// <summary>
 /// Reads the runners of a PC's status one by one. An entry that cannot be read is left out (and counted, see
 /// <see cref="MachineStatusPayload.UnreadableRunners"/>), so one odd entry from an older or unusual agent does not lose
 /// the whole status. A null where a text or a list belongs reads as its default. Writes them as before.
+/// Only the first <see cref="PeerStatus.MaxRunners"/> + 1 entries are read: one more than is used, so that
+/// <see cref="PeerStatus.Checked"/> sees that there were more. The rest are skipped without being read, so a PC that
+/// sends a huge list costs little more than one that sends a short one.
 /// </summary>
 internal sealed class RunnerListConverter : JsonConverter<MachineRunnerStatus[]>
 {
@@ -105,11 +140,24 @@ internal sealed class RunnerListConverter : JsonConverter<MachineRunnerStatus[]>
 
     public override MachineRunnerStatus[] Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
     {
-        using var document = JsonDocument.ParseValue(ref reader);
-        var root = document.RootElement;
-        if (root.ValueKind == JsonValueKind.Null) return [];
-        if (root.ValueKind != JsonValueKind.Array) return [Unreadable];
-        return root.EnumerateArray().Select(item => ReadOne(item, options) ?? Unreadable).ToArray();
+        if (reader.TokenType == JsonTokenType.Null) return [];
+        if (reader.TokenType != JsonTokenType.StartArray)
+        {
+            reader.Skip();
+            return [Unreadable];
+        }
+        var runners = new List<MachineRunnerStatus>();
+        while (reader.Read() && reader.TokenType != JsonTokenType.EndArray)
+        {
+            if (runners.Count > PeerStatus.MaxRunners)
+            {
+                reader.Skip();
+                continue;
+            }
+            using var item = JsonDocument.ParseValue(ref reader);
+            runners.Add(ReadOne(item.RootElement, options) ?? Unreadable);
+        }
+        return runners.ToArray();
     }
 
     private static MachineRunnerStatus? ReadOne(JsonElement item, JsonSerializerOptions options)

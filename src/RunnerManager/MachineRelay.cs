@@ -336,7 +336,7 @@ public static class MachineRelay
     private static MachineInfo Accept(MachineStatusPayload? payload, string address)
     {
         if (payload == null) throw new InvalidOperationException("The PC returned no status.");
-        payload = PeerStatus.Checked(payload, AppendAgentLog);
+        payload = PeerStatus.Checked(payload, FleetNetwork.WithPort(address), AppendAgentLog);
         var machineKey = Sanitize(payload.MachineName);
         payload = ByLocalClock(machineKey, payload, DateTime.UtcNow);
         NoteAnswer(machineKey, payload);
@@ -470,7 +470,7 @@ public static class MachineRelay
     private static MachineInfo AcceptManaged(ManagedPcRecord pc, MachineStatusPayload? payload, string address)
     {
         if (payload == null) throw new InvalidOperationException("The PC returned no status.");
-        payload = PeerStatus.Checked(payload, AppendAgentLog);
+        payload = PeerStatus.Checked(payload, "managed " + pc.KeyId, AppendAgentLog);
         var machineKey = Sanitize(payload.MachineName);
         if (machineKey != Sanitize(pc.Name) && (machineKey == LocalMachineKey || FleetConfig.Current.KnownPeers.Any(p => Sanitize(p.Name) == machineKey)))
             return MachineInfo.Placeholder("MANAGED_" + machineKey, payload.MachineName, DateTime.UtcNow, address, ManagedNameProblem(payload.MachineName), managed: true);

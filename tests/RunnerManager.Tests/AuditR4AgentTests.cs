@@ -116,3 +116,98 @@ public class UpdateRestartWaitTests
             agentDownFor: TimeSpan.FromSeconds(10), installed + MachineRelay.UpdateRestartLimit, uptime: TimeSpan.FromHours(5)));
     }
 }
+
+/// <summary>Another PC's status: what is logged about it, and how much of it is read.</summary>
+[Collection(FleetSettingsCollection.Name)]
+public class PeerStatusLogTests
+{
+    private static readonly JsonSerializerOptions WireJson = new() { PropertyNameCaseInsensitive = true };
+
+    private static string Unique(string from) => $"{from}-{Guid.NewGuid():N}";
+
+    /// <summary>A status with one runner whose repository is not a GitHub name, which is logged.</summary>
+    private static MachineStatusPayload Odd(string name) => new()
+    {
+        MachineName = name,
+        Runners = new[] { new MachineRunnerStatus { ServiceName = "actions.runner.1", RepositoryPath = "not a repository" } }
+    };
+
+    [Fact]
+    public void APcThatChangesItsName_IsLoggedOnce_ByWhereItAnswered()
+    {
+        var log = new List<string>();
+        var from = Unique("10.0.0.5:47800");
+        for (var n = 0; n < 5; n++) PeerStatus.Checked(Odd($"NAME{n}"), from, log.Add);
+        Assert.Contains("NAME0", Assert.Single(log));
+    }
+
+    [Fact]
+    public void APcThatAnswersUnderAnotherPcsName_DoesNotUseUpThatPcsLogLine()
+    {
+        var log = new List<string>();
+        var name = Unique("OFFICE");
+        PeerStatus.Checked(Odd(name), Unique("managed key"), log.Add);
+        PeerStatus.Checked(Odd(name), Unique("10.0.0.7:47800"), log.Add);
+        Assert.Equal(2, log.Count);
+    }
+
+    [Fact]
+    public void TheNameAPcSends_CannotWriteLinesOfItsOwnIntoTheLog()
+    {
+        var log = new List<string>();
+        PeerStatus.Checked(Odd("PC\r\n2026-11-12 10:00:00  Update to v9.9.9 works on this PC.\u2028x"), Unique("10.0.0.8:47800"), log.Add);
+        var line = Assert.Single(log);
+        Assert.DoesNotContain('\n', line);
+        Assert.DoesNotContain('\r', line);
+        Assert.DoesNotContain('\u2028', line);
+        Assert.StartsWith("The status of PC 2026-11-12 10:00:00 Update to v9.9.9 works on this PC. x was not used in full", line);
+    }
+
+    [Fact]
+    public void WhatWasLogged_IsRememberedForSoManyPcs_ThenTheOldestIsForgotten()
+    {
+        var log = new List<string>();
+        var first = Unique("first");
+        PeerStatus.Checked(Odd("FIRSTPC"), first, log.Add);
+        PeerStatus.Checked(Odd("FIRSTPC"), first, log.Add);
+        Assert.Single(log);
+        for (var n = 0; n < PeerStatus.MaxLogged; n++) PeerStatus.Checked(Odd($"PC{n}"), Unique($"other{n}"), log.Add);
+        Assert.Equal(1 + PeerStatus.MaxLogged, log.Count);
+        // The first PC was forgotten to make room, so it is logged again.
+        PeerStatus.Checked(Odd("FIRSTPC"), first, log.Add);
+        Assert.Equal(2 + PeerStatus.MaxLogged, log.Count);
+    }
+
+    [Fact]
+    public void AHugeRunnerList_IsReadNoFurtherThanOneEntryMoreThanIsUsed()
+    {
+        var used = Enumerable.Range(0, PeerStatus.MaxRunners + 1).Select(n => $$"""{"ServiceName":"actions.runner.{{n}}"}""");
+        // Entries after those are skipped without being read: these would each count as unreadable.
+        var skipped = Enumerable.Range(0, 5000).Select(n => n % 2 == 0 ? "5" : """{"AgentId":"not a number","Labels":[1,{"a":[2]}]}""");
+        var json = $$"""{"MachineName":"HUGEPC","Runners":[{{string.Join(",", used.Concat(skipped))}}],"MachineId":"id-after"}""";
+
+        var status = JsonSerializer.Deserialize<MachineStatusPayload>(json, WireJson)!;
+        Assert.Equal(PeerStatus.MaxRunners + 1, status.Runners.Length);
+        Assert.Equal(0, status.UnreadableRunners);
+        Assert.Equal("actions.runner.200", status.Runners[^1].ServiceName);
+        // What follows the list is read as before.
+        Assert.Equal("id-after", status.MachineId);
+
+        var log = new List<string>();
+        Assert.Equal(PeerStatus.MaxRunners, PeerStatus.Checked(status, Unique("huge"), log.Add).Runners.Length);
+        Assert.Contains($"more than {PeerStatus.MaxRunners} runners", Assert.Single(log));
+    }
+
+    [Fact]
+    public void AListOfEntriesThatCannotBeRead_StillSaysThatThePcSentTooMany()
+    {
+        var json = $$"""{"MachineName":"ODDPC","Runners":[{{string.Join(",", Enumerable.Repeat("5", PeerStatus.MaxRunners + 50))}}]}""";
+        var status = JsonSerializer.Deserialize<MachineStatusPayload>(json, WireJson)!;
+        Assert.Empty(status.Runners);
+        Assert.Equal(PeerStatus.MaxRunners + 1, status.UnreadableRunners);
+
+        var log = new List<string>();
+        PeerStatus.Checked(status, Unique("odd"), log.Add);
+        Assert.Contains($"more than {PeerStatus.MaxRunners} runners", Assert.Single(log));
+    }
+}

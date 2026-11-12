@@ -81,7 +81,7 @@ public class PeerStatusTests
         };
         var log = new List<string>();
 
-        var used = PeerStatus.Checked(payload, log.Add);
+        var used = PeerStatus.Checked(payload, name, log.Add);
         Assert.Equal(3, used.Runners.Length);
         Assert.Equal("octo/repo", used.Runners[0].RepositoryPath);
         Assert.Equal(string.Empty, used.Runners[1].RepositoryPath);
@@ -93,7 +93,7 @@ public class PeerStatusTests
         Assert.Contains("1 runner had a repository or organization that is not a GitHub name", line);
 
         // At every poll after that: checked the same way, logged no more.
-        Assert.Equal(string.Empty, PeerStatus.Checked(payload, log.Add).Runners[1].Scope);
+        Assert.Equal(string.Empty, PeerStatus.Checked(payload, name, log.Add).Runners[1].Scope);
         Assert.Single(log);
     }
 
@@ -106,7 +106,7 @@ public class PeerStatusTests
             MachineName = UniqueName("MANYPC"),
             Runners = Enumerable.Range(0, PeerStatus.MaxRunners + 50).Select(n => Runner(n, "octo/repo")).ToArray()
         };
-        Assert.Equal(PeerStatus.MaxRunners, PeerStatus.Checked(many, log.Add).Runners.Length);
+        Assert.Equal(PeerStatus.MaxRunners, PeerStatus.Checked(many, many.MachineName, log.Add).Runners.Length);
         Assert.Contains($"more than {PeerStatus.MaxRunners} runners", Assert.Single(log));
 
         var spread = new MachineStatusPayload
@@ -114,13 +114,13 @@ public class PeerStatusTests
             MachineName = UniqueName("SPREADPC"),
             Runners = Enumerable.Range(0, PeerStatus.MaxRepositories + 20).Select(n => Runner(n, $"octo/repo-{n}")).ToArray()
         };
-        var used = PeerStatus.Checked(spread, log.Add);
+        var used = PeerStatus.Checked(spread, spread.MachineName, log.Add);
         Assert.Equal(PeerStatus.MaxRepositories, used.Runners.Select(r => r.RepositoryPath).Distinct().Count());
         Assert.Contains($"more than {PeerStatus.MaxRepositories} repositories", log[1]);
 
         // Nothing wrong: the status is used as it came.
         var fine = new MachineStatusPayload { MachineName = UniqueName("FINEPC"), Runners = new[] { Runner(1, "octo/repo") } };
-        Assert.Same(fine, PeerStatus.Checked(fine, log.Add));
+        Assert.Same(fine, PeerStatus.Checked(fine, fine.MachineName, log.Add));
         Assert.Equal(2, log.Count);
     }
 
