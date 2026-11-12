@@ -564,9 +564,9 @@ public class AuditDashboardTests
     public void ClickableElements_CanBeUsedFromTheKeyboard()
     {
         var xaml = Xaml("MainWindow.xaml");
-        var clickable = Regex.Matches(xaml, @"<\w+\b[^>]*MouseLeftButtonUp=""[^""]+""[^>]*>");
-        Assert.NotEmpty(clickable);
-        Assert.All(clickable, m => Assert.Contains("KeyDown=", m.Value));
+        // No element takes only mouse clicks: what is clicked is a button, which Enter and Space press. Since 2.9.1 the
+        // links in a runner's details are buttons too.
+        Assert.Empty(Regex.Matches(xaml, @"<\w+\b[^>]*MouseLeftButtonUp=""[^""]+""[^>]*>"));
         // Keyboard focus is always visible.
         Assert.DoesNotContain(@"<Setter Property=""FocusVisualStyle"" Value=""{x:Null}""/>", xaml);
     }
@@ -1022,7 +1022,7 @@ public class AuditDashboardTests
         {
             var start = code.IndexOf(title, StringComparison.Ordinal);
             Assert.True(start >= 0, title);
-            var wait = code.IndexOf("await WaitForFleetReadAsync();", start, StringComparison.Ordinal);
+            var wait = code.IndexOf("using var hold = await HoldFleetReadsAsync();", start, StringComparison.Ordinal);
             Assert.True(wait > start && wait - start < 300, title);
         }
     }
@@ -1036,9 +1036,10 @@ public class AuditDashboardTests
         // A focusable panel or border has no automation peer: a screen reader does not offer it as something to press.
         Assert.DoesNotMatch(@"<(Grid|Border|StackPanel|DockPanel)\b[^>]*(MouseLeftButtonUp=|Focusable=""True"")", xaml);
         Assert.DoesNotMatch(@"TargetType=""(Grid|Border)""[^>]*>(\s*<Setter[^>]*/>)*\s*<Setter Property=""Focusable"" Value=""True""/>", xaml);
-        // The PC header, the runner header, and the rows of the queue and of the recent runs.
+        // The PC header, the runner header, the rows of the queue and of the recent runs, and the three links in a
+        // runner's details (the job, the repository and the current job).
         var flat = Regex.Matches(xaml, @"<Button\b[^>]*Style=""\{StaticResource (FlatButton|RunRow)\}""[^>]*>(\s*<AutomationProperties\.Name>)?");
-        Assert.Equal(4, flat.Count);
+        Assert.Equal(7, flat.Count);
         Assert.All(flat, m => Assert.True(m.Value.Contains("AutomationProperties.Name=") || m.Groups[2].Success, m.Value));
     }
 

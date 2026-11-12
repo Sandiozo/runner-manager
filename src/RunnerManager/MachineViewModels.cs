@@ -193,6 +193,10 @@ public sealed class MachineRunnerStatus : INotifyPropertyChanged
     // shown for runners on this PC.
     [JsonIgnore] public Visibility LabelsVisibility => LocalRunner != null || CustomLabels.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
     [JsonIgnore] public bool HasCurrentJob => !string.IsNullOrWhiteSpace(LocalRunner?.CurrentJobUrl);
+    /// <summary>The current job in the details is a link (a button) when GitHub gave its address.</summary>
+    [JsonIgnore] public Visibility CurrentJobLinkVisibility => HasCurrentJob ? Visibility.Visible : Visibility.Collapsed;
+    /// <summary>Otherwise it is plain text, which Tab does not stop at.</summary>
+    [JsonIgnore] public Visibility CurrentJobTextVisibility => HasCurrentJob ? Visibility.Collapsed : Visibility.Visible;
     // Runners on this PC use the dashboard's own readings, so the details are complete even before the agent is updated.
     [JsonIgnore] private long? EffectiveWorkFolderBytes => LocalRunner?.WorkFolderBytes ?? WorkFolderBytes;
     [JsonIgnore] private string EffectiveRunnerVersion => string.IsNullOrWhiteSpace(LocalRunner?.RunnerVersion) ? RunnerVersion : LocalRunner!.RunnerVersion;

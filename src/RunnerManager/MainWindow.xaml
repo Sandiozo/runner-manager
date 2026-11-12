@@ -381,7 +381,8 @@
 
             <!-- Machine cards -->
             <ScrollViewer Grid.Row="2" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Padding="20,0,20,6">
-                <StackPanel>
+                <!-- A click that focuses a header or a row does not scroll the list (Tab still does). -->
+                <StackPanel local:StillOnClick.IsEnabled="True">
                     <ItemsControl ItemsSource="{Binding MachinesView}">
                         <ItemsControl.ItemTemplate>
                             <DataTemplate DataType="{x:Type local:MachineInfo}">
@@ -662,16 +663,17 @@
                                                                                         <TextBlock DockPanel.Dock="Right" Text="{Binding LiveJob.ElapsedText}" Style="{StaticResource Caption}" FontSize="11" VerticalAlignment="Center"/>
                                                                                         <TextBlock Text="CURRENT JOB" Style="{StaticResource SectionLabel}" VerticalAlignment="Center"/>
                                                                                     </DockPanel>
-                                                                                    <TextBlock Text="{Binding LiveJob.Title}" Tag="{Binding LiveJob.Url}" MouseLeftButtonUp="Link_Click" KeyDown="Link_KeyDown"
-                                                                                               Focusable="True" FocusVisualStyle="{StaticResource SubtleFocus}" FontWeight="SemiBold"
-                                                                                               Margin="0,4,0,0" TextTrimming="CharacterEllipsis" Cursor="Hand">
-                                                                                        <TextBlock.ToolTip>
+                                                                                    <!-- A link: Tab reaches it and screen readers name it. -->
+                                                                                    <Button Style="{StaticResource FlatButton}" Tag="{Binding LiveJob.Url}" Click="LinkButton_Click" Margin="0,4,0,0"
+                                                                                            AutomationProperties.Name="{Binding LiveJob.Title}" AutomationProperties.HelpText="Open the job on GitHub">
+                                                                                        <Button.ToolTip>
                                                                                             <StackPanel>
                                                                                                 <TextBlock Text="{Binding LiveJob.Title}" FontWeight="SemiBold"/>
                                                                                                 <TextBlock Text="Open the job on GitHub"/>
                                                                                             </StackPanel>
-                                                                                        </TextBlock.ToolTip>
-                                                                                    </TextBlock>
+                                                                                        </Button.ToolTip>
+                                                                                        <TextBlock Text="{Binding LiveJob.Title}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+                                                                                    </Button>
                                                                                     <TextBlock Text="{Binding LiveJob.Note}" Visibility="{Binding LiveJob.NoteVisibility}" Style="{StaticResource Caption}"
                                                                                                FontSize="12" TextWrapping="Wrap" Margin="0,4,0,0"/>
 
@@ -768,7 +770,7 @@
                                                                                 <ItemsControl ItemsSource="{Binding Queue}" Visibility="{Binding QueueListVisibility}">
                                                                                     <ItemsControl.ItemTemplate>
                                                                                         <DataTemplate DataType="{x:Type local:QueueEntry}">
-                                                                                            <Button Style="{StaticResource RunRow}" Tag="{Binding Url}" Click="RunRow_Click" ToolTip="Open the job on GitHub">
+                                                                                            <Button Style="{StaticResource RunRow}" Tag="{Binding Url}" Click="LinkButton_Click" ToolTip="Open the job on GitHub">
                                                                                                 <AutomationProperties.Name>
                                                                                                     <MultiBinding StringFormat="{}{0}, {1}">
                                                                                                         <Binding Path="Title"/>
@@ -810,7 +812,7 @@
                                                                                 <ItemsControl ItemsSource="{Binding RecentRuns}" Visibility="{Binding RecentRunsListVisibility}">
                                                                                     <ItemsControl.ItemTemplate>
                                                                                         <DataTemplate DataType="{x:Type local:WorkflowRunSummary}">
-                                                                                            <Button Style="{StaticResource RunRow}" Tag="{Binding HtmlUrl}" Click="RunRow_Click" ToolTip="{Binding Title}">
+                                                                                            <Button Style="{StaticResource RunRow}" Tag="{Binding HtmlUrl}" Click="LinkButton_Click" ToolTip="{Binding Title}">
                                                                                                 <AutomationProperties.Name>
                                                                                                     <MultiBinding StringFormat="{}{0}, {1}">
                                                                                                         <Binding Path="TitleText"/>
@@ -860,9 +862,10 @@
                                                                             <StackPanel>
                                                                             <DockPanel Style="{StaticResource KeyRow}">
                                                                                 <TextBlock Text="Repository" Style="{StaticResource KeyText}"/>
-                                                                                <TextBlock Text="{Binding RepositoryText}" Style="{StaticResource Hyperlink}" FontSize="12" HorizontalAlignment="Left"
-                                                                                           Tag="{Binding RepositoryUrl}" MouseLeftButtonUp="Link_Click" KeyDown="Link_KeyDown"
-                                                                                           Focusable="True" FocusVisualStyle="{StaticResource SubtleFocus}"/>
+                                                                                <Button Style="{StaticResource FlatButton}" HorizontalAlignment="Left" Tag="{Binding RepositoryUrl}" Click="LinkButton_Click"
+                                                                                        AutomationProperties.Name="{Binding RepositoryText}" AutomationProperties.HelpText="Open the repository on GitHub">
+                                                                                    <TextBlock Text="{Binding RepositoryText}" Style="{StaticResource Hyperlink}" FontSize="12"/>
+                                                                                </Button>
                                                                             </DockPanel>
                                                                             <DockPanel Style="{StaticResource KeyRow}">
                                                                                 <TextBlock Text="Windows service" Style="{StaticResource KeyText}"/>
@@ -896,22 +899,17 @@
                                                                                 </DockPanel>
                                                                                 <DockPanel Style="{StaticResource KeyRow}">
                                                                                     <TextBlock Text="Current job" Style="{StaticResource KeyText}"/>
-                                                                                    <TextBlock Text="{Binding LocalRunner.CurrentWorkText}" HorizontalAlignment="Left" FontSize="12"
-                                                                                               Tag="{Binding LocalRunner.CurrentJobUrl}" MouseLeftButtonUp="Link_Click" KeyDown="Link_KeyDown"
-                                                                                               FocusVisualStyle="{StaticResource SubtleFocus}">
-                                                                                        <TextBlock.Style>
-                                                                                            <Style TargetType="TextBlock" BasedOn="{StaticResource ValueText}">
-                                                                                                <Style.Triggers>
-                                                                                                    <DataTrigger Binding="{Binding HasCurrentJob}" Value="True">
-                                                                                                        <Setter Property="Foreground" Value="{DynamicResource AccentBrush}"/>
-                                                                                                        <Setter Property="Cursor" Value="Hand"/>
-                                                                                                        <Setter Property="Focusable" Value="True"/>
-                                                                                                        <Setter Property="TextDecorations" Value="Underline"/>
-                                                                                                    </DataTrigger>
-                                                                                                </Style.Triggers>
-                                                                                            </Style>
-                                                                                        </TextBlock.Style>
-                                                                                    </TextBlock>
+                                                                                    <!-- A link when GitHub gave the job's address, plain text otherwise. -->
+                                                                                    <Grid>
+                                                                                        <TextBlock Text="{Binding LocalRunner.CurrentWorkText}" Style="{StaticResource ValueText}" HorizontalAlignment="Left"
+                                                                                                   Visibility="{Binding CurrentJobTextVisibility}"/>
+                                                                                        <Button Style="{StaticResource FlatButton}" HorizontalAlignment="Left" Tag="{Binding LocalRunner.CurrentJobUrl}" Click="LinkButton_Click"
+                                                                                                Visibility="{Binding CurrentJobLinkVisibility}"
+                                                                                                AutomationProperties.Name="{Binding LocalRunner.CurrentWorkText}" AutomationProperties.HelpText="Open the job on GitHub">
+                                                                                            <TextBlock Text="{Binding LocalRunner.CurrentWorkText}" Style="{StaticResource ValueText}"
+                                                                                                       Foreground="{DynamicResource AccentBrush}" TextDecorations="Underline"/>
+                                                                                        </Button>
+                                                                                    </Grid>
                                                                                 </DockPanel>
                                                                                 <DockPanel Style="{StaticResource KeyRow}">
                                                                                     <TextBlock Text="Last log activity" Style="{StaticResource KeyText}"/>

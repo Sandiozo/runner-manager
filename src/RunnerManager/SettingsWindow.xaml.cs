@@ -452,13 +452,13 @@ public partial class SettingsWindow : Window
         RefreshPeers();
         try
         {
-            var answers = await Task.WhenAll(addresses.Select(a => MachineRelay.FetchPeerAsync(null, null, a, null)));
+            var answers = await MachineRelay.ReadAddressesAsync(addresses);
             for (var i = 0; i < addresses.Count; i++)
                 if (answers[i] is { } answer) _addressAnswers[addresses[i]] = answer;
         }
         catch (Exception)
         {
-            // The status stays as the last fleet refresh found it.
+            // The status stays as the last fleet refresh found it. This is also so while this PC joins or leaves the fleet.
         }
         finally
         {

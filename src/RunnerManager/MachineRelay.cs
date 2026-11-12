@@ -91,8 +91,88 @@ public static class MachineRelay
     /// <remarks>
     /// Runs on the thread pool, not on the caller's thread: decrypting and reading the answers and saving fleet.json
     /// (which can wait for the agent's write) would otherwise run on the dashboard's UI thread and make it stutter.
+    /// While this PC joins or leaves the fleet, it fails with <see cref="FleetReadsHeldText"/> (see <see cref="HoldFleetReadsAsync"/>).
     /// </remarks>
-    public static Task<List<MachineInfo>> ReadFleetAsync(bool forceDiscovery = false) => Task.Run(() => ReadFleetOnPoolAsync(forceDiscovery));
+    public static Task<List<MachineInfo>> ReadFleetAsync(bool forceDiscovery = false) => StartFleetRead(() => ReadFleetOnPoolAsync(forceDiscovery));
+
+    /// <summary>
+    /// Asks addresses that no known PC has for their status, as a fleet read does (<see cref="FetchPeerAsync"/>): a PC
+    /// that answers is saved. Held back like <see cref="ReadFleetAsync"/> while this PC joins or leaves the fleet.
+    /// </summary>
+    public static Task<MachineInfo?[]> ReadAddressesAsync(IReadOnlyList<string> addresses)
+        => StartFleetRead(() => Task.WhenAll(addresses.Select(a => FetchPeerAsync(null, null, a, null))));
+
+    internal const string FleetReadsHeldText = "This PC is joining or leaving the fleet, so the other PCs are not read until it is done. Try again in a moment.";
+
+    private static readonly object FleetReadGate = new();
+    private static int _fleetReadHolds;
+    private static readonly HashSet<Task> FleetReads = new();
+
+    /// <summary>Whether this PC joins or leaves the fleet now, so fleet reads in this process are held back.</summary>
+    internal static bool FleetReadsHeld { get { lock (FleetReadGate) return _fleetReadHolds > 0; } }
+
+    /// <summary>Starts a read that saves the PCs it finds, on the thread pool, unless this PC joins or leaves the fleet.</summary>
+    internal static Task<T> StartFleetRead<T>(Func<Task<T>> read)
+    {
+        lock (FleetReadGate)
+        {
+            if (_fleetReadHolds > 0) return Task.FromException<T>(new InvalidOperationException(FleetReadsHeldText));
+            var running = Task.Run(read);
+            FleetReads.Add(running);
+            _ = running.ContinueWith(ended => { lock (FleetReadGate) FleetReads.Remove(ended); }, TaskScheduler.Default);
+            return running;
+        }
+    }
+
+    /// <summary>
+    /// Holds back every fleet read in this process (the dashboard's refresh, Change fleet code and the address check in
+    /// Settings) until the result is disposed, and first waits for the reads that started before. Join fleet and Leave
+    /// fleet take it: a read saves the PCs it finds, and could add a PC back to the list that leaving just cleared. It
+    /// waits at most until <paramref name="limit"/> has ended (started only when a read still runs), as a read that does
+    /// not end would leave Join or Leave running with no way to cancel it. It never throws.
+    /// </summary>
+    internal static async Task<FleetReadHold> HoldFleetReadsAsync(Func<Task> limit)
+    {
+        Task[] running;
+        lock (FleetReadGate)
+        {
+            _fleetReadHolds++;
+            running = FleetReads.ToArray();
+        }
+        var hold = new FleetReadHold();
+        try { hold.EarlierReadsEnded = await WaitForReadAsync(running.Length == 0 ? null : Task.WhenAll(running), limit); }
+        catch
+        {
+            hold.Dispose();
+            throw;
+        }
+        return hold;
+    }
+
+    /// <summary>Holds fleet reads back until it is disposed (see <see cref="HoldFleetReadsAsync"/>).</summary>
+    internal sealed class FleetReadHold : IDisposable
+    {
+        private int _released;
+
+        /// <summary>The reads that started before ended; false when the hold went on without them.</summary>
+        public bool EarlierReadsEnded { get; internal set; }
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _released, 1) == 1) return;
+            lock (FleetReadGate) _fleetReadHolds--;
+        }
+    }
+
+    /// <summary>
+    /// Waits until <paramref name="read"/> has ended, or <paramref name="limit"/> has (started only when the read still
+    /// runs). True when the read ended or was not running. It never throws, also when the read failed.
+    /// </summary>
+    internal static async Task<bool> WaitForReadAsync(Task? read, Func<Task> limit)
+    {
+        if (read is not { IsCompleted: false }) return true;
+        return await Task.WhenAny(read, limit()) == read;
+    }
 
     private static async Task<List<MachineInfo>> ReadFleetOnPoolAsync(bool forceDiscovery)
     {
@@ -373,12 +453,17 @@ public static class MachineRelay
         if (!duplicates && renamed.Count == 0 && !wasManaged && existing != null && existing.Name == name && existing.Address == address
             && existing.Version == version && existing.MachineId == machineId
             && DateTime.UtcNow - existing.LastSeenUtc < TimeSpan.FromMinutes(10)) return;
-        FleetConfig.Update(c =>
+        var saved = FleetConfig.UpdateIf(c =>
         {
+            // This PC is not in a fleet (any more). A read that ends after Leave fleet, also one in another process
+            // such as an AI assistant's, must not add a PC back to the list that leaving cleared.
+            if (string.IsNullOrEmpty(c.ProtectedFleetKey)) return false;
             c.KnownPeers.RemoveAll(p => Sanitize(p.Name) == Sanitize(name) || renamed.Any(r => Sanitize(r.Name) == Sanitize(p.Name)));
             c.KnownPeers.Add(new PeerRecord { Name = name, Address = address, Version = version, MachineId = machineId, LastSeenUtc = DateTime.UtcNow });
             if (wasManaged) c.ForgetManagedWhere(p => p.MachineId.Equals(machineId, StringComparison.OrdinalIgnoreCase));
+            return true;
         });
+        if (!saved) return;
         if (wasManaged) AppendAgentLog($"{name} joined the fleet, so it is no longer managed one way.");
         foreach (var old in renamed)
         {
@@ -392,8 +477,12 @@ public static class MachineRelay
     /// same PC ends here; a managed PC with only the same name is kept.
     /// </summary>
     /// <param name="machineId">The PC's machine ID, as its status reports it; null when the pairing did not say.</param>
+    /// <exception cref="InvalidOperationException">This PC is not in a fleet (any more), so the PC is not saved.</exception>
     public static void AddKnownPeer(string name, string address, string? machineId = null)
-        => RememberPeer(name, FleetNetwork.WithPort(address), string.Empty, machineId ?? string.Empty);
+    {
+        if (string.IsNullOrEmpty(FleetConfig.Current.ProtectedFleetKey)) throw new InvalidOperationException("This PC is not in a fleet any more.");
+        RememberPeer(name, FleetNetwork.WithPort(address), string.Empty, machineId ?? string.Empty);
+    }
 
     public static void ForgetPeer(string name)
     {
