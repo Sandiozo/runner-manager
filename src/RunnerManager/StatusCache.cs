@@ -25,6 +25,8 @@ internal sealed class StatusCache(Func<Task<MachineStatusPayload>> build, Action
     internal TimeSpan BuildTimeout { get; init; } = DefaultBuildTimeout;
     /// <summary>How long reading this PC's state may take, here and for the watchdog.</summary>
     internal static readonly TimeSpan DefaultBuildTimeout = TimeSpan.FromSeconds(60);
+    /// <summary>The clock (tests set their own).</summary>
+    internal Func<DateTime> UtcNow { get; init; } = () => DateTime.UtcNow;
     /// <summary>How many builds may run at once, given-up ones included, so a PC whose WMI hangs doesn't pile up threads.</summary>
     private const int MaxRunningBuilds = 3;
     private readonly object _gate = new();
@@ -61,9 +63,10 @@ internal sealed class StatusCache(Func<Task<MachineStatusPayload>> build, Action
         {
             last = _last;
             current = last != null && _lastVersion == _version;
-            if (current && DateTime.UtcNow - _builtUtc <= FreshFor) return last!;
+            if (current && UtcNow() - _builtUtc <= FreshFor) return last!;
             var idle = _building == null || _building.IsCompleted;
-            var hung = !idle && DateTime.UtcNow - _buildingSinceUtc > BuildTimeout;
+            // How long the build that runs now has taken. A build queued behind it does not restart this clock.
+            var hung = !idle && UtcNow() - _buildingSinceUtc > BuildTimeout;
             if (idle || (hung && _running < MaxRunningBuilds))
             {
                 if (hung) note = Problem(SlowText);
@@ -97,7 +100,8 @@ internal sealed class StatusCache(Func<Task<MachineStatusPayload>> build, Action
     {
         _queued = after != null;
         _buildingVersion = _version;
-        _buildingSinceUtc = DateTime.UtcNow;
+        // A queued build sets it when it starts, so a hung build before it is still noticed in time.
+        if (after == null) _buildingSinceUtc = UtcNow();
         _building = BuildAsync(++_started, after);
         // A failed build is retried by the next request; nobody may be waiting for this one.
         _ = _building.ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);
@@ -111,7 +115,7 @@ internal sealed class StatusCache(Func<Task<MachineStatusPayload>> build, Action
         }
         string? note;
         int version;
-        var startedUtc = DateTime.UtcNow;
+        var startedUtc = UtcNow();
         lock (_gate)
         {
             version = _version;
@@ -133,10 +137,10 @@ internal sealed class StatusCache(Func<Task<MachineStatusPayload>> build, Action
                     _last = built;
                     _lastVersion = version;
                     _lastBuild = number;
-                    _builtUtc = DateTime.UtcNow;
+                    _builtUtc = UtcNow();
                 }
                 // Only a build that finished in time ends a problem: a slow PC is logged once, not at every build.
-                var inTime = DateTime.UtcNow - startedUtc <= BuildTimeout;
+                var inTime = UtcNow() - startedUtc <= BuildTimeout;
                 note = inTime && _problem != null ? "Reading this PC's status works again." : null;
                 if (inTime) _problem = null;
             }

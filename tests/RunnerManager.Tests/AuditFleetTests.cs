@@ -336,7 +336,7 @@ public class PendingCodeTests
             FleetConfig.Update(c => c.ProtectedPendingFleetKey = string.Empty);
             Assert.Equal(sent, keys.Pending);
 
-            // Replace code, or Enter pairing code, on this PC.
+            // Replace code, or Enter fleet code, on this PC.
             FleetConfig.SetFleetKey(replaced);
             Assert.Null(keys.Pending);
             keys.UsePending(sent);
@@ -909,6 +909,44 @@ public class StatusCacheBuildTests
     }
 
     [Fact]
+    public async Task ABuildQueuedBehindAHungOne_DoesNotRestartItsClock()
+    {
+        var now = new DateTime(2026, 11, 12, 8, 0, 0, DateTimeKind.Utc);
+        var builds = 0;
+        var hang = new TaskCompletionSource<MachineStatusPayload>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var log = new List<string>();
+        var cache = new StatusCache(() =>
+        {
+            var n = Interlocked.Increment(ref builds);
+            return n == 2 ? hang.Task : Task.FromResult(Payload(n));
+        }, message => { lock (log) log.Add(message); })
+        {
+            BuildTimeout = TimeSpan.FromSeconds(60),
+            ChangeWait = TimeSpan.Zero,
+            UtcNow = () => now
+        };
+        Assert.Equal("1", (await cache.GetAsync()).LastCommandId);
+
+        // A command ran: build 2 starts, and hangs.
+        cache.Invalidate();
+        await cache.GetAsync();
+        Assert.True(SpinWait.SpinUntil(() => Volatile.Read(ref builds) == 2, TimeSpan.FromSeconds(10)));
+
+        // Another command ran 50 seconds later: build 3 is queued behind build 2.
+        now += TimeSpan.FromSeconds(50);
+        cache.Invalidate();
+        await cache.GetAsync();
+        Assert.Equal(2, Volatile.Read(ref builds));
+
+        // 70 seconds after build 2 started, and 20 after build 3 was queued: build 2 counts as hung, so another starts.
+        now += TimeSpan.FromSeconds(20);
+        await cache.GetAsync();
+        Assert.True(SpinWait.SpinUntil(() => Volatile.Read(ref builds) == 3, TimeSpan.FromSeconds(10)));
+        lock (log) Assert.Contains(log, m => m.Contains("took more than 60 seconds"));
+        hang.SetResult(Payload(2));
+    }
+
+    [Fact]
     public async Task ASlowBuildThatFinishesInTime_RunsAlone_AndIsNotLogged()
     {
         var builds = 0;
@@ -986,18 +1024,23 @@ public class AssistantSwitchTests
     private static readonly string ConfigPath = Path.Combine(FleetConfig.StateDir, "fleet.json");
 
     /// <summary>Runs a test with its own switch store, a file that stands in for the registry, and puts back the one before it.</summary>
-    private static Task WithStoreAsync(bool administrator, Action<string> test) => AuditFleetConfig.WithConfigAsync(() =>
+    private static Task WithStoreAsync(bool administrator, Action<string> test) => WithStoreAsync(administrator, path =>
+    {
+        test(path);
+        return Task.CompletedTask;
+    });
+
+    private static Task WithStoreAsync(bool administrator, Func<string, Task> test) => AuditFleetConfig.WithConfigAsync(async () =>
     {
         var path = Path.Combine(FleetConfig.StateDir, $"assistant-switches-{Guid.NewGuid():N}.json");
         var before = AssistantSwitches.Store;
         AssistantSwitches.Store = new FileSwitchStore(path) { CanWrite = administrator };
-        try { test(path); }
+        try { await test(path); }
         finally
         {
             AssistantSwitches.Store = before;
             File.Delete(path);
         }
-        return Task.CompletedTask;
     });
 
     private static void WriteFleetJson(string json)
@@ -1018,6 +1061,59 @@ public class AssistantSwitchTests
     {
         var store = Assert.IsType<FileSwitchStore>(AssistantSwitches.Store);
         Assert.Equal(Path.Combine(FleetConfig.StateDir, "assistant-switches.json"), store.Where);
+    }
+
+    [Fact]
+    public void RunnerManager_KeepsTheSwitchesInTheRegistry_WhateverTheStateFolderVariableSays()
+    {
+        // The tests set the variable, as a program without administrator rights can in HKCU\Environment.
+        Assert.False(string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("RUNNER_MANAGER_STATE_DIR")));
+        var store = Assert.IsType<RegistrySwitchStore>(AssistantSwitches.ShippedStore());
+        Assert.Equal(@"HKEY_LOCAL_MACHINE\SOFTWARE\RunnerManager", store.Where);
+
+        // And Runner Manager has no store that keeps them anywhere a program without those rights could change.
+        var stores = typeof(AssistantSwitches).Assembly.GetTypes()
+            .Where(t => !t.IsInterface && typeof(IAssistantSwitchStore).IsAssignableFrom(t)).ToList();
+        Assert.Equal(new[] { typeof(FleetAgentSwitchStore), typeof(RegistrySwitchStore) }, stores.OrderBy(t => t.Name));
+    }
+
+    [Fact]
+    public async Task AnAssistantLaunch_NeitherReadsNorChangesTheSwitches_EvenWithAdministratorRights()
+    {
+        await WithStoreAsync(administrator: true, async path =>
+        {
+            new FileSwitchStore(path).Write(new AssistantSwitchValues(true, false));
+            WriteFleetJson("{\"Assistant\":{\"Enabled\":true,\"AskBeforeChanges\":false}}");
+            // What RunnerManager.exe ai and --mcp do first.
+            Assert.Equal(0, await AssistantHost.RunAsync(new[] { AssistantHost.CliArgument, "help" }));
+            Assert.IsType<FleetAgentSwitchStore>(AssistantSwitches.Store);
+
+            // The fleet agent decides; this process sees only the defaults, and moves and writes nothing.
+            Assert.False(FleetConfig.Current.Assistant.Enabled);
+            Assert.True(FleetConfig.Current.Assistant.AskBeforeChanges);
+            var refused = Assert.Throws<UnauthorizedAccessException>(() => FleetConfig.Update(c => c.Assistant.AskBeforeChanges = false));
+            Assert.Equal(AssistantSwitches.NotAdministratorText, refused.Message);
+            Assert.Throws<UnauthorizedAccessException>(() => AssistantSwitches.Set(enabled: false));
+            Assert.Equal(new AssistantSwitchValues(true, false), new FileSwitchStore(path).Read());
+        });
+    }
+
+    [Fact]
+    public async Task RemovedForUninstall_TheSwitchesAreNotMovedFromFleetJsonAgain()
+    {
+        await WithStoreAsync(administrator: true, path =>
+        {
+            WriteFleetJson("{\"Assistant\":{\"Enabled\":true,\"AskBeforeChanges\":false}}");
+            Assert.True(FleetConfig.Current.Assistant.Enabled);
+            Assert.True(File.Exists(path));
+
+            AssistantSwitches.Remove();
+            Assert.False(File.Exists(path));
+            WriteFleetJson("{\"Assistant\":{\"Enabled\":true,\"AskBeforeChanges\":false}}");
+            Assert.False(FleetConfig.Current.Assistant.Enabled);
+            Assert.True(FleetConfig.Current.Assistant.AskBeforeChanges);
+            Assert.False(File.Exists(path));
+        });
     }
 
     [Fact]
@@ -1094,5 +1190,156 @@ public class AssistantSwitchTests
             Assert.True(FleetConfig.Current.Assistant.Enabled);
             Assert.False(FleetConfig.Current.Assistant.AskBeforeChanges);
         });
+    }
+}
+
+[Collection(FleetSettingsCollection.Name)]
+public class FullJoinTests
+{
+    /// <summary>A PC in a fleet: it knows a PC, an address added by hand and a PC it manages one way.</summary>
+    private static void InAFleet(byte[] key)
+    {
+        FleetConfig.SetFleetKey(key);
+        FleetConfig.Update(c =>
+        {
+            c.KnownPeers.Add(new PeerRecord { Name = "OLDPC", Address = "10.0.0.5:47821", LastSeenUtc = DateTime.UtcNow });
+            c.ManualAddresses.Add("old-pc.example.ts.net");
+            c.RemovedManagedPcs.Add(new RemovedManagedPc { KeyId = "0123abcd", RemovedUtc = DateTime.UtcNow });
+            c.Watchdog = false;
+            c.RunnerFolder = @"D:\Runners";
+        });
+        FleetConfig.AddManagedPc("MANAGEDPC", "10.0.0.9", CommandSigner.NewKey());
+    }
+
+    private static bool KeepsTheFleet(FleetConfig c)
+        => c.KnownPeers.Count == 1 && c.ManualAddresses.Count == 1 && c.ManagedPcs.Count == 1 && c.RemovedManagedPcs.Count == 1;
+
+    private static void AssertForgotten(FleetConfig c)
+    {
+        Assert.Empty(c.KnownPeers);
+        Assert.Empty(c.ManualAddresses);
+        Assert.Empty(c.ManagedPcs);
+        Assert.Empty(c.RemovedManagedPcs);
+    }
+
+    [Fact]
+    public async Task JoiningAnotherFleet_ForgetsTheEarlierFleet_AndKeepsThisPcsOwnSettings()
+    {
+        await AuditFleetConfig.WithConfigAsync(() =>
+        {
+            var machineId = FleetConfig.LocalMachineId;
+            InAFleet(CommandSigner.NewKey());
+            // Remove code keeps them, for when the code is entered again.
+            FleetConfig.SetFleetKey(null);
+            Assert.True(KeepsTheFleet(FleetConfig.Current));
+
+            var other = CommandSigner.NewKey();
+            FleetConfig.SetFleetKey(other);
+
+            var config = FleetConfig.Current;
+            Assert.Equal(other, config.FleetKey);
+            AssertForgotten(config);
+            Assert.False(config.Watchdog);
+            Assert.Equal(@"D:\Runners", config.RunnerFolder);
+            Assert.Equal(machineId, config.MachineId);
+            Assert.Empty(config.RemovedFleetKeyId);
+            return Task.CompletedTask;
+        });
+    }
+
+    [Fact]
+    public async Task EnteringTheRemovedCodeAgain_KeepsTheFleet()
+    {
+        await AuditFleetConfig.WithConfigAsync(() =>
+        {
+            var key = CommandSigner.NewKey();
+            InAFleet(key);
+            FleetConfig.SetFleetKey(null);
+            Assert.Equal(CommandSigner.KeyId(key), FleetConfig.Current.RemovedFleetKeyId);
+
+            FleetConfig.SetFleetKey(key);
+            Assert.True(KeepsTheFleet(FleetConfig.Current));
+            Assert.Empty(FleetConfig.Current.RemovedFleetKeyId);
+            return Task.CompletedTask;
+        });
+    }
+
+    [Fact]
+    public async Task ANewCodeForTheSameFleet_KeepsItsPcs()
+    {
+        await AuditFleetConfig.WithConfigAsync(() =>
+        {
+            InAFleet(CommandSigner.NewKey());
+            // Change fleet code, or a new code entered by hand on each PC: the code replaces the one before it.
+            FleetConfig.SetFleetKey(CommandSigner.NewKey());
+            Assert.True(KeepsTheFleet(FleetConfig.Current));
+            return Task.CompletedTask;
+        });
+    }
+
+    [Fact]
+    public async Task ANewFleet_OnAPcWithoutACode_StartsWithoutTheEarlierFleet()
+    {
+        await AuditFleetConfig.WithConfigAsync(() =>
+        {
+            InAFleet(CommandSigner.NewKey());
+            // As a version before 2.9 left it: no code, and nothing to tell which code the PCs belonged to.
+            FleetConfig.Update(c =>
+            {
+                c.ProtectedFleetKey = string.Empty;
+                c.RemovedFleetKeyId = string.Empty;
+            });
+            FleetConfig.SetFleetKey(CommandSigner.NewKey());
+            AssertForgotten(FleetConfig.Current);
+            return Task.CompletedTask;
+        });
+    }
+}
+
+public class CodeProblemTests
+{
+    public static TheoryData<string> CodeProblems => new()
+    {
+        FleetNetwork.RefusalMessage("denied"),
+        // With the note about an older agent that cannot read the name.
+        FleetNetwork.RefusalMessage("denied", "ÖSTRA"),
+        FleetNetwork.NoCodeThereText,
+        FleetNetwork.NoCodeHereText,
+        FleetNetwork.ResponseNotVerifiedText,
+        FleetNetwork.AccessCodeUnreadableText("PC2"),
+        FleetNetwork.AccessCodeRefusedText("PC2"),
+        // Versions 2.4 to 2.8.2.
+        "The pairing code does not match. Use the same pairing code on every PC.",
+        "The fleet agent on that PC has no pairing code.",
+        "Could not verify the response with this PC's pairing code.",
+        "This PC can't read the pairing code for PC2. Remove it and pair it again.",
+        "This PC has no pairing code. Set one up in Settings → Fleet."
+    };
+
+    [Theory]
+    [MemberData(nameof(CodeProblems))]
+    public void AWrongOrMissingCode_IsACodeProblem(string message) => Assert.True(FleetNetwork.IsCodeProblem(message));
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("Not reachable at 10.0.0.5:47821")]
+    [InlineData("The other PC refused the request: wrong PC")]
+    [InlineData("Could not reach PC2. Check that it is on and on the same network.")]
+    public void OtherProblems_AreNot(string? message) => Assert.False(FleetNetwork.IsCodeProblem(message));
+
+    [Fact]
+    public void ClockAndNameProblems_AreNot()
+    {
+        Assert.False(FleetNetwork.IsCodeProblem(FleetNetwork.RefusalMessage("the PC clocks differ by more than 5 minutes; set both to the correct time")));
+        Assert.False(FleetNetwork.IsCodeProblem(MachineRelay.ManagedNameProblem("PC2")));
+        Assert.False(FleetNetwork.IsCodeProblem(MachineRelay.ManagedNameTakenProblem("PC2")));
+    }
+
+    [Fact]
+    public void AManagedPcsCode_IsCalledItsAccessCode()
+    {
+        Assert.Equal("This PC cannot read the access code for PC2. Remove it and pair it again.", FleetNetwork.AccessCodeUnreadableText("PC2"));
+        Assert.DoesNotContain("pairing", FleetNetwork.AccessCodeRefusedText("PC2"));
     }
 }

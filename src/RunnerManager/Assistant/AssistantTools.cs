@@ -695,15 +695,17 @@ public static class AssistantTools
     private static readonly SemaphoreSlim LookupGate = new(4, 4);
 
     /// <summary>Asks GitHub for a repository's current name. Only GitHub's own answers are remembered.</summary>
-    /// <param name="run">Runs gh; a test replaces it.</param>
-    internal static async Task<RepositoryLookup> LookUpRepositoryAsync(string path, Func<string, Task<CommandResult>>? run = null)
+    /// <param name="api">Runs "gh api" with an endpoint and its options, as <see cref="GitHubCli.ApiAsync(string, string[])"/>; a test replaces it.</param>
+    internal static async Task<RepositoryLookup> LookUpRepositoryAsync(string path, Func<string, string[], Task<CommandResult>>? api = null)
     {
         if (RepositoryLookups.TryGetValue(path, out var known) && DateTime.UtcNow < known.Until) return known.Lookup;
         await LookupGate.WaitAsync();
         try
         {
-            var arguments = $"api repos/{path} --jq .full_name";
-            var lookup = ReadLookup(run != null ? await run(arguments) : await GitHubCli.RunAsync(arguments));
+            // Each argument on its own, so nothing in the path can become another option of gh.
+            var endpoint = $"repos/{path}";
+            string[] options = ["--jq", ".full_name"];
+            var lookup = ReadLookup(await (api ?? GitHubCli.ApiAsync)(endpoint, options));
             // A timeout, a rate limit or a missing sign-in says nothing about the repository, so the next call asks again.
             if (lookup.Current != null) RepositoryLookups[path] = (lookup, DateTime.UtcNow + TimeSpan.FromMinutes(30));
             else if (lookup.NotFound) RepositoryLookups[path] = (lookup, DateTime.UtcNow + TimeSpan.FromMinutes(2));

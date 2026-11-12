@@ -42,6 +42,13 @@ public sealed class AgentLink : IDisposable
     /// </summary>
     private static readonly TimeSpan DefaultSignInTimeout = TimeSpan.FromMinutes(2);
 
+    /// <summary>
+    /// After a sign-in that was not answered in time, the requests that waited for it and those that follow fail at
+    /// once for a while, instead of each waiting <see cref="DefaultSignInTimeout"/> again. Then the next one asks again:
+    /// a busy agent may only have been slow.
+    /// </summary>
+    private static readonly TimeSpan SignInTimeoutMemory = TimeSpan.FromSeconds(30);
+
     /// <summary>The most that is read of a sign-in answer, which is under 1 KB.</summary>
     private const int MaxSignInAnswerBytes = 16 * 1024;
 
@@ -65,6 +72,10 @@ public sealed class AgentLink : IDisposable
     private volatile string? _initialize;
     private Task? _initializing;
     private (DateTime Until, string Message)? _unreachable;
+    private (DateTime Until, string Message)? _signInTimedOut;
+
+    /// <summary>The clock for what this link remembers (tests pass their own).</summary>
+    internal Func<DateTime> UtcNow { get; init; } = () => DateTime.UtcNow;
 
     /// <summary>
     /// How this process connects to the agent: straight to this PC. A proxy from Windows' settings or from the
@@ -264,21 +275,30 @@ public sealed class AgentLink : IDisposable
     private async Task<SignedIn> SignInAsync(CancellationToken cancellationToken)
     {
         if (_signedIn is { } current) return current;
+        ThrowIfSignInTimedOut();
         await _signInGate.WaitAsync(cancellationToken);
         try
         {
             if (_signedIn is { } already) return already;
+            // The requests that waited here for a sign-in that timed out do not each try again.
+            ThrowIfSignInTimedOut();
             using var limit = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             limit.CancelAfter(_signInTimeout);
             try { return _signedIn = await NewSignInAsync(limit.Token); }
-            // Nothing is remembered about it: the next request asks again, in case the agent was only slow.
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
             {
-                throw new AgentLinkException("The fleet agent did not answer this program's sign-in in time. Try again. " +
-                                             "If this happens again, restart Runner Manager's fleet agent, or check which program uses port " + _port + ".");
+                var message = "The fleet agent did not answer this program's sign-in in time. Try again in a minute. " +
+                              "If this happens again, restart Runner Manager's fleet agent, or check which program uses port " + _port + ".";
+                _signInTimedOut = (UtcNow() + SignInTimeoutMemory, message);
+                throw new AgentLinkException(message);
             }
         }
         finally { _signInGate.Release(); }
+    }
+
+    private void ThrowIfSignInTimedOut()
+    {
+        if (_signInTimedOut is { } known && UtcNow() < known.Until) throw new AgentLinkException(known.Message);
     }
 
     /// <summary>
@@ -373,7 +393,7 @@ public sealed class AgentLink : IDisposable
 
     private async Task<HttpResponseMessage> Send(HttpRequestMessage request, CancellationToken cancellationToken)
     {
-        if (_unreachable is { } known && DateTime.UtcNow < known.Until) throw new AgentLinkException(known.Message);
+        if (_unreachable is { } known && UtcNow() < known.Until) throw new AgentLinkException(known.Message);
         try { return await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken); }
         catch (HttpRequestException ex) when (ex.HttpRequestError is HttpRequestError.ConnectionError or HttpRequestError.NameResolutionError)
         {
@@ -394,7 +414,7 @@ public sealed class AgentLink : IDisposable
     {
         var message = $"Runner Manager's fleet agent is not running on this PC ({reason}). " +
                       "Open Runner Manager and turn on Settings → AI assistants; it starts the agent.";
-        _unreachable = (DateTime.UtcNow + UnreachableMemory, message);
+        _unreachable = (UtcNow() + UnreachableMemory, message);
         return new AgentLinkException(message);
     }
 

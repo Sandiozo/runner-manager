@@ -32,7 +32,7 @@ public sealed class FleetConfig
     /// </summary>
     private static readonly Lazy<Mutex?> FileMutex = new(CreateFileMutex);
 
-    /// <summary>The fleet pairing code, encrypted for this Windows user with DPAPI.</summary>
+    /// <summary>The fleet code (on a managed PC, its access code), encrypted for this Windows user with DPAPI.</summary>
     public string ProtectedFleetKey { get; set; } = string.Empty;
     /// <summary>Other PCs in the fleet and where they were last reached.</summary>
     public List<PeerRecord> KnownPeers { get; set; } = new();
@@ -54,7 +54,7 @@ public sealed class FleetConfig
     /// </summary>
     public string MachineId { get; set; } = string.Empty;
     /// <summary>
-    /// PCs this fleet manages one way: each has its own pairing code, which only this fleet knows. They answer this
+    /// PCs this fleet manages one way: each has its own access code, which only this fleet knows. They answer this
     /// fleet's requests but never get the fleet's code, so they can't see or control its PCs.
     /// </summary>
     public List<ManagedPcRecord> ManagedPcs { get; set; } = new();
@@ -110,7 +110,7 @@ public sealed class FleetConfig
                     _readFailedUtc = null;
                     if (hasPlainKey)
                     {
-                        // Earlier builds also wrote the decrypted pairing code; save once without it.
+                        // Earlier builds also wrote the decrypted fleet code; save once without it.
                         // Write never reads the config back, so this cannot recurse.
                         try
                         {
@@ -293,7 +293,7 @@ public sealed class FleetConfig
 
     /// <summary>
     /// Writes are atomic, so a file that stays invalid is damaged rather than half-written. Keeps a copy for inspection
-    /// and saves what can still be read in its place, so the pairing code is still there at the next read and later
+    /// and saves what can still be read in its place, so the fleet code is still there at the next read and later
     /// saves aren't blocked. Returns null when the file changed meanwhile.
     /// </summary>
     private static FleetConfig? SaveSalvage(string? json)
@@ -342,7 +342,7 @@ public sealed class FleetConfig
         }
         catch (JsonException)
         {
-            // Not even valid JSON (cut off, for example): the pairing code may still be in it.
+            // Not even valid JSON (cut off, for example): the fleet code may still be in it.
             config.ProtectedFleetKey = StringValue(json, nameof(ProtectedFleetKey)) ?? string.Empty;
             config.MachineId = StringValue(json, nameof(MachineId)) ?? string.Empty;
         }
@@ -354,6 +354,7 @@ public sealed class FleetConfig
     private void Normalize()
     {
         ProtectedFleetKey ??= string.Empty;
+        RemovedFleetKeyId ??= string.Empty;
         ProtectedPendingFleetKey ??= string.Empty;
         KnownPeers ??= new();
         KnownPeers.RemoveAll(p => p == null);
@@ -408,7 +409,7 @@ public sealed class FleetConfig
     private DecryptedKey? _decryptedKey;
 
     /// <summary>
-    /// The decrypted pairing code, or null. Never written to fleet.json. Decrypted once per instance (a new
+    /// The decrypted fleet code (on a managed PC, its access code), or null. Never written to fleet.json. Decrypted once per instance (a new
     /// instance is loaded when the file changes); each caller gets its own copy.
     /// </summary>
     [JsonIgnore]
@@ -431,19 +432,54 @@ public sealed class FleetConfig
         catch { return null; }
     }
 
-    /// <summary>Sets the fleet's pairing code (a new fleet, a full join or a pasted code), so this PC is no longer managed.</summary>
+    /// <summary>
+    /// Sets the fleet code (a new fleet, a full join, a pasted code, or Change fleet code), so this PC is no longer
+    /// managed. A PC without a code that gets one starts or joins a fleet: unless it is the code removed here last, what
+    /// belonged to its earlier fleet goes (<see cref="ForgetEarlierFleet"/>). A code that replaces another keeps it: that
+    /// is the same fleet with a new code, as after Change fleet code or a code entered by hand on each PC.
+    /// </summary>
     public static void SetFleetKey(byte[]? key) => Update(c =>
     {
+        var before = c.FleetKey;
+        if (key == null)
+        {
+            // Entering this code again is the same fleet, so it finds its PCs again.
+            if (before != null) c.RemovedFleetKeyId = CommandSigner.KeyId(before);
+        }
+        else
+        {
+            if (before == null && CommandSigner.KeyId(key) != c.RemovedFleetKeyId) c.ForgetEarlierFleet();
+            c.RemovedFleetKeyId = string.Empty;
+        }
         c.ProtectedFleetKey = Protect(key);
         c.ClearPendingFleetKey();
         c.ManagedBy = string.Empty;
     });
 
+    /// <summary>
+    /// The fingerprint of the fleet code removed last (Settings → Fleet → Remove code), while this PC has no code. Empty
+    /// otherwise.
+    /// </summary>
+    public string RemovedFleetKeyId { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Forgets what belonged to the fleet this PC was in before: its PCs, the addresses added by hand to find them, and
+    /// the PCs it managed one way, whose codes the new fleet would otherwise get from this PC. This PC's own settings
+    /// stay.
+    /// </summary>
+    private void ForgetEarlierFleet()
+    {
+        KnownPeers.Clear();
+        ManualAddresses.Clear();
+        ManagedPcs.Clear();
+        RemovedManagedPcs.Clear();
+    }
+
     private static string Protect(byte[]? key)
         => key == null ? string.Empty : Convert.ToBase64String(ProtectedData.Protect(key, null, DataProtectionScope.CurrentUser));
 
     /// <summary>
-    /// A new pairing code sent by "Change fleet code" on another PC, encrypted like the pairing code. The agent
+    /// A new code sent by "Change fleet code" on another PC, encrypted like the fleet code. The agent
     /// accepts it next to the current code until the first request that uses it; then it replaces the current code.
     /// </summary>
     public string ProtectedPendingFleetKey { get; set; } = string.Empty;
@@ -636,7 +672,7 @@ public sealed class FleetConfig
     }
 
     /// <summary>
-    /// Makes the pending code the pairing code, if it still is <paramref name="key"/> (in fleet.json, or the copy the agent
+    /// Makes the pending code the fleet code, if it still is <paramref name="key"/> (in fleet.json, or the copy the agent
     /// kept in memory). The old code stops working.
     /// </summary>
     public static void UsePendingFleetKey(byte[] key, byte[]? remembered = null) => Update(c =>
@@ -648,7 +684,7 @@ public sealed class FleetConfig
     });
 }
 
-/// <summary>The fleet pairing code: 32 random bytes, shown as "rwk_…" so it can be copied between PCs.</summary>
+/// <summary>The fleet code: 32 random bytes, shown as "rwk_…" so it can be copied between PCs.</summary>
 public static class CommandSigner
 {
     private const string KeyPrefix = "rwk_";
@@ -740,7 +776,7 @@ public sealed class ManagedPcRecord
     public DateTime LastSeenUtc { get; set; }
     /// <summary>When it was paired; of two pairings of one PC, the newer one wins.</summary>
     public DateTime AddedUtc { get; set; }
-    /// <summary>The PC's own pairing code, encrypted for this Windows user with DPAPI.</summary>
+    /// <summary>The PC's own access code, encrypted for this Windows user with DPAPI.</summary>
     public string ProtectedKey { get; set; } = string.Empty;
     /// <summary>The code's fingerprint, which identifies this pairing.</summary>
     public string KeyId { get; set; } = string.Empty;

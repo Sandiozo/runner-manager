@@ -339,16 +339,26 @@ public static class ScheduledTasks
     /// </summary>
     public static async Task<bool?> IsRunningAsync(string name)
     {
-        var task = name.Replace("'", "''");
-        var (code, output) = await RunAsync("powershell.exe",
-            "-NoLogo -NoProfile -NonInteractive -Command \"$s = New-Object -ComObject Schedule.Service; $s.Connect(); " +
-            $"try {{ [int]$s.GetFolder('\\').GetTask('{task}').State }} catch {{ -1 }}\"", ShortTimeout);
+        var (code, output) = await RunAsync("powershell.exe", $"-NoLogo -NoProfile -NonInteractive -Command \"{TaskStateScript(name)}\"", ShortTimeout);
         return code == 0 ? ParseTaskState(output) : null;
     }
 
+    /// <summary>The COM error Task Scheduler gives for a task that does not exist (HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)).</summary>
+    internal const int TaskNotFound = unchecked((int)0x80070002);
+
+    /// <summary>
+    /// Prints the task's TASK_STATE; -1 when the task does not exist, and "unknown" for any other error (Task Scheduler
+    /// not reachable, access denied), so such an error is never taken for a missing task.
+    /// </summary>
+    internal static string TaskStateScript(string name)
+        => "$s = New-Object -ComObject Schedule.Service; " +
+           $"try {{ $s.Connect(); [int]$s.GetFolder('\\').GetTask('{name.Replace("'", "''")}').State }} " +
+           "catch { $e = $_.Exception; while ($e.InnerException) { $e = $e.InnerException }; " +
+           $"if ($e.HResult -eq {TaskNotFound}) {{ -1 }} else {{ 'unknown' }} }}";
+
     /// <summary>
     /// Task Scheduler's state of a task (TASK_STATE): 4 running and 2 queued count as running, 1 disabled and 3 ready do
-    /// not, and -1 stands for a task that does not exist. Anything else is unknown.
+    /// not, and -1 stands for a task that does not exist. Anything else, "unknown" among it, is unknown.
     /// </summary>
     internal static bool? ParseTaskState(string output) => int.TryParse(output.Trim(), out var state)
         ? state switch { 2 or 4 => true, -1 or 1 or 3 => false, _ => null }
@@ -469,7 +479,7 @@ public static class ScheduledTasks
 
 /// <summary>
 /// One Windows user per PC runs the fleet agent: its task name, ports and single-instance lock are shared by everyone
-/// on the PC, and it uses that user's pairing code. Other users of the PC can use the dashboard for this PC's runners,
+/// on the PC, and it uses that user's fleet code. Other users of the PC can use the dashboard for this PC's runners,
 /// but never take the agent over.
 /// </summary>
 public static class AgentOwnership

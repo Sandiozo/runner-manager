@@ -14,7 +14,7 @@ public sealed record FleetRequest
 {
     /// <summary>
     /// "status", "command", "log", "leave", "job" (protocol 11: a runner's live output and processes), "rekey"
-    /// (protocol 12: a new pairing code from Change fleet code), "managed" (protocol 15: the PCs this fleet manages one
+    /// (protocol 12: a new code from Change fleet code), "managed" (protocol 15: the PCs this fleet manages one
     /// way, for the other fleet PCs) or "release" (protocol 15: the fleet stops managing this PC).
     /// </summary>
     public string Op { get; init; } = "status";
@@ -29,7 +29,7 @@ public sealed record FleetRequest
     public string TargetId { get; init; } = string.Empty;
     /// <summary>"rekey": the sender's ECDH public key for this change (base64 SubjectPublicKeyInfo).</summary>
     public string RekeyPublicKey { get; init; } = string.Empty;
-    /// <summary>"rekey", second step: the new pairing code, sealed with the key from the exchange (base64).</summary>
+    /// <summary>"rekey", second step: the new code, sealed with the key from the exchange (base64).</summary>
     public string NewKey { get; init; } = string.Empty;
 }
 
@@ -51,13 +51,13 @@ public sealed record FleetResponse
     public List<RemovedManagedPc>? RemovedManagedPcs { get; init; }
 }
 
-/// <summary>Where an agent finds its pairing code, and the new one from "Change fleet code" until it is first used.</summary>
+/// <summary>Where an agent finds its code (the fleet code, or a managed PC's access code), and the new one from "Change fleet code" until it is first used.</summary>
 public interface IAgentKeys
 {
     byte[]? Current { get; }
     byte[]? Pending { get; }
     void SetPending(byte[] key);
-    /// <summary>A request came with the pending code: it becomes the pairing code, and the old one stops working.</summary>
+    /// <summary>A request came with the pending code: it becomes the code, and the old one stops working.</summary>
     void UsePending(byte[] key);
     /// <summary>This PC is managed one way: its code is its own, known only to the fleet that manages it.</summary>
     bool IsManaged { get; }
@@ -90,7 +90,7 @@ internal sealed class ConfigAgentKeys(Func<DateTime>? clock = null) : IAgentKeys
     }
 
     /// <summary>
-    /// The copy in memory, while it is fresh and the code it replaces is still in use: Replace code or Enter pairing code
+    /// The copy in memory, while it is fresh and the code it replaces is still in use: Replace code or Enter fleet code
     /// on this PC ends it, so a code sent earlier by a PC that has left the fleet since can't switch this PC.
     /// </summary>
     private byte[]? Kept(FleetConfig config)
@@ -146,7 +146,7 @@ internal sealed class MemoryAgentKeys(Func<byte[]?> current, bool managed = fals
 /// <param name="MachineId">The PC's machine ID; empty from agents before protocol 12.</param>
 public sealed record DiscoveredPeer(string Name, string Address, string Version, string MachineId = "");
 
-/// <summary>Thrown when a PC answers but refuses the request (different pairing code, wrong PC, clocks apart).</summary>
+/// <summary>Thrown when a PC answers but refuses the request (different code, wrong PC, clocks apart).</summary>
 public sealed class PairingMismatchException(string message, string reason = "") : Exception(message)
 {
     /// <summary>The agent's short reason, for example "denied" or "wrong PC"; empty when it gave none.</summary>
@@ -181,7 +181,7 @@ public static class FleetNetwork
     internal const int MaxResponseBytes = 8 * 1024 * 1024;
     private const int MaxErrorBodyBytes = 4 * 1024;
 
-    /// <summary>The keys derived from one pairing code (HKDF runs once per code, not once per request).</summary>
+    /// <summary>The keys derived from one code (HKDF runs once per code, not once per request).</summary>
     internal sealed record DerivedKeys(byte[] Transport, byte[] Discovery);
 
     private static readonly ConcurrentDictionary<string, DerivedKeys> KeyCache = new(StringComparer.Ordinal);
@@ -235,7 +235,7 @@ public static class FleetNetwork
         TimeSpan? timeout = null, CancellationToken cancellationToken = default, byte[]? pairingKey = null)
     {
         pairingKey ??= FleetConfig.Current.FleetKey
-            ?? throw new InvalidOperationException("This PC has no fleet code. Set one up in Settings → Fleet.");
+            ?? throw new InvalidOperationException(NoCodeHereText);
         var transportKey = KeysFor(pairingKey).Transport;
         var time = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         var body = FleetCrypto.Seal(transportKey, JsonSerializer.SerializeToUtf8Bytes(request),
@@ -257,7 +257,7 @@ public static class FleetNetwork
             if (response.StatusCode == HttpStatusCode.Forbidden)
                 throw new PairingMismatchException(RefusalMessage(reason, targetMachineKey), reason);
             if (response.StatusCode == HttpStatusCode.ServiceUnavailable)
-                throw new PairingMismatchException("The fleet agent on that PC has no fleet code.", reason);
+                throw new PairingMismatchException(NoCodeThereText, reason);
             if (reason.Length > MaxRefusalLength) reason = reason[..MaxRefusalLength];
             throw new InvalidOperationException($"The fleet agent returned HTTP {(int)response.StatusCode}: {reason}");
         }
@@ -266,20 +266,54 @@ public static class FleetNetwork
         var bytes = await ReadLimitedAsync(await response.Content.ReadAsStreamAsync(cts.Token), MaxResponseBytes, truncate: false, cts.Token)
                     ?? throw new InvalidDataException("The fleet agent's answer is too large.");
         var plain = FleetCrypto.Open(transportKey, bytes, FleetCrypto.ResponseContext(FleetCrypto.NonceOf(body)))
-            ?? throw new PairingMismatchException("Could not verify the response with the code the request was sent with.");
+            ?? throw new PairingMismatchException(ResponseNotVerifiedText);
         var result = JsonSerializer.Deserialize<FleetResponse>(plain, Json) ?? throw new InvalidOperationException("The fleet agent returned an empty response.");
         if (!result.Ok) throw new InvalidOperationException(result.Error);
         return result;
     }
 
+    // ----- Problems with a code -----
+    // The dashboard shows a PC whose connection problem is one of these as "Not paired" (see IsCodeProblem).
+
+    internal const string CodeMismatchText = "The fleet code does not match. Use the same fleet code on every PC.";
+    internal const string NoCodeThereText = "The fleet agent on that PC has no fleet code.";
+    internal const string NoCodeHereText = "This PC has no fleet code. Set one up in Settings → Fleet.";
+    internal const string ResponseNotVerifiedText = "Could not verify the response with the code the request was sent with.";
+    private const string AccessCodeUnreadableStart = "This PC cannot read the access code for ";
+    private const string AccessCodeUnreadableEnd = ". Remove it and pair it again.";
+    private const string AccessCodeRefusedEnd = " no longer accepts this fleet's requests. It may have been disconnected there. Remove it here, or pair it again.";
+
+    /// <summary>A managed PC whose access code this PC cannot decrypt (fleet.json from another Windows user, for example).</summary>
+    internal static string AccessCodeUnreadableText(string name) => AccessCodeUnreadableStart + name + AccessCodeUnreadableEnd;
+
+    /// <summary>A managed PC that refuses its access code: it was disconnected there, or paired with another fleet.</summary>
+    internal static string AccessCodeRefusedText(string name) => name + AccessCodeRefusedEnd;
+
     /// <summary>
-    /// Explains a 403 answer. Agents send a short reason ("denied" when the pairing code does not match, or for
+    /// Whether a connection problem means that the code is wrong or missing: the fleet code here or on the other PC, or
+    /// a managed PC's access code. Matches the texts of this version, and those of versions 2.4 to 2.8.2, which all said
+    /// "pairing code" (an older fleet agent on this PC can still report them during an update).
+    /// </summary>
+    public static bool IsCodeProblem(string? message)
+    {
+        if (string.IsNullOrEmpty(message)) return false;
+        return message.StartsWith(CodeMismatchText, StringComparison.Ordinal)
+               || message.StartsWith(NoCodeThereText, StringComparison.Ordinal)
+               || message.StartsWith(NoCodeHereText, StringComparison.Ordinal)
+               || message.StartsWith(ResponseNotVerifiedText, StringComparison.Ordinal)
+               || (message.StartsWith(AccessCodeUnreadableStart, StringComparison.Ordinal) && message.EndsWith(AccessCodeUnreadableEnd, StringComparison.Ordinal))
+               || message.EndsWith(AccessCodeRefusedEnd, StringComparison.Ordinal)
+               || message.Contains("pairing code", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Explains a 403 answer. Agents send a short reason ("denied" when the fleet code does not match, or for
     /// example a clock or PC name problem); anything else is shown as the reason.
     /// </summary>
     internal static string RefusalMessage(string reason)
     {
         if (reason.Length == 0 || reason.Equals("denied", StringComparison.OrdinalIgnoreCase))
-            return "The fleet code does not match. Use the same fleet code on every PC.";
+            return CodeMismatchText;
         if (reason.Contains("clock", StringComparison.OrdinalIgnoreCase))
             return ClockMessage(reason);
         if (reason.Length > MaxRefusalLength) reason = reason[..MaxRefusalLength];
@@ -541,7 +575,7 @@ public sealed class AgentServer : IDisposable
 
     /// <param name="prefix">HTTP prefix to listen on (tests use a localhost one; the agent listens on all interfaces).</param>
     /// <param name="machineId">This PC's machine ID; by default the one in fleet.json for the real agent, none for tests.</param>
-    /// <param name="keys">Where the pairing codes are kept; by default fleet.json, or memory when <paramref name="pairingKey"/> is given.</param>
+    /// <param name="keys">Where the codes are kept; by default fleet.json, or memory when <paramref name="pairingKey"/> is given.</param>
     public AgentServer(Func<Task<MachineStatusPayload>> status, Func<MachineCommand, string> enqueue, Func<string, Task<LogPayload>> log,
         Func<byte[]?>? pairingKey = null, string? prefix = null, int discoveryPort = FleetNetwork.DiscoveryPort, string? machineKey = null,
         Func<string, Task<RunnerJobActivity>>? job = null, string? machineId = null, IAgentKeys? keys = null)
@@ -763,8 +797,8 @@ public sealed class AgentServer : IDisposable
             if (pending != null)
             {
                 _keys.UsePending(pending);
-                // A managed PC's code is its own, not the fleet code.
-                MachineRelay.AppendAgentLog(_keys.IsManaged ? "Switched to the new pairing code. The old one no longer works."
+                // A managed PC's code is its own access code, not the fleet code.
+                MachineRelay.AppendAgentLog(_keys.IsManaged ? "Switched to the new access code. The old one no longer works."
                     : "Switched to the new fleet code. The old one no longer works.");
             }
 
@@ -867,7 +901,7 @@ public sealed class AgentServer : IDisposable
                 if (newKey is not { Length: 32 }) return new FleetResponse { Ok = false, Error = "Could not read the new fleet code." };
                 _keys.SetPending(newKey);
                 var from = request.From.Length > 0 ? $" from {request.From}" : "";
-                MachineRelay.AppendAgentLog($"Received a new {(_keys.IsManaged ? "pairing" : "fleet")} code{from}. It is used from the first request that comes with it.");
+                MachineRelay.AppendAgentLog($"Received a new {(_keys.IsManaged ? "access" : "fleet")} code{from}. It is used from the first request that comes with it.");
                 return new FleetResponse { Ok = true, KeyId = CommandSigner.KeyId(newKey) };
             }
         }
@@ -879,7 +913,7 @@ public sealed class AgentServer : IDisposable
     /// </summary>
     private FleetResponse ShareManaged()
     {
-        if (_keys.IsManaged) return new FleetResponse { Ok = false, Error = "This PC is managed one way and doesn't share its PCs." };
+        if (_keys.IsManaged) return new FleetResponse { Ok = false, Error = "This PC is managed one way and does not share its PCs." };
         var (pcs, removed) = FleetConfig.Current.ShareManaged();
         return new FleetResponse { Ok = true, ManagedPcs = pcs, RemovedManagedPcs = removed };
     }
@@ -892,7 +926,7 @@ public sealed class AgentServer : IDisposable
     {
         if (!_keys.IsManaged) return new FleetResponse { Ok = false, Error = "This PC is a member of the fleet, not managed by it. Use Leave fleet on it instead." };
         _keys.Release();
-        MachineRelay.AppendAgentLog($"{(from.Length > 0 ? from : "The fleet")} stopped managing this PC. Its old pairing code no longer works.");
+        MachineRelay.AppendAgentLog($"{(from.Length > 0 ? from : "The fleet")} stopped managing this PC. Its old access code no longer works.");
         return new FleetResponse { Ok = true };
     }
 

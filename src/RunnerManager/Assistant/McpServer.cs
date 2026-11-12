@@ -217,11 +217,15 @@ public sealed class McpServer
     /// <summary>How much of a name is looked at. What is shown is cut to <see cref="MaxClientNameLength"/>.</summary>
     private const int MaxClientNameInput = 400;
 
+    /// <summary>How many combining marks (accents, vowel signs) one letter keeps, so that stacked marks cannot cover the frame.</summary>
+    private const int MaxMarksPerLetter = 3;
+
     /// <summary>
-    /// A client's name with nothing but Latin letters, digits, spaces and a few plain marks. Every other character
-    /// becomes a space. A list of characters to take out would not do: many look like a quotation mark (low,
-    /// full-width and prime marks, letters of some scripts), and some turn the reading order around, so that the name
-    /// seems to end where it does not.
+    /// A client's name with nothing but letters and digits of any script that is written from left to right, their
+    /// accents and vowel signs, spaces and a few plain marks. Every other character becomes a space. A list of
+    /// characters to take out would not do: many look like a quotation mark (low, full-width and prime marks), and
+    /// letters written from right to left turn the reading order around, so that the name seems to end where it does
+    /// not. Control and format characters go too, and the few letters that look like a quotation mark.
     /// </summary>
     private static string PlainName(string? name)
     {
@@ -231,17 +235,46 @@ public sealed class McpServer
         // Other forms of a character become the plain one (full-width letters, ligatures), and a letter with a
         // separate accent becomes one letter.
         try { text = text.Normalize(NormalizationForm.FormKC); }
-        catch (ArgumentException) { } // Text that is not valid Unicode. What is wrong with it is not in the list below.
+        catch (ArgumentException) { } // Text that is not valid Unicode: each character is still checked below.
         var plain = new StringBuilder(text.Length);
-        foreach (var c in text)
+        // The marks on the last letter kept, or -1 when the last character kept was not a letter or digit.
+        var marks = -1;
+        foreach (var rune in text.EnumerateRunes())
         {
-            var keep = char.IsAsciiLetterOrDigit(c) || NameMarks.Contains(c)
-                       // Latin letters with accents (À to ɏ), without the signs and click letters among them.
-                       || (c is >= '\u00C0' and <= '\u024F' && char.GetUnicodeCategory(c) is UnicodeCategory.UppercaseLetter or UnicodeCategory.LowercaseLetter);
-            plain.Append(keep ? c : ' ');
+            var category = Rune.GetUnicodeCategory(rune);
+            if (IsNameLetter(rune, category))
+            {
+                plain.Append(rune.ToString());
+                marks = 0;
+            }
+            else if (category is UnicodeCategory.NonSpacingMark or UnicodeCategory.SpacingCombiningMark && marks is >= 0 and < MaxMarksPerLetter)
+            {
+                plain.Append(rune.ToString());
+                marks++;
+            }
+            else
+            {
+                plain.Append(rune.IsAscii && NameMarks.Contains((char)rune.Value) ? (char)rune.Value : ' ');
+                marks = -1;
+            }
         }
         return plain.ToString();
     }
+
+    /// <summary>A letter or digit that a name may have (see <see cref="PlainName"/>).</summary>
+    private static bool IsNameLetter(Rune rune, UnicodeCategory category)
+        => category is UnicodeCategory.UppercaseLetter or UnicodeCategory.LowercaseLetter or UnicodeCategory.TitlecaseLetter
+               or UnicodeCategory.ModifierLetter or UnicodeCategory.OtherLetter or UnicodeCategory.DecimalDigitNumber
+           && !IsRightToLeft(rune.Value)
+           && rune.Value is not (>= 0x02B0 and <= 0x02FF) // modifier letters: primes and apostrophes, also doubled (ʺ ˮ)
+               and not 0x0559 // Armenian half ring, an apostrophe
+               and not 0x1426 // Canadian syllabics double strokes, a quotation mark
+               and not (0xA78B or 0xA78C); // saltillo, an apostrophe
+
+    /// <summary>The scripts written from right to left: Hebrew, Arabic, Syriac, Thaana, N'Ko and others, with their forms and digits.</summary>
+    private static bool IsRightToLeft(int value)
+        => value is >= 0x0590 and <= 0x08FF or >= 0xFB1D and <= 0xFDFF or >= 0xFE70 and <= 0xFEFF
+               or >= 0x10800 and <= 0x10FFF or >= 0x1E800 and <= 0x1EFFF;
 
     private static JsonObject ListTools()
     {

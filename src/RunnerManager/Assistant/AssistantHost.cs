@@ -22,8 +22,11 @@ public static class AssistantHost
     /// <summary>An approval nobody answers in this time counts as declined.</summary>
     public static readonly TimeSpan ApprovalTimeout = TimeSpan.FromMinutes(10);
 
-    /// <summary>After stdin closes, requests still running get this long to finish.</summary>
-    private static readonly TimeSpan DrainLimit = TimeSpan.FromMinutes(15);
+    /// <summary>
+    /// After stdin closes, requests still running get this long to finish: enough for a change that waits for its
+    /// approval and then creates a runner (<see cref="FleetActions.CreateWait"/>).
+    /// </summary>
+    internal static readonly TimeSpan DrainLimit = ApprovalTimeout + FleetActions.CreateWait;
 
     /// <summary>The fleet agent's approvals, shown one at a time in the order they came in.</summary>
     public static ApprovalQueue Approvals { get; } = new(ShowApprovalAsync, ApprovalTimeout);
@@ -32,7 +35,12 @@ public static class AssistantHost
         => args.Length > 0 && (args[0].Equals(McpArgument, StringComparison.OrdinalIgnoreCase) || args[0].Equals(CliArgument, StringComparison.OrdinalIgnoreCase));
 
     public static Task<int> RunAsync(string[] args)
-        => args[0].Equals(McpArgument, StringComparison.OrdinalIgnoreCase) ? RunStdioAsync() : RunCliAsync(args.Skip(1).ToArray());
+    {
+        // The AI tool starts this process, and may give it administrator rights. The fleet agent alone decides what
+        // the AI assistant switches allow, so this process never reads them, and never moves or writes them.
+        AssistantSwitches.LeaveToFleetAgent();
+        return args[0].Equals(McpArgument, StringComparison.OrdinalIgnoreCase) ? RunStdioAsync() : RunCliAsync(args.Skip(1).ToArray());
+    }
 
     /// <summary>Asks the user in a Runner Manager window in front of other windows, after any approval asked before.</summary>
     /// <param name="client">How to name the client (see <see cref="McpServer.ClientLabel"/>).</param>

@@ -15,7 +15,7 @@ namespace RunnerManager;
 /// <item><c>RunnerManager.exe --mcp</c> and <c>ai</c>, started by AI tools, forward to it after showing with DPAPI that
 /// they run as the same Windows user (see <see cref="LocalSignIn"/>). This also works when an AI tool runs them in a
 /// sandbox with its own copy of %LOCALAPPDATA%.</item>
-/// <item>AI tools that connect by URL use the access token from Settings → AI assistants, while that is turned on.</item>
+/// <item>AI tools that connect by URL use the Connect by URL token from Settings → AI assistants, while that is turned on.</item>
 /// </list>
 /// Most answers are plain JSON. A tool call is answered as an event stream when the client accepts one: progress
 /// while it works, then the result, with keep-alives in between, so a call of several minutes does not look stuck.
@@ -60,19 +60,19 @@ public sealed class AssistantHttpServer : IDisposable
     /// <summary>Why the endpoint could not start at the last try; logged when it changes, not at every try.</summary>
     private string? _startProblem;
 
-    private sealed class Session(McpServer server)
+    private sealed class Session(McpServer server, DateTime startedUtc)
     {
         public McpServer Server { get; } = server;
-        public DateTime LastUsedUtc { get; set; } = DateTime.UtcNow;
+        public DateTime LastUsedUtc { get; set; } = startedUtc;
     }
 
     /// <summary>A sign-in the agent started: its random value, and the secret only this Windows user can open.</summary>
     private sealed record Challenge(DateTime IssuedUtc, byte[] Nonce, byte[] Secret, byte[] Sealed);
 
     /// <summary>A signed-in <c>--mcp</c> or <c>ai</c> process, by its token: the key for the proof on each answer to it.</summary>
-    private sealed class LocalClient(byte[] key)
+    private sealed class LocalClient(byte[] key, DateTime signedInUtc)
     {
-        private long _lastUsedTicks = DateTime.UtcNow.Ticks;
+        private long _lastUsedTicks = signedInUtc.Ticks;
         private volatile bool _used;
         public byte[] Key { get; } = key;
 
@@ -92,6 +92,16 @@ public sealed class AssistantHttpServer : IDisposable
     /// than this, the client is told to sign in again, which it does by itself. Tests shorten it.
     /// </summary>
     internal TimeSpan UnusedSignInLifetime { get; init; } = TimeSpan.FromMinutes(2);
+
+    /// <summary>The clock for sign-ins and sessions (tests pass their own).</summary>
+    internal Func<DateTime> UtcNow { get; init; } = () => DateTime.UtcNow;
+
+    /// <summary>
+    /// The answer to a request without a valid token. "Token" is the word Settings uses for Connect by URL; the access
+    /// code is something else (a managed PC's own code).
+    /// </summary>
+    internal const string MissingTokenText = "Missing or wrong Connect by URL token. Turn on Connect by URL in Runner Manager → Settings → AI assistants, " +
+                                             "and copy the setup from there.";
 
     /// <param name="port">Another port, for tests.</param>
     /// <param name="host">"localhost" for tests, which run without administrator rights.</param>
@@ -184,7 +194,7 @@ public sealed class AssistantHttpServer : IDisposable
             {
                 response.AddHeader("WWW-Authenticate", "Bearer");
                 await ReplyAsync(response, 401, McpServer.Error(null, -32001,
-                    "Missing or wrong access token. Turn on Connect by URL in Runner Manager → Settings → AI assistants, and copy the setup from there."));
+                    MissingTokenText));
                 return;
             }
             // Shows a signed-in client, on every answer from here on, that the answer comes from its agent.
@@ -321,7 +331,7 @@ public sealed class AssistantHttpServer : IDisposable
     private async Task ChallengeAsync(HttpListenerRequest request, HttpListenerResponse response)
     {
         if (request.HttpMethod != "POST") { await ReplyAsync(response, 405, null); return; }
-        var now = DateTime.UtcNow;
+        var now = UtcNow();
         foreach (var old in _challenges.Where(c => now - c.Value.IssuedUtc > ChallengeLifetime).Select(c => c.Key).ToList()) Drop(old);
         while (_challenges.Count >= MaxChallenges && _challenges.MinBy(c => c.Value.IssuedUtc) is { Key: { } oldest }) Drop(oldest);
         var nonce = RandomNumberGenerator.GetBytes(LocalSignIn.NonceBytes);
@@ -371,7 +381,7 @@ public sealed class AssistantHttpServer : IDisposable
                 await ReplyAsync(response, 400, McpServer.Error(null, -32001, OlderProgram));
                 return;
             }
-            if (challenge == null || DateTime.UtcNow - challenge.IssuedUtc > ChallengeLifetime
+            if (challenge == null || UtcNow() - challenge.IssuedUtc > ChallengeLifetime
                 || !LocalSignIn.TryDecode(clientNonce, LocalSignIn.NonceBytes, out var clientNonceBytes)
                 || !LocalSignIn.TryDecodeSealed(clientChallenge, out var clientSealed)
                 || !LocalSignIn.TryDecode(proof, LocalSignIn.ProofBytes, out var proofBytes)
@@ -392,7 +402,7 @@ public sealed class AssistantHttpServer : IDisposable
             while (_localTokens.Count(e => !e.Value.Used) >= MaxUnusedSignIns && OldestKey(_localTokens.Where(e => !e.Value.Used)) is { } unused)
                 _localTokens.TryRemove(unused, out _);
             while (_localTokens.Count >= MaxSessions && OldestKey(_localTokens) is { } oldest) _localTokens.TryRemove(oldest, out _);
-            _localTokens[token] = new LocalClient(key);
+            _localTokens[token] = new LocalClient(key, UtcNow());
             await ReplyAsync(response, 200, new JsonObject { ["agent_proof"] = Convert.ToBase64String(agentProof) });
         }
         finally
@@ -416,21 +426,21 @@ public sealed class AssistantHttpServer : IDisposable
         {
             var server = _newServer();
             var id = Guid.NewGuid().ToString("N");
-            var now = DateTime.UtcNow;
+            var now = UtcNow();
             foreach (var old in _sessions.Where(s => now - s.Value.LastUsedUtc > IdleLifetime).Select(s => s.Key).ToList()) _sessions.TryRemove(old, out _);
             while (_sessions.Count >= MaxSessions && _sessions.MinBy(s => s.Value.LastUsedUtc) is { Key: { } oldest }) _sessions.TryRemove(oldest, out _);
-            _sessions[id] = new Session(server);
+            _sessions[id] = new Session(server, now);
             response.AddHeader("Mcp-Session-Id", id);
             return server;
         }
         if (sessionId == null) return _newServer(); // a client without sessions
         if (!_sessions.TryGetValue(sessionId, out var session)) return null;
-        if (DateTime.UtcNow - session.LastUsedUtc > IdleLifetime)
+        if (UtcNow() - session.LastUsedUtc > IdleLifetime)
         {
             _sessions.TryRemove(sessionId, out _);
             return null;
         }
-        session.LastUsedUtc = DateTime.UtcNow;
+        session.LastUsedUtc = UtcNow();
         return session.Server;
     }
 
@@ -446,10 +456,10 @@ public sealed class AssistantHttpServer : IDisposable
         var given = authorization[7..].Trim();
         if (_localTokens.TryGetValue(given, out var client))
         {
-            if (DateTime.UtcNow - client.LastUsedUtc <= LifetimeOf(client))
+            if (UtcNow() - client.LastUsedUtc <= LifetimeOf(client))
             {
                 client.Used = true;
-                client.LastUsedUtc = DateTime.UtcNow;
+                client.LastUsedUtc = UtcNow();
                 local = client;
                 return true;
             }
@@ -465,7 +475,7 @@ public sealed class AssistantHttpServer : IDisposable
 
     private void RemoveIdleSignIns()
     {
-        var now = DateTime.UtcNow;
+        var now = UtcNow();
         foreach (var old in _localTokens.Where(e => now - e.Value.LastUsedUtc > LifetimeOf(e.Value)).Select(e => e.Key).ToList()) _localTokens.TryRemove(old, out _);
     }
 

@@ -4,18 +4,18 @@ namespace RunnerManager.Tests;
 
 public class ManagedPairingTests
 {
-    private static readonly TimeSpan Step = TimeSpan.FromSeconds(5);
+    // How long a test waits for what should happen at once: a step that hangs fails the test, a slow machine does not.
+    private static readonly TimeSpan Step = TimeSpan.FromSeconds(30);
 
     [Fact]
     public async Task OneWayPairing_GivesThePcItsOwnCode_NotTheFleets()
     {
         var fleetKey = CommandSigner.NewKey();
         var ownKey = CommandSigner.NewKey();
-        var port = TestPorts.FreeRange(2);
-        using var host = new Pairing.PairingHost(fleetKey, "HOSTPC", port, port + 1);
+        var port = 0;
+        using var host = FreePorts.Listen(2, p => new Pairing.PairingHost(fleetKey, "HOSTPC", port = p, p + 1), h => h.Start());
         Pairing.JoinRequest? seen = null;
         host.JoinRequested += request => { seen = request; request.AllowManaged(ownKey); };
-        host.Start();
 
         var result = await Pairing.JoinAsync($"127.0.0.1:{port}", "FRIENDPC", _ => { }, CancellationToken.None);
 
@@ -31,12 +31,11 @@ public class ManagedPairingTests
     public async Task FullPairing_IsNotManaged_AndTheHostLearnsWhereThePcIs()
     {
         var fleetKey = CommandSigner.NewKey();
-        var port = TestPorts.FreeRange(2);
-        using var host = new Pairing.PairingHost(fleetKey, "HOSTPC", port, port + 1);
+        var port = 0;
+        using var host = FreePorts.Listen(2, p => new Pairing.PairingHost(fleetKey, "HOSTPC", port = p, p + 1), h => h.Start());
         var joined = new TaskCompletionSource<Pairing.JoinRequest>();
         host.JoinRequested += request => request.Allow();
         host.Joined += request => joined.TrySetResult(request);
-        host.Start();
 
         var result = await Pairing.JoinAsync($"127.0.0.1:{port}", "NEWPC", _ => { }, CancellationToken.None);
 
