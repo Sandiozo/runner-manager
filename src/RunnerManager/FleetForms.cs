@@ -106,6 +106,28 @@ internal static class CodeRowText
 
     internal static string ManagedCannotChange(string managedBy)
         => $"Only {managedBy}'s fleet changes this PC's access code. To stop it from managing this PC, click Disconnect.";
+
+    /// <summary>
+    /// Whether entering <paramref name="key"/> by hand makes this PC forget the PCs it manages one way, so it asks first:
+    /// the PC has another code now, and manages PCs (see <see cref="FleetConfig.SetFleetKey"/>).
+    /// </summary>
+    internal static bool PasteForgetsManagedPcs(FleetConfig config, byte[] key)
+        => config.FleetKey is { } current && !System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(current, key)
+           && config.ManagedPcs.Count > 0;
+
+    internal const string PasteHeading = "Use the new fleet code?";
+
+    /// <param name="managed">The names of the PCs this PC manages one way.</param>
+    internal static string PasteMessage(IReadOnlyList<string> managed)
+    {
+        var one = managed.Count == 1;
+        var names = one ? $"{managed[0]} one way" : $"these PCs one way: {string.Join(", ", managed)}";
+        return $"This PC manages {names}. With another fleet code, this PC forgets {(one ? "it" : "them")}, so the fleet " +
+               $"that has the new code does not get {(one ? "its access code" : "their access codes")}. If your fleet changed " +
+               $"its code and this is the new one, {(one ? "it comes" : "they come")} back from the other PCs of the fleet.";
+    }
+
+    internal const string PasteConfirm = "Use new code";
 }
 
 /// <summary>Settings → AI assistants: "Allow AI assistants" and "Ask before changes".</summary>

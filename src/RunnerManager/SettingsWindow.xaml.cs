@@ -348,7 +348,13 @@ public partial class SettingsWindow : Window
             DialogWindow.Info(this, "Invalid fleet code", "Paste the full code copied from another PC. It starts with rwk_.");
             return;
         }
-        FleetConfig.SetFleetKey(key);
+        // Cancel keeps the code this PC has, and the box with the pasted one.
+        var config = FleetConfig.Current;
+        if (CodeRowText.PasteForgetsManagedPcs(config, key)
+            && !DialogWindow.Confirm(this, CodeRowText.PasteHeading, CodeRowText.PasteMessage(config.ManagedPcs.Select(p => p.Name).ToList()),
+                CodeRowText.PasteConfirm, danger: true))
+            return;
+        FleetConfig.SetFleetKey(key, pastedFromAnotherPc: true);
         CancelPasteKey_Click(sender, e);
         await JoinWithCodeAsync();
     }

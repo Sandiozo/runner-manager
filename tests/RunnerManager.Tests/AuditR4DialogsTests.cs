@@ -236,3 +236,185 @@ public class AssistantSwitchFormTests
         public void Remove() { }
     }
 }
+
+/// <summary>Settings → Fleet → Enter fleet code: a code copied from another PC (round 4 of the review).</summary>
+[Collection(FleetSettingsCollection.Name)]
+public class PastedFleetCodeTests
+{
+    private const string RemovedId = "0123abcd";
+
+    /// <summary>A PC in a fleet: it knows a PC, an address added by hand, a removed pairing and a PC it manages one way.</summary>
+    private static byte[] InAFleet(byte[] key)
+    {
+        FleetConfig.SetFleetKey(key);
+        FleetConfig.Update(c =>
+        {
+            c.KnownPeers.Add(new PeerRecord { Name = "OLDPC", Address = "10.0.0.5:47821", LastSeenUtc = DateTime.UtcNow });
+            c.ManualAddresses.Add("old-pc.example.ts.net");
+            c.RemovedManagedPcs.Add(new RemovedManagedPc { KeyId = RemovedId, RemovedUtc = DateTime.UtcNow });
+        });
+        var managed = CommandSigner.NewKey();
+        FleetConfig.AddManagedPc("MANAGEDPC", "10.0.0.9", managed);
+        return managed;
+    }
+
+    private static void AssertKeepsThePcsAndAddresses(FleetConfig c)
+    {
+        Assert.Equal("OLDPC", Assert.Single(c.KnownPeers).Name);
+        Assert.Equal("old-pc.example.ts.net", Assert.Single(c.ManualAddresses));
+        // Nothing is added: entries here go to the other PCs, and would remove the managed PCs across the fleet.
+        Assert.Equal(RemovedId, Assert.Single(c.RemovedManagedPcs).KeyId);
+    }
+
+    [Fact]
+    public async Task PastingAnotherCode_ForgetsTheManagedPcs_AndKeepsTheRest()
+    {
+        await AuditFleetConfig.WithConfigAsync(() =>
+        {
+            InAFleet(CommandSigner.NewKey());
+            var other = CommandSigner.NewKey();
+
+            FleetConfig.SetFleetKey(other, pastedFromAnotherPc: true);
+
+            var config = FleetConfig.Current;
+            Assert.Equal(other, config.FleetKey);
+            Assert.Empty(config.ManagedPcs);
+            AssertKeepsThePcsAndAddresses(config);
+            Assert.Empty(config.ManagedBy);
+            return Task.CompletedTask;
+        });
+    }
+
+    [Fact]
+    public async Task AfterAPastedOtherCode_TheFleetWithThatCodeGetsNoAccessCodes()
+    {
+        await AuditFleetConfig.WithConfigAsync(() =>
+        {
+            InAFleet(CommandSigner.NewKey());
+            Assert.Single(FleetConfig.Current.ShareManaged().Pcs);
+
+            FleetConfig.SetFleetKey(CommandSigner.NewKey(), pastedFromAnotherPc: true);
+
+            var (pcs, removed) = FleetConfig.Current.ShareManaged();
+            Assert.Empty(pcs);
+            Assert.Equal(RemovedId, Assert.Single(removed).KeyId);
+            return Task.CompletedTask;
+        });
+    }
+
+    [Fact]
+    public async Task PastingTheSameCode_KeepsEverything()
+    {
+        await AuditFleetConfig.WithConfigAsync(() =>
+        {
+            var key = CommandSigner.NewKey();
+            var managed = InAFleet(key);
+
+            FleetConfig.SetFleetKey((byte[])key.Clone(), pastedFromAnotherPc: true);
+
+            var config = FleetConfig.Current;
+            Assert.Equal(managed, Assert.Single(config.ManagedPcs).Key);
+            AssertKeepsThePcsAndAddresses(config);
+            return Task.CompletedTask;
+        });
+    }
+
+    [Fact]
+    public async Task ACodeSetWithoutTheFlag_KeepsTheManagedPcs()
+    {
+        await AuditFleetConfig.WithConfigAsync(() =>
+        {
+            var managed = InAFleet(CommandSigner.NewKey());
+
+            // Change the fleet code on every PC, or a new code made on this PC.
+            FleetConfig.SetFleetKey(CommandSigner.NewKey());
+
+            var config = FleetConfig.Current;
+            Assert.Equal(managed, Assert.Single(config.ManagedPcs).Key);
+            Assert.Single(config.ShareManaged().Pcs);
+            AssertKeepsThePcsAndAddresses(config);
+            return Task.CompletedTask;
+        });
+    }
+
+    [Fact]
+    public async Task PastingACode_OnAPcWithoutOne_WorksAsBefore()
+    {
+        await AuditFleetConfig.WithConfigAsync(() =>
+        {
+            // The code removed last, entered again: the same fleet.
+            var key = CommandSigner.NewKey();
+            InAFleet(key);
+            FleetConfig.SetFleetKey(null);
+            FleetConfig.SetFleetKey(key, pastedFromAnotherPc: true);
+            Assert.Single(FleetConfig.Current.ManagedPcs);
+            AssertKeepsThePcsAndAddresses(FleetConfig.Current);
+
+            // Another code: the earlier fleet goes.
+            FleetConfig.SetFleetKey(null);
+            FleetConfig.SetFleetKey(CommandSigner.NewKey(), pastedFromAnotherPc: true);
+            var config = FleetConfig.Current;
+            Assert.Empty(config.KnownPeers);
+            Assert.Empty(config.ManualAddresses);
+            Assert.Empty(config.ManagedPcs);
+            Assert.Empty(config.RemovedManagedPcs);
+            return Task.CompletedTask;
+        });
+    }
+
+    [Fact]
+    public async Task PastingAFleetCode_OnAPcManagedOneWay_MakesItAFleetMember()
+    {
+        await AuditFleetConfig.WithConfigAsync(() =>
+        {
+            FleetConfig.BecomeManaged(CommandSigner.NewKey(), "HOSTPC");
+            var fleet = CommandSigner.NewKey();
+            // It manages no PCs, so Settings does not ask.
+            Assert.False(CodeRowText.PasteForgetsManagedPcs(FleetConfig.Current, fleet));
+
+            FleetConfig.SetFleetKey(fleet, pastedFromAnotherPc: true);
+
+            var config = FleetConfig.Current;
+            Assert.Equal(fleet, config.FleetKey);
+            Assert.Empty(config.ManagedBy);
+            Assert.Empty(config.ManagedPcs);
+            return Task.CompletedTask;
+        });
+    }
+
+    [Fact]
+    public async Task Settings_AsksFirst_OnlyForAnotherCode_OnAPcThatManagesPcs()
+    {
+        await AuditFleetConfig.WithConfigAsync(() =>
+        {
+            var key = CommandSigner.NewKey();
+            Assert.False(CodeRowText.PasteForgetsManagedPcs(FleetConfig.Current, key));
+
+            InAFleet(key);
+            Assert.True(CodeRowText.PasteForgetsManagedPcs(FleetConfig.Current, CommandSigner.NewKey()));
+            Assert.False(CodeRowText.PasteForgetsManagedPcs(FleetConfig.Current, (byte[])key.Clone()));
+
+            FleetConfig.Update(c => c.ManagedPcs.Clear());
+            Assert.False(CodeRowText.PasteForgetsManagedPcs(FleetConfig.Current, CommandSigner.NewKey()));
+            return Task.CompletedTask;
+        });
+    }
+
+    [Fact]
+    public void TheQuestion_SaysWhatIsForgotten_AndWhenItComesBack()
+    {
+        Assert.Equal("Use the new fleet code?", CodeRowText.PasteHeading);
+        Assert.Equal("This PC manages GUEST-PC one way. With another fleet code, this PC forgets it, so the fleet that has the " +
+                     "new code does not get its access code. If your fleet changed its code and this is the new one, it comes back " +
+                     "from the other PCs of the fleet.", CodeRowText.PasteMessage(["GUEST-PC"]));
+        var two = CodeRowText.PasteMessage(["GUEST-PC", "LAB-PC"]);
+        Assert.StartsWith("This PC manages these PCs one way: GUEST-PC, LAB-PC. With another fleet code, this PC forgets them,", two);
+        Assert.Contains("does not get their access codes", two);
+        Assert.Contains("they come back from the other PCs of the fleet.", two);
+        foreach (var text in new[] { CodeRowText.PasteHeading, two, CodeRowText.PasteConfirm })
+        {
+            Assert.DoesNotContain("n't", text);
+            Assert.DoesNotContain("pairing code", text);
+        }
+    }
+}
