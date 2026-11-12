@@ -455,6 +455,11 @@
                             <Setter TargetName="Ring" Property="Stroke" Value="{DynamicResource AccentBrush}"/>
                             <Setter TargetName="Dot" Property="Visibility" Value="Visible"/>
                         </Trigger>
+                        <!-- Faded like a disabled button, on the theme's own colors, so it looks the same in both themes. -->
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter TargetName="Chrome" Property="Opacity" Value="0.45"/>
+                            <Setter Property="Cursor" Value="Arrow"/>
+                        </Trigger>
                     </ControlTemplate.Triggers>
                 </ControlTemplate>
             </Setter.Value>

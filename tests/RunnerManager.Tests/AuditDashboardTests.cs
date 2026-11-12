@@ -1023,4 +1023,36 @@ public class AuditDashboardTests
             Assert.True(wait > start && wait - start < 300, title);
         }
     }
+
+    // ----- 4: OptionCard -----
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void OptionCard_LooksDisabledInBothThemes(bool light)
+        => WpfTestApp.Run(() =>
+        {
+            try
+            {
+                WpfTestApp.UseColors(light);
+                var card = WpfTestApp.Layout(new RadioButton
+                {
+                    Style = (Style)Application.Current.FindResource("OptionCard"),
+                    Content = new TextBlock { Text = "Several PCs" },
+                    IsChecked = true
+                });
+                var chrome = (Border)card.Template.FindName("Chrome", card);
+                Assert.Equal(1.0, chrome.Opacity);
+                Assert.Equal(Cursors.Hand, card.Cursor);
+
+                card.IsEnabled = false;
+                WpfTestApp.Layout(card);
+                // Faded on the theme's own colors, like a disabled button, and it no longer looks clickable.
+                Assert.Equal(0.45, chrome.Opacity, 3);
+                Assert.Equal(Cursors.Arrow, card.Cursor);
+                Assert.Equal(WpfTestApp.Resource("AccentBrush"), WpfTestApp.ColorOf(chrome.BorderBrush));
+                Assert.Equal(WpfTestApp.Resource("SelectedBrush"), WpfTestApp.ColorOf(chrome.Background));
+            }
+            finally { WpfTestApp.UseColors(light: false); }
+        });
 }
