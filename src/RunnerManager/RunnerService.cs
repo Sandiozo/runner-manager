@@ -450,7 +450,7 @@ public static partial class RunnerService
         var wasMarked = IsMarkedStopped(local.Name);
         var restoreOldName = HoldAutoRecovery(local.Name);
         // config.cmd gives a renamed runner a new service name and starts it, so that name is held as well.
-        var restoreNewName = HoldAutoRecovery(ServiceNameAfterRename(local.Name, wanted.Name));
+        var restoreNewName = HoldAutoRecovery(ServiceNameAfterRename(local.Name, local.AgentName, wanted.Name));
         void restoreRecovery()
         {
             restoreNewName();
@@ -484,16 +484,22 @@ public static partial class RunnerService
         => requested.Length > 0 || clearLabels ? requested : current;
 
     /// <summary>
-    /// The service name config.cmd gives a runner that is renamed: actions.runner.{owner-repo}.{name}. Empty when the
-    /// name does not change, and when config.cmd would shorten the name (over 80 characters, with a random ending).
-    /// Only used to hold auto-recovery, so a guess that is wrong does no harm.
+    /// The service name config.cmd gives a runner that is renamed: actions.runner.{owner-repo}.{name}. The old runner
+    /// name is cut off the end of the old service name; a dot does not tell where it starts, since runner and repository
+    /// names may contain dots. Empty when the name does not change, when the old service name does not end with the old
+    /// runner name (config.cmd shortened it, and its repository part may be shortened too), and when config.cmd would
+    /// shorten the new name (over 80 characters, with a random ending). Only used to hold auto-recovery, so a guess that
+    /// is wrong does no harm, but without the right name the watchdog can start the runner after the edit stops it.
     /// </summary>
-    internal static string ServiceNameAfterRename(string serviceName, string newName)
+    internal static string ServiceNameAfterRename(string serviceName, string oldName, string newName)
     {
-        var dot = serviceName.LastIndexOf('.');
-        if (!serviceName.StartsWith("actions.runner.", StringComparison.OrdinalIgnoreCase) || dot < "actions.runner.".Length) return string.Empty;
-        if (serviceName[(dot + 1)..].Equals(newName, StringComparison.OrdinalIgnoreCase)) return string.Empty;
-        var renamed = serviceName[..(dot + 1)] + newName;
+        const string prefix = "actions.runner.";
+        if (string.IsNullOrWhiteSpace(oldName) || string.IsNullOrWhiteSpace(newName)) return string.Empty;
+        if (oldName.Equals(newName, StringComparison.OrdinalIgnoreCase)) return string.Empty;
+        if (!serviceName.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
+            || !serviceName.EndsWith("." + oldName, StringComparison.OrdinalIgnoreCase)
+            || serviceName.Length - oldName.Length - 1 <= prefix.Length) return string.Empty;
+        var renamed = serviceName[..^oldName.Length] + newName;
         return renamed.Length <= 80 ? renamed : string.Empty;
     }
 

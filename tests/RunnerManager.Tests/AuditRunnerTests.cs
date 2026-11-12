@@ -697,14 +697,14 @@ public class AuditRunnerTests
     }
 
     [Theory]
-    [InlineData("actions.runner.octo-app.build-01", "build-02", "actions.runner.octo-app.build-02")]
-    [InlineData("actions.runner.octo.build-01", "gpu", "actions.runner.octo.gpu")]
-    [InlineData("actions.runner.octo-app.build-01", "BUILD-01", "")]
-    [InlineData("actions.runner.octo-app.build-01", "a-name-long-enough-for-config-cmd-to-shorten-the-service-name", "")]
-    [InlineData(@"C:\GitHub-Runners\app", "build-02", "")]
-    [InlineData("", "build-02", "")]
-    public void RenamedRunner_GetsTheServiceNameThatConfigCmdGives(string serviceName, string newName, string expected)
-        => Assert.Equal(expected, RunnerService.ServiceNameAfterRename(serviceName, newName));
+    [InlineData("actions.runner.octo-app.build-01", "build-01", "build-02", "actions.runner.octo-app.build-02")]
+    [InlineData("actions.runner.octo.build-01", "build-01", "gpu", "actions.runner.octo.gpu")]
+    [InlineData("actions.runner.octo-app.build-01", "build-01", "BUILD-01", "")]
+    [InlineData("actions.runner.octo-app.build-01", "build-01", "a-name-long-enough-for-config-cmd-to-shorten-the-service-name", "")]
+    [InlineData(@"C:\GitHub-Runners\app", "app", "build-02", "")]
+    [InlineData("", "build-01", "build-02", "")]
+    public void RenamedRunner_GetsTheServiceNameThatConfigCmdGives(string serviceName, string oldName, string newName, string expected)
+        => Assert.Equal(expected, RunnerService.ServiceNameAfterRename(serviceName, oldName, newName));
 
     private static readonly DateTime Watch = new(2026, 11, 12, 9, 0, 0, DateTimeKind.Utc);
 

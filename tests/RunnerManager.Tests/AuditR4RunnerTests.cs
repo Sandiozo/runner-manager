@@ -208,4 +208,21 @@ public class AuditR4RunnerTests
 
         Assert.False(health.IsProblem, health.Detail);
     }
+
+    // ----- Editing a runner -----
+
+    [Theory]
+    // Runner and repository names may contain dots: the old runner name is cut off the end, not at the last dot.
+    [InlineData("actions.runner.octo-app.build.01", "build.01", "gpu", "actions.runner.octo-app.gpu")]
+    [InlineData("actions.runner.octo-app.build.01", "BUILD.01", "build.02", "actions.runner.octo-app.build.02")]
+    [InlineData("actions.runner.octo-my.app.r1", "r1", "r2", "actions.runner.octo-my.app.r2")]
+    [InlineData("actions.runner.octo-app.gpu", "gpu", "gpu.big", "actions.runner.octo-app.gpu.big")]
+    // config.cmd shortened the old name (its repository part too, and a random ending): the new one is not known.
+    [InlineData("actions.runner.octo-a-repository-name-that-is-long-enough-to-c.build-01-4821", "build-01", "gpu", "")]
+    // The service name does not end with the runner's name, or the runner's name is not known.
+    [InlineData("actions.runner.octo-app.build-01", "other", "gpu", "")]
+    [InlineData("actions.runner.octo-app.build-01", "", "gpu", "")]
+    [InlineData("actions.runner.build-01", "build-01", "gpu", "")]
+    public void RenamedRunner_WithDotsInItsNames_GetsTheServiceNameThatConfigCmdGives(string serviceName, string oldName, string newName, string expected)
+        => Assert.Equal(expected, RunnerService.ServiceNameAfterRename(serviceName, oldName, newName));
 }
