@@ -161,6 +161,13 @@ public static class Installer
             await MachineRelay.UpdateLocalAgentAsync(log);
         }
 
+        var settings = AppSettings.Load();
+        settings.SetupCompleted = true;
+        if (choices.StartWithWindows is { } startsWithWindows) settings.StartMinimizedHint = startsWithWindows;
+        settings.Save();
+        InstallChecks.MarkDone(LaunchTaskCheck);
+
+        // The last step: when anything before it fails, the old copy is still there to go back to.
         if (moving && await MachineInstall.OtherUsersOfAsync(previous!) is { KeepFiles: true } others)
             log($"The copy in {previous} was kept, because {others.KeptBecause("it")}.");
         else if (moving)
@@ -170,12 +177,6 @@ public static class Installer
             AppUpdater.RunAfterExit(UnlessInstalledIn(RemoveProgramFilesScript(previous!)), TimeSpan.FromMinutes(5), TimeSpan.FromSeconds(3),
                 FolderEnvironment(previous!));
         }
-
-        var settings = AppSettings.Load();
-        settings.SetupCompleted = true;
-        if (choices.StartWithWindows is { } startsWithWindows) settings.StartMinimizedHint = startsWithWindows;
-        settings.Save();
-        InstallChecks.MarkDone(LaunchTaskCheck);
         log("Installed.");
     }
 
