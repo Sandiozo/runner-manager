@@ -207,6 +207,8 @@ Runner Manager no longer starts a runner's service next to its console window.
   folder.
 - For a folder outside Program Files, also one that setup offers, setup says to check that only administrators can
   change the files in it.
+- A folder in Program Files or Program Files (x86), such as `C:\Program Files (x86)\RunnerManager`, gets its rights
+  from there, so setup shows no such note for it.
 - The first page says what setup does with a copy that is already in the chosen folder, also after **Change…**.
 - Several Windows users on one PC can share one install outside the user profiles, such as in Program Files: when a
   second user runs the setup, it offers such an install folder that Runner Manager recorded for another user. An
