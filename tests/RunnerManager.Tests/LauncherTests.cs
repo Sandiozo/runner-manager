@@ -41,8 +41,8 @@ public class LauncherTests
             "RUNNER_MANAGER_STATE_DIR", "RUNNER_MANAGER_ANYTHING", $"RM_LAUNCHER_UNKNOWN_{Guid.NewGuid():N}",
         ];
         // Names the app does get, but never with the launcher's value.
-        string[] systemValue = ["PATH", "PATHEXT", "ComSpec", "windir", "SystemRoot", "SystemDrive", "TEMP", "TMP", "PSModulePath", "ProgramFiles"];
-        string[] ownValue = [.. IdentityNames, "DOTNET_EnableDiagnostics", "DOTNET_BUNDLE_EXTRACT_BASE_DIR"];
+        string[] systemValue = ["PATH", "PATHEXT", "ComSpec", "windir", "SystemRoot", "SystemDrive", "TEMP", "TMP", "ProgramFiles"];
+        string[] ownValue = [.. IdentityNames, "PSModulePath", "DOTNET_EnableDiagnostics", "DOTNET_BUNDLE_EXTRACT_BASE_DIR"];
         var environment = absent.Concat(systemValue).Concat(ownValue).ToDictionary(name => name, name => $@"C:\{marker}\{name}");
 
         using var folder = new LauncherFolder();
@@ -53,6 +53,7 @@ public class LauncherTests
         var system = SystemBlock();
         foreach (var name in systemValue) Assert.Equal(system.Value(name), child.Value(name));
         AssertIdentity(child);
+        Assert.Equal(ExpectedModulePath(system.Value("PSModulePath")), child.Value("PSModulePath"));
     }
 
     /// <summary>
@@ -67,8 +68,9 @@ public class LauncherTests
         var child = folder.Launch(environment: new Dictionary<string, string> { ["SystemRoot"] = @"C:\x-root", ["SystemDrive"] = @"C:\x-drive" }).ChildOrFail();
 
         var system = SystemBlock();
-        foreach (var name in system.Names.Where(name => !IdentityNames.Contains(name, StringComparer.OrdinalIgnoreCase)))
+        foreach (var name in system.Names.Where(name => !IdentityNames.Contains(name, StringComparer.OrdinalIgnoreCase) && name != "PSModulePath"))
             Assert.Equal(system.Value(name), child.Value(name));
+        Assert.Equal(ExpectedModulePath(system.Value("PSModulePath")), child.Value("PSModulePath"));
         Assert.DoesNotContain(child.Block, entry => entry.Contains(@"C:\x-", StringComparison.OrdinalIgnoreCase));
     }
 
@@ -97,8 +99,75 @@ public class LauncherTests
         using var folder = new LauncherFolder();
         var child = folder.Launch(environment: new Dictionary<string, string> { ["GH_TOKEN"] = "test-token-not-real" }).ChildOrFail();
 
-        Assert.Equal(ExpectedNames([.. IdentityNames, "DOTNET_EnableDiagnostics", "DOTNET_BUNDLE_EXTRACT_BASE_DIR", "GH_TOKEN"]),
+        Assert.Equal(ExpectedNames([.. IdentityNames, "PSModulePath", "DOTNET_EnableDiagnostics", "DOTNET_BUNDLE_EXTRACT_BASE_DIR", "GH_TOKEN"]),
             child.Names.OrderBy(name => name, StringComparer.OrdinalIgnoreCase));
+    }
+
+    // ---- PSModulePath: Windows PowerShell started by the app must not load modules from a folder the user can write.
+
+    [Fact]
+    public void PSModulePath_IsWindowsPowerShellsOwnModulesFolder_Once()
+    {
+        using var folder = new LauncherFolder();
+        var child = folder.Launch(environment: new Dictionary<string, string> { ["PSModulePath"] = @"C:\elsewhere\Modules" }).ChildOrFail();
+
+        Assert.Single(child.Names, name => name.Equals("PSModulePath", StringComparison.OrdinalIgnoreCase));
+        var machine = SystemBlock().Value("PSModulePath");
+        Assert.Equal(ExpectedModulePath(machine), child.Value("PSModulePath"));
+        Assert.NotEqual(machine, child.Value("PSModulePath"), StringComparer.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// What the launcher's PSModulePath is for. Windows PowerShell 5.1 started with exactly the app's environment (as the
+    /// app starts it, with administrator rights) looks for modules only in folders that need administrator rights to
+    /// change, and still finds its own. Given a user-level value too (HKCU\Environment\PSModulePath, which needs no
+    /// administrator rights), PowerShell's own rule still adds no folder of the user's; that rule is asked directly, so
+    /// the registry is not touched.
+    /// </summary>
+    [Fact]
+    public void WindowsPowerShell_StartedWithTheAppsEnvironment_LoadsModulesOnlyFromAdministratorFolders()
+    {
+        using var folder = new LauncherFolder();
+        var child = folder.Launch().ChildOrFail();
+        var value = child.Value("PSModulePath")!;
+
+        var output = RunWindowsPowerShell(child.Block,
+            "$env:PSModulePath",
+            "(Get-Command Get-AuthenticodeSignature).Module.Path",
+            "$machine = [Environment]::ExpandEnvironmentVariables([Environment]::GetEnvironmentVariable('PSModulePath', 'Machine'))",
+            ModulePathFromPowerShell(value, "$machine", PlantedModules));
+
+        AssertAdministratorFoldersOnly(output[0]);
+        Assert.StartsWith(PowerShellModules + @"\", output[1], StringComparison.OrdinalIgnoreCase);
+        AssertAdministratorFoldersOnly(output[2]);
+    }
+
+    /// <summary>
+    /// On a PC whose machine value of PSModulePath is the launcher's folder itself, the launcher must spell its value
+    /// differently, or PowerShell takes it for the machine value and puts the user's modules folder first. No test can
+    /// set the machine value; the test build acts as if it were that folder. PowerShell's own rule is asked what it makes
+    /// of the result with that machine value, without and with a user-level value, and real PowerShell must still find
+    /// its modules with it.
+    /// </summary>
+    [Fact]
+    public void PSModulePath_DiffersFromAMachineValueThatIsTheFolderItself()
+    {
+        using var folder = new LauncherFolder(testBuild: true);
+        var child = folder.Launch().ChildOrFail();
+        var value = child.Value("PSModulePath")!;
+        Assert.Equal($"{PowerShellModules};{PowerShellModules}", value);
+
+        var machine = PowerShellText(PowerShellModules);
+        var output = RunWindowsPowerShell(child.Block,
+            "$env:PSModulePath",
+            "(Get-Command Get-AuthenticodeSignature).Module.Path",
+            ModulePathFromPowerShell(value, machine, null),
+            ModulePathFromPowerShell(value, machine, PlantedModules));
+
+        AssertAdministratorFoldersOnly(output[0]);
+        Assert.StartsWith(PowerShellModules + @"\", output[1], StringComparison.OrdinalIgnoreCase);
+        AssertAdministratorFoldersOnly(output[2]);
+        AssertAdministratorFoldersOnly(output[3]);
     }
 
     /// <summary>
@@ -117,7 +186,7 @@ public class LauncherTests
             && entry != "RM_LAUNCHER_TEST_BUILD=kept");
         foreach (var name in new[] { "DOTNET_ROOT", "DOTNET_gcServer", "COMPlus_EnableDiagnostics", "CORECLR_PROFILER_PATH", "COR_ENABLE_PROFILING", "COREHOST_TRACE", "__COMPAT_LAYER", "GH_TOKEN" })
             Assert.Null(child.Value(name));
-        Assert.Equal(ExpectedNames([.. IdentityNames, "DOTNET_EnableDiagnostics", "DOTNET_BUNDLE_EXTRACT_BASE_DIR", "RM_LAUNCHER_TEST_BUILD"]),
+        Assert.Equal(ExpectedNames([.. IdentityNames, "PSModulePath", "DOTNET_EnableDiagnostics", "DOTNET_BUNDLE_EXTRACT_BASE_DIR", "RM_LAUNCHER_TEST_BUILD"]),
             child.Names.OrderBy(name => name, StringComparer.OrdinalIgnoreCase));
         AssertIdentity(child);
     }
@@ -545,6 +614,7 @@ public class LauncherTests
         Assert.True(At("ReadPassThrough") < At("ReplaceOwnEnvironment"));
         Assert.True(At("ReplaceOwnEnvironment") < At("CreateEnvironmentBlock"));
         Assert.True(At("CreateEnvironmentBlock") < At("AddIdentity"));
+        Assert.True(At("CreateEnvironmentBlock") < At("AddModulePath"));   // it compares with the system block's value
 
         // The system block without the launcher's environment, and the app started with the block built from it.
         Assert.Single(Regex.Matches(code, @"\bCreateEnvironmentBlock\s*\("));
@@ -576,8 +646,86 @@ public class LauncherTests
             .Where(name => !LeftOutPrefixes.Any(prefix => name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)))
             .Where(name => !name.Equals("__COMPAT_LAYER", StringComparison.OrdinalIgnoreCase))
             .Where(name => !IdentityNames.Contains(name, StringComparer.OrdinalIgnoreCase) && !PassThroughNames.Contains(name, StringComparer.OrdinalIgnoreCase))
+            .Where(name => !name.Equals("PSModulePath", StringComparison.OrdinalIgnoreCase))
             .Concat(own)
             .OrderBy(name => name, StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Windows PowerShell's own modules folder, in System32.</summary>
+    private static string PowerShellModules => Path.Combine(Environment.SystemDirectory, @"WindowsPowerShell\v1.0\Modules");
+
+    /// <summary>A folder in the user's profile, as a user-level PSModulePath could name it.</summary>
+    private static string PlantedModules => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "planted-modules");
+
+    /// <summary>
+    /// The launcher's PSModulePath: <see cref="PowerShellModules"/>, or that folder twice when the machine value has as
+    /// many characters, so that the two are never equal.
+    /// </summary>
+    private static string ExpectedModulePath(string? machineValue)
+        => machineValue?.Length == PowerShellModules.Length ? $"{PowerShellModules};{PowerShellModules}" : PowerShellModules;
+
+    /// <summary>
+    /// Every folder in a PSModulePath is in the Windows folder or in Program Files (which need administrator rights to
+    /// change), and none is in the user's profile.
+    /// </summary>
+    private static void AssertAdministratorFoldersOnly(string modulePath)
+    {
+        string[] allowed = [Environment.GetFolderPath(Environment.SpecialFolder.Windows), Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles)];
+        var profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        var folders = modulePath.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        Assert.NotEmpty(folders);
+        foreach (var folder in folders)
+        {
+            Assert.False(IsIn(folder, profile), $"PSModulePath has {folder}, in the user's profile: {modulePath}");
+            Assert.True(allowed.Any(root => IsIn(folder, root)), $"PSModulePath has {folder}, outside the Windows and Program Files folders: {modulePath}");
+        }
+
+        static bool IsIn(string path, string root) => Path.GetFullPath(path).StartsWith(root.TrimEnd('\\') + @"\", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>A PowerShell string literal of <paramref name="text"/>.</summary>
+    private static string PowerShellText(string text) => "'" + text.Replace("'", "''") + "'";
+
+    /// <summary>
+    /// A PowerShell line that prints the PSModulePath Windows PowerShell 5.1 makes for itself when it is given
+    /// <paramref name="value"/>, with the machine value <paramref name="machineExpression"/> and the user-level value
+    /// <paramref name="user"/> (null: none). It runs PowerShell's own rule, the public ModuleIntrinsics.GetModulePath that
+    /// PowerShell calls with the three values when it starts; null from it means it keeps the value it was given.
+    /// </summary>
+    private static string ModulePathFromPowerShell(string value, string machineExpression, string? user)
+        => $"$path = [System.Management.Automation.ModuleIntrinsics]::GetModulePath({PowerShellText(value)}, {machineExpression}, " +
+           $"{(user == null ? "[NullString]::Value" : PowerShellText(user))}); if ($path) {{ $path }} else {{ {PowerShellText(value)} }}";
+
+    /// <summary>
+    /// Runs 64-bit Windows PowerShell 5.1, as the app starts it, with exactly <paramref name="environment"/> and these
+    /// lines, and returns the lines it wrote.
+    /// </summary>
+    private static string[] RunWindowsPowerShell(IEnumerable<string> environment, params string[] lines)
+    {
+        var script = string.Join("\n", ["$ProgressPreference = 'SilentlyContinue'", "[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false", .. lines]);
+        var start = new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, @"WindowsPowerShell\v1.0\powershell.exe"))
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            StandardOutputEncoding = new UTF8Encoding(false),
+        };
+        foreach (var argument in new[] { "-NoProfile", "-NonInteractive", "-EncodedCommand", Convert.ToBase64String(Encoding.Unicode.GetBytes(script)) })
+            start.ArgumentList.Add(argument);
+        start.Environment.Clear();
+        foreach (var entry in environment) start.Environment[NameOf(entry)] = entry[(entry.IndexOf('=', 1) + 1)..];
+
+        using var process = Process.Start(start)!;
+        var errors = process.StandardError.ReadToEndAsync();
+        var output = process.StandardOutput.ReadToEnd();
+        if (!process.WaitForExit(120_000))
+        {
+            process.Kill();
+            Assert.Fail("Windows PowerShell did not end within 2 minutes.");
+        }
+        Assert.True(process.ExitCode == 0 && errors.Result.Trim().Length == 0, $"Windows PowerShell exited with {process.ExitCode}: {errors.Result}");
+        return output.Split(["\r\n", "\n"], StringSplitOptions.RemoveEmptyEntries);
+    }
 
     private static string NameOf(string entry) => entry[..entry.IndexOf('=', 1)];
 

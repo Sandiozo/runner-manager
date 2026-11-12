@@ -10,6 +10,8 @@
  *   - the system variables from CreateEnvironmentBlock(NULL), less the names in IsLeftOutSystemName;
  *   - USERNAME, USERDOMAIN, USERPROFILE, HOMEDRIVE, HOMEPATH, APPDATA and LOCALAPPDATA, from the process token and
  *     Windows functions, never from the environment;
+ *   - PSModulePath=<System32>\WindowsPowerShell\v1.0\Modules, so that Windows PowerShell started by the app does not
+ *     load modules from the user's Documents folder (see AddModulePath);
  *   - DOTNET_EnableDiagnostics=0 and DOTNET_BUNDLE_EXTRACT_BASE_DIR=<launcher folder>\.net;
  *   - HTTP_PROXY, HTTPS_PROXY, ALL_PROXY, NO_PROXY, GH_TOKEN and GITHUB_TOKEN from the launcher's own environment, as
  *     data, when set, at most 8,192 characters and without control characters. ReadPassThroughValue is the only
@@ -28,7 +30,7 @@
  *   0x524C0001  its own path (or, for a very long folder, the System32 path) could not be read
  *   0x524C0002  out of memory
  *   0x524C0003  the DLL search could not be limited to System32
- *   0x524C0004  the system variables could not be read (the Windows folder, or CreateEnvironmentBlock)
+ *   0x524C0004  the system variables could not be read (the Windows or System32 folder, or CreateEnvironmentBlock)
  *   0x524C0005  the user's name, profile folder or AppData folders could not be read
  *   0x524C0006  the environment block could not be put together (a size overflowed, or a name came twice)
  *   0x524C0007  the child's command line would be longer than 32,767 characters
@@ -65,6 +67,8 @@
 
 #define CHILD_FILE_NAME          L"RunnerManager.exe"
 #define EXTRACT_FOLDER_NAME      L".net"
+/* Windows PowerShell's own modules, in the System32 folder. */
+#define POWERSHELL_MODULES       L"\\WindowsPowerShell\\v1.0\\Modules"
 
 /* The largest buffer GetModuleFileNameW is given: Windows paths are at most 32,767 characters. */
 #define OWN_PATH_BUFFER_MAX      32768u
@@ -76,8 +80,8 @@
 #define PASS_THROUGH_MAX_CHARS   8192u
 /* Names are compared with CompareStringOrdinal, which takes int lengths. No real name comes near this. */
 #define NAME_MAX_CHARS           32767u
-/* Entries the launcher makes itself: 7 for the user, 2 for .NET, 6 passed through. */
-#define OWN_ENTRY_COUNT          15u
+/* Entries the launcher makes itself: 7 for the user, 1 for Windows PowerShell, 2 for .NET, 6 passed through. */
+#define OWN_ENTRY_COUNT          16u
 
 /* One "NAME=value" string of the child's environment. */
 typedef struct Entry {
@@ -100,7 +104,7 @@ static const WCHAR *const PassThroughNames[] = {
 
 /* The names the launcher sets itself. The system block's value of any of them is left out, so each is there once. */
 static const WCHAR *const OwnNames[] = {
-    L"USERNAME", L"USERDOMAIN", L"USERPROFILE", L"HOMEDRIVE", L"HOMEPATH", L"APPDATA", L"LOCALAPPDATA",
+    L"USERNAME", L"USERDOMAIN", L"USERPROFILE", L"HOMEDRIVE", L"HOMEPATH", L"APPDATA", L"LOCALAPPDATA", L"PSModulePath",
     L"HTTP_PROXY", L"HTTPS_PROXY", L"ALL_PROXY", L"NO_PROXY", L"GH_TOKEN", L"GITHUB_TOKEN"
 };
 
@@ -132,6 +136,7 @@ static const WCHAR TestSystemEntries[] =
     L"__COMPAT_LAYER=RunAsInvoker\0"
     L"USERNAME=RM_LAUNCHER_TEST_BUILD\0"
     L"USERPROFILE=C:\\RM_LAUNCHER_TEST_BUILD\0"
+    L"PSModulePath=C:\\RM_LAUNCHER_TEST_BUILD\\Modules\0"
     L"GH_TOKEN=RM_LAUNCHER_TEST_BUILD\0"
     L"=C:=C:\\RM_LAUNCHER_TEST_BUILD\0"
     L"RM_LAUNCHER_TEST_BUILD_WITHOUT_EQUALS_SIGN\0"
@@ -265,6 +270,17 @@ static SIZE_T CountStrings(const WCHAR *block)
     return count;
 }
 
+/* The length of the value of name (any letter case) in an environment block, or (SIZE_T)-1 when the block has none. */
+static SIZE_T ValueLength(const WCHAR *block, const WCHAR *name)
+{
+    SIZE_T nameLength = TextLength(name);
+    for (const WCHAR *p = block; *p != 0; p += TextLength(p) + 1) {
+        SIZE_T textLength = TextLength(p);
+        if (textLength > nameLength && p[nameLength] == L'=' && IsName(p, nameLength, name)) return textLength - nameLength - 1;
+    }
+    return (SIZE_T)-1;
+}
+
 /*
  * Adds the system variables, except the names left out. Strings without a name are left out too: Windows keeps the
  * current folder of each drive as "=C:=C:\...", and CreateEnvironmentBlock makes none; a string without '=' is no
@@ -356,6 +372,52 @@ done:
     Free(domain);
     Free(name);
     Free(user);
+    return result;
+}
+
+/*
+ * PSModulePath: Windows PowerShell's own modules folder, <System32>\WindowsPowerShell\v1.0\Modules, which only
+ * administrators can change. System32 comes from GetSystemDirectoryW, which reads no variable.
+ * Why not the system value: the app starts Windows PowerShell 5.1 with administrator rights, and PowerShell puts the
+ * user's own modules folder (<Documents>\WindowsPowerShell\Modules, which programs without administrator rights can
+ * write) first when the value it is given equals the machine value, as the system block's value does. A module there
+ * named like a command of the app's scripts would then run with administrator rights. A value that differs from the
+ * machine value PowerShell keeps, adding only <Program Files>\WindowsPowerShell\Modules. A user-level value
+ * (HKCU\Environment\PSModulePath) adds nothing either: PowerShell uses it only when the value it is given equals the
+ * machine value, the user-level value itself, or the two joined, so here it can only bring in this value and the
+ * machine value. (ModuleIntrinsics.GetModulePath of Windows PowerShell 5.1, read and measured on Windows 11 24H2.)
+ * 32-bit Windows PowerShell (SysWOW64) does put the user's folder before this value when no user-level value is set;
+ * the app starts the 64-bit one.
+ * PowerShell compares with String.Equals(OrdinalIgnoreCase), which is false for strings of different lengths. So when
+ * the machine value has as many characters as the folder (it may be the folder itself), the child gets the folder
+ * twice, "<folder>;<folder>": the same modules, and never equal to the machine value.
+ */
+static DWORD AddModulePath(EntryList *list, const WCHAR *systemBlock)
+{
+    SIZE_T modulesLength = TextLength(POWERSHELL_MODULES);
+    UINT size = GetSystemDirectoryW(NULL, 0);   /* the size it needs, with the terminating null */
+    if (size == 0) return EXIT_SYSTEM_ENVIRONMENT;
+    /* Room for the folder twice and a ';' between: size counts a null, so this is a character more than that. */
+    WCHAR *value = Allocate(((SIZE_T)size + modulesLength) * 2, sizeof(WCHAR));
+    if (value == NULL) return EXIT_OUT_OF_MEMORY;
+    DWORD result = EXIT_SYSTEM_ENVIRONMENT;
+    UINT length = GetSystemDirectoryW(value, size);
+    if (length != 0 && length < size) {
+        SIZE_T folderLength = length + modulesLength;
+        SIZE_T valueLength = folderLength;
+        SIZE_T machineLength = ValueLength(systemBlock, L"PSModulePath");
+#ifdef LAUNCHER_TEST_BUILD
+        machineLength = folderLength;   /* as on a PC whose machine value is the folder itself, which no test can set */
+#endif
+        CopyChars(value + length, POWERSHELL_MODULES, modulesLength);
+        if (machineLength == folderLength) {
+            value[folderLength] = L';';
+            CopyChars(value + folderLength + 1, value, folderLength);
+            valueLength = folderLength * 2 + 1;
+        }
+        result = AddOwnEntry(list, L"PSModulePath", value, valueLength);
+    }
+    Free(value);
     return result;
 }
 
@@ -667,6 +729,7 @@ static DWORD Run(void)
         goto done;
     }
     if ((result = AddIdentity(&list, token)) != 0) goto done;
+    if ((result = AddModulePath(&list, systemBlock)) != 0) goto done;
     /* The elevated app must not offer the .NET diagnostics pipe, profiler attach or debugger hooks. */
     if ((result = AddOwnEntry(&list, L"DOTNET_EnableDiagnostics", L"0", 1)) != 0) goto done;
     /* A self-contained single-file build then never unpacks its native DLLs into a temp folder and loads them there. */
