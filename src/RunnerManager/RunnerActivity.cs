@@ -205,16 +205,24 @@ public static class RunnerActivity
     /// <summary>The last lines of the running step's output, without timestamps and color codes. None when the runner runs no job.</summary>
     internal static string[] ReadOutput(string root, int lines) => ReadOutput(root, lines, () => ProcessSnapshot.Read(WorkerName));
 
+    /// <summary>
+    /// Without the process list, the newest page is shown only when it was written this recently: then it is most often
+    /// the running step's. An older one can be the last step of an earlier job, for an organization runner even
+    /// another repository's.
+    /// </summary>
+    internal static readonly TimeSpan RecentPage = TimeSpan.FromMinutes(5);
+
     /// <param name="readWorkers">Reads the PC's Runner.Worker processes; tests replace it.</param>
-    internal static string[] ReadOutput(string root, int lines, Func<ProcessSnapshot> readWorkers)
+    /// <param name="nowUtc">The time, which tests set.</param>
+    internal static string[] ReadOutput(string root, int lines, Func<ProcessSnapshot> readWorkers, DateTime? nowUtc = null)
     {
         ProcessSnapshot workers;
         try { workers = readWorkers(); }
         catch (Exception ex) when (ex is ManagementException or System.Runtime.InteropServices.COMException or UnauthorizedAccessException)
         {
-            // Without the process list it is unknown whether a job runs and when it started, so the newest page is
-            // shown. Most often it is the running step's; between jobs it can be the last step of an earlier one.
-            return ReadLines(CurrentOutputFile(root), lines);
+            // Without the process list it is unknown whether a job runs and when it started.
+            var page = CurrentOutputFile(root);
+            return page != null && (nowUtc ?? DateTime.UtcNow) - page.ChangedUtc <= RecentPage ? ReadLines(page, lines) : Array.Empty<string>();
         }
         return ReadOutput(root, lines, workers);
     }

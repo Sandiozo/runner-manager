@@ -321,7 +321,7 @@ public class AuditRunnerTests
         var root = NewRunnerRoot();
         try
         {
-            WritePage(root, "a_1.log", "2026-10-19T12:00:00.0000000Z Compiling…\n", DateTime.UtcNow.AddHours(-2));
+            WritePage(root, "a_1.log", "2026-10-19T12:00:00.0000000Z Compiling…\n", DateTime.UtcNow.AddMinutes(-1));
 
             var lines = RunnerActivity.ReadOutput(root, 10, () => throw new System.Runtime.InteropServices.COMException("WMI is not available."));
 

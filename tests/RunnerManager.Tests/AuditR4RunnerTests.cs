@@ -91,4 +91,45 @@ public class AuditR4RunnerTests
     [InlineData(@"psql.exe -U postgres -d app", "-U postgres -d")]
     public void ProcessArguments_KeepOrdinaryArguments(string commandLine, string expected)
         => Assert.Equal(expected, RunnerActivity.ShortArguments(commandLine));
+
+    // ----- The job log without the process list -----
+
+    private static readonly DateTime Noon = new(2026, 11, 12, 12, 0, 0, DateTimeKind.Utc);
+
+    private static string NewRunnerRoot()
+    {
+        var root = Directory.CreateTempSubdirectory("rm-audit-r4-").FullName;
+        Directory.CreateDirectory(Path.Combine(root, "_diag", "pages"));
+        return root;
+    }
+
+    private static void WritePage(string root, string name, string text, DateTime writtenUtc)
+    {
+        var path = Path.Combine(root, "_diag", "pages", name);
+        File.WriteAllText(path, text);
+        File.SetCreationTimeUtc(path, writtenUtc);
+        File.SetLastWriteTimeUtc(path, writtenUtc);
+    }
+
+    private static RunnerActivity.ProcessSnapshot NoProcessList() => throw new System.Runtime.InteropServices.COMException("WMI is not available.");
+
+    [Fact]
+    public void JobLog_WithoutTheProcessList_ShowsOnlyAPageWrittenInTheLastMinutes()
+    {
+        var root = NewRunnerRoot();
+        try
+        {
+            // The last step of an earlier job, which the runner did not upload.
+            WritePage(root, "earlier_1.log", "an earlier job\n", Noon);
+
+            Assert.Equal(new[] { "an earlier job", "" }, RunnerActivity.ReadOutput(root, 10, NoProcessList, Noon.AddMinutes(4)));
+            Assert.Empty(RunnerActivity.ReadOutput(root, 10, NoProcessList, Noon.AddMinutes(6)));
+            Assert.Empty(RunnerActivity.ReadOutput(root, 10, NoProcessList, Noon.AddHours(3)));
+
+            // A step that writes now.
+            WritePage(root, "now_1.log", "this job\n", Noon.AddHours(3).AddSeconds(-20));
+            Assert.Equal(new[] { "this job", "" }, RunnerActivity.ReadOutput(root, 10, NoProcessList, Noon.AddHours(3)));
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
 }
