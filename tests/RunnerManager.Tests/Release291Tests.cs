@@ -352,3 +352,32 @@ public class JobOutputTests
     public void TheJobLog_WithProcessesThatCanBeRead_SaysThatThereIsNoOutputYet()
         => Assert.StartsWith("(No output yet.", LogReader.JobLogText(new RunnerActivity.JobOutput([], ProcessesUnreadable: false)));
 }
+
+/// <summary>An answer that cannot be read, which arrives after the failures were forgotten (see <see cref="FakeGh"/>).</summary>
+[Collection(GitHubCliCollection.Name)]
+public class UnreadableAfterResetTests
+{
+    [Fact]
+    public async Task AnUnreadableAnswer_ToAPollSentBeforeForgetProblems_DoesNotPauseTheEndpoint()
+    {
+        var scope = $"orgs/r291-{Guid.NewGuid():N}"[..30];
+        var list = $"{scope}/actions/runners?per_page=100";
+        var runner = $"{scope}/actions/runners/3";
+        var first = true;
+        using var gh = new FakeGh(_ =>
+        {
+            // The user connects GitHub or refreshes while the list waits for GitHub's answer.
+            if (first) GitHubCli.ForgetProblems();
+            first = false;
+            return FakeGh.Http(200, "not JSON");
+        });
+
+        Assert.Null(await GitHubCli.GetRunnerStateAsync(scope, 3));
+
+        // The list was asked before the reset: its unreadable answer is not kept, so the next refresh asks again.
+        Assert.Null(GitHubFailures.Blocking(list));
+        // The runner was asked one by one after the reset: that answer pauses it, as before.
+        Assert.NotNull(GitHubFailures.Blocking(runner));
+        Assert.Equal(2, gh.Calls.Length);
+    }
+}

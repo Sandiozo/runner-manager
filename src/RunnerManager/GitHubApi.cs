@@ -131,6 +131,7 @@ public static class GitHubApi
             if (UsualDurations.TryGetValue(key, out var known) && DateTime.UtcNow < known.Until) return (true, known.Usual);
 
         var endpoint = $"repos/{repositoryPath}/actions/runs?status=success&per_page=30";
+        var sentIn = GitHubFailures.Generation;
         var body = await GetPolledAsync(endpoint);
         if (body == null) return (false, null);
         List<WorkflowRunState> runs;
@@ -142,7 +143,7 @@ public static class GitHubApi
         }
         catch
         {
-            Unreadable(endpoint);
+            Unreadable(endpoint, sentIn);
             return (false, null);
         }
 
@@ -275,11 +276,12 @@ public static class GitHubApi
     /// same answer back as 304), and the request is paused like a failed one, so the job view does not start the
     /// whole read of the repository again on every tick only to fail at the same answer.
     /// </summary>
+    /// <param name="sentIn"><see cref="GitHubFailures.Generation"/>, taken before the request was sent.</param>
     /// <param name="unanswered">Gets the endpoint, so the failed read is kept while the request is paused.</param>
-    private static void Unreadable(string endpoint, ConcurrentBag<string>? unanswered = null)
+    private static void Unreadable(string endpoint, int sentIn, ConcurrentBag<string>? unanswered = null)
     {
         lock (CacheLock) PolledBodies.Remove(endpoint);
-        GitHubFailures.Unreadable(endpoint);
+        GitHubFailures.Unreadable(endpoint, sentIn);
         unanswered?.Add(endpoint);
     }
 
@@ -327,6 +329,7 @@ public static class GitHubApi
         string repositoryPath, string status, int page, ConcurrentBag<string> unanswered)
     {
         var endpoint = $"repos/{repositoryPath}/actions/runs?status={status}&per_page={RunPageSize}{PageParameter(page)}";
+        var sentIn = GitHubFailures.Generation;
         var body = await GetPolledAsync(endpoint, unanswered);
         if (body == null) return null;
         try
@@ -339,7 +342,7 @@ public static class GitHubApi
         }
         catch
         {
-            Unreadable(endpoint, unanswered);
+            Unreadable(endpoint, sentIn, unanswered);
             return null;
         }
     }
@@ -379,6 +382,7 @@ public static class GitHubApi
         string repositoryPath, WorkflowRunState run, int page, ConcurrentBag<string>? unanswered = null)
     {
         var endpoint = $"repos/{repositoryPath}/actions/runs/{GitHubNames.Id(run.Id)}/jobs?filter=latest&per_page={JobPageSize}{PageParameter(page)}";
+        var sentIn = GitHubFailures.Generation;
         var body = await GetPolledAsync(endpoint, unanswered);
         if (body == null) return null;
         try
@@ -392,7 +396,7 @@ public static class GitHubApi
         }
         catch
         {
-            Unreadable(endpoint, unanswered);
+            Unreadable(endpoint, sentIn, unanswered);
             return null;
         }
     }
@@ -457,6 +461,7 @@ public static class GitHubApi
             cached = RecentRunsCache.TryGetValue(repositoryPath, out var entry) ? entry : (string.Empty, new List<WorkflowRunSummary>());
 
         var endpoint = $"repos/{repositoryPath}/actions/runs?per_page={RecentRunCount}&exclude_pull_requests=true";
+        var sentIn = GitHubFailures.Generation;
         var response = await GitHubCli.GetConditionalAsync(endpoint, cached.ETag);
         if (response.NotModified) return cached.Runs;
         if (!response.Ok) return null;
@@ -486,7 +491,7 @@ public static class GitHubApi
         }
         catch
         {
-            GitHubFailures.Unreadable(endpoint);
+            GitHubFailures.Unreadable(endpoint, sentIn);
             return null;
         }
     }

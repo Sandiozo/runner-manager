@@ -303,6 +303,7 @@ public static class GitHubCli
     private static async Task<RemoteRunnerState?> PollRunnerAsync(string scope, long agentId)
     {
         var endpoint = $"{scope}/actions/runners/{GitHubNames.Id(agentId)}";
+        var sentIn = GitHubFailures.Generation;
         var response = await GetConditionalAsync(endpoint, null);
         if (!response.Ok) return null;
         try
@@ -313,7 +314,7 @@ public static class GitHubCli
         catch
         {
             // Paused like a failed poll, so it is not asked again at every refresh.
-            GitHubFailures.Unreadable(endpoint);
+            GitHubFailures.Unreadable(endpoint, sentIn);
             return null;
         }
     }
@@ -344,6 +345,7 @@ public static class GitHubCli
         (string ETag, RunnerList List)? previous;
         lock (RunnerListLock) previous = RunnerListETags.TryGetValue(scope, out var entry) ? entry : null;
         var endpoint = $"{scope}/actions/runners?per_page=100";
+        var sentIn = GitHubFailures.Generation;
         var response = await GetConditionalAsync(endpoint, previous?.ETag);
         if (response.NotModified && previous != null) return previous.Value.List;
         if (!response.Ok) return null;
@@ -356,7 +358,7 @@ public static class GitHubCli
         }
         catch
         {
-            GitHubFailures.Unreadable(endpoint);
+            GitHubFailures.Unreadable(endpoint, sentIn);
             return null;
         }
     }
