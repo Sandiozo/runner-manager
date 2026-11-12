@@ -91,7 +91,7 @@ need the `admin:org` permission; Runner Manager tells you how to add it when it 
 
 The fleet agent runs while you are signed in to Windows. After a restart, the PC rejoins the fleet when you sign in;
 runners installed as Windows services start on their own. On a PC with several Windows users, one of them runs the
-fleet agent, and the others can't take it over.
+fleet agent, and the others cannot take it over.
 
 ## Several PCs
 
@@ -99,15 +99,19 @@ To add a PC to the fleet:
 
 1. On a PC in the fleet, click **Add a PC** in the sidebar.
 2. On the new PC, click **Connect another PC → Join an existing fleet**, and select the PC it finds.
-3. Check that both PCs show the same 6-digit code, then click **Allow**.
+3. Check that both PCs show the same 6-digit code. On the PC in the fleet, choose **Join the fleet** and click
+   **Allow**.
+4. On the new PC, click **The codes match**. The PC in the fleet waits up to 3 minutes for this, and adds the new PC
+   only then.
 
-Both PCs need Runner Manager 2.4 or later to pair. To lock a PC out of the fleet, for example a lost laptop, use
-**Settings → Fleet → Change code…** and leave that PC out; the PCs you keep switch to a new code.
+Both PCs need Runner Manager 2.4 or later to pair, and 2.9 or later for step 4. To lock a PC out of the fleet, for
+example a lost laptop, use **Settings → Fleet → Change the fleet code on every PC** and leave that PC out; the PCs
+you keep switch to a new fleet code.
 
 ### A PC that belongs to someone else
 
-When the request comes in, choose **Manage it one way** before you click Allow. The PC gets a pairing code of its own
-instead of the fleet's: your PCs and AI assistants can see and control it like your other PCs, but it can't see or
+When the request comes in, choose **Manage it one way** before you click Allow. The PC gets an access code of its own
+instead of the fleet code: your PCs and AI assistants can see and control it like your other PCs, but it cannot see or
 control yours. Use it, for example, when a friend runs runners for you on their PC. Both PCs need Runner Manager 2.8 or
 later. On another network, put both PCs on the same Tailscale network (invite the other PC's owner to yours), click
 **Add a PC** here, and on the other PC enter this PC's Tailscale address under **Other ways to join**.
@@ -115,18 +119,19 @@ later. On another network, put both PCs on the same Tailscale network (invite th
 - Your other fleet PCs pick it up within a minute, so any of them can manage it.
 - The card shows **Managed**. To end it, choose **Stop managing this PC…** in its ⋯ menu. On the managed PC, the owner can
   end it with **Settings → Fleet → Disconnect…**.
-- **Change code…** also gives managed PCs new codes of their own.
+- **Change the fleet code on every PC** also gives managed PCs new access codes.
+- A managed PC cannot add PCs itself: **Add a PC** is for PCs in a fleet.
 - Jobs that run on the PC still use your code and secrets, as on any self-hosted runner. Only use PCs whose owner you
   trust with them.
 
 | | |
 | --- | --- |
 | Transport | Direct PC-to-PC connections. Fleet traffic does not go through GitHub. |
-| Encryption | AES-256-GCM. The key is derived from the pairing code and bound to the target PC and a timestamp. Replayed requests are rejected. |
-| Pairing | ECDH P-256 key exchange, confirmed with a 6-digit code on both PCs. The new PC commits to its key first, so a device in between cannot make the codes match. |
-| Storage | The pairing code, and the codes of PCs managed one way, are encrypted for your Windows account (DPAPI). |
+| Encryption | AES-256-GCM. The key is derived from the fleet code (for a PC managed one way, from its access code) and bound to the target PC and a timestamp. Replayed requests are rejected. |
+| Pairing | ECDH P-256 key exchange, confirmed with a 6-digit code on both PCs. The new PC commits to its key first, so a device in between cannot make the codes match, and it uses the code it is sent only after its user confirms that the 6-digit codes match. |
+| Storage | The fleet code, and the access codes of PCs managed one way, are encrypted for your Windows account (DPAPI). |
 | Ports | TCP 47821 and UDP 47822. TCP 47823 and UDP 47824 during pairing only. Firewall rules allow the local subnet and Tailscale (`100.64.0.0/10`). |
-| Other networks | Install [Tailscale](https://tailscale.com) on both PCs, then use **Settings → Fleet → Add a PC by address**. |
+| Other networks | Install [Tailscale](https://tailscale.com) on both PCs. To pair, enter the other PC's Tailscale address under **Other ways to join**. For a PC that is paired already, use **Settings → Fleet → Look for a paired PC at an address**. |
 
 Auto-recovery restarts a runner that stops unexpectedly, up to three times an hour. It does
 not restart anything you stop from Runner Manager. Turn it on or off for each PC in the PC's ⋯ menu.
@@ -166,7 +171,8 @@ Runner Manager is an [MCP](https://modelcontextprotocol.io) server, so any AI to
 the assistant which repository a new project uses, and it can check whether the repository has a runner, create one
 on the least busy PC, and tell you which `runs-on` labels to use.
 
-1. Open **Settings → AI assistants** and turn on **Allow AI assistants**.
+1. Open **Settings → AI assistants** and turn on **Allow AI assistants**. This switch and **Ask before changes** count
+   for every Windows user of the PC, and only a program with administrator rights can change them.
 2. Choose your AI tool, click **Copy**, and paste the setup where the page says. For most tools it is:
 
    ```json
