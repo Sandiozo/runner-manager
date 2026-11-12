@@ -1160,4 +1160,14 @@ public class AuditDashboardTests
         Assert.Contains(@"AddActivity(""Updated the fleet agent task to the current settings."");", check);
         Assert.DoesNotContain("3-day", check);
     }
+
+    // ----- 12: finishing joining from Settings -----
+
+    [Fact]
+    public void Settings_CanFinishJoiningTheFleet()
+    {
+        // Without it, Settings hides "Finish joining" and sends the user to the sidebar.
+        var open = MethodBody("MainWindow.Fleet.cs", "new SettingsWindow(");
+        Assert.Contains("finishJoining: () => SetUpFleetAsync(FleetStart.Ask)", open);
+    }
 }

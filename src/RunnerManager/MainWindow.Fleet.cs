@@ -311,7 +311,9 @@ public partial class MainWindow
             existing.Activate();
             return;
         }
-        var window = new SettingsWindow(_settings, ApplySettings, OnFleetSettingsChangedAsync, RunOperationAsync) { Owner = this };
+        // With the fleet code saved but no fleet agent, Settings offers to finish joining, as the sidebar does.
+        var window = new SettingsWindow(_settings, ApplySettings, OnFleetSettingsChangedAsync, RunOperationAsync,
+            finishJoining: () => SetUpFleetAsync(FleetStart.Ask)) { Owner = this };
         window.Show();
     }
 
