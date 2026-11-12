@@ -943,6 +943,8 @@ public partial class MainWindow : Window
 
     private async void AddRunner_Click(object sender, RoutedEventArgs e)
     {
+        // The first sign-in check runs beside the first refresh; until it answers, the sign-in is not known.
+        if (!_githubChecked && _gitHubCheck is { } check) await check;
         if (!_githubAuthenticated)
         {
             if (DialogWindow.Show(this, DialogTone.Info, "Connect GitHub first",
@@ -952,10 +954,39 @@ public partial class MainWindow : Window
             return;
         }
         if (IsOperationRunning("Add runner")) return;
-        var dialog = new AddRunnerWindow { Owner = this };
-        if (dialog.ShowDialog() != true || dialog.Setup == null) return;
-        await RunOperationAsync("Add runner", log => RunnerService.CreateRunnerAsync(dialog.Setup, log));
+        // A PC card's button adds on that PC; the toolbar and Ctrl+N on the PC selected in the sidebar.
+        var selected = ItemFrom<MachineInfo>(sender) ?? Machines.FirstOrDefault(m => m.MachineKey == _selectedMachineKey);
+        var dialog = new AddRunnerWindow(null, Machines, selected) { Owner = this };
+        if (dialog.ShowDialog() != true || dialog.Setup is not { } setup) return;
+        if (OtherPcToAddOn(dialog.TargetPc, Machines) is not { } pc)
+        {
+            await RunOperationAsync("Add runner", log => RunnerService.CreateRunnerAsync(setup, log));
+            return;
+        }
+        if (!CanSendTo(pc.MachineKey)) return;
+        await RunOperationAsync($"Add runner on {pc.MachineName}", async log =>
+        {
+            log(RemoteAddRunnerNote(pc.MachineName));
+            await _fleetActions.CreateRunnerAsync(pc, setup.RepositoryUrl, setup.RunnerName, setup.Labels, log);
+            var path = RunnerService.RepositoryPath(setup.RepositoryUrl);
+            if (!setup.CheckWorkflows || string.IsNullOrWhiteSpace(path)) return;
+            // The workflows are on GitHub, so this PC checks them; the runner works either way.
+            log("Checking repository workflows…");
+            try { await WorkflowManager.CheckAndUpdateAsync(path, setup.Labels, log); }
+            catch (Exception ex) { log($"Warning: the workflow check failed: {ex.Message.Split('\n')[0].Trim()} The runner was created."); }
+        });
     }
+
+    /// <summary>
+    /// The PC the Add runner window chose, as the dashboard knows it now, when it is another PC; null for this PC.
+    /// The window keeps the reading it was opened with, which a refresh may have replaced meanwhile.
+    /// </summary>
+    internal static MachineInfo? OtherPcToAddOn(MachineInfo? chosen, IEnumerable<MachineInfo> machines)
+        => chosen is not { IsLocal: false } ? null : machines.FirstOrDefault(m => m.MachineKey == chosen.MachineKey) ?? chosen;
+
+    /// <summary>The first line of an Add runner on another PC: its fleet agent sends nothing until it is done.</summary>
+    internal static string RemoteAddRunnerNote(string pcName)
+        => $"{pcName} downloads and sets up the runner. It reports no progress until it is done, which can take several minutes.";
 
     // ================= Operations =================
 

@@ -782,11 +782,12 @@ public class AuditDashboardTests
             MachineName = "BUILD-08", AgentProtocolVersion = 14, UpdatedUtc = DateTime.UtcNow, FleetAgentRunning = true
         });
         Assert.Equal("No runners on BUILD-08.", online.NoRunnersText);
-        // Runners are added on this PC.
-        Assert.Equal(Visibility.Collapsed, online.AddRunnerVisibility);
+        // Runners are added there through its fleet agent (round 3, item 11).
+        Assert.Equal(Visibility.Visible, online.AddRunnerVisibility);
 
         var offline = MachineInfo.Placeholder("BUILD-09", "BUILD-09", DateTime.UtcNow.AddHours(-2), "192.168.1.29", "Not reachable at 192.168.1.29:47800");
         Assert.Equal("BUILD-09 is not connected, so its runners are not known.", offline.NoRunnersText);
+        Assert.Equal(Visibility.Collapsed, offline.AddRunnerVisibility);
     }
 
     // ----- Item 22: smaller points -----
@@ -1283,5 +1284,51 @@ public class AuditDashboardTests
             MainWindow.LeaveFleetMessage(new[] { "BUILD-02", "BUILD-03" }, managed: false));
         Assert.Equal("The fleet agent and this PC's access code are removed from this PC. Runners keep running. You can add this PC again later.",
             MainWindow.LeaveFleetMessage(Array.Empty<string>(), managed: true));
+    }
+
+    // ----- 11: Add runner on another PC -----
+
+    [Fact]
+    public void AddRunner_OnAnotherPc_GoesToThatPcAsTheDashboardKnowsItNow()
+    {
+        var local = PcWith(Environment.MachineName);
+        var opened = PcWith("BUILD-30");
+        var newer = PcWith("BUILD-30", RunnerWith("api"));
+        Assert.Null(MainWindow.OtherPcToAddOn(null, new[] { local, newer }));
+        Assert.Null(MainWindow.OtherPcToAddOn(local, new[] { local, newer }));
+        // A refresh replaced the reading the window was opened with.
+        Assert.Same(newer, MainWindow.OtherPcToAddOn(opened, new[] { local, newer }));
+        Assert.Same(opened, MainWindow.OtherPcToAddOn(opened, new[] { local }));
+    }
+
+    [Fact]
+    public void AddRunner_OnAnotherPc_SaysFirstThatNoProgressComes()
+    {
+        Assert.Equal("BUILD-30 downloads and sets up the runner. It reports no progress until it is done, which can take several minutes.",
+            MainWindow.RemoteAddRunnerNote("BUILD-30"));
+        var click = MethodBody("MainWindow.xaml.cs", "private async void AddRunner_Click(");
+        Assert.Contains("new AddRunnerWindow(null, Machines, selected)", click);
+        Assert.Contains("if (!CanSendTo(pc.MachineKey)) return;", click);
+        var note = click.IndexOf("log(RemoteAddRunnerNote(pc.MachineName));", StringComparison.Ordinal);
+        var create = click.IndexOf("_fleetActions.CreateRunnerAsync(pc, setup.RepositoryUrl, setup.RunnerName, setup.Labels, log)", StringComparison.Ordinal);
+        Assert.True(note > 0 && note < create);
+        // Before the first sign-in check has answered, the sign-in is not known yet.
+        Assert.True(click.IndexOf("await check;", StringComparison.Ordinal) < click.IndexOf("if (!_githubAuthenticated)", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void PcCard_OffersAddRunner_OnAPcThatCanCreateOne()
+    {
+        Assert.Equal(Visibility.Visible, PcWith(Environment.MachineName).AddRunnerVisibility);
+        var online = PcWith("BUILD-31");
+        Assert.Equal(Visibility.Visible, online.AddRunnerVisibility);
+        Assert.Equal("Add a self-hosted runner on BUILD-31", online.AddRunnerTip);
+        var offline = MachineInfo.Placeholder("build-32", "BUILD-32", DateTime.UtcNow.AddHours(-1), "10.0.0.32", "No answer.");
+        Assert.Equal(Visibility.Collapsed, offline.AddRunnerVisibility);
+        var old = MachineInfo.FromPayload("build-33", new MachineStatusPayload
+        {
+            MachineName = "BUILD-33", AgentProtocolVersion = 8, UpdatedUtc = DateTime.UtcNow, FleetAgentRunning = true
+        });
+        Assert.Equal(Visibility.Collapsed, old.AddRunnerVisibility);
     }
 }

@@ -280,7 +280,7 @@
                             <TextBlock Text="Connect GitHub"/>
                         </StackPanel>
                     </Button>
-                    <Button Style="{StaticResource PrimaryButton}" Click="AddRunner_Click" ToolTip="Add a self-hosted runner on this PC (Ctrl+N)" AutomationProperties.Name="Add runner">
+                    <Button Style="{StaticResource PrimaryButton}" Click="AddRunner_Click" ToolTip="Add a self-hosted runner on this PC or another PC (Ctrl+N)" AutomationProperties.Name="Add runner">
                         <StackPanel Orientation="Horizontal">
                             <TextBlock Text="&#xE710;" Style="{StaticResource Icon}" FontSize="12" Foreground="{DynamicResource OnAccentBrush}" Margin="0,0,8,0"/>
                             <TextBlock Text="Add runner" Foreground="{DynamicResource OnAccentBrush}"/>
@@ -473,7 +473,8 @@
                                                     <StackPanel Orientation="Horizontal" Margin="8,8,8,10" Visibility="{Binding NoRunnersVisibility}">
                                                         <TextBlock Text="{Binding NoRunnersText}" Style="{StaticResource Caption}" VerticalAlignment="Center"/>
                                                         <Button Content="Add runner" Click="AddRunner_Click" Padding="10,3" Margin="12,0,0,0"
-                                                                Visibility="{Binding AddRunnerVisibility}" ToolTip="Add a self-hosted runner on this PC (Ctrl+N)"/>
+                                                                Visibility="{Binding AddRunnerVisibility}" ToolTip="{Binding AddRunnerTip}"
+                                                                AutomationProperties.Name="{Binding MachineName, StringFormat='Add runner on {0}'}"/>
                                                     </StackPanel>
                                                     <ItemsControl ItemsSource="{Binding Runners}">
                                                         <ItemsControl.ItemTemplate>
