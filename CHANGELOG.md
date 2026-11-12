@@ -47,10 +47,15 @@ Runner Manager no longer starts a runner's service next to its console window.
   says so. Only the launch task, which opens the dashboard without a UAC prompt, is registered again when it is not the
   user's own task with administrator rights.
 - Runner Manager goes back to the previous version after an update only when a file beside RunnerManager.exe,
-  `RunnerManager.exe.pending`, names that update. In Program Files, only administrators can change that file. Before,
-  the update state in the user's data folder was enough, and any program of the user can change it, so such a program
-  could make Runner Manager go back to the previous version. 2.9.0 writes no such file, so for 24 hours after the
-  update from 2.9.0, the update state alone is still enough.
+  `RunnerManager.exe.pending`, names that update. The starts of the new fleet agent are counted in that file, and only
+  those counts decide. In Program Files, only administrators can change that file. Before, the update state in the
+  user's data folder was enough, and any program of the user can change it, so such a program could make Runner
+  Manager go back to the previous version. The file is deleted when the update is no longer watched. When an update
+  was undone, the file records that, and only this record, not the update state, keeps Runner Manager from updating
+  the fleet agent to that version again by itself. A program of the user can still end the watch of an update through
+  the update state, so that an update whose fleet agent does not work is not undone. Versions before 2.10.0 write no such file,
+  so for 24 hours after an update from one of them, or after a setup that replaced one of them, the update state alone
+  is still enough.
 - Updates are prepared in a `RunnerManager.update-<number>` folder in the install folder instead of in the user's data
   folder. In Program Files, the new files cannot be changed between the checksum check and the copy without
   administrator rights. Old update folders in the install folder are removed only when they hold nothing but files and
