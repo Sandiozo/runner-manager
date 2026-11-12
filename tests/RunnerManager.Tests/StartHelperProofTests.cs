@@ -77,21 +77,24 @@ public class ProcessImageTests
 
     /// <summary>
     /// The path that <paramref name="process"/> was started by, from its list of modules. Right after the start, Windows
-    /// may not have filled in that list yet on a busy PC, so it is read again for a few seconds.
+    /// may not have filled in that list yet on a busy PC: reading it fails (Win32Exception), or it is still empty, and then
+    /// <see cref="Process.MainModule"/> is null (seen in about 1 of 30 runs while the whole suite ran beside it). So it is
+    /// read again for up to 10 seconds.
     /// </summary>
     private static string StartedBy(Process process)
     {
-        for (var attempt = 1; ; attempt++)
+        var deadline = Stopwatch.StartNew();
+        while (true)
         {
             try
             {
                 process.Refresh();
-                return process.MainModule!.FileName;
+                if (process.MainModule?.FileName is { Length: > 0 } path) return path;
             }
-            catch (Win32Exception) when (attempt < 50)
-            {
-                Thread.Sleep(100);
-            }
+            catch (Win32Exception) when (deadline.Elapsed < TimeSpan.FromSeconds(10)) { }
+            if (deadline.Elapsed >= TimeSpan.FromSeconds(10))
+                throw new TimeoutException($"Windows listed no modules of process {process.Id} within 10 seconds.");
+            Thread.Sleep(100);
         }
     }
 
