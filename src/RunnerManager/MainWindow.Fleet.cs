@@ -517,14 +517,10 @@ public partial class MainWindow
             await StopManagingAsync(machine.MachineName);
             return;
         }
-        if (!DialogWindow.Confirm(this, $"Forget {machine.MachineName}?",
-                machine.IsOnline
-                    ? $"{machine.MachineName} is online and still has the pairing code, so it may appear again. To remove it permanently, use \u201cLeave fleet\u201d in its \u22ef menu on {machine.MachineName}."
-                    : $"{machine.MachineName} is removed from this list. If it is still in the fleet, it appears again when it is found.",
+        if (!DialogWindow.Confirm(this, ForgetPc.Heading(machine.MachineName), ForgetPc.Message(machine.MachineName, machine.IsOnline),
                 "Forget")) return;
-        MachineRelay.ForgetPeer(machine.MachineName);
-        var host = machine.Address.Split(':')[0];
-        FleetConfig.Update(c => c.ManualAddresses.RemoveAll(a => a.Split(':')[0].Equals(host, StringComparison.OrdinalIgnoreCase)));
+        // As in Settings: the host of an IPv6 address has colons, so it is not what comes before the first one.
+        ForgetPc.Forget(machine.MachineName, machine.Address);
         AddActivity($"Forgot {machine.MachineName}.");
         if (_selectedMachineKey == machine.MachineKey) _selectedMachineKey = null;
         await RefreshAsync();

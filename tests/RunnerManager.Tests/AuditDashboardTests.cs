@@ -1125,4 +1125,28 @@ public class AuditDashboardTests
             }
             finally { WpfTestApp.UseColors(light: false); }
         });
+
+    // ----- 7: forgetting a PC -----
+
+    /// <summary>The body of a method in the app's source, from its name to its closing brace.</summary>
+    private static string MethodBody(string file, string signature)
+    {
+        var code = File.ReadAllText(Path.Combine(SourceDir, file)).Replace("\r\n", "\n");
+        var start = code.IndexOf(signature, StringComparison.Ordinal);
+        Assert.True(start >= 0, signature);
+        return code[start..code.IndexOf("\n    }\n", start, StringComparison.Ordinal)];
+    }
+
+    [Fact]
+    public void ForgettingAPc_OnTheDashboard_IsWordedAndDoneAsInSettings()
+    {
+        var forget = MethodBody("MainWindow.Fleet.cs", "void MachineForget_Click(");
+        Assert.Contains("ForgetPc.Heading(machine.MachineName)", forget);
+        Assert.Contains("ForgetPc.Message(machine.MachineName, machine.IsOnline)", forget);
+        Assert.Contains("ForgetPc.Forget(machine.MachineName, machine.Address)", forget);
+        // An IPv6 address has colons in its host, so the part before the first colon is not the host.
+        Assert.DoesNotContain("Split(':')", forget);
+        Assert.Equal(new[] { "[fd7a:115c::5]:47821" },
+            ForgetPc.ManualAddressesFor(new[] { "[fd7a:115c::5]:47821", "[fd7a:115c::6]:47821" }, new[] { "[fd7a:115c::5]:47821" }));
+    }
 }
