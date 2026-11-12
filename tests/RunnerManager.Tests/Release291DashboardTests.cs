@@ -1,6 +1,8 @@
 using System.IO;
 using System.Text.RegularExpressions;
 using System.Windows;
+using System.Windows.Automation;
+using System.Windows.Automation.Peers;
 using System.Windows.Controls;
 using System.Windows.Input;
 
@@ -330,17 +332,66 @@ public class DetailLinkTests
         });
     }
 
+    [Fact]
+    public void NamesWithAnUnderscore_KeepItWhereverTheyAreReadOrDrawn_AndEachRowSaysWhatItIs()
+    {
+        var steps = new[] { new LiveStepView { Name = "Run build_all.cmd", State = "running", DurationText = "2m 5s" } };
+        var processes = new[] { new LiveProcessView { Name = "MSBuild", Arguments = "web_app.sln", CpuText = "12%", MemoryText = "300 MB" } };
+        var runner = new MachineRunnerStatus
+        {
+            ServiceName = "actions.runner.octocat-web_app.GPT_CP", DisplayName = "GPT_CP", ServiceInstalled = true, IsRunning = true, ActivityText = "Busy",
+            RepositoryPath = "octocat/web_app",
+            LiveJob = new LiveJobView { Title = "CI_main → build_x", Url = "https://github.com/octocat/web_app/actions/runs/1/job/2", Steps = steps, Processes = processes }
+        };
+        var queued = new QueueEntry("CI_main → test_x  ·  run #8", "Waiting  ·  1m", "https://github.com/octocat/web_app/actions/runs/8/job/9", Running: false);
+        var run = new WorkflowRunSummary
+        {
+            Id = 6, RepositoryPath = "octocat/web_app", WorkflowName = "CI_main", RunNumber = 6, Status = "completed", Conclusion = "success",
+            HtmlUrl = "https://github.com/octocat/web_app/actions/runs/6", UpdatedUtc = DateTime.UtcNow
+        };
+        runner.Queue = new[] { queued };
+        runner.RecentRuns = new[] { run };
+        WithCard(runner, host =>
+        {
+            // A screen reader gets each button's whole name: a string content would make WPF drop the underscore.
+            var named = WpfTestApp.Descendants<Button>(host).Where(b => AutomationProperties.GetName(b).Length > 0).ToList();
+            foreach (var name in new[]
+                     {
+                         "Actions for BUILD_60", "Add runner on BUILD_60", "More actions for GPT_CP", "Run GPT_CP as a service",
+                         $"GPT_CP, {runner.StatusText}. Hide details", "CI_main → build_x", "octocat/web_app",
+                         "CI_main → test_x  ·  run #8, Waiting  ·  1m", "CI_main  #6, Succeeded"
+                     })
+                Assert.Contains(named, b => AutomationProperties.GetName(b) == name);
+            Assert.All(named, b => Assert.Equal(AutomationProperties.GetName(b), UIElementAutomationPeer.CreatePeerForElement(b).GetName()));
+            // And it is drawn whole: no text in the card is access text, which leaves the underscore out.
+            Assert.Empty(WpfTestApp.Descendants<AccessText>(host));
+            Assert.Contains(WpfTestApp.Descendants<TextBlock>(host), t => t.Text == "GPT_CP" && t.ActualWidth > 0);
+
+            // The rows of the lists say what they are, not the name of their class.
+            string[] Rows(object item)
+            {
+                var list = WpfTestApp.Descendants<ItemsControl>(host).Single(c => c.ItemsSource is System.Collections.IEnumerable items && items.Cast<object>().Contains(item));
+                return UIElementAutomationPeer.CreatePeerForElement(list).GetChildren().Select(p => p.GetName()).ToArray();
+            }
+            Assert.Equal(new[] { $"GPT_CP, {runner.StatusText}" }, Rows(runner));
+            Assert.Equal(new[] { "Run build_all.cmd, Running, 2m 5s" }, Rows(steps[0]));
+            Assert.Equal(new[] { "MSBuild, 12% CPU, 300 MB" }, Rows(processes[0]));
+            Assert.Equal(new[] { "CI_main → test_x  ·  run #8, Waiting  ·  1m" }, Rows(queued));
+            Assert.Equal(new[] { "CI_main  #6, Succeeded" }, Rows(run));
+        }, pcName: "BUILD_60");
+    }
+
     private static MachineRunnerStatus Busy(string repositoryPath, LiveJobView job) => new()
     {
         ServiceName = "actions.runner.web", DisplayName = "web", ServiceInstalled = true, IsRunning = true, ActivityText = "Busy",
         RepositoryPath = repositoryPath, LiveJob = job
     };
 
-    private static void WithCard(MachineRunnerStatus runner, Action<FrameworkElement> check)
+    private static void WithCard(MachineRunnerStatus runner, Action<FrameworkElement> check, string pcName = "BUILD-60")
     {
-        var pc = MachineInfo.FromPayload("build-60", new MachineStatusPayload
+        var pc = MachineInfo.FromPayload(pcName.ToLowerInvariant(), new MachineStatusPayload
         {
-            MachineName = "BUILD-60", AgentProtocolVersion = 14, UpdatedUtc = DateTime.UtcNow, FleetAgentRunning = true, Runners = new[] { runner }
+            MachineName = pcName, AgentProtocolVersion = 14, UpdatedUtc = DateTime.UtcNow, FleetAgentRunning = true, Runners = new[] { runner }
         });
         var window = WpfTestApp.Run(() => new MainWindow());
         var (queueCollapsed, runsCollapsed) = (MachineRunnerStatus.QueueCollapsed, MachineRunnerStatus.RecentRunsCollapsed);

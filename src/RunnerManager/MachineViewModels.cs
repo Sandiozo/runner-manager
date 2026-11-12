@@ -216,6 +216,11 @@ public sealed class MachineRunnerStatus : INotifyPropertyChanged
     [JsonIgnore] public string ExpandGlyph => IsExpanded ? "" : "";
     /// <summary>The name of the header button for screen readers: the runner, its state and what a click does.</summary>
     [JsonIgnore] public string HeaderName => $"{TitleText}, {StatusText}. {(IsExpanded ? "Hide details" : "Show details")}";
+    /// <summary>
+    /// What a screen reader says for the runner's row in the PC's list, which has no name of its own: the runner and its
+    /// state, as the header says. Without it, the row is read as the name of this class.
+    /// </summary>
+    public override string ToString() => $"{TitleText}, {StatusText}";
     /// <summary>This PC's own reading of the labels when it has one, otherwise what the runner's agent reports.</summary>
     [JsonIgnore] private string[] EffectiveCustomLabels => LocalRunner is { CustomLabels.Length: > 0 } local ? local.CustomLabels : CustomLabels;
     [JsonIgnore] public string LabelsText => EffectiveCustomLabels is { Length: > 0 } labels
@@ -918,6 +923,13 @@ public sealed class LiveStepView
         return new LiveStepView { Name = step.Name, DurationText = duration, State = state };
     }
 
+    /// <summary>What a screen reader says for the step's row: its name, its state and how long it took.</summary>
+    public override string ToString()
+    {
+        var state = State switch { "done" => "Done", "failed" => "Failed", "running" => "Running", "skipped" => "Skipped", _ => "Waiting" };
+        return DurationText.Length > 0 ? $"{Name}, {state}, {DurationText}" : $"{Name}, {state}";
+    }
+
     public static string FormatDuration(TimeSpan span)
     {
         if (span < TimeSpan.Zero) span = TimeSpan.Zero;
@@ -941,4 +953,7 @@ public sealed class LiveProcessView
         CpuText = $"{process.CpuPercent:0}%",
         MemoryText = SystemHealth.FormatBytes(process.MemoryBytes)
     };
+
+    /// <summary>What a screen reader says for the process's row: its name, CPU and memory.</summary>
+    public override string ToString() => $"{Name}, {CpuText} CPU, {MemoryText}";
 }

@@ -629,7 +629,8 @@ public partial class SettingsWindow : Window
         {
             var ready = pc.IsOnline && pc.AgentProtocolVersion >= MachineRelay.RekeyProtocolVersion;
             var note = ready ? string.Empty : pc.IsOnline ? "  ·  update Runner Manager on it first" : "  ·  offline";
-            var box = new CheckBox { Content = pc.MachineName + note, IsChecked = ready, IsEnabled = ready, Margin = new Thickness(0, 4, 0, 4) };
+            // In a TextBlock: string content would drop an underscore in the PC's name, read as an access key.
+            var box = new CheckBox { Content = new TextBlock { Text = pc.MachineName + note }, IsChecked = ready, IsEnabled = ready, Margin = new Thickness(0, 4, 0, 4) };
             boxes.Add((box, pc));
             body.Children.Add(box);
         }
@@ -881,7 +882,8 @@ public partial class SettingsWindow : Window
                     : AppUpdater.IsRunningInstalledCopy
                         ? "Up to date."
                         : $"Running from a build folder. Install v{_release.Version} to run from a fixed location.";
-            InstallUpdateButton.Content = available ? $"Install {_release!.Version}" : "Install";
+            // Text made at run time goes in a TextBlock, as everywhere: string content reads an underscore as an access key.
+            InstallUpdateButton.Content = new TextBlock { Text = available ? $"Install {_release!.Version}" : "Install" };
             InstallUpdateButton.Visibility = installable ? Visibility.Visible : Visibility.Collapsed;
             UpdateDot.Visibility = available && !replacesNewer ? Visibility.Visible : Visibility.Collapsed;
         }

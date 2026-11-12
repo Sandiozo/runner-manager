@@ -514,8 +514,11 @@
                                                         <TextBlock Text="{Binding StatusText}" Foreground="{Binding StatusTextBrush}" FontSize="12" FontWeight="SemiBold"/>
                                                     </StackPanel>
                                                 </Border>
-                                                <Button Style="{StaticResource IconButton}" Content="&#xE712;" Margin="6,0,0,0" ToolTip="PC actions" Click="OpenButtonMenu_Click"
+                                                <Button Style="{StaticResource IconButton}" Margin="6,0,0,0" ToolTip="PC actions" Click="OpenButtonMenu_Click"
                                                         AutomationProperties.Name="{Binding MachineName, StringFormat='Actions for {0}'}">
+                                                    <!-- The icon is a TextBlock, not string content: with string content, WPF reads an
+                                                         underscore in the name as an access key and drops it, so "GPT_CP" would be read "GPTCP". -->
+                                                    <TextBlock Text="&#xE712;"/>
                                                     <Button.ContextMenu>
                                                         <ContextMenu>
                                                             <MenuItem Header="Auto-recovery" IsCheckable="True" IsChecked="{Binding WatchdogEnabled, Mode=OneWay}"
@@ -525,7 +528,9 @@
                                                             <MenuItem Header="Update Runner Manager" Tag="&#xE896;" IsEnabled="{Binding CanUpdateAgent}" Click="MachineUpdate_Click"/>
                                                             <Separator/>
                                                             <MenuItem Header="Restart PC…" Tag="&#xE7E8;" Style="{StaticResource DangerMenuItem}" IsEnabled="{Binding SupportsFleetTools}" Click="MachineReboot_Click"/>
-                                                            <MenuItem Header="{Binding ForgetHeader}" Tag="&#xE711;" Visibility="{Binding ForgetVisibility}" Click="MachineForget_Click"/>
+                                                            <MenuItem Tag="&#xE711;" Visibility="{Binding ForgetVisibility}" Click="MachineForget_Click">
+                                                                <MenuItem.Header><TextBlock Text="{Binding ForgetHeader}"/></MenuItem.Header>
+                                                            </MenuItem>
                                                             <MenuItem Header="Leave fleet…" Tag="&#xF3B1;" Style="{StaticResource DangerMenuItem}" Visibility="{Binding LeaveVisibility}" Click="LeaveFleet_Click"/>
                                                         </ContextMenu>
                                                     </Button.ContextMenu>
@@ -574,9 +579,11 @@
                                                     </DockPanel>
                                                     <StackPanel Orientation="Horizontal" Margin="8,8,8,10" Visibility="{Binding NoRunnersVisibility}">
                                                         <TextBlock Text="{Binding NoRunnersText}" Style="{StaticResource Caption}" VerticalAlignment="Center"/>
-                                                        <Button Content="Add runner" Click="AddRunner_Click" Padding="10,3" Margin="12,0,0,0"
+                                                        <Button Click="AddRunner_Click" Padding="10,3" Margin="12,0,0,0"
                                                                 Visibility="{Binding AddRunnerVisibility}" ToolTip="{Binding AddRunnerTip}"
-                                                                AutomationProperties.Name="{Binding MachineName, StringFormat='Add runner on {0}'}"/>
+                                                                AutomationProperties.Name="{Binding MachineName, StringFormat='Add runner on {0}'}">
+                                                            <TextBlock Text="Add runner"/>
+                                                        </Button>
                                                     </StackPanel>
                                                     <ItemsControl ItemsSource="{Binding Runners}">
                                                         <ItemsControl.ItemTemplate>
@@ -649,16 +656,20 @@
                                                                                 <TextBlock Text="Run as service" FontSize="12"/>
                                                                             </StackPanel>
                                                                         </Button>
-                                                                        <Button Grid.Column="4" Style="{StaticResource IconButton}" Content="&#xE712;" Margin="4,0,0,0" VerticalAlignment="Center"
+                                                                        <Button Grid.Column="4" Style="{StaticResource IconButton}" Margin="4,0,0,0" VerticalAlignment="Center"
                                                                                 Click="OpenButtonMenu_Click" ToolTip="More actions" AutomationProperties.Name="{Binding TitleText, StringFormat='More actions for {0}'}">
+                                                                            <!-- A TextBlock, as on the PC's actions button, so the runner's name keeps its underscores. -->
+                                                                            <TextBlock Text="&#xE712;"/>
                                                                             <Button.ContextMenu>
                                                                                 <ContextMenu>
                                                                                     <MenuItem Header="Edit name and labels…" Tag="&#xE70F;" Click="RunnerEdit_Click" IsEnabled="{Binding CanEdit}"/>
                                                                                     <MenuItem Header="Restart" Tag="&#xE72C;" Click="RunnerRestart_Click" IsEnabled="{Binding CanRestart}"/>
                                                                                     <MenuItem Header="Repair Windows service…" Tag="&#xE90F;" Click="RunnerRepair_Click" Visibility="{Binding RepairVisibility}"/>
                                                                                     <MenuItem Header="Run as Windows service…" Tag="&#xE90F;" Click="RunnerConvert_Click" Visibility="{Binding ConvertVisibility}" IsEnabled="{Binding CanConvert}"/>
-                                                                                    <MenuItem Header="{Binding StartupHeader}" IsCheckable="True" IsChecked="{Binding StartsAutomatically, Mode=OneWay}"
-                                                                                              IsEnabled="{Binding CanChangeStartup}" ToolTip="{Binding StartupTip}" Click="RunnerStartup_Click"/>
+                                                                                    <MenuItem IsCheckable="True" IsChecked="{Binding StartsAutomatically, Mode=OneWay}"
+                                                                                              IsEnabled="{Binding CanChangeStartup}" ToolTip="{Binding StartupTip}" Click="RunnerStartup_Click">
+                                                                                        <MenuItem.Header><TextBlock Text="{Binding StartupHeader}"/></MenuItem.Header>
+                                                                                    </MenuItem>
                                                                                     <MenuItem Header="Move to another PC…" Tag="&#xE8AB;" Click="RunnerMove_Click" IsEnabled="{Binding CanMove}"/>
                                                                                     <MenuItem Header="Clean work folder…" Tag="&#xE74D;" Click="RunnerCleanWork_Click" IsEnabled="{Binding CanCleanWork}"/>
                                                                                     <MenuItem Header="Stop the job's processes…" Tag="&#xE71A;" Click="RunnerStopJob_Click" IsEnabled="{Binding CanStopJob}"

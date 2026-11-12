@@ -28,6 +28,11 @@ public sealed record QueueEntry(string Title, string Detail, string Url, bool Ru
     /// <summary>The row is a link (a button) when GitHub gave the job's address, and plain text otherwise.</summary>
     public System.Windows.Visibility LinkVisibility => string.IsNullOrWhiteSpace(Url) ? System.Windows.Visibility.Collapsed : System.Windows.Visibility.Visible;
     public System.Windows.Visibility TextVisibility => string.IsNullOrWhiteSpace(Url) ? System.Windows.Visibility.Visible : System.Windows.Visibility.Collapsed;
+    /// <summary>
+    /// What a screen reader says for the row, as its link says: the job and its state. Without it, the row is read as
+    /// the record's type name and fields.
+    /// </summary>
+    public override string ToString() => $"{Title}, {Detail}";
 }
 
 /// <summary>A queued job that no runner in the fleet will take.</summary>

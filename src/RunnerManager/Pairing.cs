@@ -54,6 +54,8 @@ public static class Pairing
     {
         public bool IsOutdated => Version < Pairing.Version;
         public string Detail => IsOutdated ? $"{Address}  ·  older Runner Manager, update it first" : Address;
+        /// <summary>What a screen reader says for the PC's row in Join a fleet. Without it, the row is read as the record's type name and fields.</summary>
+        public override string ToString() => $"{Name}, {Detail.Replace("  ·  ", ", ")}";
     }
 
     /// <param name="Managed">

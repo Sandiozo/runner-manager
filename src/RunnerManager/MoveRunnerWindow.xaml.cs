@@ -22,7 +22,8 @@ public partial class MoveRunnerWindow : Window
     private void TargetList_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e)
     {
         MoveButton.IsEnabled = TargetList.SelectedItem != null;
-        if (TargetList.SelectedItem is MachineInfo machine) MoveButton.Content = $"Move to {machine.MachineName}";
+        // In a TextBlock: string content would drop an underscore in the PC's name, read as an access key.
+        if (TargetList.SelectedItem is MachineInfo machine) MoveButton.Content = new System.Windows.Controls.TextBlock { Text = $"Move to {machine.MachineName}" };
     }
 
     private void Move_Click(object sender, RoutedEventArgs e)

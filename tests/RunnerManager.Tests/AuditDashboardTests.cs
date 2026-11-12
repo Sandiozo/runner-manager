@@ -1096,6 +1096,104 @@ public class AuditDashboardTests
         Assert.Equal($"api, {runner.StatusText}. Hide details", runner.HeaderName);
     }
 
+    // ----- 4: names that users choose keep their underscores -----
+
+    [Fact]
+    public void ANameWithAnUnderscore_IsCutByStringContent_AndKeptInATextBlock()
+        => WpfTestApp.Run(() =>
+        {
+            // Why controls take such text as a TextBlock: WPF reads an underscore in string content as an access key. It
+            // draws the text without it, and the peer of a button or menu item drops it even from a name set on its own.
+            var icon = WpfTestApp.Layout(new Button { Style = (Style)Application.Current.FindResource("IconButton"), Content = "" });
+            AutomationProperties.SetName(icon, "More actions for GPT_CP");
+            Assert.Equal("More actions for GPTCP", UIElementAutomationPeer.CreatePeerForElement(icon).GetName());
+            var text = WpfTestApp.Layout(new Button { Content = "Move to GPT_CP" });
+            Assert.NotEmpty(WpfTestApp.Descendants<AccessText>(text));
+            Assert.Equal("Move to GPTCP", UIElementAutomationPeer.CreatePeerForElement(text).GetName());
+            Assert.Equal("Forget GPTCP", UIElementAutomationPeer.CreatePeerForElement(new MenuItem { Header = "Forget GPT_CP" }).GetName());
+
+            var kept = new (Control Control, string Name)[]
+            {
+                (new Button { Style = (Style)Application.Current.FindResource("IconButton"), Content = new TextBlock { Text = "" } }, "More actions for GPT_CP"),
+                (new Button { Content = new TextBlock { Text = "Move to GPT_CP" } }, "Move to GPT_CP"),
+                (new RadioButton { Style = (Style)Application.Current.FindResource("Segment"), Content = new TextBlock { Text = "GPT_CP (this PC)" } }, "GPT_CP, this PC"),
+                (new CheckBox { Content = new TextBlock { Text = "GPT_CP  ·  offline" } }, string.Empty),
+                (new MenuItem { Header = new TextBlock { Text = "Forget GPT_CP" } }, string.Empty)
+            };
+            foreach (var (control, name) in kept)
+            {
+                if (name.Length > 0) AutomationProperties.SetName(control, name);
+                WpfTestApp.Layout(control);
+                var expected = name.Length > 0 ? name : ((TextBlock)(control is HeaderedItemsControl menu ? menu.Header : ((ContentControl)control).Content)).Text;
+                Assert.Equal(expected, UIElementAutomationPeer.CreatePeerForElement(control).GetName());
+                Assert.Empty(WpfTestApp.Descendants<AccessText>(control));
+            }
+        });
+
+    [Fact]
+    public void ControlsWithTextFromData_TakeItAsATextBlock()
+    {
+        // As above: a control's text from data, and the text of a control whose name carries data, is a TextBlock. A
+        // name bound to the control itself or to another element (its tooltip, a label) carries none.
+        var dataName = new Regex(@"AutomationProperties\.Name=""\{Binding(?![^""]*(RelativeSource Self|ElementName=))");
+        var wrong = new List<string>();
+        foreach (var file in SourceFiles("*.xaml"))
+        foreach (Match control in Regex.Matches(File.ReadAllText(file), @"<(Button|MenuItem|CheckBox|RadioButton|ToggleButton)\b[^>]*>"))
+        {
+            if (Regex.IsMatch(control.Value, @"\s(Content|Header)=""\{Binding\s")
+                || (dataName.IsMatch(control.Value) && Regex.IsMatch(control.Value, @"\s(Content|Header)=""[^{]")))
+                wrong.Add($"{Path.GetFileName(file)}: {control.Value}");
+        }
+        // In code, text made at run time.
+        foreach (var file in SourceFiles("*.cs"))
+            wrong.AddRange(Regex.Matches(File.ReadAllText(file), @"\b(Content|Header) = (?!new\b)[^;\r\n]*(\$""| \+ )")
+                .Select(m => $"{Path.GetFileName(file)}: {m.Value}"));
+        Assert.Empty(wrong);
+        // The ones that had string content.
+        var main = Xaml("MainWindow.xaml");
+        Assert.Contains(@"AutomationProperties.Name=""{Binding TitleText, StringFormat='More actions for {0}'}"">", main);
+        Assert.Contains(@"AutomationProperties.Name=""{Binding MachineName, StringFormat='Add runner on {0}'}"">", main);
+        Assert.Equal(2, Regex.Matches(main, @"StringFormat='(More actions|Actions) for \{0\}'\}"">\s*(<!--[^>]*-->\s*)?<TextBlock Text=""&#xE712;""/>").Count);
+    }
+
+    /// <summary>The app's own source files, without what the build makes.</summary>
+    private static IEnumerable<string> SourceFiles(string pattern)
+        => Directory.GetFiles(SourceDir, pattern, SearchOption.AllDirectories)
+            .Where(f => !Path.GetRelativePath(SourceDir, f).Split(Path.DirectorySeparatorChar).Any(part => part is "obj" or "bin"));
+
+    [Fact]
+    public void TheMoveButton_SaysThePcAsItIsNamed()
+        => WpfTestApp.Run(() =>
+        {
+            var runner = new MachineRunnerStatus { ServiceName = "actions.runner.web", DisplayName = "GPT_CP", MachineName = "BUILD_01" };
+            var target = MachineInfo.FromPayload("gpu_box", new MachineStatusPayload { MachineName = "GPU_BOX", UpdatedUtc = DateTime.UtcNow, FleetAgentRunning = true });
+            var window = new MoveRunnerWindow(runner, new[] { target });
+            try
+            {
+                WpfTestApp.Layout(window.MoveButton);
+                Assert.Equal("Move to GPU_BOX", ((TextBlock)window.MoveButton.Content).Text);
+                Assert.Equal("Move to GPU_BOX", UIElementAutomationPeer.CreatePeerForElement(window.MoveButton).GetName());
+                Assert.Empty(WpfTestApp.Descendants<AccessText>(window.MoveButton));
+            }
+            finally { window.Close(); }
+        });
+
+    [Fact]
+    public void ListRowsWithoutANameOfTheirOwn_SayWhatTheyAre()
+    {
+        // A row of a list is read with ToString when it has no name of its own: by default the name of its class, or for
+        // a record its type name and fields.
+        var runner = PcWith("BUILD-01", RunnerWith("GPT_CP")).Runners[0];
+        Assert.Equal($"GPT_CP, {runner.StatusText}", runner.ToString());
+        Assert.Equal("CI → build  ·  run #7, Waiting  ·  2m", new QueueEntry("CI → build  ·  run #7", "Waiting  ·  2m", string.Empty, Running: false).ToString());
+        Assert.Equal("Nightly  #5, Failed", new WorkflowRunSummary { WorkflowName = "Nightly", RunNumber = 5, Status = "completed", Conclusion = "failure" }.ToString());
+        Assert.Equal("Run build_all.cmd, Running, 2m 5s", new LiveStepView { Name = "Run build_all.cmd", State = "running", DurationText = "2m 5s" }.ToString());
+        Assert.Equal("Checkout, Waiting", new LiveStepView { Name = "Checkout" }.ToString());
+        Assert.Equal("MSBuild, 12% CPU, 300 MB", new LiveProcessView { Name = "MSBuild", Arguments = "web_app.sln", CpuText = "12%", MemoryText = "300 MB" }.ToString());
+        Assert.Equal("GPU_BOX, 10.0.0.7:47821", new Pairing.Host("GPU_BOX", "10.0.0.7:47821").ToString());
+        Assert.Equal("GPU_BOX, 10.0.0.7:47821, older Runner Manager, update it first", new Pairing.Host("GPU_BOX", "10.0.0.7:47821", Version: 1).ToString());
+    }
+
     // ----- 4: OptionCard -----
 
     [Theory]

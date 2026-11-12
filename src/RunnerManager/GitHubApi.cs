@@ -692,6 +692,8 @@ public sealed class WorkflowRunSummary
     /// <summary>The row is a link (a button) when GitHub gave the run's address, and plain text otherwise.</summary>
     public System.Windows.Visibility LinkVisibility => string.IsNullOrWhiteSpace(HtmlUrl) ? System.Windows.Visibility.Collapsed : System.Windows.Visibility.Visible;
     public System.Windows.Visibility TextVisibility => string.IsNullOrWhiteSpace(HtmlUrl) ? System.Windows.Visibility.Visible : System.Windows.Visibility.Collapsed;
+    /// <summary>What a screen reader says for the run's row, as its link says: the workflow, the run and its state.</summary>
+    public override string ToString() => $"{TitleText}, {StateText}";
 }
 
 public sealed class RepositoryFile
