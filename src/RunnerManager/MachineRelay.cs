@@ -1202,17 +1202,35 @@ public static class MachineRelay
 
     /// <summary>
     /// The fleet agent's check of its start (every few minutes): asks the loop to restart through the start helper when
-    /// <see cref="Launcher.AgentStep"/> says so. Only for the installed copy with administrator rights.
+    /// <see cref="Launcher.AgentStep"/> says so. Only for the installed build with administrator rights
+    /// (<see cref="Launcher.Decides"/>), and only once this process saw the start helper start Runner Manager (see
+    /// <see cref="StartHelperWorksAsync"/>): a probe runs before the task moves to it.
     /// </summary>
     internal static async Task CheckStartHelperAsync()
     {
-        if (!Elevation.IsElevated || !AppUpdater.IsRunningInstalledCopy) return;
+        if (!Launcher.Decides()) return;
         var exe = AppUpdater.InstalledExe;
         var command = ScheduledTasks.CommandOfOwnElevatedTask(await ScheduledTasks.QueryXmlAsync(ScheduledTasks.AgentTaskName));
-        var step = Launcher.AgentStep(Launcher.StartedThisProcess(), Launcher.IsInPlace(AppUpdater.InstallDir), command, exe,
+        var startedByHelper = Launcher.StartedThisProcess();
+        var step = Launcher.AgentStep(startedByHelper, Launcher.IsInPlace(AppUpdater.InstallDir), command, exe,
             UpdateWatched(), InstallChecks.IsDone(Launcher.AgentRestartCheck));
-        if (step != Launcher.AgentStartStep.Nothing && await ScheduledTasks.OtherOwnerAsync(ScheduledTasks.AgentTaskName) == null)
-            AskStartHelperStep(step);
+        if (step == Launcher.AgentStartStep.Nothing || await ScheduledTasks.OtherOwnerAsync(ScheduledTasks.AgentTaskName) != null) return;
+        if (await StartHelperWorksAsync(AppUpdater.InstallDir, Launcher.EnsureForThisCopyAsync)) AskStartHelperStep(step);
+    }
+
+    /// <summary>
+    /// Whether the start helper in <paramref name="folder"/> starts Runner Manager, checked before the agent moves its task
+    /// to it and restarts through it (see <see cref="Launcher.ProveAsync"/>). One that does not is given up on by
+    /// <paramref name="giveUp"/>, as one that was removed is (see <see cref="Launcher.EnsureForThisCopyAsync"/>, which
+    /// finds the result of the probe): this PC runs without it and this user's tasks start the exe. False without a
+    /// decision while an update holds the update lock; the next check tries again.
+    /// </summary>
+    internal static async Task<bool> StartHelperWorksAsync(string folder, Func<Task> giveUp)
+    {
+        var proof = await Launcher.ProveAsync(folder, TimeSpan.FromSeconds(2));
+        if (proof.Outcome == Launcher.Proof.Works) return true;
+        if (proof.Outcome == Launcher.Proof.Fails) await giveUp();
+        return false;
     }
 
     /// <summary>The agent's answer to a status request: the built status as an answer, with its commands and its work.</summary>

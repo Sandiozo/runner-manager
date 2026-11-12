@@ -380,11 +380,14 @@ public partial class App : Application
             return;
         }
         var fromTask = args.Contains(FromTaskArgument, StringComparer.OrdinalIgnoreCase);
-        if (args.Length == 0 && AppUpdater.IsRunningInstalledCopy && await Elevation.TryStartLaunchTaskAsync()) return;
         // The elevated copy checks that it still runs as this user (a standard user may type an administrator's password).
         var relaunchArgs = args.Where(a => !a.Equals(FromTaskArgument, StringComparison.OrdinalIgnoreCase))
             .Append(ElevationAttemptedArgument).Append(Elevation.UserSidArgument + Elevation.CurrentUserSid);
-        if (Elevation.RelaunchElevated(relaunchArgs) && fromTask)
+        // Without administrator rights nothing is checked or decided about the start helper: when the launch task ran but
+        // no dashboard came, the UAC prompt is for RunnerManager.exe itself (see Elevation.HandOffAsync).
+        var (started, askedWithUac) = await Elevation.HandOffAsync(Environment.ProcessPath!, relaunchArgs,
+            tryLaunchTask: args.Length == 0 && AppUpdater.IsRunningInstalledCopy, Elevation.TryStartLaunchTaskAsync);
+        if (started && askedWithUac && fromTask)
             MachineRelay.AppendAgentLog("The launch task started Runner Manager without administrator rights. Asked with UAC instead.");
     }
 

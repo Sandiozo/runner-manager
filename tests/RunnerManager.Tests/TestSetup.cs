@@ -26,6 +26,14 @@ internal static class TestSetup
         Launcher.MayBeInPlace = folder => folder.StartsWith(Path.GetTempPath(), StringComparison.OrdinalIgnoreCase);
         Launcher.UnderUpdateLock = (_, write) => write();
         Launcher.Settle = () => Task.CompletedTask;
+        // A test's own install folders stand for the installed one, the test process decides about the start helper there
+        // as the installed build does (only there: see Launcher.MayBeInPlace), and a start helper there counts as seen to
+        // work. A test that checks those passes its own.
+        Launcher.IsInstalledExe = exe => exe.StartsWith(Path.GetTempPath(), StringComparison.OrdinalIgnoreCase);
+        Launcher.Decides = () => true;
+        Launcher.IsProven = _ => true;
+        Launcher.RunProbe = _ => null;
+        Launcher.ProbePause = () => Task.CompletedTask;
         // No update waits to prove itself, whatever the data folder of an earlier test says.
         MachineRelay.UpdateWatched = () => false;
         AssistantSwitches.Store = new FileSwitchStore(Path.Combine(StateDir, "assistant-switches.json"));

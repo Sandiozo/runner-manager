@@ -97,7 +97,8 @@ public static class Installer
         var replacing = File.Exists(AppUpdater.InstalledExe) && !AppUpdater.IsRunningInstalledCopy && !keepInstalled;
         // Setup warns on its first page when it is older than this user's installed copy, so going ahead is the user's choice.
         var exe = await AppUpdater.InstallCurrentBuildAsync(log, createShortcut: false, allowOlder: !keepInstalled);
-        // The installed copy run as setup copies nothing, but still puts its start helper in place before the tasks.
+        // The installed copy run as setup copies nothing, but still puts its start helper in place, and checks it, before
+        // the tasks; only while it is still the installed file (see AppUpdater.IsInstalledBuild).
         if (AppUpdater.IsRunningInstalledCopy) await AppUpdater.EnsureStartHelperAsync(log);
         try
         {
@@ -287,7 +288,9 @@ public static class Installer
     /// </summary>
     public static async Task EnsureLaunchTaskAsync(bool force = false)
     {
-        if (!AppUpdater.IsRunningInstalledCopy) return;
+        // Only the installed build: an earlier copy that still runs after an update leaves the tasks, the start helper and
+        // the version in Settings → Apps to the copy that is installed now.
+        if (!AppUpdater.IsInstalledBuild) return;
         RefreshUninstallEntryVersion();
         // On every start: antivirus software may remove the start helper at any time, and a task must never name a file
         // that is gone. Puts it back or points this user's tasks at the exe (see Launcher.EnsureForThisCopyAsync).
@@ -306,11 +309,12 @@ public static class Installer
 
     /// <summary>
     /// Whether this user's launch task, or turned-on startup task, starts <paramref name="exe"/> directly although the start
-    /// helper beside it is in place. Reads no task while the start helper is not in place.
+    /// helper beside it is in place and this process saw it work (see <see cref="Launcher.CommandFor"/>). Reads no task
+    /// otherwise.
     /// </summary>
     internal static async Task<bool> SkipsStartHelperAsync(string exe)
     {
-        if (!Launcher.IsInPlace(Path.GetDirectoryName(exe)!)) return false;
+        if (!string.Equals(Launcher.CommandFor(exe), Launcher.PathBeside(exe), StringComparison.OrdinalIgnoreCase)) return false;
         bool StartsExe(string xml) => ScheduledTasks.CommandOfOwnElevatedTask(xml) is { } command
                                       && string.Equals(command, exe, StringComparison.OrdinalIgnoreCase);
         if (StartsExe(await ScheduledTasks.QueryXmlAsync(ScheduledTasks.LaunchTaskName))) return true;
@@ -364,10 +368,10 @@ public static class Installer
            && (!ScheduledTasks.HasCurrentPriority(xml) || !string.Equals(started, exe, StringComparison.OrdinalIgnoreCase)
                || !RunsCommandFor(xml, exe));
 
-    /// <summary>Whether a task runs exactly what <see cref="Launcher.CommandFor"/> gives for <paramref name="exe"/>.</summary>
+    /// <summary>Whether a task runs exactly what <see cref="Launcher.CommandFor"/> gives for <paramref name="exe"/> and what it runs now.</summary>
     private static bool RunsCommandFor(string xml, string exe)
         => ScheduledTasks.CommandOfOwnElevatedTask(xml) is { } command
-           && string.Equals(command, Launcher.CommandFor(exe), StringComparison.OrdinalIgnoreCase);
+           && string.Equals(command, Launcher.CommandFor(exe, command), StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// 2.3 and earlier named the launch and startup tasks the same for every Windows user, so a second user's setup took

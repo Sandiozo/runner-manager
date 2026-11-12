@@ -29,7 +29,11 @@ public static class AppUpdater
     internal static void UseInstallDir(string folder)
     {
         // A setup tried again in another folder copies the build there too.
-        if (_installDir == null || !SameFolder(_installDir, folder)) _installedThisBuild = false;
+        if (_installDir == null || !SameFolder(_installDir, folder))
+        {
+            _installedThisBuild = false;
+            _copiedFile = null;
+        }
         _installDir = folder;
     }
     internal static bool IsDefaultInstallDir(string folder) => SameFolder(folder, DefaultInstallDir);
@@ -68,8 +72,27 @@ public static class AppUpdater
         }
     }
 
+    /// <summary>
+    /// Whether this process was started by the installed exe's path. It stays true after an update or a rollback replaced
+    /// the file there, so it only says where this copy came from; whether this process may look after the install is
+    /// <see cref="IsInstalledBuild"/>.
+    /// </summary>
     public static bool IsRunningInstalledCopy => string.Equals(
         Path.GetFullPath(Environment.ProcessPath ?? string.Empty), Path.GetFullPath(InstalledExe), StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Whether this process is the installed build, the only one that may look after the install (the start helper, its
+    /// marker, the tasks' commands, the unpack folders): it runs from the file that is at <see cref="InstalledExe"/> now,
+    /// or it copied its own build there (setup) and that copy is still the file there. Decided by the file itself
+    /// (<see cref="ProcessImage"/>), never by path or version: after an update or a rollback a copy that still runs from
+    /// the renamed file is not the installed build, and neither is another build of the same version.
+    /// </summary>
+    internal static bool IsInstalledBuild
+        => ProcessImage.ThisProcessRunsFrom(InstalledExe)
+           || _copiedFile is { } copied && ProcessImage.IdOf(InstalledExe) == copied;
+
+    /// <summary>The file that this process copied its build to (see <see cref="InstallCurrentBuildAsync(Action{string})"/>), while that is its build.</summary>
+    private static ProcessImage.FileId? _copiedFile;
 
     /// <summary>"v2.1.0", "2.1" or "2.1.0+abc" → "2.1.0". A pre-release keeps its label: "2.4.0-beta.1".</summary>
     public static string Normalize(string version)
@@ -622,6 +645,7 @@ public static class AppUpdater
             DeleteSwapMarker(InstalledExe);
             // This build is no longer the installed one, so a setup tried again copies it again.
             _installedThisBuild = false;
+            _copiedFile = null;
         });
     }
 
@@ -1054,6 +1078,8 @@ public static class AppUpdater
                 var isExe = relative.Equals(AssetName, StringComparison.OrdinalIgnoreCase);
                 ReplaceFile(source, destination, keepPrevious: isExe, isExe ? install : null);
             }
+            // Still under the update lock, so the file recorded is the one just copied.
+            _copiedFile = ProcessImage.IdOf(InstalledExe);
         }));
         _installedThisBuild = true;
         // Before any task is registered for the new copy (setup registers them next), so they start it through the start helper.
@@ -1063,13 +1089,14 @@ public static class AppUpdater
     }
 
     /// <summary>
-    /// Writes the start helper into the install folder after this process installed its build there (see
-    /// <see cref="Launcher.EnsureAsync"/>); only with administrator rights, which setup always has. A PC where it cannot
-    /// be kept runs without it, as before.
+    /// Writes the start helper into the install folder after this process installed its build there, and checks that it
+    /// starts Runner Manager (see <see cref="Launcher.EnsureAsync"/>); only with administrator rights, which setup always
+    /// has, and only while this process is the installed build (<see cref="IsInstalledBuild"/>). A PC where it cannot be
+    /// kept runs without it, as before.
     /// </summary>
     internal static async Task EnsureStartHelperAsync(Action<string> log)
     {
-        if (!Elevation.IsElevated) return;
+        if (!Launcher.Decides()) return;
         try
         {
             if (!await Launcher.EnsureAsync(InstallDir, afterInstall: true, MachineRelay.AppendAgentLog) && Launcher.RunsWithout(InstallDir))

@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
+using Microsoft.Win32.SafeHandles;
 
 namespace RunnerManager;
 
@@ -60,17 +61,52 @@ internal static class Launcher
         => MayBeInPlace(folder) && IsRegularFile(PathIn(folder)) && !File.Exists(OffMarkerPath(folder));
 
     /// <summary>
-    /// The folders where the start helper is looked for: all of them, except in tests, which see only their own folders
-    /// and never an install of Runner Manager on the PC that runs them.
+    /// The folders where the start helper is looked for, written, checked and given up on: all of them, except in tests,
+    /// which see only their own folders and never look at or change an install of Runner Manager on the PC that runs them.
     /// </summary>
     internal static Func<string, bool> MayBeInPlace { get; set; } = _ => true;
 
     /// <summary>
-    /// The one place that decides what a task, or a start with administrator rights, runs for an installed
-    /// RunnerManager.exe: the start helper beside it while it is in place (see <see cref="IsInPlace"/>), otherwise the exe.
+    /// Whether <paramref name="exe"/> is the installed RunnerManager.exe (<see cref="AppUpdater.InstalledExe"/>): only that
+    /// one is ever started through the start helper beside it. Tests see their own folders.
     /// </summary>
-    internal static string CommandFor(string exe)
-        => IsAppExe(exe) && IsInPlace(Path.GetDirectoryName(exe)!) ? PathBeside(exe) : exe;
+    internal static Func<string, bool> IsInstalledExe { get; set; } = exe => SamePath(exe, AppUpdater.InstalledExe);
+
+    /// <summary>
+    /// Whether this process decides about the start helper: it has administrator rights and is the installed build
+    /// (<see cref="AppUpdater.IsInstalledBuild"/>). Only such a process writes or replaces the start helper, checks that it
+    /// works and gives up on it (<see cref="EnsureAsync"/>), moves a task to it or back to the exe, removes unpack folders,
+    /// and starts Runner Manager through it with administrator rights. Tests pass their own.
+    /// </summary>
+    internal static Func<bool> Decides { get; set; } = () => Elevation.IsElevated && AppUpdater.IsInstalledBuild;
+
+    /// <summary>
+    /// The one place that decides what a task, or a start with administrator rights, runs for the installed
+    /// RunnerManager.exe. A process that decides (<see cref="Decides"/>) gives the start helper beside it while it is in
+    /// place (see <see cref="IsInPlace"/>) and this process saw it start Runner Manager (<see cref="IsProven"/>), and the
+    /// exe while it is not in place. While it is in place but not seen to work yet (an update held the update lock), and in
+    /// a process that does not decide (an earlier copy that still runs after an update), a task keeps what it runs now
+    /// (<paramref name="current"/>), so such a process never moves a task either way. Any other exe is its own command.
+    /// </summary>
+    internal static string CommandFor(string exe, string? current = null)
+    {
+        if (!IsAppExe(exe) || !IsInstalledExe(exe)) return exe;
+        var folder = Path.GetDirectoryName(exe)!;
+        var helper = PathBeside(exe);
+        var keeps = current != null && SamePath(current, helper);
+        if (!Decides()) return keeps ? helper : exe;
+        if (!IsInPlace(folder)) return exe;
+        return IsProven(folder) || keeps ? helper : exe;
+    }
+
+    /// <summary>
+    /// What a process without administrator rights asks for with a UAC prompt for <paramref name="exe"/>: the start helper
+    /// beside the installed exe while it is in place, otherwise the exe. Such a process cannot check that the start helper
+    /// works, so it relies on the marker of a PC that runs without it (see <see cref="OffMarkerPath"/>) and starts the exe
+    /// itself when the start helper cannot be started (see <see cref="Elevation.RelaunchElevated"/>).
+    /// </summary>
+    internal static string UacCommandFor(string exe)
+        => IsAppExe(exe) && IsInstalledExe(exe) && IsInPlace(Path.GetDirectoryName(exe)!) ? PathBeside(exe) : exe;
 
     private static bool IsAppExe(string exe)
         => Path.IsPathFullyQualified(exe) && Path.GetFileName(exe).Equals(AppPaths.ExeName, StringComparison.OrdinalIgnoreCase);
@@ -80,12 +116,14 @@ internal static class Launcher
 
     /// <summary>
     /// How the app starts <paramref name="exe"/> itself (the start after setup, a restart of the dashboard, the UAC
-    /// prompt, uninstall): through the start helper while it is in place (see <see cref="CommandFor"/>), with the same
-    /// arguments, in the install folder. The start helper passes the arguments on as they are.
+    /// prompt, uninstall), with the same arguments, in the install folder: with <paramref name="elevate"/> (a UAC prompt)
+    /// through <see cref="UacCommandFor"/>, otherwise through <see cref="CommandFor"/>, and with <paramref name="direct"/>
+    /// always the exe itself. The start helper passes the arguments on as they are.
     /// </summary>
-    internal static ProcessStartInfo StartInfo(string exe, IEnumerable<string> arguments, bool elevate = false)
+    internal static ProcessStartInfo StartInfo(string exe, IEnumerable<string> arguments, bool elevate = false, bool direct = false)
     {
-        var start = new ProcessStartInfo(CommandFor(exe)) { UseShellExecute = true, WorkingDirectory = Path.GetDirectoryName(exe) ?? string.Empty };
+        var command = direct ? exe : elevate ? UacCommandFor(exe) : CommandFor(exe);
+        var start = new ProcessStartInfo(command) { UseShellExecute = true, WorkingDirectory = Path.GetDirectoryName(exe) ?? string.Empty };
         if (elevate) start.Verb = "runas";
         foreach (var argument in arguments) start.ArgumentList.Add(argument);
         return start;
@@ -362,25 +400,28 @@ internal static class Launcher
 
     /// <summary>
     /// Keeps the start helper in the install folder <paramref name="folder"/> for this version: writes it when it is missing
-    /// or different (see <see cref="EnsureFileAsync"/>). Only called with administrator rights, by setup and by the
-    /// installed copy. <paramref name="afterInstall"/> (setup, or a copy of the build just installed there) tries again
-    /// even when this version gave up before. Otherwise a version that gave up keeps running without it, and a start
-    /// helper that one of this user's tasks names but that is gone (antivirus software may remove it) is put back once per
-    /// version; gone again, this version runs without it. When it cannot be kept, this is recorded beside it
-    /// (<see cref="TurnOff"/>) and logged. Returns whether it is in place.
+    /// or different (see <see cref="EnsureFileAsync"/>), then checks that it starts Runner Manager (see
+    /// <see cref="ProveAsync"/>) before anything depends on it. Only called by a process that decides
+    /// (<see cref="Decides"/>): setup, and the installed build. <paramref name="afterInstall"/> (setup, or a copy of the
+    /// build just installed there) tries again even when this version gave up before; the marker of that stays until the
+    /// start helper was seen to work. Otherwise a version that gave up keeps running without it, and a start helper that
+    /// one of this user's tasks names but that is gone (antivirus software may remove it) is put back once per version;
+    /// gone again, this version runs without it. When it cannot be kept, or does not start Runner Manager, this is recorded
+    /// beside it (<see cref="TurnOff"/>) and logged. Returns whether it is in place and works; false without a decision
+    /// while an update holds the update lock.
     /// </summary>
     internal static async Task<bool> EnsureAsync(string folder, bool afterInstall, Action<string> log)
     {
+        if (!MayBeInPlace(folder)) return false;
         await Gate.WaitAsync();
         try
         {
             var version = AppUpdater.CurrentVersion;
-            if (afterInstall) ClearOff(folder);
-            if (OffVersion(folder) is { } off && AppUpdater.CompareVersions(off, version) == 0) return false;
+            if (!afterInstall && OffVersion(folder) is { } off && AppUpdater.CompareVersions(off, version) == 0) return false;
             if (Embedded() is not { } bytes)
             {
                 LogOnce(log, "This build of Runner Manager has no start helper, so its scheduled tasks start RunnerManager.exe directly.");
-                return IsInPlace(folder);
+                return IsInPlace(folder) && IsProven(folder);
             }
             if (!afterInstall && !IsRegularFile(PathIn(folder)) && await OwnTaskNamesAsync(folder))
             {
@@ -395,11 +436,152 @@ internal static class Launcher
             var result = await EnsureFileAsync(folder, bytes, Settle, write => UnderUpdateLock(lockWait, write));
             if (result.Problem != null) return GiveUp(folder, version, result.Problem, log);
             if (!result.InPlace) return false;
-            if (OffVersion(folder) != null) ClearOff(folder);
             if (result.Wrote) log($"Wrote the start helper {PathIn(folder)}.");
+            // Before a task is registered for it or Runner Manager is started through it.
+            var proof = await ProveAsync(folder, lockWait);
+            if (proof.Outcome == Proof.NotYet) return false;
+            if (proof.Outcome == Proof.Fails) return GiveUp(folder, version, proof.Reason!, log);
+            if (OffVersion(folder) != null) ClearOff(folder);
             return true;
         }
         finally { Gate.Release(); }
+    }
+
+    // ================= Whether it works =================
+
+    /// <summary>What <see cref="ProveAsync"/> found: the start helper starts Runner Manager, it does not, or this cannot be checked now.</summary>
+    internal enum Proof { Works, Fails, NotYet }
+
+    /// <summary>The outcome of <see cref="ProveAsync"/>, and for <see cref="Proof.Fails"/> why, for the marker and the log.</summary>
+    internal sealed record ProofResult(Proof Outcome, string? Reason = null);
+
+    /// <summary>The probes this process ran, by what they tested (see <see cref="ProofKey"/>): null when it worked, otherwise why not.</summary>
+    private static readonly Dictionary<string, string?> Probed = new(StringComparer.Ordinal);
+
+    private static readonly SemaphoreSlim ProofGate = new(1, 1);
+
+    /// <summary>How long a probe of the start helper may take before it counts as not working.</summary>
+    internal static readonly TimeSpan ProbeTimeout = TimeSpan.FromSeconds(60);
+
+    /// <summary>The pause before a probe that failed is tried once more. Tests pass their own.</summary>
+    internal static Func<Task> ProbePause { get; set; } = () => Task.Delay(TimeSpan.FromSeconds(5));
+
+    /// <summary>Runs one probe of the start helper at the given path (see <see cref="Probe"/>). Tests pass their own.</summary>
+    internal static Func<string, string?> RunProbe { get; set; } = Probe;
+
+    /// <summary>
+    /// Whether this process knows that the start helper in <paramref name="folder"/>, as it is now, starts the Runner
+    /// Manager beside it: it started this process (<see cref="StartedFromHere"/>), or a probe of these files worked (see
+    /// <see cref="ProveAsync"/>). It only reads what is known, so it never waits. Tests pass their own.
+    /// </summary>
+    internal static Func<string, bool> IsProven { get; set; } = ProvenNow;
+
+    internal static bool ProvenNow(string folder)
+    {
+        if (StartedFrom(folder)) return true;
+        if (ProofKey(folder) is not { } key) return false;
+        lock (Probed) return Probed.TryGetValue(key, out var failure) && failure == null;
+    }
+
+    /// <summary>
+    /// What a probe tests: the start helper's bytes and the file of the RunnerManager.exe beside it, so a start helper that
+    /// was written again, or an exe that an update replaced, is probed again. Null when either cannot be read.
+    /// </summary>
+    private static string? ProofKey(string folder)
+    {
+        try
+        {
+            if (!IsRegularFile(PathIn(folder)) || ProcessImage.IdOf(Path.Combine(folder, AppPaths.ExeName)) is not { } exe) return null;
+            return $"{Convert.ToHexString(HashOf(PathIn(folder)))} {exe}";
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return null; }
+    }
+
+    /// <summary>
+    /// Whether the start helper in <paramref name="folder"/> started this process, which is the RunnerManager.exe there,
+    /// and is still the file there: a start helper that was replaced while it ran was renamed out of the way first, and its
+    /// replacement has not started anything yet.
+    /// </summary>
+    internal static bool StartedFromHere(string folder)
+        => Helper() is { } helper && ProcessImage.RunsFrom(helper.Handle, PathIn(folder))
+           && ProcessImage.ThisProcessRunsFrom(Path.Combine(folder, AppPaths.ExeName));
+
+    /// <summary><see cref="StartedFromHere"/>. Tests pass their own.</summary>
+    internal static Func<string, bool> StartedFrom { get; set; } = StartedFromHere;
+
+    /// <summary>
+    /// Checks that the start helper in <paramref name="folder"/> starts the Runner Manager beside it: it started this
+    /// process (<see cref="StartedFromHere"/>), so a start through it costs nothing, or else it is started with
+    /// <see cref="App.ProbeArgument"/> and has to exit with 0 (see <see cref="Probe"/>). The result is kept for this process
+    /// and these files (see <see cref="ProofKey"/>). A probe that fails is tried once more after a short pause
+    /// (<see cref="ProbePause"/>). Each probe runs under the update lock, waiting for it at most
+    /// <paramref name="lockWait"/>: while an update holds it, nothing is probed and nothing is decided
+    /// (<see cref="Proof.NotYet"/>), and a later check tries again. Only for a process that decides (<see cref="Decides"/>).
+    /// </summary>
+    internal static async Task<ProofResult> ProveAsync(string folder, TimeSpan lockWait)
+    {
+        if (!MayBeInPlace(folder)) return new ProofResult(Proof.NotYet);
+        if (StartedFrom(folder)) return new ProofResult(Proof.Works);
+        await ProofGate.WaitAsync();
+        try
+        {
+            for (var attempt = 1; ; attempt++)
+            {
+                string? key = null, failure = null;
+                var known = false;
+                var ran = await Task.Run(() => UnderUpdateLock(lockWait, () =>
+                {
+                    key = ProofKey(folder);
+                    if (key == null) return EnsureResult.Kept;
+                    lock (Probed) known = Probed.TryGetValue(key, out failure);
+                    if (!known) failure = RunProbe(PathIn(folder));
+                    return EnsureResult.Kept;
+                })) != null;
+                // An update holds the lock, or the files cannot be read right now (an update or a scanner has them).
+                if (!ran || key == null) return new ProofResult(Proof.NotYet);
+                if (!known && (failure == null || attempt == 2))
+                    lock (Probed) Probed[key] = failure;
+                if (known || failure == null || attempt == 2)
+                    return failure == null ? new ProofResult(Proof.Works) : new ProofResult(Proof.Fails, failure);
+                await ProbePause();
+            }
+        }
+        finally { ProofGate.Release(); }
+    }
+
+    /// <summary>
+    /// Starts the start helper at <paramref name="helper"/> with <see cref="App.ProbeArgument"/>, without a shell and
+    /// without a window, in the system folder, and waits for it at most <see cref="ProbeTimeout"/>. It starts the
+    /// RunnerManager.exe beside it with that argument, which exits with 0 before it opens or changes anything (see
+    /// App.OnStartup), and returns that exit code; its own failures have codes of its own. Null when it exited with 0,
+    /// otherwise why not, for the marker and the log.
+    /// </summary>
+    internal static string? Probe(string helper)
+    {
+        var start = new ProcessStartInfo(helper) { UseShellExecute = false, CreateNoWindow = true, WorkingDirectory = Environment.SystemDirectory };
+        start.ArgumentList.Add(App.ProbeArgument);
+        try
+        {
+            using var process = Process.Start(start);
+            if (process == null) return "it could not be started";
+            if (!process.WaitForExit(ProbeTimeout))
+            {
+                try { process.Kill(entireProcessTree: true); }
+                catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception or NotSupportedException) { }
+                return $"it did not start Runner Manager within {(int)ProbeTimeout.TotalSeconds} seconds";
+            }
+            return process.ExitCode == 0 ? null : $"it did not start Runner Manager (exit code 0x{process.ExitCode:X8})";
+        }
+        catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException)
+        {
+            return $"it could not be started: {ex.Message}";
+        }
+    }
+
+    /// <summary>Forgets the probes this process ran (for tests).</summary>
+    internal static void ForgetProbes()
+    {
+        lock (Probed) Probed.Clear();
     }
 
     private static bool GiveUp(string folder, string version, string reason, Action<string> log)
@@ -477,29 +659,34 @@ internal static class Launcher
     }
 
     /// <summary>
-    /// For the installed copy with administrator rights: keeps the start helper (<see cref="EnsureAsync"/>), points this
-    /// user's tasks at the exe while it is not in place (<see cref="PointOwnTasksAtExeAsync"/>), and removes what earlier
-    /// versions unpacked in the install folder (<see cref="RemoveOldExtractions"/>). Any other copy does nothing.
+    /// For the installed build with administrator rights (<see cref="Decides"/>): keeps the start helper and checks that it
+    /// works (<see cref="EnsureAsync"/>), points this user's tasks at the exe while it is not in place
+    /// (<see cref="PointOwnTasksAtExeAsync"/>), and removes what earlier versions unpacked in the install folder
+    /// (<see cref="RemoveOldExtractions"/>). Any other copy does nothing, also one that still runs from the installed path
+    /// after an update replaced the file there.
     /// </summary>
-    internal static async Task EnsureForThisCopyAsync()
+    internal static Task EnsureForThisCopyAsync()
+        => EnsureForCopyAsync(AppUpdater.InstallDir, MachineRelay.AppendAgentLog, removeExtractions: folder => Task.Run(() => RemoveOldExtractions(folder, CurrentExtractionFolders())));
+
+    /// <summary><see cref="EnsureForThisCopyAsync"/> for the install folder <paramref name="folder"/>. Tests pass their own folder.</summary>
+    internal static async Task EnsureForCopyAsync(string folder, Action<string> log, Func<string, Task> removeExtractions)
     {
-        if (!Elevation.IsElevated || !AppUpdater.IsRunningInstalledCopy) return;
-        var folder = AppUpdater.InstallDir;
+        if (!Decides() || !MayBeInPlace(folder)) return;
         try
         {
-            if (!await EnsureAsync(folder, afterInstall: false, MachineRelay.AppendAgentLog))
-                await PointOwnTasksAtExeAsync(AppUpdater.InstalledExe, MachineRelay.AppendAgentLog);
+            if (!await EnsureAsync(folder, afterInstall: false, log))
+                await PointOwnTasksAtExeAsync(Path.Combine(folder, AppPaths.ExeName), log);
         }
-        catch (Exception ex) { MachineRelay.AppendAgentLog($"Could not check the start helper: {ex.Message}"); }
-        _ = Task.Run(() => RemoveOldExtractions(folder, CurrentExtractionFolders()));
+        catch (Exception ex) { log($"Could not check the start helper: {ex.Message}"); }
+        _ = removeExtractions(folder);
     }
 
     // ================= What a self-contained exe unpacked =================
 
     /// <summary>
     /// Removes what self-contained exes of earlier versions unpacked in <paramref name="folder"/>\.net\RunnerManager (one
-    /// folder per build): each folder that no running program uses, which means that none of its files is open, and that
-    /// is not in <paramref name="inUse"/> (this process's own). Nothing is followed through a link: a link there is removed
+    /// folder per build): each folder that no running program uses, which means that none of its files is open or loaded
+    /// (see <see cref="IsInUse"/>), and that is not in <paramref name="inUse"/> (this process's own). Nothing is followed through a link: a link there is removed
     /// itself, and a .net folder that is a link is left as it is.
     /// </summary>
     internal static void RemoveOldExtractions(string folder, IReadOnlyCollection<string> inUse)
@@ -601,20 +788,24 @@ internal static class Launcher
     /// this process and exits a moment after it, so whatever waits for this process to exit before it starts a task or
     /// removes files waits for it too.
     /// </summary>
-    internal static int? HelperProcessId()
+    internal static int? HelperProcessId() => Helper()?.Id;
+
+    /// <summary>The start helper that started this process, found once: its id, and a handle that keeps its id from being reused.</summary>
+    private sealed record HelperProcess(int Id, SafeProcessHandle Handle);
+
+    private sealed record HelperFound(HelperProcess? Helper);
+    private static HelperFound? _helper;
+
+    private static HelperProcess? Helper()
     {
-        if (_helperProcessId is { } known) return known.Id;
+        if (_helper is { } known) return known.Helper;
         var exe = Environment.ProcessPath;
-        int? id = null;
-        if (!string.IsNullOrEmpty(exe) && ParentProcess() is { } parent && SamePath(parent.Path, PathBeside(exe))) id = parent.Id;
-        _helperProcessId = new HelperId(id);
-        return id;
+        var found = new HelperFound(string.IsNullOrEmpty(exe) ? null : ParentProcess(PathBeside(exe)));
+        return (Interlocked.CompareExchange(ref _helper, found, null) ?? found).Helper;
     }
 
-    private sealed record HelperId(int? Id);
-    private static HelperId? _helperProcessId;
-
-    private static (int Id, string Path)? ParentProcess()
+    /// <summary>The parent process when it was started from <paramref name="helper"/> and started before this one, otherwise null.</summary>
+    private static HelperProcess? ParentProcess(string helper)
     {
         try
         {
@@ -625,10 +816,21 @@ internal static class Launcher
             using var parent = Process.GetProcessById(id);
             // The start helper waits for the app, so it still runs; a parent that started later is another process with its id.
             if (parent.StartTime > self.StartTime) return null;
-            return parent.MainModule?.FileName is { } path ? (id, path) : null;
+            // The path it was started by, also when its file was renamed since.
+            if (parent.MainModule?.FileName is not { } path || !SamePath(path, helper)) return null;
+            var handle = OpenProcess(ProcessQueryLimitedInformation | Synchronize, false, id);
+            if (!handle.IsInvalid) return new HelperProcess(id, handle);
+            handle.Dispose();
+            return null;
         }
         catch { return null; }
     }
+
+    private const uint ProcessQueryLimitedInformation = 0x1000;
+    private const uint Synchronize = 0x00100000;
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern SafeProcessHandle OpenProcess(uint access, bool inherit, int processId);
 
     [StructLayout(LayoutKind.Sequential)]
     private struct ProcessBasicInformation

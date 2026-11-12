@@ -37,20 +37,26 @@ public static class ScheduledTasks
     /// Registers a logon task that runs elevated for the current user, keeps running on battery and has no 72-hour time
     /// limit. A <paramref name="restartOnFailure"/> task (the always-on fleet agent) also restarts after a failure and is started again
     /// every five minutes while the user is signed in, in case it exited. The task starts <paramref name="exe"/> through
-    /// the start helper beside it while that is in place (see <see cref="Launcher.CommandFor"/>), unless
-    /// <paramref name="startHelper"/> is false.
+    /// the start helper beside it while that is in place and works (see <see cref="Launcher.CommandFor"/>, which also
+    /// decides when the task keeps what it runs now), unless <paramref name="startHelper"/> is false.
     /// </summary>
-    public static Task RegisterLogonTaskAsync(string name, string exe, string arguments, string description, bool restartOnFailure,
+    public static async Task RegisterLogonTaskAsync(string name, string exe, string arguments, string description, bool restartOnFailure,
         bool startHelper = true)
-        => RegisterTaskAsync(name, startHelper ? Launcher.CommandFor(exe) : exe, arguments, description, alwaysOn: restartOnFailure, atLogon: true, parallel: false);
+        => await RegisterTaskAsync(name, startHelper ? Launcher.CommandFor(exe, await CurrentCommandAsync(name)) : exe, arguments, description,
+            alwaysOn: restartOnFailure, atLogon: true, parallel: false);
 
     /// <summary>
     /// Registers a task without a trigger that starts the dashboard elevated when the Start menu shortcut runs it.
     /// Instances may run in parallel, so a second start reaches the running dashboard and brings it to the front. It starts
-    /// <paramref name="exe"/> through the start helper beside it while that is in place (see <see cref="Launcher.CommandFor"/>).
+    /// <paramref name="exe"/> through the start helper beside it while that is in place and works (see
+    /// <see cref="Launcher.CommandFor"/>).
     /// </summary>
-    public static Task RegisterLaunchTaskAsync(string exe) => RegisterTaskAsync(LaunchTaskName, Launcher.CommandFor(exe), App.FromTaskArgument,
-        "Starts Runner Manager with administrator rights, without a UAC prompt.", alwaysOn: false, atLogon: false, parallel: true);
+    public static async Task RegisterLaunchTaskAsync(string exe)
+        => await RegisterTaskAsync(LaunchTaskName, Launcher.CommandFor(exe, await CurrentCommandAsync(LaunchTaskName)), App.FromTaskArgument,
+            "Starts Runner Manager with administrator rights, without a UAC prompt.", alwaysOn: false, atLogon: false, parallel: true);
+
+    /// <summary>What this user's own task <paramref name="name"/> with the highest rights runs now, or null.</summary>
+    private static async Task<string?> CurrentCommandAsync(string name) => CommandOfOwnElevatedTask(await QueryXmlAsync(name));
 
     /// <param name="command">The program the task runs: RunnerManager.exe, or the start helper beside it. The task runs in its folder.</param>
     private static async Task RegisterTaskAsync(string name, string command, string arguments, string description,
