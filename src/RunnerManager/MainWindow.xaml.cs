@@ -821,7 +821,7 @@ public partial class MainWindow : Window
         DisconnectMenuItem.Visibility = _githubAuthenticated ? Visibility.Visible : Visibility.Collapsed;
     }
 
-    /// <summary>In a fleet = the agent is installed and this PC has the fleet's pairing code.</summary>
+    /// <summary>In a fleet = the fleet agent is installed and this PC has the fleet code (or, managed one way, its access code).</summary>
     private bool InFleet => _isEnrolled && FleetConfig.Current.FleetKey != null;
 
     private void ApplyEnrollmentStatus()
@@ -1366,9 +1366,7 @@ public partial class MainWindow : Window
         if (!InFleet || IsAgentWorkRunning() || IsOperationRunning(LeaveFleetTitle)) return;
         var others = Machines.Where(m => !m.IsLocal && !m.IsManaged).Select(m => m.MachineName).ToList();
         if (!DialogWindow.Confirm(this, $"Remove {Environment.MachineName} from the fleet?",
-                (others.Count > 0 ? $"{string.Join(", ", others)} will forget this PC. " : string.Empty) +
-                "The fleet agent and pairing code are removed from this PC. Runners keep running. " +
-                "You can add this PC again later.",
+                LeaveFleetMessage(others, managed: FleetConfig.Current.ManagedBy.Length > 0),
                 "Leave fleet", danger: true)) return;
         await RunOperationAsync(LeaveFleetTitle, async log =>
         {
@@ -1384,6 +1382,12 @@ public partial class MainWindow : Window
     }
 
     private async void InstallAgent_Click(object sender, RoutedEventArgs e) => await SetUpFleetAsync(FleetStart.Ask);
+
+    /// <summary>What leaving the fleet does. A PC managed one way has its own access code instead of the fleet code.</summary>
+    internal static string LeaveFleetMessage(IReadOnlyCollection<string> others, bool managed)
+        => (others.Count > 0 ? $"{string.Join(", ", others)} will forget this PC. " : string.Empty)
+           + (managed ? "The fleet agent and this PC's access code are removed from this PC. " : "The fleet agent and the fleet code are removed from this PC. ")
+           + "Runners keep running. You can add this PC again later.";
 
     private enum FleetStart { Ask, New, Join }
 
@@ -1413,15 +1417,15 @@ public partial class MainWindow : Window
             }
             else if (join.PairingKey != null && join.Managed)
             {
-                // Its own code: the fleet can reach this PC, but this PC can't reach the fleet, so it doesn't list the host.
+                // Its own access code: the fleet can reach this PC, but this PC cannot reach the fleet, so it does not list the host.
                 FleetConfig.BecomeManaged(join.PairingKey, join.HostName);
-                AddActivity($"{join.HostName}'s fleet manages this PC one way now. It can view and control this PC; this PC can't see its PCs.");
+                AddActivity($"{join.HostName}'s fleet manages this PC one way now. It can view and control this PC; this PC cannot see its PCs.");
             }
             else if (join.PairingKey != null)
             {
                 FleetConfig.SetFleetKey(join.PairingKey);
                 if (join.HostName.Length > 0) MachineRelay.AddKnownPeer(join.HostName, join.HostAddress);
-                AddActivity(join.HostName.Length > 0 ? $"Joined the fleet through {join.HostName}." : "Joined the fleet with a pairing code.");
+                AddActivity(join.HostName.Length > 0 ? $"Joined the fleet through {join.HostName}." : "Joined the fleet with the fleet code.");
             }
             else return;
         }
@@ -1446,7 +1450,7 @@ public partial class MainWindow : Window
         var window = new PairingHostWindow(key) { Owner = this };
         window.ShowDialog();
         foreach (var name in window.JoinedPcs) AddActivity($"{name} joined the fleet.");
-        foreach (var name in window.ManagedPcs) AddActivity($"{name} is managed one way. It can't see or control the fleet's PCs.");
+        foreach (var name in window.ManagedPcs) AddActivity($"{name} is managed one way. It cannot see or control the fleet's PCs.");
         _forceDiscovery = true;
         await RefreshAsync();
     }

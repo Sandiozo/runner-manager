@@ -378,7 +378,7 @@ public partial class MainWindow
         var check = await AppUpdater.CheckForUpdateAsync(force: true);
         if (check.Release is not { } release)
         {
-            DialogWindow.Error(this, "Couldn't check for updates", check.Problem);
+            DialogWindow.Error(this, "Could not check for updates", check.Problem);
             return;
         }
         if (!check.UpdateAvailable)

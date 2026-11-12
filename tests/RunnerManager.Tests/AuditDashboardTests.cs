@@ -1232,4 +1232,56 @@ public class AuditDashboardTests
         // A sign-in check that finds GitHub connected now.
         Assert.Contains("if (authenticated) GitHubCli.ForgetProblems();", MethodBody("MainWindow.xaml.cs", "private async Task CheckGitHubAsync("));
     }
+
+    // ----- 10: the owner's names, no contractions -----
+
+    /// <summary>The text a user can see in the dashboard's files: string literals in code, and text attributes in XAML.</summary>
+    private static IEnumerable<(string File, string Text)> DashboardUserText()
+    {
+        var files = Directory.GetFiles(SourceDir, "MainWindow*").Select(Path.GetFileName)
+            .Concat(new[] { "MachineViewModels.cs", "Ui.cs", "GitHubNotes.cs" }).Select(f => f!);
+        foreach (var file in files)
+        {
+            var text = File.ReadAllText(Path.Combine(SourceDir, file));
+            if (file.EndsWith(".xaml", StringComparison.OrdinalIgnoreCase))
+            {
+                foreach (Match m in Regex.Matches(text, @"\b(?:Text|ToolTip|Header|Content|AutomationProperties\.Name)=""([^""]*)"""))
+                    yield return (file, m.Groups[1].Value);
+                continue;
+            }
+            foreach (var line in text.Split('\n').Where(l => !l.TrimStart().StartsWith("//", StringComparison.Ordinal)))
+                foreach (Match m in Regex.Matches(line, @"""(?:[^""\\]|\\.)*"""))
+                    yield return (file, m.Value);
+        }
+    }
+
+    [Fact]
+    public void DashboardText_UsesTheOwnersNamesAndNoContractions()
+    {
+        var contraction = new Regex(@"\b\w+n['’]t\b|\b(?:it|that|there|what|here|who|let)['’]s\b|\b\w+['’](?:re|ll|ve|m|d)\b", RegexOptions.IgnoreCase);
+        var text = DashboardUserText().ToList();
+        Assert.True(text.Count > 200);
+        Assert.Empty(text.Where(t => contraction.IsMatch(t.Text)).Select(t => $"{t.File}: {t.Text}"));
+        Assert.Empty(text.Where(t => t.Text.Contains("pairing code", StringComparison.OrdinalIgnoreCase)).Select(t => $"{t.File}: {t.Text}"));
+    }
+
+    [Fact]
+    public void PcCard_SaysWhichCodeEncryptsItsConnections()
+    {
+        var paired = MachineInfo.FromPayload("build-01", new MachineStatusPayload { MachineName = "BUILD-01", SigningKeyId = "a1b2c3" });
+        Assert.Equal("Paired. Connections to other PCs are encrypted with the fleet code (fingerprint a1b2c3).", paired.SignedTip);
+        var managed = MachineInfo.Placeholder("build-02", "BUILD-02", DateTime.UtcNow, "10.0.0.2", string.Empty, managed: true);
+        Assert.Contains("its own access code", managed.SignedTip);
+        Assert.Contains("cannot use", managed.SignedTip);
+    }
+
+    [Fact]
+    public void LeavingTheFleet_SaysWhichCodeIsRemoved()
+    {
+        Assert.Equal("BUILD-02, BUILD-03 will forget this PC. The fleet agent and the fleet code are removed from this PC. "
+                     + "Runners keep running. You can add this PC again later.",
+            MainWindow.LeaveFleetMessage(new[] { "BUILD-02", "BUILD-03" }, managed: false));
+        Assert.Equal("The fleet agent and this PC's access code are removed from this PC. Runners keep running. You can add this PC again later.",
+            MainWindow.LeaveFleetMessage(Array.Empty<string>(), managed: true));
+    }
 }

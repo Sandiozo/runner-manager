@@ -173,7 +173,7 @@
                     <DockPanel x:Name="NavHeader" DockPanel.Dock="Top" Margin="8,0,6,6">
                         <TextBlock x:Name="FleetSecureIcon" DockPanel.Dock="Right" Text="&#xE72E;" Style="{StaticResource Icon}" FontSize="11"
                                    Foreground="{DynamicResource TextFaintBrush}" Visibility="Collapsed"
-                                   ToolTip="PCs in the fleet connect directly. Connections are encrypted with the pairing code."/>
+                                   ToolTip="PCs in the fleet connect directly. Connections are encrypted with the fleet code."/>
                         <TextBlock x:Name="FleetHeaderText" Text="FLEET" Style="{StaticResource SectionLabel}" VerticalAlignment="Center"/>
                     </DockPanel>
                     <ListBox x:Name="MachineNav" DockPanel.Dock="Top" ItemsSource="{Binding NavItems}" ItemContainerStyle="{StaticResource NavItem}"
@@ -368,7 +368,7 @@
                                                         <TextBlock Text="This PC" FontSize="11" Foreground="{DynamicResource AccentBrush}"/>
                                                     </Border>
                                                     <Border Style="{StaticResource Badge}" Background="{DynamicResource Bg3Brush}" BorderBrush="{DynamicResource BorderSubtleBrush}" Visibility="{Binding ManagedVisibility}"
-                                                            ToolTip="Managed one way: the fleet can view and control this PC, but it can't see or control the fleet's PCs.">
+                                                            ToolTip="Managed one way: the fleet can view and control this PC, but it cannot see or control the fleet's PCs.">
                                                         <TextBlock Text="Managed" FontSize="11" Foreground="{DynamicResource TextMutedBrush}"/>
                                                     </Border>
                                                     <Button Style="{StaticResource BadgeButton}" Visibility="{Binding UpdateBadgeVisibility}"
@@ -595,7 +595,7 @@
                                                                             <Border Background="{DynamicResource BadgeInfoBgBrush}" BorderBrush="{DynamicResource BadgeInfoBorderBrush}" BorderThickness="1"
                                                                                     CornerRadius="6" Padding="10,7" Margin="0,0,0,8" Visibility="{Binding ConsoleNoteVisibility}">
                                                                                 <TextBlock TextWrapping="Wrap" FontSize="12" Foreground="{DynamicResource TextMutedBrush}"
-                                                                                           Text="This runner runs in a console window in your session, opened when you sign in. Its jobs can use your desktop, which builds that open windows, such as Unity, need. It is offline while you are signed out. A Windows service runs without sign-in but has no desktop; “Run as service” changes it, if its jobs don't need one."/>
+                                                                                           Text="This runner runs in a console window in your session, opened when you sign in. Its jobs can use your desktop, which builds that open windows, such as Unity, need. It is offline while you are signed out. A Windows service runs without sign-in but has no desktop; “Run as service” changes it, if its jobs do not need one."/>
                                                                             </Border>
                                                                             <!-- GitHub could not be read for this runner: why, and when it is asked again -->
                                                                             <DockPanel Margin="0,0,0,8" Visibility="{Binding GitHubNoteVisibility}" ToolTip="{Binding GitHubNoteTip}">
