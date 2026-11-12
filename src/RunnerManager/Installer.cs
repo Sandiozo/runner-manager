@@ -547,13 +547,26 @@ public static class Installer
 
     /// <summary>
     /// PowerShell that deletes the data folder in <see cref="DataVariable"/>, or everything in it except the startup
-    /// scripts Runner Manager had turned off (<paramref name="keepDisabledStartup"/>).
+    /// scripts Runner Manager had turned off (<paramref name="keepDisabledStartup"/>). It runs with administrator rights,
+    /// and any program of the user can change the data folder, so nothing is deleted through a link (a junction or
+    /// symbolic link): the script never goes into one, and deletes the link itself. A data folder that is a link itself
+    /// is only unlinked, or with <paramref name="keepDisabledStartup"/> left as it is. A link swapped in while the script
+    /// runs can still be followed.
     /// </summary>
     internal static string RemoveDataScript(bool keepDisabledStartup)
-        => $"$d = $env:{DataVariable}; if ($d) {{ " + (keepDisabledStartup
-            ? $"Get-ChildItem -LiteralPath $d -Force -ErrorAction SilentlyContinue | Where-Object {{ $_.Name -ne '{DisabledStartupFolderName}' }} | " +
-              "Remove-Item -Recurse -Force -ErrorAction SilentlyContinue"
-            : "Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue") + " }";
+        => ("$d = $env:" + DataVariable + "; if ($d) { " +
+            // Deletes what is in folder $p, except the entry named $keep, without going into links.
+            "function Remove-Inside($p, $keep) { Get-ChildItem -LiteralPath $p -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne $keep } | " +
+            "ForEach-Object { $e = $_; if ($e.Attributes -band [IO.FileAttributes]::ReparsePoint) { " +
+            "try { if ($e.PSIsContainer) { [System.IO.Directory]::Delete($e.FullName) } else { [System.IO.File]::Delete($e.FullName) } } catch { } } " +
+            "elseif ($e.PSIsContainer) { Remove-Inside $e.FullName ''; try { [System.IO.Directory]::Delete($e.FullName) } catch { } } " +
+            "else { Remove-Item -LiteralPath $e.FullName -Force -ErrorAction SilentlyContinue } } }; " +
+            "$i = Get-Item -LiteralPath $d -Force -ErrorAction SilentlyContinue; " +
+            "if ($i -and ($i.Attributes -band [IO.FileAttributes]::ReparsePoint)) { UNLINK} " +
+            "elseif ($i) { Remove-Inside $d 'KEEP'; REMOVE} }")
+            .Replace("UNLINK", keepDisabledStartup ? string.Empty : "try { [System.IO.Directory]::Delete($d) } catch { } ")
+            .Replace("KEEP", keepDisabledStartup ? DisabledStartupFolderName : string.Empty)
+            .Replace("REMOVE", keepDisabledStartup ? string.Empty : "try { [System.IO.Directory]::Delete($d) } catch { } ");
 
     private const string DisabledStartupFolderName = "disabled-startup";
 
@@ -563,11 +576,23 @@ public static class Installer
     /// is null when there are none.
     /// </summary>
     internal static (string? Folder, bool Moved) KeepDisabledStartupScripts(Action<string> log, string? documents = null)
+        => KeepDisabledStartupScripts(log, documents, Path.Combine(FleetConfig.StateDir, DisabledStartupFolderName));
+
+    /// <summary>
+    /// <see cref="KeepDisabledStartupScripts(Action{string}, string?)"/> from <paramref name="source"/>. It runs with
+    /// administrator rights, and any program of the user can change the data folder, so nothing is copied through a link
+    /// (a junction or symbolic link): a link inside is left out, and a source that is a link itself stays where it is.
+    /// </summary>
+    internal static (string? Folder, bool Moved) KeepDisabledStartupScripts(Action<string> log, string? documents, string source)
     {
-        var source = Path.Combine(FleetConfig.StateDir, DisabledStartupFolderName);
         try
         {
             if (!Directory.Exists(source) || !Directory.EnumerateFileSystemEntries(source).Any()) return (null, false);
+            if (new DirectoryInfo(source).Attributes.HasFlag(FileAttributes.ReparsePoint))
+            {
+                log($"The folder of the startup scripts that Runner Manager had turned off is a link, so they were not moved. They stay in {source}.");
+                return (source, false);
+            }
         }
         catch { return (null, false); }
         try
@@ -577,8 +602,9 @@ public static class Installer
             for (var i = 2; Directory.Exists(target) || File.Exists(target); i++)
                 target = Path.Combine(documents, $"Runner Manager startup scripts ({i})");
             Directory.CreateDirectory(target);
-            // Copied, not moved: Documents may be on another drive.
-            foreach (var file in Directory.EnumerateFiles(source, "*", SearchOption.AllDirectories))
+            // Copied, not moved: Documents may be on another drive. Hidden files are copied too, links are left out.
+            var files = new System.IO.EnumerationOptions { RecurseSubdirectories = true, AttributesToSkip = FileAttributes.ReparsePoint, IgnoreInaccessible = false };
+            foreach (var file in Directory.EnumerateFiles(source, "*", files))
             {
                 var destination = Path.Combine(target, Path.GetRelativePath(source, file));
                 Directory.CreateDirectory(Path.GetDirectoryName(destination)!);

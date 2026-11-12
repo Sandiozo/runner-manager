@@ -243,3 +243,128 @@ public class UninstallDataTests
         }
     }
 }
+
+/// <summary>
+/// Uninstall with "delete settings" runs with administrator rights, and any program of the user can change the data
+/// folder: nothing is deleted or copied through a junction there. The junctions are in folders of the test's own in %TEMP%.
+/// </summary>
+public class UninstallDataLinkTests
+{
+    private sealed class Folders : IDisposable
+    {
+        public Folders()
+        {
+            Root = Path.Combine(Path.GetTempPath(), $"rm-data-links-{Guid.NewGuid():N}");
+            Data = Path.Combine(Root, "RunnerManager");
+            // Another folder, such as another user's Documents, with a file that must stay.
+            Elsewhere = Path.Combine(Root, "elsewhere");
+            Directory.CreateDirectory(Path.Combine(Elsewhere, "sub"));
+            File.WriteAllText(Path.Combine(Elsewhere, "keep.txt"), "keep");
+            File.WriteAllText(Path.Combine(Elsewhere, "sub", "keep.txt"), "keep");
+        }
+
+        public string Root { get; }
+        public string Data { get; }
+        public string Elsewhere { get; }
+        public List<string> Links { get; } = new();
+
+        public string Link(string link)
+        {
+            Junctions.Create(link, Elsewhere);
+            Links.Add(link);
+            return link;
+        }
+
+        public void AssertElsewhereIsWhole()
+        {
+            Assert.True(File.Exists(Path.Combine(Elsewhere, "keep.txt")));
+            Assert.True(File.Exists(Path.Combine(Elsewhere, "sub", "keep.txt")));
+        }
+
+        public Dictionary<string, string> Environment => new() { [Installer.DataVariable] = Data };
+
+        public void Dispose()
+        {
+            Junctions.Delete(Links.ToArray());
+            Directory.Delete(Root, recursive: true);
+        }
+    }
+
+    [JunctionFact]
+    public void TheStartupScripts_AreCopiedWithoutWhatALinkInsideHolds()
+    {
+        using var folders = new Folders();
+        var source = Path.Combine(folders.Data, "disabled-startup");
+        var documents = Path.Combine(folders.Root, "Documents");
+        Directory.CreateDirectory(source);
+        Directory.CreateDirectory(documents);
+        File.WriteAllText(Path.Combine(source, "start-runner.cmd"), "run.cmd");
+        folders.Link(Path.Combine(source, "x"));
+
+        var (folder, moved) = Installer.KeepDisabledStartupScripts(_ => { }, documents, source);
+
+        Assert.True(moved);
+        Assert.Equal(new[] { Path.Combine(folder!, "start-runner.cmd") }, Directory.GetFiles(folder!, "*", SearchOption.AllDirectories));
+    }
+
+    [JunctionFact]
+    public void AStartupScriptsFolderThatIsALink_StaysWhereItIs()
+    {
+        using var folders = new Folders();
+        Directory.CreateDirectory(folders.Data);
+        var source = folders.Link(Path.Combine(folders.Data, "disabled-startup"));
+        var documents = Path.Combine(folders.Root, "Documents");
+        Directory.CreateDirectory(documents);
+        var log = new List<string>();
+
+        var (folder, moved) = Installer.KeepDisabledStartupScripts(log.Add, documents, source);
+
+        Assert.False(moved);
+        Assert.Equal(source, folder);
+        Assert.Empty(Directory.GetFileSystemEntries(documents));
+        Assert.DoesNotContain("n't", Assert.Single(log));
+        // Uninstall then keeps that entry of the data folder, and deletes nothing through it.
+        InstallFolderTests.RunPowerShell(Installer.RemoveDataScript(keepDisabledStartup: true), folders.Environment);
+        Assert.True(Directory.Exists(source));
+        folders.AssertElsewhereIsWhole();
+    }
+
+    [JunctionFact]
+    public void DeletingTheDataFolder_RemovesALinkInside_NotWhatItLinksTo()
+    {
+        foreach (var keep in new[] { false, true })
+        {
+            using var folders = new Folders();
+            Directory.CreateDirectory(Path.Combine(folders.Data, "logs"));
+            Directory.CreateDirectory(Path.Combine(folders.Data, "disabled-startup"));
+            File.WriteAllText(Path.Combine(folders.Data, "settings.json"), "{}");
+            File.WriteAllText(Path.Combine(folders.Data, "disabled-startup", "start.cmd"), "run.cmd");
+            var top = folders.Link(Path.Combine(folders.Data, "update-1"));
+            var nested = folders.Link(Path.Combine(folders.Data, "logs", "old"));
+
+            InstallFolderTests.RunPowerShell(Installer.RemoveDataScript(keepDisabledStartup: keep), folders.Environment);
+
+            folders.AssertElsewhereIsWhole();
+            Assert.False(Directory.Exists(top));
+            Assert.False(Directory.Exists(nested));
+            Assert.False(File.Exists(Path.Combine(folders.Data, "settings.json")));
+            Assert.Equal(keep, File.Exists(Path.Combine(folders.Data, "disabled-startup", "start.cmd")));
+            Assert.Equal(keep, Directory.Exists(folders.Data));
+        }
+    }
+
+    [JunctionFact]
+    public void ADataFolderThatIsALink_IsOnlyUnlinked()
+    {
+        foreach (var keep in new[] { false, true })
+        {
+            using var folders = new Folders();
+            folders.Link(folders.Data);
+
+            InstallFolderTests.RunPowerShell(Installer.RemoveDataScript(keepDisabledStartup: keep), folders.Environment);
+
+            folders.AssertElsewhereIsWhole();
+            Assert.Equal(keep, Directory.Exists(folders.Data));
+        }
+    }
+}
