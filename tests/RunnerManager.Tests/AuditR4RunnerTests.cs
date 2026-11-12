@@ -291,3 +291,85 @@ public class AuditR4RunnerTests
         Assert.Null(Problem(Array.Empty<string>(), clearLabels: false, noDefaultLabels: true));
     }
 }
+
+/// <summary>Failed polls whose answer arrives after the failures were forgotten, with gh replaced (see <see cref="FakeGh"/>).</summary>
+[Collection(GitHubCliCollection.Name)]
+public class AuditR4GitHubFailureTests
+{
+    /// <summary>A scope no other test uses: "orgs/" and at most 39 characters, as GitHub allows for a name.</summary>
+    private static string NewOrganization() => $"orgs/r4-{Guid.NewGuid():N}";
+
+    private static readonly CommandResult NotFound = FakeGh.Http(404, error: "gh: Not Found (HTTP 404)\n");
+
+    [Fact]
+    public async Task NotFound_ThatArrivesAfterForgetProblems_DoesNotPauseTheEndpoint()
+    {
+        var scope = NewOrganization();
+        var endpoint = $"{scope}/actions/runners?per_page=100";
+        var first = true;
+        using var gh = new FakeGh(_ =>
+        {
+            // The user connects GitHub or refreshes while the request waits for GitHub's answer.
+            if (first) GitHubCli.ForgetProblems();
+            first = false;
+            return NotFound;
+        });
+
+        Assert.Equal(404, (await GitHubCli.GetConditionalAsync(endpoint, null)).StatusCode);
+        Assert.Null(GitHubCli.ProblemFor(scope));
+        // The read right after the reset is sent.
+        Assert.Equal(404, (await GitHubCli.GetConditionalAsync(endpoint, null)).StatusCode);
+        Assert.Equal(2, gh.Calls.Length);
+
+        // Its answer came after the reset, so it pauses the endpoint as before.
+        Assert.NotNull(GitHubCli.ProblemFor(scope));
+        Assert.Equal(0, (await GitHubCli.GetConditionalAsync(endpoint, null)).StatusCode);
+        Assert.Equal(2, gh.Calls.Length);
+    }
+
+    [Fact]
+    public async Task RateLimit_ThatArrivesAfterForgetProblems_DoesNotPauseEveryPoll()
+    {
+        var first = NewOrganization();
+        var second = NewOrganization();
+        var reset = true;
+        using var gh = new FakeGh(arguments =>
+        {
+            if (!arguments.Contains($"{first}/actions/runners?per_page=100")) return FakeGh.Http(200);
+            if (reset) GitHubCli.ForgetProblems();
+            reset = false;
+            return FakeGh.Http(403, headers: "X-Ratelimit-Remaining: 0\r\n", error: "gh: API rate limit exceeded for user ID 1. (HTTP 403)");
+        });
+
+        Assert.Equal(403, (await GitHubCli.GetConditionalAsync($"{first}/actions/runners?per_page=100", null)).StatusCode);
+
+        Assert.Null(GitHubCli.CurrentProblem);
+        Assert.True((await GitHubCli.GetConditionalAsync($"{second}/actions/runners?per_page=100", null)).Ok);
+    }
+
+    [Fact]
+    public async Task RunnerList_ThatWasNotFound_WhileGitHubWasConnected_IsAskedAgainRightAway()
+    {
+        var scope = NewOrganization();
+        var answers = new Queue<CommandResult>(new[]
+        {
+            NotFound,
+            FakeGh.Http(200, """{"total_count":1,"runners":[{"id":3,"name":"gpu","labels":[{"name":"gpu"}]}]}""")
+        });
+        var first = true;
+        using var gh = new FakeGh(_ =>
+        {
+            if (first) GitHubCli.ForgetProblems();
+            first = false;
+            return answers.Dequeue();
+        });
+        var now = DateTime.UtcNow;
+
+        Assert.Null(await RegisteredRunners.GetAsync(scope, GitHubCli.GetConditionalAsync, now));
+        // The health check right after Connect GitHub asks again, and gets the list.
+        var list = await RegisteredRunners.GetAsync(scope, GitHubCli.GetConditionalAsync, now.AddSeconds(10));
+
+        Assert.Equal(2, gh.Calls.Length);
+        Assert.Equal(3, Assert.Single(list!).Id);
+    }
+}

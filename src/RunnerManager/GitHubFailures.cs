@@ -48,6 +48,14 @@ internal static class GitHubFailures
     private static bool _pauseIsSignIn;
     /// <summary>When GitHub last answered a poll, with whatever status: it could be reached then.</summary>
     private static DateTime? _lastAnswer;
+    /// <summary>Counts the calls of <see cref="Forget"/>, so a poll that was sent before one does not store its failure after it.</summary>
+    private static int _generation;
+
+    /// <summary>Taken right before a poll is sent, and given to <see cref="Failed"/> with its answer.</summary>
+    internal static int Generation
+    {
+        get { lock (Gate) return _generation; }
+    }
 
     /// <summary>The remembered failure because of which a poll of this endpoint is not sent now, or null.</summary>
     internal static GitHubProblem? Blocking(string endpoint)
@@ -75,11 +83,16 @@ internal static class GitHubFailures
 
     /// <summary>A poll of this endpoint failed.</summary>
     /// <param name="status">The HTTP status, or 0 when gh gave no HTTP answer.</param>
-    internal static void Failed(string endpoint, int status, LimitHeaders headers, CommandResult result)
+    /// <param name="sentIn">
+    /// <see cref="Generation"/> when the poll was sent. A failure of a poll that was sent before <see cref="Forget"/> is
+    /// not stored: the user connected GitHub or asked for a refresh meanwhile, and the next polls must be sent.
+    /// </param>
+    internal static void Failed(string endpoint, int status, LimitHeaders headers, CommandResult result, int? sentIn = null)
     {
         var now = UtcNow();
         lock (Gate)
         {
+            if (sentIn is { } generation && generation != _generation) return;
             // An answer to another poll while this one waited for gh: GitHub can be reached.
             var othersAnswered = _lastAnswer is { } last && last <= now && now - last <= GitHubCli.DefaultTimeout;
             if (status > 0) _lastAnswer = now;
@@ -131,11 +144,12 @@ internal static class GitHubFailures
             if (_pauseIsSignIn) (_pause, _pauseIsSignIn) = (null, false);
     }
 
-    /// <summary>Forgets every failure, so the next polls ask GitHub again.</summary>
+    /// <summary>Forgets every failure, so the next polls ask GitHub again, also the failures of polls that are still waiting for an answer.</summary>
     internal static void Forget()
     {
         lock (Gate)
         {
+            _generation++;
             Endpoints.Clear();
             (_pause, _pauseIsSignIn) = (null, false);
             _lastAnswer = null;
