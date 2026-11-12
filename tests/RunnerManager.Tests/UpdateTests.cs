@@ -1,3 +1,5 @@
+using System.IO;
+
 namespace RunnerManager.Tests;
 
 public class UpdateCheckTests
@@ -157,5 +159,107 @@ public class UpdateRollbackTests
     {
         Assert.Equal(DashboardUpdateDecision.Forget, Dashboard(Pending(), installed: "2.5.0"));
         Assert.Equal(DashboardUpdateDecision.Nothing, Dashboard(null));
+    }
+}
+
+/// <summary>
+/// update-state.json is in the data folder, which any program of the user can change. A pending update from it counts
+/// only with what the install folder shows (see <see cref="UpdateGuard.PendingCounts"/>), so a program without
+/// administrator rights cannot make the fleet agent go back to the previous version of a Program Files install.
+/// </summary>
+public class UpdateMarkerTests
+{
+    private static readonly DateTime Now = new(2026, 11, 12, 12, 0, 0, DateTimeKind.Utc);
+    private static readonly PendingUpdate Planted = new() { Version = "2.11.0", PreviousVersion = "2.10.0", InstalledUtc = Now, FailedStarts = 3 };
+
+    private static UpdateGuard.InstallFacts Facts(string marker = "", string previous = "2.10.0", double hoursSinceWritten = 1)
+        => new(marker, previous, Now.AddHours(-hoursSinceWritten));
+
+    [Fact]
+    public void APendingUpdate_CountsOnlyWhenTheMarkerBesideTheExeNamesIt()
+    {
+        Assert.True(UpdateGuard.PendingCounts(Planted, Facts(marker: "2.11.0"), Now));
+        // Written by hand into the update state: the install folder has no marker, or one of another update.
+        Assert.False(UpdateGuard.PendingCounts(Planted, Facts(), Now));
+        Assert.False(UpdateGuard.PendingCounts(Planted, Facts(marker: "2.12.0"), Now));
+    }
+
+    [Fact]
+    public void WithTheMarker_TheUpdateIsUndone_AlsoWhenTheNewVersionNeverStarted()
+    {
+        // The version that installed the update wrote the marker, so its dashboard can go back however long the new
+        // version has failed to start (the PC may have been off since).
+        Assert.True(UpdateGuard.PendingCounts(Planted, Facts(marker: "2.11.0", hoursSinceWritten: 72), Now));
+        Assert.True(UpdateGuard.PendingCounts(Planted, new UpdateGuard.InstallFacts("2.11.0", "2.10.0", null), Now));
+    }
+
+    [Theory]
+    [InlineData("2.9.0", 1, true)]
+    [InlineData("2.9.0", 23.9, true)]
+    [InlineData("2.9.0", 24.1, false)]
+    [InlineData("2.10.0", 1, false)]
+    [InlineData("2.10.1", 1, false)]
+    [InlineData("", 1, false)]
+    public void TheUpdateFrom290_CountsWithoutAMarker_OnlyForADayAfterTheExeWasWritten(string previous, double hours, bool counts)
+    {
+        // 2.9.0 wrote no marker when it installed 2.10.0. The previous exe (2.9.0) and the time the installed exe was written
+        // are in the install folder, which only administrators can change in Program Files.
+        var fromOld = new PendingUpdate { Version = "2.10.0", PreviousVersion = "2.9.0", InstalledUtc = Now.AddHours(-hours) };
+        Assert.Equal(counts, UpdateGuard.PendingCounts(fromOld, Facts(previous: previous, hoursSinceWritten: hours), Now));
+        Assert.False(UpdateGuard.PendingCounts(fromOld, new UpdateGuard.InstallFacts(string.Empty, previous, null), Now));
+    }
+
+    [Fact]
+    public void TheInstallFolder_IsReadForTheFacts_AndTheMarkerIsWrittenAndDeleted()
+    {
+        var folder = InstallEvidenceTests.NewFolder("pending");
+        try
+        {
+            var exe = Path.Combine(folder, AppPaths.ExeName);
+            File.WriteAllText(exe, string.Empty);
+            var written = new DateTime(2026, 11, 10, 8, 30, 0, DateTimeKind.Utc);
+            File.SetLastWriteTimeUtc(exe, written);
+            Assert.Equal(new UpdateGuard.InstallFacts(string.Empty, string.Empty, written), UpdateGuard.ReadInstallFacts(exe));
+
+            File.Copy(typeof(UpdateGuard).Assembly.Location, exe + ".previous");
+            UpdateGuard.WritePendingMarker(exe, "2.11.0");
+            Assert.Equal(Path.Combine(folder, "RunnerManager.exe.pending"), UpdateGuard.PendingMarkerPath(exe));
+            Assert.Equal(new UpdateGuard.InstallFacts("2.11.0", AppUpdater.CurrentVersion, written), UpdateGuard.ReadInstallFacts(exe));
+
+            UpdateGuard.DeletePendingMarker(exe);
+            Assert.False(File.Exists(UpdateGuard.PendingMarkerPath(exe)));
+        }
+        finally { Directory.Delete(folder, recursive: true); }
+    }
+
+    [Fact]
+    public void APlantedPendingUpdate_IsRemovedAndLogged_AndAMarkedOneIsKept()
+    {
+        var folder = InstallEvidenceTests.NewFolder("planted");
+        var statePath = Path.Combine(FleetConfig.StateDir, "update-state.json");
+        try
+        {
+            var exe = Path.Combine(folder, AppPaths.ExeName);
+            File.WriteAllText(exe, string.Empty);
+            // The previous exe is a version that writes the marker, so a pending update needs one.
+            File.Copy(typeof(UpdateGuard).Assembly.Location, exe + ".previous");
+            Directory.CreateDirectory(FleetConfig.StateDir);
+            File.WriteAllText(statePath, System.Text.Json.JsonSerializer.Serialize(new UpdateState { Pending = Planted }));
+
+            Assert.False(UpdateGuard.Counts(Planted, exe, Now));
+            Assert.Null(UpdateGuard.Load().Pending);
+            Assert.Contains(UpdateGuard.NotCountedText("2.11.0", folder), File.ReadAllText(MachineRelay.AgentLogPath));
+
+            File.WriteAllText(statePath, System.Text.Json.JsonSerializer.Serialize(new UpdateState { Pending = Planted }));
+            UpdateGuard.WritePendingMarker(exe, "2.11.0");
+            Assert.True(UpdateGuard.Counts(Planted, exe, Now));
+            Assert.Equal(Planted, UpdateGuard.Load().Pending);
+            Assert.True(File.Exists(UpdateGuard.PendingMarkerPath(exe)));
+        }
+        finally
+        {
+            Directory.Delete(folder, recursive: true);
+            File.Delete(statePath);
+        }
     }
 }

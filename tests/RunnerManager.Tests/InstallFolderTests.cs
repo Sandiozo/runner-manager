@@ -55,6 +55,8 @@ public class InstallFolderTests
             File.WriteAllText(Path.Combine(shared, "notes.txt"), "keep");
             File.WriteAllText(Path.Combine(own, "RunnerManager.exe"), string.Empty);
             File.WriteAllText(Path.Combine(own, "RunnerManager.123.old.exe"), string.Empty);
+            // The mark of an update that waits to prove itself (see UpdateGuard.PendingCounts).
+            File.WriteAllText(Path.Combine(own, "RunnerManager.exe.pending"), "2.11.0");
 
             RunPowerShell(Installer.RemoveProgramFilesScript(shared), Installer.FolderEnvironment(shared));
             RunPowerShell(Installer.RemoveProgramFilesScript(own), Installer.FolderEnvironment(own));

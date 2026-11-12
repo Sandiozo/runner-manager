@@ -34,7 +34,9 @@ public enum DashboardUpdateDecision { Nothing, MarkHealthy, RollBack, Forget }
 
 /// <summary>
 /// Undoes an update that does not work on this PC. Installing a release keeps the exe it replaces as
-/// RunnerManager.exe.previous and marks the update as pending. Each start of the new fleet agent is counted; when it
+/// RunnerManager.exe.previous and marks the update as pending: in update-state.json, and with RunnerManager.exe.pending
+/// beside the exe, without which the pending update does not count (see <see cref="PendingCounts"/>). Each start of the
+/// new fleet agent is counted; when it
 /// keeps ending before it worked, or never starts at all, the previous exe is put back. Once an agent has run for
 /// <see cref="HealthyAfter"/> and answered a status request on this PC, the version is recorded as good; one that runs on
 /// for <see cref="AnswerWaitLimit"/> more without answering is kept and no longer watched.
@@ -59,6 +61,80 @@ public static class UpdateGuard
     private static DateTime? _agentDownSinceUtc;
 
     public static string PreviousExe => AppUpdater.InstalledExe + ".previous";
+
+    // ================= Whether a pending update counts =================
+
+    /// <summary>
+    /// The first version that writes <see cref="PendingMarkerPath"/> when it installs an update. An update that an earlier
+    /// version installed has no marker (see <see cref="PendingCounts"/>).
+    /// </summary>
+    internal const string MarkerSince = "2.10.0";
+
+    /// <summary>How long after an update that a version before <see cref="MarkerSince"/> installed it counts without a marker.</summary>
+    internal static readonly TimeSpan UnmarkedLimit = TimeSpan.FromHours(24);
+
+    /// <summary>The file beside the installed exe that names the version of the update that waits to prove itself.</summary>
+    internal static string PendingMarkerPath(string exe) => exe + ".pending";
+
+    /// <summary>
+    /// What the install folder shows about the last update: the version that <see cref="PendingMarkerPath"/> names (empty
+    /// without one), the version of the previous exe (empty without one), and when the installed exe was written. In
+    /// Program Files a program without administrator rights can change none of it.
+    /// </summary>
+    internal sealed record InstallFacts(string MarkerVersion, string PreviousVersion, DateTime? ExeWrittenUtc);
+
+    internal static InstallFacts ReadInstallFacts(string exe)
+    {
+        var marker = string.Empty;
+        try { marker = File.ReadAllText(PendingMarkerPath(exe)).Trim(); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        var previous = string.Empty;
+        try
+        {
+            if (File.Exists(exe + ".previous"))
+                previous = AppUpdater.Normalize(FileVersionInfo.GetVersionInfo(exe + ".previous").ProductVersion ?? string.Empty);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        DateTime? written = null;
+        try { if (File.Exists(exe)) written = File.GetLastWriteTimeUtc(exe); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        return new InstallFacts(marker, previous, written);
+    }
+
+    /// <summary>
+    /// Whether a pending update from update-state.json counts, so that its fleet agent is watched and the update can be
+    /// undone. That file is in the data folder, which any program of the user can change, so the install folder decides:
+    /// the marker that the update wrote beside the exe must name the same version. Versions before
+    /// <see cref="MarkerSince"/> wrote no marker. So when the previous exe is older than that (one of them installed the
+    /// update), a pending update without a marker counts while the installed exe was written at most
+    /// <see cref="UnmarkedLimit"/> ago, which covers the update from 2.9.0.
+    /// </summary>
+    internal static bool PendingCounts(PendingUpdate pending, InstallFacts facts, DateTime nowUtc)
+    {
+        if (facts.MarkerVersion.Length > 0) return AppUpdater.CompareVersions(facts.MarkerVersion, pending.Version) == 0;
+        return AppUpdater.CompareVersions(facts.PreviousVersion, MarkerSince) < 0
+               && facts.ExeWrittenUtc is { } written && nowUtc - written <= UnmarkedLimit;
+    }
+
+    /// <summary>The log line for a pending update that does not count (see <see cref="PendingCounts"/>), which is removed.</summary>
+    internal static string NotCountedText(string version, string installDir)
+        => $"The update state in the data folder names an update to v{version}, but {installDir} has no mark of that update. " +
+           "Runner Manager removed it from the update state, so it does not go back to the previous version because of it.";
+
+    internal static void WritePendingMarker(string exe, string version)
+    {
+        try { File.WriteAllText(PendingMarkerPath(exe), version); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            MachineRelay.AppendAgentLog($"Could not mark the update to v{version} in {Path.GetDirectoryName(exe)}, so it is not watched: {ex.Message}");
+        }
+    }
+
+    internal static void DeletePendingMarker(string exe)
+    {
+        try { File.Delete(PendingMarkerPath(exe)); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+    }
 
     // ================= Decisions (pure) =================
 
@@ -147,19 +223,54 @@ public static class UpdateGuard
         }
     }
 
+    /// <summary>Changes the saved state. When that removes the pending update, its marker beside the exe goes too.</summary>
     private static void Change(Func<UpdateState, UpdateState> change)
     {
-        lock (Gate) Save(change(Load()));
+        bool removed;
+        lock (Gate)
+        {
+            var before = Load();
+            var after = change(before);
+            removed = before.Pending != null && after.Pending == null;
+            Save(after);
+        }
+        if (removed) DeletePendingMarker(AppUpdater.InstalledExe);
     }
 
-    /// <summary>Called after a release replaced the installed exe.</summary>
+    /// <summary>
+    /// Called after a release replaced the installed exe. Also writes the marker beside the exe (see
+    /// <see cref="PendingCounts"/>). It is written after the state, so a crash in between leaves at worst an update that
+    /// is not watched, never a marker that a planted update state could use.
+    /// </summary>
     internal static void MarkPending(string version, string previousVersion)
-        => Change(state => state with
+    {
+        Change(state => state with
         {
             Pending = new PendingUpdate { Version = version, PreviousVersion = previousVersion, InstalledUtc = DateTime.UtcNow },
             RolledBackFrom = string.Empty,
             RolledBackTo = string.Empty
         });
+        WritePendingMarker(AppUpdater.InstalledExe, version);
+    }
+
+    private static bool Counts(PendingUpdate pending) => Counts(pending, AppUpdater.InstalledExe, DateTime.UtcNow);
+
+    /// <summary>
+    /// Whether the saved pending update counts for the install of <paramref name="exe"/> (see <see cref="PendingCounts"/>).
+    /// One that does not is removed from the saved state, any marker beside the exe is deleted, and it is logged.
+    /// </summary>
+    internal static bool Counts(PendingUpdate pending, string exe, DateTime nowUtc)
+    {
+        if (PendingCounts(pending, ReadInstallFacts(exe), nowUtc)) return true;
+        lock (Gate)
+        {
+            var state = Load();
+            if (state.Pending == pending) Save(state with { Pending = null });
+        }
+        DeletePendingMarker(exe);
+        MachineRelay.AppendAgentLog(NotCountedText(pending.Version, Path.GetDirectoryName(exe) ?? exe));
+        return false;
+    }
 
     private static void MarkHealthy(string version)
     {
@@ -179,7 +290,7 @@ public static class UpdateGuard
     {
         var state = Load();
         var (decision, pending) = DecideAgentStart(state.Pending, AppUpdater.CurrentVersion, AppUpdater.IsRunningInstalledCopy);
-        if (decision == AgentStartDecision.Nothing) return true;
+        if (decision == AgentStartDecision.Nothing || !Counts(state.Pending!)) return true;
         Save(state with { Pending = pending });
         if (decision == AgentStartDecision.RollBack)
             return !RollBack(AgentStopsReason(pending!.FailedStarts, answersStatus: FleetConfig.Current.FleetKey != null));
@@ -266,10 +377,10 @@ public static class UpdateGuard
             case DashboardUpdateDecision.Forget:
                 Change(s => s with { Pending = null });
                 return null;
-            case DashboardUpdateDecision.MarkHealthy:
+            case DashboardUpdateDecision.MarkHealthy when Counts(state.Pending):
                 MarkHealthy(state.Pending.Version);
                 return null;
-            case DashboardUpdateDecision.RollBack:
+            case DashboardUpdateDecision.RollBack when Counts(state.Pending):
                 var reason = DashboardRollbackReason(state.Pending);
                 if (!await Task.Run(() => RollBack(reason))) return null;
                 await ScheduledTasks.RunTaskAsync(ScheduledTasks.AgentTaskName);
@@ -303,6 +414,7 @@ public static class UpdateGuard
                                             $"Put the previous version{VersionText(swap?.Kind is SwapKind.Rollback or SwapKind.Undo ? swap.To : swap?.From)} back in its place.");
                 if (swap is { Kind: SwapKind.Rollback, From.Length: > 0 })
                     Change(s => s with { Pending = null, RolledBackFrom = swap.From, RolledBackTo = swap.To, RollbackReported = false });
+                DeletePendingMarker(AppUpdater.InstalledExe);
                 return null;
             case RepairSource.Unexplained:
                 if (!_missingLogged)
@@ -349,6 +461,7 @@ public static class UpdateGuard
         {
             MachineRelay.AppendAgentLog($"Update to v{bad} failed: {reason}. There is no previous version to go back to.");
             Save(state with { Pending = null });
+            DeletePendingMarker(AppUpdater.InstalledExe);
             return false;
         }
         string previousVersion;
@@ -364,6 +477,7 @@ public static class UpdateGuard
             return false;
         }
         Save(state with { Pending = null, RolledBackFrom = bad, RolledBackTo = previousVersion, RollbackReported = false });
+        DeletePendingMarker(AppUpdater.InstalledExe);
         MachineRelay.AppendAgentLog($"Update to v{bad} failed: {reason}. Went back to v{previousVersion}.");
         return true;
     }
