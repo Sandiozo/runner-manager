@@ -111,8 +111,8 @@ public sealed class FleetActions
     /// <summary>
     /// Moves a runner: stops and disables it, registers it on the target PC with the same name and labels (replacing
     /// the old registration), then removes the old copy. If the target reports that registering failed, the old copy's
-    /// service starts again as it did before the move, and is started again unless it was disabled or a console window
-    /// ran the runner (<see cref="StartAfterFailedMoveAsync"/>).
+    /// service starts again as it did before the move, and is started again unless it was disabled, a console window
+    /// ran the runner, or it was stopped (<see cref="StartAfterFailedMoveAsync"/>).
     /// </summary>
     public async Task MoveRunnerAsync(MachineInfo source, MachineRunnerStatus runner, MachineInfo target, bool deleteOldFiles,
         string[]? knownLabels, Action<string> log)
@@ -166,8 +166,8 @@ public sealed class FleetActions
                 }
                 catch (Exception restartError) { log($"Could not set up the runner as it was before: {restartError.Message}"); }
             }
-            // config.cmd on the target replaced the registration before the install failed. The old copy is still enabled
-            // and started, so it can be edited, but GitHub no longer accepts it.
+            // config.cmd on the target replaced the registration before the install failed. The old copy is set up again as
+            // before the move, so it can be edited, but GitHub no longer accepts it.
             if (ex.Message.Contains(RunnerService.ReplacedRegistrationNote, StringComparison.Ordinal))
                 log($"{runner.TitleText} on {source.MachineName} must be registered again before it can take jobs. " +
                     "Move it again, or edit it and change its name or labels.");
@@ -219,20 +219,21 @@ public sealed class FleetActions
     /// <summary>
     /// Step 1 of a move, on the PC the runner leaves: stops it when idle, keeps auto-recovery away, disables its service so
     /// it doesn't start at the next restart, and marks it as the old copy (so deleting it later doesn't unregister the
-    /// moved runner). The marker says how the service started and whether a console window ran the runner, for a failed
-    /// move to put back (<see cref="BeforeMove"/>). Undone when any part fails: the service starts as it did before.
+    /// moved runner). The marker says how the service started, whether a console window ran the runner and whether it was
+    /// stopped, for a failed move to put back (<see cref="BeforeMove"/>). Undone when any part fails: the service starts as
+    /// it did before.
     /// </summary>
     internal static async Task StopForMoveAsync(string key)
     {
         var wasStopped = FleetConfig.Current.ManuallyStopped.Contains(key, StringComparer.OrdinalIgnoreCase);
         var runner = await RunnerService.FindRunnerAsync(key);
-        var before = BeforeMove(runner);
+        var before = BeforeMove(runner, wasStopped);
         FleetConfig.SetManuallyStopped(key, true);
         try
         {
             await RunnerService.StopIfIdleAsync(key);
             await SetServiceEnabledAsync(key, false);
-            await RunnerService.MarkMovedAwayAsync(key, true, before.ManualStart, before.ServiceStart, before.Console);
+            await RunnerService.MarkMovedAwayAsync(key, true, before.ManualStart, before.ServiceStart, before.Console, before.Stopped);
         }
         catch
         {
@@ -245,24 +246,39 @@ public sealed class FleetActions
 
     /// <summary>
     /// What the marker of a move records (<see cref="RunnerService.MovedAwayText"/>): whether the runner was set not to
-    /// start with Windows, as before, how its Windows service started, and whether a console window ran it or a startup
-    /// entry opens it in one. A runner that an earlier move left disabled keeps what that move recorded, not that it is
-    /// disabled now.
+    /// start with Windows, as before, how its Windows service started (see <see cref="ServiceBeforeMove"/>), whether a
+    /// console window ran it or a startup entry opens it in one, and whether it was stopped in Runner Manager
+    /// (<paramref name="wasStopped"/>). A runner that an earlier move left disabled and stopped keeps what that move
+    /// recorded, not that it is disabled and stopped now.
     /// </summary>
-    internal static (bool ManualStart, string? ServiceStart, bool Console) BeforeMove(RunnerInfo? runner)
-        => runner == null ? (false, null, false)
-            : (runner.RegistrationOptions.ManualStart, runner.ServiceStartBeforeMove ?? runner.ServiceStart,
-               runner.ConsoleBeforeMove || runner.HasConsoleCopy);
+    internal static (bool ManualStart, string? ServiceStart, bool Console, bool Stopped) BeforeMove(RunnerInfo? runner, bool wasStopped)
+    {
+        if (runner == null) return (false, null, false, wasStopped);
+        var console = runner.ConsoleBeforeMove || runner.HasConsoleCopy;
+        return (runner.RegistrationOptions.ManualStart, ServiceBeforeMove(runner, console) ?? runner.ServiceStart, console,
+            runner.MovedAway ? runner.StoppedBeforeMove : wasStopped);
+    }
+
+    /// <summary>
+    /// How the service of a runner that an earlier move marked started before that move, or null without such a mark. A
+    /// mark of 2.9.0 does not say: 2.9.0 did not undo a failed move of a runner in a console window, so the service of
+    /// such a runner is still disabled, and stays so while a console window runs the runner or a startup entry opens it
+    /// (<paramref name="console"/>); starting it with Windows would run the runner twice. Otherwise as 2.9.0 put it back.
+    /// </summary>
+    internal static string? ServiceBeforeMove(RunnerInfo runner, bool console)
+        => runner.ServiceStartBeforeMove != null && !runner.ServiceRecordedBeforeMove && console
+            ? RunnerStart.Disabled
+            : runner.ServiceStartBeforeMove;
 
     /// <summary>
     /// Undoes <see cref="StopForMoveAsync"/> after a move failed: the service starts as it did before the move, with
     /// Windows, manually or not at all (disabled), and is started again only when that is how the runner ran
-    /// (<see cref="AfterFailedMove"/>). Returns what was done.
+    /// (<see cref="AfterFailedMove"/>). A runner that was stopped before the move stays stopped. Returns what was done.
     /// </summary>
     internal static async Task<string> StartAfterFailedMoveAsync(string key)
     {
         var undo = AfterFailedMove(await RunnerService.FindRunnerAsync(key));
-        FleetConfig.SetManuallyStopped(key, false);
+        FleetConfig.SetManuallyStopped(key, undo.Stopped);
         await SetServiceStartAsync(key, undo.ServiceStart);
         // Removed after the service is set, so a retry still knows how it started.
         await RunnerService.MarkMovedAwayAsync(key, false);
@@ -272,20 +288,25 @@ public sealed class FleetActions
 
     /// <summary>
     /// How a failed move leaves the old copy (as its marker says): how its service starts, whether the service is started
-    /// again, and what to say. It is not started when it was disabled before the move, and not when a console window ran
-    /// the runner or a startup entry opens it in one: the move closed that window, and starting the service would run the
-    /// runner as a service instead, or twice. Without a marker, the service starts with Windows and is started, as before.
+    /// again, whether the runner stays stopped, and what to say. It is not started when it was disabled before the move,
+    /// not when a console window ran the runner or a startup entry opens it in one (the move closed that window, and
+    /// starting the service would run the runner as a service instead, or twice), and not when it was stopped in Runner
+    /// Manager before the move. Without a marker, the service starts with Windows and is started, as before.
     /// </summary>
-    internal static (string ServiceStart, bool Start, string Text) AfterFailedMove(RunnerInfo? runner)
+    internal static (string ServiceStart, bool Start, bool Stopped, string Text) AfterFailedMove(RunnerInfo? runner)
     {
-        var service = runner?.ServiceStartBeforeMove ?? RunnerStart.WithWindows;
+        var console = runner != null && (runner.ConsoleBeforeMove || runner.HasConsoleCopy);
+        var service = (runner == null ? null : ServiceBeforeMove(runner, console)) ?? RunnerStart.WithWindows;
+        var stopped = runner?.StoppedBeforeMove == true;
         // A runner without a service runs in a console window only.
-        if (runner?.ConsoleBeforeMove == true || runner is { ServiceInstalled: false })
-            return (service, false, "The runner is as it was before the move. Its Windows service was not started, because the runner runs in a console window. " +
-                                    "Open the console window again if the move closed it.");
-        return service == RunnerStart.Disabled
-            ? (service, false, "The runner is as it was before the move. Its Windows service is disabled, as before, and was not started.")
-            : (service, true, "The runner was started again.");
+        if (console || runner is { ServiceInstalled: false })
+            return (service, false, stopped, "The runner is as it was before the move. Its Windows service was not started, because the runner runs in a console window. " +
+                                             "Open the console window again if the move closed it.");
+        if (service == RunnerStart.Disabled)
+            return (service, false, stopped, "The runner is as it was before the move. Its Windows service is disabled, as before, and was not started.");
+        return stopped
+            ? (service, false, true, "The runner is as it was before the move. It was stopped before the move, so it was not started.")
+            : (service, true, false, "The runner was started again.");
     }
 
     /// <summary>

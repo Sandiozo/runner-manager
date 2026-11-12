@@ -219,7 +219,9 @@ public static partial class RunnerService
             MovedAway = File.Exists(Path.Combine(root, MovedAwayMarker)),
             ManualStartBeforeMove = moved?.ManualStart == true,
             ServiceStartBeforeMove = moved?.ServiceStart,
+            ServiceRecordedBeforeMove = moved?.ServiceRecorded == true,
             ConsoleBeforeMove = moved?.Console == true,
+            StoppedBeforeMove = moved?.Stopped == true,
             LastActivityText = GetLatestRunnerActivity(root),
             InstallPath = root,
             GitHubUrl = config.GitHubUrl,
@@ -880,49 +882,56 @@ public static partial class RunnerService
     /// <param name="manualStart">The runner was set not to start with Windows (<see cref="RunnerRegistrationOptions.ManualStart"/>).</param>
     /// <param name="serviceStart">How its Windows service started (a <see cref="RunnerStart"/> value), which a failed move puts back.</param>
     /// <param name="console">A console window ran it, or a startup entry opened it in one: a failed move does not start its service.</param>
-    public static async Task MarkMovedAwayAsync(string key, bool movedAway, bool manualStart = false, string? serviceStart = null, bool console = false)
+    /// <param name="stopped">It was stopped in Runner Manager before the move: a failed move does not start it, and it stays stopped.</param>
+    public static async Task MarkMovedAwayAsync(string key, bool movedAway, bool manualStart = false, string? serviceStart = null, bool console = false,
+        bool stopped = false)
     {
         var runner = await FindRunnerAsync(key);
         if (runner == null || string.IsNullOrEmpty(runner.InstallPath)) return;
         var marker = Path.Combine(runner.InstallPath, MovedAwayMarker);
-        if (movedAway) await File.WriteAllTextAsync(marker, MovedAwayText(DateTime.UtcNow, manualStart, serviceStart, console));
+        if (movedAway) await File.WriteAllTextAsync(marker, MovedAwayText(DateTime.UtcNow, manualStart, serviceStart, console, stopped));
         else TryDelete(marker);
     }
 
     private const string ManualStartNote = "start=manual";
     private const string ServiceStartNote = "service=";
     private const string ConsoleNote = "console";
+    private const string StoppedNote = "stopped";
 
     /// <summary>
     /// The marker's text: when the runner moved, and how it started before. The "start=manual" line is as in 2.9.0,
     /// which reads only that line: with it, a failed move sets the service to start manually, without it to start with
     /// Windows. The lines after it are new, and 2.9.0 ignores them: how the service itself started ("service=off" for
-    /// manually, "service=disabled"), and "console" when a console window ran the runner or a startup entry opened it.
+    /// manually, "service=disabled"), "console" when a console window ran the runner or a startup entry opened it, and
+    /// "stopped" when it was stopped in Runner Manager.
     /// </summary>
-    internal static string MovedAwayText(DateTime utc, bool manualStart, string? serviceStart, bool console)
+    internal static string MovedAwayText(DateTime utc, bool manualStart, string? serviceStart, bool console, bool stopped = false)
     {
         var lines = new List<string> { $"Moved to another PC on {utc:O}. Its registration belongs to that PC now." };
         if (manualStart) lines.Add(ManualStartNote);
         if (serviceStart is RunnerStart.WithWindows or RunnerStart.Off or RunnerStart.Disabled) lines.Add(ServiceStartNote + serviceStart);
         if (console) lines.Add(ConsoleNote);
+        if (stopped) lines.Add(StoppedNote);
         return string.Join(Environment.NewLine, lines);
     }
 
     /// <summary>
-    /// What a marker says (<see cref="MovedAwayText"/>). A marker of 2.9.0 has no service line: its service is put back
-    /// as 2.9.0 did, manually with the "start=manual" line and with Windows without it.
+    /// What a marker says (<see cref="MovedAwayText"/>). A marker of 2.9.0 has no service line (<c>ServiceRecorded</c> is
+    /// false): its service is put back as 2.9.0 did, manually with the "start=manual" line and with Windows without it,
+    /// unless a console window runs the runner (see <see cref="FleetActions.ServiceBeforeMove"/>).
     /// </summary>
-    internal static (bool ManualStart, string ServiceStart, bool Console) ParseMovedAway(IEnumerable<string> lines)
+    internal static (bool ManualStart, string ServiceStart, bool Console, bool ServiceRecorded, bool Stopped) ParseMovedAway(IEnumerable<string> lines)
     {
         var notes = lines.Select(l => l.Trim()).ToList();
         var manual = notes.Contains(ManualStartNote);
         var service = notes.Where(n => n.StartsWith(ServiceStartNote, StringComparison.Ordinal)).Select(n => n[ServiceStartNote.Length..])
             .FirstOrDefault(s => s is RunnerStart.WithWindows or RunnerStart.Off or RunnerStart.Disabled);
-        return (manual, service ?? (manual ? RunnerStart.Off : RunnerStart.WithWindows), notes.Contains(ConsoleNote));
+        return (manual, service ?? (manual ? RunnerStart.Off : RunnerStart.WithWindows), notes.Contains(ConsoleNote), service != null,
+            notes.Contains(StoppedNote));
     }
 
     /// <summary>What the marker of the old copy of a moved runner says, or null when it has none or it cannot be read.</summary>
-    private static (bool ManualStart, string ServiceStart, bool Console)? ReadMovedAway(string root)
+    private static (bool ManualStart, string ServiceStart, bool Console, bool ServiceRecorded, bool Stopped)? ReadMovedAway(string root)
     {
         var marker = Path.Combine(root, MovedAwayMarker);
         try { return File.Exists(marker) ? ParseMovedAway(File.ReadAllLines(marker)) : null; }
@@ -2338,10 +2347,15 @@ public sealed class RunnerInfo : INotifyPropertyChanged
     /// <summary>
     /// How the Windows service of the old copy of a moved runner started before the move (a <see cref="RunnerStart"/>
     /// value: with Windows, Off for manually, or Disabled), which a failed move puts back; null when it is no such copy.
+    /// Without <see cref="ServiceRecordedBeforeMove"/> it is only what 2.9.0 would have put back.
     /// </summary>
     public string? ServiceStartBeforeMove { get; init; }
+    /// <summary>The marker of the move says how the service started (2.9.0 did not write that).</summary>
+    public bool ServiceRecordedBeforeMove { get; init; }
     /// <summary>A console window ran the old copy of a moved runner before the move, or a startup entry opened it in one.</summary>
     public bool ConsoleBeforeMove { get; init; }
+    /// <summary>The old copy of a moved runner was stopped in Runner Manager before the move.</summary>
+    public bool StoppedBeforeMove { get; init; }
     public bool ServiceInstalled { get; init; }
     /// <summary>What starts the runner after a restart (a <see cref="RunnerStart"/> value).</summary>
     public string StartsAt { get; init; } = RunnerStart.Unknown;

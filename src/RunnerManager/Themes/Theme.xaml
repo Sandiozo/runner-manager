@@ -139,7 +139,7 @@
         <Setter Property="Padding" Value="0"/>
         <Setter Property="FontFamily" Value="{StaticResource IconFont}"/>
         <Setter Property="FontSize" Value="14"/>
-        <Setter Property="AutomationProperties.Name" Value="{Binding ToolTip, RelativeSource={RelativeSource Self}}"/>
+        <Setter Property="AutomationProperties.Name" Value="{Binding ToolTip, RelativeSource={RelativeSource Self}, TargetNullValue=''}"/>
     </Style>
 
     <!-- TextBox with placeholder taken from Tag -->

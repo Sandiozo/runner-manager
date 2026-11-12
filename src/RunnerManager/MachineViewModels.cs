@@ -188,7 +188,16 @@ public sealed class MachineRunnerStatus : INotifyPropertyChanged
     [JsonIgnore] public bool CanCleanWork => (IsLocalMachine || AgentProtocolVersion >= 9) && CanControl && !IsBusy;
     [JsonIgnore] public bool CanViewLog => IsLocalMachine || (MachineOnline && AgentProtocolVersion >= 9);
     [JsonIgnore] private string AccountText => ServiceAccount.Length > 0 ? $"  ·  runs as {ServiceAccount}" : string.Empty;
-    [JsonIgnore] public string ServiceText => ServiceInstalled && IsInteractive ? $"{ServiceName} (not used: the runner runs in a console window)"
+    /// <summary>
+    /// The "Windows service" row in the details, short enough for its narrow column. <see cref="ServiceTip"/> has the
+    /// service's name, its account and the reason, as the row's tooltip and for screen readers.
+    /// </summary>
+    [JsonIgnore] public string ServiceText => ServiceInstalled && IsInteractive ? "Not used (console window)"
+        : RunsTwice ? "Runs, and a console window too"
+        : ServiceInstalled && ConsoleAtSignIn ? "Not used (console window)"
+        : ServiceInstalled ? "Installed"
+        : IsInteractive || IsStoppedConsole ? "None (console window)" : "Not installed";
+    [JsonIgnore] public string ServiceTip => ServiceInstalled && IsInteractive ? $"{ServiceName} (not used: the runner runs in a console window)"
         : RunsTwice && ConsoleAtSignIn ? $"{ServiceName}{AccountText} (runs, and the runner also opens in a console window when you sign in)"
         : RunsTwice ? $"{ServiceName}{AccountText} (runs, and a console window runs the runner too)"
         : ServiceInstalled && ConsoleAtSignIn ? $"{ServiceName} (not used: the runner opens in a console window when you sign in)"

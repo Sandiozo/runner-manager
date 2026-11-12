@@ -606,17 +606,54 @@ internal static class TestPorts
         throw new InvalidOperationException("No free port range found.");
     }
 
-    private static bool IsFree(int port)
+    /// <summary>
+    /// Whether the port is free for TCP and UDP, on IPv4 and IPv6. Each probe binds the port for itself alone
+    /// (ExclusiveAddressUse). Without that, Windows lets a probe on all addresses bind a port that another program listens
+    /// on for 127.0.0.1 only, and the test that then binds 127.0.0.1 or localhost fails.
+    /// </summary>
+    internal static bool IsFree(int port)
     {
+        var addresses = Socket.OSSupportsIPv6 ? new[] { IPAddress.Any, IPAddress.IPv6Any } : new[] { IPAddress.Any };
         try
         {
-            var tcp = new TcpListener(IPAddress.Any, port);
-            tcp.Start();
-            tcp.Stop();
-            using var udp = new UdpClient(new IPEndPoint(IPAddress.Any, port));
+            foreach (var address in addresses)
+            {
+                using var tcp = new TcpListener(address, port) { ExclusiveAddressUse = true };
+                tcp.Start();
+                tcp.Stop();
+                using var udp = new UdpClient(address.AddressFamily) { ExclusiveAddressUse = true };
+                udp.Client.Bind(new IPEndPoint(address, port));
+            }
             return true;
         }
         catch (SocketException) { return false; }
+    }
+}
+
+public class TestPortTests
+{
+    /// <summary>
+    /// A port that another program uses for 127.0.0.1 or ::1 only is not free: a test that took it would fail to listen
+    /// on localhost, or its client would reach the other program and wait for an answer that never comes.
+    /// </summary>
+    [Fact]
+    public void APort_ThatAnotherProgramUsesForLoopbackOnly_IsNotFree()
+    {
+        var loopbacks = Socket.OSSupportsIPv6 ? new[] { IPAddress.Loopback, IPAddress.IPv6Loopback } : new[] { IPAddress.Loopback };
+        foreach (var loopback in loopbacks)
+        {
+            using (var tcp = new TcpListener(loopback, 0))
+            {
+                tcp.Start();
+                var port = ((IPEndPoint)tcp.LocalEndpoint).Port;
+                Assert.False(TestPorts.IsFree(port), $"TCP {loopback} port {port}");
+            }
+            using (var udp = new UdpClient(new IPEndPoint(loopback, 0)))
+            {
+                var port = ((IPEndPoint)udp.Client.LocalEndPoint!).Port;
+                Assert.False(TestPorts.IsFree(port), $"UDP {loopback} port {port}");
+            }
+        }
     }
 }
 
