@@ -62,7 +62,9 @@ public partial class MainWindow
     /// The alerts for concerns that were not reported before, as the cards show them (<see cref="ApplyHealth"/>): the
     /// check runs beside the refreshes, so a job that ended while it asked GitHub is no longer stuck and is not reported.
     /// Each concern reported is added to <paramref name="reported"/>, so it is reported once. A runner that runs twice
-    /// or cannot use its work folder is reported when that begins, and again only after it was fixed and came back.
+    /// or cannot use its work folder is reported when that begins, and again only after it was fixed and came back. A
+    /// job concern can hide the work folder concern for a while (<see cref="JobHealth.Shown"/>): that one is forgotten
+    /// only when the runner's setup concern is gone or is another one, not each time a job concern comes and goes.
     /// </summary>
     internal static List<string> NewProblemAlerts(IEnumerable<MachineInfo> machines, ISet<string> reported)
     {
@@ -72,9 +74,11 @@ public partial class MainWindow
         {
             var problem = runner.Health;
             var subject = $"{JobHealth.Key(runner)}|{problem.Subject}";
+            var setupNow = JobHealth.ForSetup(runner);
+            var setupSubject = $"{JobHealth.Key(runner)}|{setupNow.Subject}";
             var setup = $"{JobHealth.Key(runner)}|{JobHealth.SetupSubject}";
             foreach (var gone in reported.Where(r => r.StartsWith(setup, StringComparison.OrdinalIgnoreCase)
-                                                     && !(problem.IsProblem && r.Equals(subject, StringComparison.OrdinalIgnoreCase))).ToList())
+                                                     && !(setupNow.IsProblem && r.Equals(setupSubject, StringComparison.OrdinalIgnoreCase))).ToList())
                 reported.Remove(gone);
             if (problem.IsProblem && reported.Add(subject))
                 alerts.Add($"{machine.MachineName}: {runner.TitleText} — {problem.Label}. {problem.Detail}");

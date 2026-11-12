@@ -49,11 +49,25 @@ Runner Manager updates itself from [Releases](https://github.com/Sandiozo/runner
   dashboard, commands from other PCs, AI assistants, auto-recovery, and the restart after an edit or **Clean work
   folder**. After an edit, a service that config.cmd started is stopped again for such a runner. **Stop** still works.
   The runner's **Start when you sign in** switch turns its startup entries off and on.
-- A runner's details show the account its service runs as. When folders in its work folder belong to another account,
-  which git refuses, the details say so, and a running runner counts under **Needs attention** as **Work folder owner**.
+- A startup entry that only names files in a runner's work folder or log folder (`_work`, `_diag`), such as a
+  scheduled task that deletes old logs, no longer counts as one that opens the runner. Such a task does not make a
+  runner show **Runs twice**, and Runner Manager no longer turns it off with the runner's startup entries.
+- A runner's details show the account its service runs as. When its Windows service runs it and folders in its work
+  folder belong to another account, which git refuses, the details say so, and a running runner counts under **Needs
+  attention** as **Work folder owner**. A stuck job, a job that runs long, or jobs that wait for an idle runner are
+  shown before it, with **Stop the job's processes**, and it gives one alert, not one each time such a job concern
+  ends. A runner that a startup entry opens in a console window is not warned about: its folders belong to the
+  signed-in user, as they should.
 - **Run as Windows service**, **Repair Windows service** and an edit give the work folder to the service's account,
-  NETWORK SERVICE, before config.cmd installs the service, when folders in it belong to another account. Nothing is
-  deleted, and links in it are not followed.
+  NETWORK SERVICE, before config.cmd installs the service, when folders in it belong to another account and the service
+  runs the runner from then on. Nothing is deleted, and links in it are not followed. An edit leaves the work folder as
+  it is while a console window runs the runner, or a startup entry that is turned on opens it in one when you sign in,
+  and the log says so.
+- Fix: an edit of a runner whose Windows service is disabled, as for a runner that runs in a console window instead,
+  made the service start with Windows, so that after the next restart of the PC the runner could run twice. The service
+  is now disabled again after the edit, also when a failed edit registers the runner again with its old name and
+  labels. While the console window runs such a runner, an edit is refused, and nothing is changed. The old copy of a
+  moved runner is handled as before.
 
 ## 2.9.0
 

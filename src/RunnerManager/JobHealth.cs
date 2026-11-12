@@ -114,9 +114,10 @@ public static class JobHealth
     }
 
     /// <summary>
-    /// The concern that the runner's own status shows, which comes before the job checks: its Windows service runs and a
-    /// console window runs it too or opens it at sign-in, or its running service's work folder has folders of another
-    /// account, which git refuses. Healthy otherwise, and for runners from agents before 2.9.1, which do not tell.
+    /// The concern that the runner's own status shows, without the job checks: its Windows service runs and a console
+    /// window runs it too or opens it at sign-in, or its running service's work folder has folders of another account,
+    /// which git refuses. Healthy otherwise, and for runners from agents before 2.9.1, which do not tell. See
+    /// <see cref="Shown"/> for how it ranks with the job checks.
     /// </summary>
     public static RunnerHealth ForSetup(MachineRunnerStatus runner)
     {
@@ -152,6 +153,15 @@ public static class JobHealth
 
     /// <summary>A concern of <see cref="ForSetup"/>, which the runner's status shows rather than the dashboard's check.</summary>
     internal static bool IsSetupConcern(RunnerConcern concern) => concern is RunnerConcern.RunsTwice or RunnerConcern.WorkFolderOwner;
+
+    /// <summary>
+    /// The one concern a runner shows, of its setup concern (<see cref="ForSetup"/>) and the concern its job checks
+    /// found: a runner that runs twice first; then a job that is stuck or runs long, or jobs that wait while it idles,
+    /// which can be acted on now (Stop job); a work folder of another account only when there is none of those. That one
+    /// lasts until someone fixes it, and can be a false alarm, so it must not hide a job for that long.
+    /// </summary>
+    public static RunnerHealth Shown(RunnerHealth setup, RunnerHealth jobs)
+        => setup.Concern == RunnerConcern.RunsTwice || !jobs.IsProblem ? setup : jobs;
 
     /// <summary>The jobs a runner can take, as GitHub lists them for its repository: running ones first, then queued ones by age.</summary>
     public static List<QueueEntry> QueueFor(IEnumerable<GitHubJobState> jobs, DateTime nowUtc)
@@ -246,15 +256,20 @@ public static class JobHealth
             var jobs = active?.Where(j => RunnerLabels.CanRun(j.Labels, labelsOf[key])).ToList() ?? new List<GitHubJobState>();
             if (jobs.Count > 0) health.Queues[key] = QueueFor(jobs, nowUtc);
 
-            if (ForSetup(runner) is { IsProblem: true } setup)
-                health.Runners[key] = setup;
-            else if (runner.IsBusy)
-                health.Runners[key] = await ForBusyRunnerAsync(runner, active, unread.Contains(runner.RepositoryPath), github, quietLimit, nowUtc);
-            else if (runner.IsRunning && online.Contains(machine))
+            var setup = ForSetup(runner);
+            RunnerHealth? found = null;
+            // The job checks are left out for a runner that runs twice: it shows that whatever its jobs do (Shown).
+            if (setup.Concern != RunnerConcern.RunsTwice)
             {
-                var waiting = jobs.Where(j => j.Status.Equals("queued", StringComparison.OrdinalIgnoreCase)).ToList();
-                health.Runners[key] = ForIdleRunner(waiting, idleSince != null && idleSince.TryGetValue(key, out var idle) ? idle : null, nowUtc);
+                if (runner.IsBusy)
+                    found = await ForBusyRunnerAsync(runner, active, unread.Contains(runner.RepositoryPath), github, quietLimit, nowUtc);
+                else if (runner.IsRunning && online.Contains(machine))
+                {
+                    var waiting = jobs.Where(j => j.Status.Equals("queued", StringComparison.OrdinalIgnoreCase)).ToList();
+                    found = ForIdleRunner(waiting, idleSince != null && idleSince.TryGetValue(key, out var idle) ? idle : null, nowUtc);
+                }
             }
+            if (setup.IsProblem || found != null) health.Runners[key] = Shown(setup, found ?? RunnerHealth.Healthy);
         }
 
         // Runner IDs are numbered per repository or organization, so an ID is compared within its own list only.

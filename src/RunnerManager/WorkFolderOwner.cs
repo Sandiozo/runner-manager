@@ -146,14 +146,43 @@ public static partial class RunnerService
     }
 
     /// <summary>
+    /// Why the work folder is left to its owners when config.cmd installs the runner's service, or null when it is given
+    /// to the service's account. It is given only when the service will run the runner. A console window that runs it,
+    /// or a startup entry that is turned on and opens it in one at sign-in, runs its jobs as the signed-in user, who
+    /// must keep owning the folders, or git refuses them there: an edit of a runner with a service whose console copy is
+    /// down for the moment leaves it a console runner. A conversion, a repair, and an edit of a runner whose console
+    /// window ran close that window and turn its startup entries off first, so for them the folder is given.
+    /// </summary>
+    /// <param name="processes">The runner processes now.</param>
+    /// <param name="startupEntries">The startup entries now (<see cref="ReadStartupEntriesNowAsync"/>).</param>
+    internal static string? WorkFolderKeptReason(string root, List<ProcessInfo> processes, List<string> startupEntries, IEnumerable<string> allRoots)
+    {
+        if (ListenerInSession(root, processes))
+            return "The work folder was left as it is: a console window runs this runner, and the jobs there need the folders to belong to its user.";
+        return ConsoleStartsAt(root, startupEntries, allRoots) is RunnerStart.SignIn or RunnerStart.SignInShared
+            ? "The work folder was left as it is: a startup entry opens this runner in a console window when you sign in, and the jobs there need the folders to belong to the signed-in user."
+            : null;
+    }
+
+    /// <summary>
     /// Gives the work folder to NETWORK SERVICE when folders in it belong to another account, such as the user of the
     /// console window the runner ran in before: its checkouts and caches are kept, and git accepts them in the service.
     /// Owners are changed in place; nothing is deleted, and links are not followed. A failure does not stop the
-    /// registration: it is logged, and the runner's details say what is left.
+    /// registration: it is logged, and the runner's details say what is left. Not for a runner that a console window
+    /// still runs or opens at sign-in (<see cref="WorkFolderKeptReason"/>), read now: the runner list may be old, and a
+    /// conversion turned the startup entries off a moment ago.
     /// </summary>
     private static async Task GiveWorkFolderToServiceAsync(string root, string workFolder, Action<string> log)
     {
         if (WorkFolderToGive(root, workFolder) is not { } folder) return;
+        var processes = await Task.Run(() => ReadProcesses());
+        var entries = await ReadStartupEntriesNowAsync();
+        var others = await Task.Run(() => OtherRunnerRoots(root));
+        if (WorkFolderKeptReason(root, processes, entries, others.Append(root)) is { } kept)
+        {
+            log(kept);
+            return;
+        }
         var owner = ForeignOwner(NetworkService, ReadWorkFolderOwners(folder))!;
         log($"Folders in the work folder belong to {AccountName(owner)}, and the Windows service runs as {AccountName(NetworkService)}. " +
             "Giving the work folder to the service's account, so that git accepts it…");

@@ -271,13 +271,14 @@ public sealed class MachineRunnerStatus : INotifyPropertyChanged
 
     /// <summary>
     /// Whether the runner needs attention (a stuck or long job, or jobs waiting while it idles); set by the dashboard.
-    /// What the runner's own status says comes first, without waiting for the dashboard's check: it runs twice, or its
-    /// service cannot use its work folder (<see cref="JobHealth.ForSetup"/>).
+    /// What the runner's own status says is shown without waiting for the dashboard's check (<see cref="JobHealth.ForSetup"/>):
+    /// that it runs twice before anything else, and that its service cannot use its work folder only while the jobs
+    /// give no concern, so that a stuck job and its Stop job button are not hidden (<see cref="JobHealth.Shown"/>).
     /// </summary>
     [JsonIgnore]
     public RunnerHealth Health
     {
-        get => JobHealth.ForSetup(this) is { IsProblem: true } setup ? setup : _health;
+        get => JobHealth.Shown(JobHealth.ForSetup(this), _health);
         set
         {
             if (_health == value) return;

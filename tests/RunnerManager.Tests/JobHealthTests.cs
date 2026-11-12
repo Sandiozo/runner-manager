@@ -2,6 +2,18 @@ using System.IO;
 
 namespace RunnerManager.Tests;
 
+/// <summary>
+/// Tests that run the job checks (JobHealth.EvaluateAsync) run one at a time. The checks keep what they learned about
+/// busy runners between calls, and each call forgets the runners that it was not given: a call from another test at the
+/// same time would make a test that checks one runner over several calls start over.
+/// </summary>
+[CollectionDefinition(Name)]
+public class JobHealthCollection
+{
+    public const string Name = "Job health state";
+}
+
+[Collection(JobHealthCollection.Name)]
 public class JobHealthTests
 {
     private static readonly DateTime Now = new(2026, 10, 31, 12, 0, 0, DateTimeKind.Utc);

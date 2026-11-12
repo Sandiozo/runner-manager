@@ -101,10 +101,10 @@ public class RunsTwiceTests : IDisposable
         Assert.True(runner.HasConsoleCopy);
         Assert.Equal(RunnerStart.SignIn, runner.StartsAt);
         Assert.Equal(RunnerStart.Off, runner.ServiceStart);
-        // 4. The work folder: the service runs as NETWORK SERVICE, and the folders in it are this user's.
+        // 4. The service runs as NETWORK SERVICE, and the folders in the work folder are this user's. That is not called a
+        // work folder of another account while the startup entry opens the console window: "Runs twice" says why jobs fail.
         Assert.Equal(RunnerService.AccountName(NetworkService), runner.ServiceAccount);
-        Assert.NotEqual(string.Empty, runner.WorkFolderOwner);
-        Assert.Equal(OwnerOf(Path.Combine(root, "_work", "project-Livonia")), runner.WorkFolderOwner);
+        Assert.Equal(string.Empty, runner.WorkFolderOwner);
         // An edit keeps the service starting manually, as it did: it does not start with Windows as well.
         Assert.True(runner.RegistrationOptions.ManualStart);
 
@@ -117,7 +117,7 @@ public class RunsTwiceTests : IDisposable
         Assert.Contains("turn off “Start when you sign in”", status.Health.Detail);
         Assert.Contains("git refuses", status.Health.Detail);
         Assert.Contains("console window", status.ServiceText);
-        Assert.Contains("belong to", status.WorkFolderText);
+        Assert.DoesNotContain("belong to", status.WorkFolderText);
         var pc = Pc(status);
         var attention = FleetAttention.Count(new[] { pc });
         Assert.Equal(1, attention.RunningTwice);
@@ -130,7 +130,6 @@ public class RunsTwiceTests : IDisposable
         var sent = JsonSerializer.Deserialize<MachineStatusPayload>(JsonSerializer.Serialize(new MachineStatusPayload { Runners = new[] { status } }))!.Runners[0];
         Assert.True(sent.RunsTwice);
         Assert.True(sent.ConsoleAtSignIn);
-        Assert.Equal(runner.WorkFolderOwner, sent.WorkFolderOwner);
         Assert.Equal(runner.ServiceAccount, sent.ServiceAccount);
 
         // 3. Prevented: Restart is refused everywhere, Stop is not.
@@ -299,6 +298,300 @@ public class RunsTwiceTests : IDisposable
         Assert.Equal(0, FleetAttention.Count(new[] { Pc(stopped) }).Total);
         // The details still say it.
         Assert.Contains(@"belong to SANDIS\sandis, not to NT AUTHORITY\NETWORK SERVICE", stopped.WorkFolderText);
+    }
+
+    // ----- The owner's console runners: a Windows service that is installed but not used -----
+
+    private const string CoreService = "actions.runner.Sandiozo-project-Livonia.livonia-core";
+
+    /// <summary>The five runner folders on one of the owner's PCs: the first name is the start of the other four.</summary>
+    private string[] OwnersRunnerFolders()
+        => new[] { "project-Livonia", "project-Livonia-2", "project-Livonia-3", "project-Livonia-4", "project-Livonia-5" }
+            .Select(name => MakeRunner(name)).ToArray();
+
+    private static Task<RunnerInfo> ReadOnPc(string root, RunnerServiceRecord service, List<ProcessInfo> processes, List<string> startup, string[] roots)
+        => RunnerService.BuildRunnerInfoAsync(root, new List<RunnerServiceRecord> { service }, processes, queryGitHub: false, startup, roots);
+
+    [Theory]
+    [InlineData("Manual")]
+    [InlineData("Disabled")]
+    public async Task AConsoleRunnerWhoseWindowIsClosed_DoesNotWarnAboutItsWorkFolder(string startMode)
+    {
+        // livonia-core as it is now: its service stopped, the shortcut turned on, no Runner.Listener.exe. The folders in
+        // _work belong to the user, which is right for a runner that runs in a console window.
+        var roots = OwnersRunnerFolders();
+        var core = roots[1];
+        var runner = await ReadOnPc(core, Service(core, "Stopped", startMode, name: CoreService), new List<ProcessInfo>(), StartupShortcut(core), roots);
+
+        Assert.True(runner.ConsoleAtSignIn);
+        Assert.False(runner.IsInteractive);
+        Assert.False(runner.RunsTwice);
+        Assert.Equal(string.Empty, runner.WorkFolderOwner);
+        var status = Status(runner);
+        Assert.DoesNotContain("belong to", status.WorkFolderText);
+        Assert.NotEqual(Palette.Warning, status.WorkFolderBrush);
+        Assert.False(status.Health.IsProblem);
+
+        // With "Start when you sign in" turned off, the service is what runs it, and the details say whose the folders are.
+        var serviceOnly = await ReadOnPc(core, Service(core, "Stopped", startMode, name: CoreService), new List<ProcessInfo>(), new List<string>(), roots);
+        Assert.Equal(OwnerOf(Path.Combine(core, "_work", "project-Livonia")), serviceOnly.WorkFolderOwner);
+        Assert.Contains("belong to", Status(serviceOnly).WorkFolderText);
+        // The shortcut of project-Livonia-2 does not open project-Livonia, whose name is the start of it.
+        var first = await ReadOnPc(roots[0], Service(roots[0], "Stopped", startMode, name: "actions.runner.Sandiozo-project-Livonia.livonia"),
+            new List<ProcessInfo>(), StartupShortcut(core), roots);
+        Assert.False(first.ConsoleAtSignIn);
+        Assert.NotEqual(string.Empty, first.WorkFolderOwner);
+    }
+
+    [Fact]
+    public void AnEditLeavesTheWorkFolderToTheConsoleWindow_AndAConversionGivesIt()
+    {
+        var roots = OwnersRunnerFolders();
+        var core = roots[1];
+        var none = new List<ProcessInfo>();
+        // There is something to give: the folders are this test's user's, and the service runs as NETWORK SERVICE.
+        Assert.Equal(Path.Combine(core, "_work"), RunnerService.WorkFolderToGive(core, "_work"));
+
+        // An edit of livonia-core as it is now: no console window, but the shortcut opens one at the next sign-in, and
+        // the edit leaves it on. The runner stays a console runner, so its folders stay the user's.
+        var kept = RunnerService.WorkFolderKeptReason(core, none, StartupShortcut(core), roots);
+        Assert.NotNull(kept);
+        Assert.Contains("a startup entry opens this runner in a console window when you sign in", kept);
+        // An edit while the service runs and a console window runs the runner too: the edit does not close that window.
+        Assert.Contains("a console window runs this runner",
+            RunnerService.WorkFolderKeptReason(core, new List<ProcessInfo> { Listener(core, 4200, 0), Listener(core, 9100, 1) }, new List<string>(), roots));
+        // A startup entry that also starts another runner opens it too, and is left in place.
+        var shared = new List<string> { $"start \"\" /d \"{core}\" run.cmd\r\nstart \"\" /d \"{roots[2]}\" run.cmd\r\n" };
+        Assert.NotNull(RunnerService.WorkFolderKeptReason(core, none, shared, roots));
+
+        // Run as Windows service, Repair Windows service, and an edit of a runner whose console window ran: the window
+        // was closed and the shortcut moved aside first, so nothing opens the runner in a console window, and the
+        // service runs it from now on. The folder is given.
+        Assert.Null(RunnerService.WorkFolderKeptReason(core, none, new List<string>(), roots));
+        // The service's own listener runs in session 0: it is not a console window.
+        Assert.Null(RunnerService.WorkFolderKeptReason(core, new List<ProcessInfo> { Listener(core, 4200, 0) }, new List<string>(), roots));
+        // The shortcut of project-Livonia-2 keeps nothing of project-Livonia.
+        Assert.Null(RunnerService.WorkFolderKeptReason(roots[0], none, StartupShortcut(core), roots));
+    }
+
+    [Fact]
+    public async Task AnEdit_KeepsADisabledServiceDisabled_AndLeavesTheMovedRunnerAsBefore()
+    {
+        var root = MakeRunner("project-Livonia-2");
+        Task<RunnerInfo> With(string startMode)
+            => Read(root, new List<RunnerServiceRecord> { Service(root, "Stopped", startMode, name: CoreService) }, new List<ProcessInfo>(), StartupShortcut(root));
+
+        // Disabled by hand, the console window closed: config.cmd installs the service again to start with Windows, so
+        // it is disabled again afterwards (in the rollback of a failed edit too), and it is never set to start with Windows.
+        var disabled = await With("Disabled");
+        Assert.True(RunnerService.KeepsServiceDisabled(disabled));
+        Assert.Null(RunnerService.DisabledServiceEditProblem(disabled));
+        // A service that starts manually or with Windows keeps that, as before.
+        var manual = await With("Manual");
+        Assert.False(RunnerService.KeepsServiceDisabled(manual));
+        Assert.True(manual.RegistrationOptions.ManualStart);
+        var automatic = await Read(root, new List<RunnerServiceRecord> { Service(root, "Stopped", "Auto", name: CoreService) }, new List<ProcessInfo>(), new List<string>());
+        Assert.False(RunnerService.KeepsServiceDisabled(automatic));
+        Assert.False(automatic.RegistrationOptions.ManualStart);
+
+        // The old copy of a moved runner: the move disabled its service, and the marker says how it started before.
+        var marker = Path.Combine(root, RunnerService.MovedAwayMarker);
+        File.WriteAllText(marker, "Moved to another PC.\r\nstart=manual");
+        var movedManual = await With("Disabled");
+        Assert.True(movedManual.MovedAway);
+        Assert.False(RunnerService.KeepsServiceDisabled(movedManual));
+        Assert.True(movedManual.RegistrationOptions.ManualStart);
+        File.WriteAllText(marker, "Moved to another PC.");
+        var movedAutomatic = await With("Disabled");
+        Assert.False(RunnerService.KeepsServiceDisabled(movedAutomatic));
+        Assert.False(movedAutomatic.RegistrationOptions.ManualStart);
+    }
+
+    [Fact]
+    public async Task AnEditOfARunnerWhoseConsoleWindowRuns_IsRefused_WhenItsServiceIsDisabled()
+    {
+        var root = MakeRunner("project-Livonia-3");
+        var console = new List<ProcessInfo> { Listener(root, 9100, 1) };
+        var disabled = await Read(root, new List<RunnerServiceRecord> { Service(root, "Stopped", "Disabled") }, console, StartupShortcut(root));
+        Assert.True(disabled.IsInteractive);
+        var refused = RunnerService.DisabledServiceEditProblem(disabled);
+        Assert.NotNull(refused);
+        Assert.Contains("nothing was changed", refused);
+
+        // A service that starts manually: the edit closes the console window and lets the service run the runner, as before.
+        var other = MakeRunner("project-Livonia-4");
+        var manual = await Read(other, new List<RunnerServiceRecord> { Service(other, "Stopped", "Manual") },
+            new List<ProcessInfo> { Listener(other, 9200, 1) }, StartupShortcut(other));
+        Assert.True(manual.IsInteractive);
+        Assert.Null(RunnerService.DisabledServiceEditProblem(manual));
+    }
+
+    // ----- Which concern a runner shows -----
+
+    private static RunnerHealth StuckJob(string subject = "job-1")
+        => JobHealth.ForBusyRunner(DateTime.UtcNow.AddMinutes(-30), DateTime.UtcNow.AddMinutes(-40), null, TimeSpan.FromMinutes(15), subject, DateTime.UtcNow);
+
+    /// <summary>A running service runner whose work folder has folders of the console window's user.</summary>
+    private static MachineRunnerStatus OwnerRunner(bool busy = true, bool runsTwice = false, string name = "livonia-backup")
+        => new()
+        {
+            ServiceName = $"actions.runner.Sandiozo-project-Livonia.{name}", DisplayName = name, AgentName = name, ServiceInstalled = true,
+            IsRunning = true, ActivityText = busy ? "Busy" : "Idle", ServiceAccount = @"NT AUTHORITY\NETWORK SERVICE",
+            WorkFolderOwner = runsTwice ? string.Empty : @"SANDIS\sandis", RunsTwice = runsTwice, ConsoleAtSignIn = runsTwice,
+            StartsAt = runsTwice ? RunnerStart.SignIn : RunnerStart.WithWindows, JobStartedUtc = busy ? DateTime.UtcNow.AddMinutes(-40) : null,
+            QuietSinceUtc = busy ? DateTime.UtcNow.AddMinutes(-30) : null, IsLocalMachine = true, MachineOnline = true,
+            AgentProtocolVersion = MachineRelay.ProtocolVersion
+        };
+
+    [Fact]
+    public void AJobConcern_IsShownBeforeTheWorkFolderOwner_WithTheStopJobButton()
+    {
+        var runner = OwnerRunner();
+        var pc = Pc(runner);
+        Assert.Equal(RunnerConcern.WorkFolderOwner, runner.Health.Concern);
+        Assert.Equal(System.Windows.Visibility.Collapsed, runner.StopJobVisibility);
+
+        // The dashboard's check finds the job stuck: that is shown, with its button, and counted as a stuck job.
+        runner.Health = StuckJob();
+        Assert.Equal(RunnerConcern.Stuck, runner.Health.Concern);
+        Assert.Equal("Stuck", runner.StatusText);
+        Assert.Equal(System.Windows.Visibility.Visible, runner.StopJobVisibility);
+        Assert.True(runner.CanStopJob);
+        var attention = FleetAttention.Count(new[] { pc });
+        Assert.Equal(1, attention.StuckJobs);
+        Assert.Equal(0, attention.FolderOwners);
+        // A job that runs long, and jobs that wait while it idles, come first too.
+        runner.Health = JobHealth.ForBusyRunner(null, DateTime.UtcNow.AddHours(-3), null, TimeSpan.FromMinutes(15), "job-1", DateTime.UtcNow);
+        Assert.Equal(RunnerConcern.RunningLong, runner.Health.Concern);
+        Assert.Equal(System.Windows.Visibility.Visible, runner.StopJobVisibility);
+        runner.Health = new RunnerHealth(RunnerConcern.IdleWithWaitingJobs, "Idle · jobs waiting", "A job it can run has waited 6 min.", "waiting|1");
+        Assert.Equal(RunnerConcern.IdleWithWaitingJobs, runner.Health.Concern);
+
+        // Without a job concern, the work folder owner is shown again.
+        runner.Health = RunnerHealth.Healthy;
+        Assert.Equal(RunnerConcern.WorkFolderOwner, runner.Health.Concern);
+        Assert.Equal(1, FleetAttention.Count(new[] { pc }).FolderOwners);
+
+        // A runner that runs twice shows that before anything else, whatever its job does.
+        var twice = OwnerRunner(runsTwice: true);
+        twice.Health = StuckJob();
+        Assert.Equal(RunnerConcern.RunsTwice, twice.Health.Concern);
+        Assert.Equal(System.Windows.Visibility.Collapsed, twice.StopJobVisibility);
+    }
+
+    [Fact]
+    public async Task TheJobCheck_AndTheAiTools_PutAJobConcernBeforeTheWorkFolderOwner_AndRunsTwiceBeforeBoth()
+    {
+        var stuck = OwnerRunner(name: "stuck");
+        var idle = OwnerRunner(busy: false, name: "idle");
+        var twice = OwnerRunner(runsTwice: true, name: "twice");
+        var pc = Pc(stuck, idle, twice);
+
+        var health = await JobHealth.EvaluateAsync(new[] { pc }, TimeSpan.FromMinutes(15), null, useGitHub: false, DateTime.UtcNow);
+
+        Assert.Equal(RunnerConcern.Stuck, health.Runners[JobHealth.Key(stuck)].Concern);
+        Assert.Equal(RunnerConcern.WorkFolderOwner, health.Runners[JobHealth.Key(idle)].Concern);
+        Assert.Equal(RunnerConcern.RunsTwice, health.Runners[JobHealth.Key(twice)].Concern);
+        // What the AI tools list as the runner's problem.
+        Assert.Contains("\"kind\":\"Stuck\"", JsonSerializer.Serialize(AssistantTools.DescribeRunner(pc, stuck, online: true, health)));
+        Assert.Contains("\"kind\":\"Work folder owner\"", JsonSerializer.Serialize(AssistantTools.DescribeRunner(pc, idle, online: true, health)));
+        // The card shows what the check found, as the dashboard applies it.
+        stuck.Health = MainWindow.StillApplies(health.Runners[JobHealth.Key(stuck)], stuck);
+        Assert.Equal(RunnerConcern.Stuck, stuck.Health.Concern);
+        idle.Health = MainWindow.StillApplies(health.Runners[JobHealth.Key(idle)], idle);
+        Assert.Equal(RunnerConcern.WorkFolderOwner, idle.Health.Concern);
+    }
+
+    [Fact]
+    public void TheWorkFolderOwner_IsReportedOnce_WhileJobConcernsComeAndGo()
+    {
+        var runner = OwnerRunner();
+        var pc = Pc(runner);
+        var reported = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        Assert.Contains("Work folder owner", Assert.Single(MainWindow.NewProblemAlerts(new[] { pc }, reported)));
+        // A stuck job hides it for a while, and is reported itself.
+        runner.Health = StuckJob();
+        Assert.Contains("Stuck", Assert.Single(MainWindow.NewProblemAlerts(new[] { pc }, reported)));
+        // The job goes on: the work folder owner is shown again, but not reported again.
+        runner.Health = RunnerHealth.Healthy;
+        Assert.Empty(MainWindow.NewProblemAlerts(new[] { pc }, reported));
+        runner.Health = StuckJob("job-2");
+        Assert.Contains("Stuck", Assert.Single(MainWindow.NewProblemAlerts(new[] { pc }, reported)));
+        runner.Health = RunnerHealth.Healthy;
+        Assert.Empty(MainWindow.NewProblemAlerts(new[] { pc }, reported));
+
+        // Fixed with Clean work folder: it is forgotten, and reported again only when it comes back.
+        var cleaned = new MachineRunnerStatus
+        {
+            ServiceName = runner.ServiceName, DisplayName = runner.DisplayName, AgentName = runner.AgentName, ServiceInstalled = true,
+            IsRunning = true, ActivityText = "Idle", ServiceAccount = runner.ServiceAccount
+        };
+        Assert.Empty(MainWindow.NewProblemAlerts(new[] { Pc(cleaned) }, reported));
+        Assert.Single(MainWindow.NewProblemAlerts(new[] { Pc(OwnerRunner(busy: false)) }, reported));
+    }
+
+    // ----- What counts as a startup entry of a runner -----
+
+    [Theory]
+    // A cleanup task for the runner's logs, a script run out of a checkout, the work folder as a working directory.
+    [InlineData(@"powershell.exe -NoProfile -Command Remove-Item C:\actions-runner\_diag\*.log -Force")]
+    [InlineData(@"cmd.exe /c C:\actions-runner\_work\project-Livonia\project-Livonia\tools\nightly.cmd C:\actions-runner\_work\project-Livonia")]
+    [InlineData(@"C:\Tools\clean.cmd  C:\actions-runner\_work")]
+    [InlineData("forfiles /p \"C:\\actions-runner\\_diag\" /m *.log /d -7 /c \"cmd /c del @path\"")]
+    [InlineData(@"robocopy C:/actions-runner/_DIAG D:\backup\diag /MIR")]
+    public void AnEntryThatOnlyNamesTheWorkOrLogFolder_DoesNotStartTheRunner(string entry)
+        => Assert.Equal(RunnerService.StartupMatch.None, RunnerService.MatchStartupEntry(entry, @"C:\actions-runner", new[] { @"C:\actions-runner-2" }));
+
+    [Theory]
+    [InlineData(@"cmd.exe /c C:\actions-runner\run.cmd")]
+    [InlineData(@"C:\Windows\System32\conhost.exe --headless cmd.exe /d /c ""C:\actions-runner\run-in-session.cmd""")]
+    // A scheduled task's action: run.cmd, with the runner folder as its working directory.
+    [InlineData(@"cmd.exe /c run.cmd C:\actions-runner")]
+    [InlineData(@"C:\actions-runner\bin\Runner.Listener.exe run --startuptype service")]
+    // A folder that only starts like the work or log folder is not one of them.
+    [InlineData(@"C:\actions-runner\_work-tools\start.cmd")]
+    [InlineData(@"C:\actions-runner\_diag.cmd")]
+    // run.cmd, together with a cleanup of the logs.
+    [InlineData(@"cmd.exe /c ""del /q C:\actions-runner\_diag\*.log & C:\actions-runner\run.cmd""")]
+    public void AnEntryThatRunsTheRunner_StillStartsIt(string entry)
+        => Assert.Equal(RunnerService.StartupMatch.ThisRunner, RunnerService.MatchStartupEntry(entry, @"C:\actions-runner", new[] { @"C:\actions-runner-2" }));
+
+    [Fact]
+    public async Task AHealthyServiceRunner_WithACleanupTaskForItsLogs_DoesNotRunTwice()
+    {
+        var root = MakeRunner("service-runner", workFolder: false);
+        var cleanup = new List<string> { $@"powershell.exe -NoProfile -Command Remove-Item {root}\_diag\*.log  {root}\_work" };
+        var service = Service(root, "Running", "Auto", name: "actions.runner.Sandiozo-api.service-runner");
+        var runner = await Read(root, new List<RunnerServiceRecord> { service }, new List<ProcessInfo> { Listener(root, 4200, 0) }, cleanup);
+
+        Assert.False(runner.ConsoleAtSignIn);
+        Assert.False(runner.RunsTwice);
+        Assert.Equal(RunnerStart.WithWindows, runner.StartsAt);
+        Assert.True(RunnerService.StartsFromService(runner));
+        Assert.Null(RunnerService.ServiceStartProblem(service, new List<ProcessInfo> { Listener(root, 4200, 0) }, cleanup, new[] { root }, "Restart"));
+        Assert.True(Status(runner).CanRestart);
+        // Nested runners: a mention of the inner runner's work folder belongs to neither of them.
+        Assert.Equal(RunnerService.StartupMatch.None,
+            RunnerService.MatchStartupEntry(@"del D:\Git-Runners\Study-Tool\_work\x.log", @"D:\Git-Runners", new[] { @"D:\Git-Runners\Study-Tool" }));
+        Assert.Equal(RunnerService.StartupMatch.None,
+            RunnerService.MatchStartupEntry(@"del D:\Git-Runners\Study-Tool\_work\x.log", @"D:\Git-Runners\Study-Tool", new[] { @"D:\Git-Runners" }));
+    }
+
+    // ----- The first runner list -----
+
+    [Fact]
+    public void TheFirstRunnerList_WaitsForTheScheduledTasks_OnlyWhereARunnerMayRunFromAConsoleWindow()
+    {
+        var a = MakeRunner("a", workFolder: false);
+        var b = MakeRunner("b", workFolder: false);
+        var services = new List<RunnerServiceRecord> { Service(a, "Running", "Auto", name: "actions.runner.o-r.a"), Service(b, "Stopped", "Auto", name: "actions.runner.o-r.b") };
+
+        // Service runners only, their listeners in session 0: the list does not wait for PowerShell.
+        Assert.False(RunnerService.MayRunFromConsole(new[] { a, b }, services, new List<ProcessInfo> { Listener(a, 4200, 0) }));
+        // A runner without a service, or a listener in a user's session.
+        Assert.True(RunnerService.MayRunFromConsole(new[] { a, b, MakeRunner("c", workFolder: false) }, services, new List<ProcessInfo>()));
+        Assert.True(RunnerService.MayRunFromConsole(new[] { a, b }, services, new List<ProcessInfo> { Listener(b, 9100, 1) }));
     }
 
     // ----- The fleet status -----

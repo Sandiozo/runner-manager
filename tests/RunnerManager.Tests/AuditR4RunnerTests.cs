@@ -3,6 +3,7 @@ using System.IO;
 namespace RunnerManager.Tests;
 
 /// <summary>Runner jobs, GitHub reads and the job view: the fixes from the fourth review round of 2.9.0.</summary>
+[Collection(JobHealthCollection.Name)]
 public class AuditR4RunnerTests
 {
     // ----- Secrets in the job view's process list -----

@@ -3,6 +3,7 @@ using System.IO;
 namespace RunnerManager.Tests;
 
 /// <summary>Runner jobs, health checks and runner setup: the fixes from the 2.8.2 audit.</summary>
+[Collection(JobHealthCollection.Name)]
 public class AuditRunnerTests
 {
     private static string NewRunnerRoot()
