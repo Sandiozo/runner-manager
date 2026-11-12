@@ -121,3 +121,38 @@ public class ScheduledTaskXmlTests
         Assert.Equal("Runner Manager Fleet Agent", ScheduledTasks.AgentTaskName);
     }
 }
+
+/// <summary>Whether a task runs is read through Task Scheduler. An error there must not read as "no such task".</summary>
+public class TaskStateTests
+{
+    [Theory]
+    [InlineData("4", true)]
+    [InlineData("-1", false)]
+    [InlineData("unknown", null)]
+    [InlineData("unknown\r\n", null)]
+    public void AnErrorIsUnknown_OnlyAMissingTaskIsNotRunning(string output, bool? running)
+        => Assert.Equal(running, ScheduledTasks.ParseTaskState(output));
+
+    [Fact]
+    public void TheScript_SaysMinusOneOnlyForATaskThatDoesNotExist()
+    {
+        var script = ScheduledTasks.TaskStateScript("Runner Manager's task");
+        // Only Task Scheduler's "not found" gives -1; everything else, also a failed Connect, gives "unknown".
+        Assert.Contains("try { $s.Connect();", script);
+        Assert.Contains($"if ($e.HResult -eq {ScheduledTasks.TaskNotFound}) {{ -1 }} else {{ 'unknown' }}", script);
+        Assert.Equal(-2147024894, ScheduledTasks.TaskNotFound);
+        Assert.DoesNotContain("catch { -1 }", script);
+        // A quote in the name is doubled, as PowerShell reads it inside single quotes.
+        Assert.Contains("GetTask('Runner Manager''s task')", script);
+        // Inside the double quotes of -Command.
+        Assert.DoesNotContain("\"", script);
+    }
+
+    [Fact]
+    public async Task AMissingTask_ReadsAsNotRunning_SoItIsRegistered()
+    {
+        // The task name cannot exist, so this only reads Task Scheduler.
+        var missing = $"RunnerManagerTests-NoSuchTask-{Guid.NewGuid():N}";
+        Assert.False(await ScheduledTasks.IsRunningAsync(missing));
+    }
+}
