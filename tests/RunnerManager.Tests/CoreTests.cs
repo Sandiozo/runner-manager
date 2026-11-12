@@ -313,7 +313,7 @@ public class FleetNetworkTests
             var address = $"localhost:{port}";
             var wrongCode = await Assert.ThrowsAsync<PairingMismatchException>(() =>
                 FleetNetwork.CallAsync(address, "TESTPC", new FleetRequest { Op = "status" }, pairingKey: CommandSigner.NewKey()));
-            Assert.Contains("pairing code does not match", wrongCode.Message);
+            Assert.Contains("fleet code does not match", wrongCode.Message);
             var wrongPc = await Assert.ThrowsAsync<PairingMismatchException>(() =>
                 FleetNetwork.CallAsync(address, "OTHERPC", new FleetRequest { Op = "status" }, pairingKey: key));
             Assert.Contains("wrong PC", wrongPc.Message);

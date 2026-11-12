@@ -377,7 +377,11 @@ public class AssistantTests
         }
         finally
         {
-            FleetConfig.Update(c => c.Assistant = new AssistantOptions());
+            FleetConfig.Update(c =>
+            {
+                c.Assistant = new AssistantOptions();
+                c.Assistant.Enabled = false;
+            });
         }
     }
 
@@ -601,7 +605,11 @@ public class AssistantTests
         }
         finally
         {
-            FleetConfig.Update(c => c.Assistant = new AssistantOptions());
+            FleetConfig.Update(c =>
+            {
+                c.Assistant = new AssistantOptions();
+                c.Assistant.Enabled = false;
+            });
         }
     }
 

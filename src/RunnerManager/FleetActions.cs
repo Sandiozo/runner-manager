@@ -52,11 +52,22 @@ public sealed class FleetActions
             }, log),
             TimeSpan.FromMinutes(10), runnerName: name, labels: labels);
 
+    /// <summary>
+    /// Why Start, Stop or Restart can't be used on a runner, or null. A runner can have a Windows service and still run in
+    /// a console window instead: starting the service would run it twice, and stopping it would not stop the runner.
+    /// </summary>
+    internal static string? ConsoleRunnerProblem(bool interactive, bool serviceInstalled, string action)
+        => !interactive || !serviceInstalled ? null
+            : action == "Stop" ? "This runner runs in a console window, not as its Windows service. Close the console window to stop it."
+            : "This runner runs in a console window. Starting its Windows service would run it twice. Close the console window first.";
+
     /// <param name="action">"Start", "Stop" or "Restart".</param>
     public Task ControlRunnerAsync(MachineInfo machine, MachineRunnerStatus runner, string action, Action<string> log)
         => RunOnMachineAsync(machine, "runner", runner.CommandKey, action, log,
             async () =>
             {
+                if (ConsoleRunnerProblem(runner.IsInteractive, runner.ServiceInstalled, action) is { } problem)
+                    throw new InvalidOperationException(problem);
                 await RunnerService.ControlServiceAsync(runner.CommandKey, action);
                 FleetConfig.SetManuallyStopped(runner.CommandKey, action == "Stop");
             },
@@ -217,7 +228,13 @@ public sealed class FleetActions
     internal static async Task SetServiceEnabledAsync(string key, bool enabled, bool manualStart = false)
     {
         if (!key.StartsWith("actions.runner.", StringComparison.OrdinalIgnoreCase)) return;
-        await RunnerService.SetServiceStartModeAsync(key,
-            !enabled ? ServiceStart.Disabled : manualStart ? ServiceStart.Manual : ServiceStart.Automatic);
+        await RunnerService.SetServiceStartModeAsync(key, StartMode(enabled, manualStart));
     }
+
+    /// <summary>
+    /// The sc.exe start= value for <see cref="SetServiceEnabledAsync"/>. Starting with Windows is "delayed-auto", as
+    /// config.cmd installs runner services, so turning a service on again leaves it as it was installed.
+    /// </summary>
+    internal static string StartMode(bool enabled, bool manualStart)
+        => !enabled ? ServiceStart.Disabled : manualStart ? ServiceStart.Manual : "delayed-auto";
 }
