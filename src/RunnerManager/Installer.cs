@@ -430,7 +430,11 @@ public static class Installer
         var note = string.Empty;
         if (removeData)
         {
-            // Only together with the settings: a later install would otherwise move into the registry what fleet.json holds.
+            // Only together with the settings. The values are the only mark that the switches were moved from fleet.json,
+            // so without them the move runs once more, as on a first install: at the next install, or when another Windows
+            // user's Runner Manager on this PC starts next (the values are the same for every user). Whatever that
+            // fleet.json holds then goes into the registry, also a copy the deletion below could not remove or another
+            // program wrote. This risk is the same as on a first install, and it is accepted.
             try { AssistantSwitches.Remove(); }
             catch (Exception ex) when (ex is UnauthorizedAccessException or System.Security.SecurityException or IOException)
             {
