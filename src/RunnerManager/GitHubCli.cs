@@ -235,6 +235,8 @@ public static class GitHubCli
     /// <summary>
     /// How <see cref="LaunchInConsole"/> starts <paramref name="gh"/>: in cmd.exe with /d, so the AutoRun commands in the
     /// registry (which any program of the user can set in HKCU) do not run in the console that Runner Manager opens.
+    /// The console stays open after Runner Manager exits, so its current folder is the system folder: the install folder,
+    /// which Runner Manager starts in, could not be removed or updated while the console is open.
     /// </summary>
     internal static ProcessStartInfo ConsoleStartInfo(string gh, string arguments)
     {
@@ -242,7 +244,8 @@ public static class GitHubCli
         {
             FileName = WindowsTools.FullPath("cmd.exe"),
             Arguments = $"/d /k \"\"{gh}\" {arguments}\"",
-            UseShellExecute = false
+            UseShellExecute = false,
+            WorkingDirectory = Environment.SystemDirectory
         };
         PrepareEnvironment(startInfo, environmentToken: false);
         return startInfo;

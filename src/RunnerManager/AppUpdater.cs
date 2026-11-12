@@ -971,15 +971,28 @@ public static class AppUpdater
     /// </summary>
     internal static void RunAfterExit(string script, TimeSpan? timeout, TimeSpan delay, IReadOnlyDictionary<string, string>? environment = null)
     {
+        using var process = Process.Start(AfterExitStartInfo(script, Environment.ProcessId, Launcher.HelperProcessId(), timeout, delay, environment));
+    }
+
+    /// <summary>
+    /// How <see cref="RunAfterExit"/> starts PowerShell, waiting for <paramref name="processId"/> and
+    /// <paramref name="helperId"/>. Its current folder is the system folder, never the one of this process: a process
+    /// that started from the install folder (a task, the start helper and the Start menu shortcut all start it there)
+    /// would otherwise pass that folder on, and a folder that is a running process's current folder cannot be removed.
+    /// </summary>
+    internal static ProcessStartInfo AfterExitStartInfo(string script, int processId, int? helperId, TimeSpan? timeout, TimeSpan delay,
+        IReadOnlyDictionary<string, string>? environment = null)
+    {
         var start = new ProcessStartInfo(PowerShellExe)
         {
             ArgumentList = { "-NoLogo", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command",
-                AfterExitScript(script, Environment.ProcessId, timeout, delay, Launcher.HelperProcessId()) },
+                AfterExitScript(script, processId, timeout, delay, helperId) },
             UseShellExecute = false,
-            CreateNoWindow = true
+            CreateNoWindow = true,
+            WorkingDirectory = Environment.SystemDirectory
         };
         foreach (var (name, value) in environment ?? new Dictionary<string, string>()) start.Environment[name] = value;
-        using var process = Process.Start(start);
+        return start;
     }
 
     internal static string AfterExitScript(string script, int processId, TimeSpan? timeout, TimeSpan delay, int? helperId = null)

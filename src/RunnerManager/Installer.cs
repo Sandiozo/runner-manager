@@ -685,11 +685,17 @@ public static class Installer
     /// only files and are no link themselves, and so do the start helper with its files and what a self-contained exe
     /// unpacked through it (.net\RunnerManager, without going into links; .net itself only when it is then empty).
     /// </summary>
-    internal static string RemoveProgramFilesScript(string folder)
+    internal static string RemoveProgramFilesScript(string folder) => RemoveProgramFilesScript(AppUpdater.IsDefaultInstallDir(folder));
+
+    /// <summary>
+    /// <see cref="RemoveProgramFilesScript(string)"/>, with the whole folder removed when <paramref name="wholeFolder"/>
+    /// is true and only Runner Manager's own files otherwise. Only tests choose the form themselves.
+    /// </summary>
+    internal static string RemoveProgramFilesScript(bool wholeFolder)
     {
         // Retried for about 20 seconds: a process that just exited, or one using the folder as its working folder, can
         // still hold it for a moment.
-        var remove = AppUpdater.IsDefaultInstallDir(folder)
+        var remove = wholeFolder
             ? "Remove-Item -LiteralPath $f -Recurse -Force -ErrorAction SilentlyContinue"
             : "foreach ($p in " + string.Join(", ", OwnFilePatterns.Select(p => $"'{p}'")) + ") " +
               "{ Get-ChildItem -LiteralPath $f -Filter $p -File -Force -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue }; " +

@@ -1171,28 +1171,46 @@ public class StartHelperTimingTests
     {
         var folder = InstallEvidenceTests.NewFolder("after-exit");
         var ping = Path.Combine(Environment.SystemDirectory, "PING.EXE");
-        Process Start(int count)
+        // Both stand-ins run until the test ends them, so only the wait can keep the script from running early.
+        Process Start()
         {
             var start = new ProcessStartInfo(ping) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true };
             start.ArgumentList.Add("-n");
-            start.ArgumentList.Add(count.ToString());
+            start.ArgumentList.Add("60");
             start.ArgumentList.Add("127.0.0.1");
             return Process.Start(start)!;
         }
-        using var app = Start(1);
-        using var helper = Start(4);
+        using var app = Start();
+        using var helper = Start();
+        Process? script = null;
         try
         {
+            var started = Path.Combine(folder, "started.txt");
             var done = Path.Combine(folder, "done.txt");
-            InstallFolderTests.RunPowerShell(
-                AppUpdater.AfterExitScript("Set-Content -LiteralPath $env:RM_TEST_DONE -Value done", app.Id, TimeSpan.FromSeconds(25), TimeSpan.Zero, helper.Id),
-                new Dictionary<string, string> { ["RM_TEST_DONE"] = done });
+            var start = AppUpdater.AfterExitStartInfo("Set-Content -LiteralPath $env:RM_TEST_DONE -Value done", app.Id, helper.Id,
+                TimeSpan.FromSeconds(50), TimeSpan.Zero, new Dictionary<string, string> { ["RM_TEST_DONE"] = done, ["RM_TEST_STARTED"] = started });
+            // A mark that PowerShell runs, written before it starts to wait.
+            start.ArgumentList[^1] = "Set-Content -LiteralPath $env:RM_TEST_STARTED -Value started; " + start.ArgumentList[^1];
+            script = Process.Start(start)!;
+            Assert.True(SpinWait.SpinUntil(() => File.Exists(started), TimeSpan.FromSeconds(20)), "PowerShell did not start within 20 seconds.");
+
+            Thread.Sleep(1500);
+            Assert.False(File.Exists(done), "The script ran while the app still ran.");
+            app.Kill();
+            app.WaitForExit();
+            Thread.Sleep(2000);
+            Assert.False(File.Exists(done), "The script ran while the start helper still ran.");
+            helper.Kill();
+            helper.WaitForExit();
+            Assert.True(script.WaitForExit(15_000), "The script did not finish within 15 seconds after both had exited.");
             Assert.True(File.Exists(done));
-            Assert.True(helper.HasExited);
         }
         finally
         {
-            try { helper.Kill(); } catch (InvalidOperationException) { }
+            foreach (var process in new[] { app, helper, script })
+                try { process?.Kill(); } catch (InvalidOperationException) { }
+            script?.WaitForExit(5000);
+            script?.Dispose();
             Directory.Delete(folder, recursive: true);
         }
     }
@@ -1253,10 +1271,73 @@ public class StartHelperTimingTests
     }
 }
 
+/// <summary>
+/// What Runner Manager starts to run after it exited does not keep the install folder as its current folder. These tests
+/// change the current folder of the test process for a moment, so they run on their own.
+/// </summary>
+[Collection(InstallStateCollection.Name)]
+public class AfterExitFolderTests
+{
+    /// <summary>The id of a process that has exited, for a wait that ends at once.</summary>
+    private static int ExitedProcessId()
+    {
+        using var process = Process.Start(new ProcessStartInfo(WindowsTools.FullPath("cmd.exe"), "/d /c exit")
+            { UseShellExecute = false, CreateNoWindow = true, WorkingDirectory = Environment.SystemDirectory })!;
+        process.WaitForExit();
+        return process.Id;
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void TheRemovalScript_RemovesTheFolderThatTheAppRanIn(bool wholeFolder)
+    {
+        var root = InstallEvidenceTests.NewFolder("after-exit-folder");
+        var folder = Path.Combine(root, "RunnerManager");
+        Process? script = null;
+        try
+        {
+            StartHelperRemovalTests.CreateInstall(folder);
+            if (wholeFolder)
+            {
+                File.WriteAllText(Path.Combine(folder, "notes.txt"), "x");
+                Directory.CreateDirectory(Path.Combine(folder, "logs"));
+                File.WriteAllText(Path.Combine(folder, "logs", "old.log"), "x");
+            }
+            var start = AppUpdater.AfterExitStartInfo(Installer.RemoveProgramFilesScript(wholeFolder), ExitedProcessId(), null,
+                TimeSpan.FromSeconds(1), TimeSpan.Zero, Installer.FolderEnvironment(folder));
+
+            // Started the way Runner Manager starts it, from a process whose current folder is the install folder: a
+            // task, the start helper and the Start menu shortcut all start Runner Manager there.
+            var before = Environment.CurrentDirectory;
+            Environment.CurrentDirectory = folder;
+            try { script = Process.Start(start)!; }
+            finally { Environment.CurrentDirectory = before; }
+
+            if (!SpinWait.SpinUntil(() => !Directory.Exists(folder), TimeSpan.FromSeconds(10)))
+                Assert.Fail($"{folder} was still there 10 seconds after the removal started, holding: " +
+                            string.Join(", ", Directory.EnumerateFileSystemEntries(folder).Select(Path.GetFileName)));
+            Assert.True(script.WaitForExit(10_000));
+            Assert.Equal(Environment.SystemDirectory, start.WorkingDirectory);
+        }
+        finally
+        {
+            try { script?.Kill(); } catch (InvalidOperationException) { }
+            script?.WaitForExit(5000);
+            script?.Dispose();
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void TheGitHubSignInConsole_DoesNotRunInTheInstallFolder()
+        => Assert.Equal(Environment.SystemDirectory, GitHubCli.ConsoleStartInfo(@"C:\Program Files\GitHub CLI\gh.exe", "auth login").WorkingDirectory);
+}
+
 /// <summary>Uninstall and the removal after a move remove the start helper and what the exe unpacked through it.</summary>
 public class StartHelperRemovalTests
 {
-    private static void CreateInstall(string folder)
+    internal static void CreateInstall(string folder)
     {
         var build = Path.Combine(folder, Launcher.ExtractionFolderName, "RunnerManager", "build1", "sub");
         Directory.CreateDirectory(build);
