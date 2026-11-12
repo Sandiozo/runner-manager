@@ -513,26 +513,6 @@ public class AuditRunnerTests
     }
 
     [Fact]
-    public async Task OrganizationRunnerList_OfAPersonalAccount_IsNotAskedAgainSoon()
-    {
-        var scope = $"orgs/audit-personal-{Guid.NewGuid():N}";
-        var asked = 0;
-        Task<ConditionalResult> Get(string endpoint, string? etag)
-        {
-            asked++;
-            return Task.FromResult(new ConditionalResult(404, string.Empty, """{"message":"Not Found"}"""));
-        }
-        var now = DateTime.UtcNow;
-
-        Assert.Null(await RegisteredRunners.GetAsync(scope, Get, now));
-        // Past the one-minute cache, the 404 is still remembered.
-        Assert.Null(await RegisteredRunners.GetAsync(scope, Get, now.AddMinutes(30)));
-        Assert.Equal(1, asked);
-        Assert.Null(await RegisteredRunners.GetAsync(scope, Get, now.AddHours(7)));
-        Assert.Equal(2, asked);
-    }
-
-    [Fact]
     public async Task RunnerLabels_ComeFromGitHub_ForAnArm64PcAndForJobsWithoutSelfHosted()
     {
         var now = DateTime.UtcNow;
@@ -590,5 +570,102 @@ public class AuditRunnerTests
         Assert.Equal("delayed-auto", ServiceStart.Automatic);
         // WMI reports a delayed automatic start as Auto.
         Assert.Equal(RunnerStart.WithWindows, RunnerService.ServiceStartsAt("Auto"));
+    }
+}
+
+/// <summary>
+/// The runner lists of the health checks. <see cref="GitHubCli.ForgetProblems"/> clears them, and the GitHub CLI tests
+/// call it, so these tests do not run at the same time as those.
+/// </summary>
+[Collection(GitHubCliCollection.Name)]
+public class RegisteredRunnerTests
+{
+    /// <summary>A scope no other test uses: "orgs/" and at most 39 characters, as GitHub allows for a name.</summary>
+    private static string NewOrganization() => $"orgs/rr-{Guid.NewGuid():N}";
+
+    private static Task<ConditionalResult> NotFound() => Task.FromResult(new ConditionalResult(404, string.Empty, """{"message":"Not Found"}"""));
+
+    [Fact]
+    public async Task OrganizationRunnerList_OfAPersonalAccount_IsNotAskedAgainSoon()
+    {
+        var scope = NewOrganization();
+        var asked = 0;
+        Task<ConditionalResult> Get(string endpoint, string? etag)
+        {
+            asked++;
+            return NotFound();
+        }
+        var now = DateTime.UtcNow;
+
+        Assert.Null(await RegisteredRunners.GetAsync(scope, Get, now));
+        // Past the one-minute cache, the 404 is still remembered.
+        Assert.Null(await RegisteredRunners.GetAsync(scope, Get, now.AddMinutes(30)));
+        Assert.Equal(1, asked);
+        Assert.Null(await RegisteredRunners.GetAsync(scope, Get, now.AddHours(7)));
+        Assert.Equal(2, asked);
+    }
+
+    [Fact]
+    public async Task RunnerList_ThatWasNotFound_IsAskedAgain_AfterForgetProblems()
+    {
+        var scope = NewOrganization();
+        var answers = new Queue<Func<Task<ConditionalResult>>>(new Func<Task<ConditionalResult>>[]
+        {
+            NotFound,
+            () => Task.FromResult(new ConditionalResult(200, "W/\"a\"", """{"total_count":1,"runners":[{"id":3,"name":"gpu","labels":[{"name":"gpu"}]}]}"""))
+        });
+        var asked = 0;
+        Task<ConditionalResult> Get(string endpoint, string? etag)
+        {
+            asked++;
+            return answers.Dequeue()();
+        }
+        var now = DateTime.UtcNow;
+
+        Assert.Null(await RegisteredRunners.GetAsync(scope, Get, now));
+        // After "Connect GitHub" or a refresh by hand, the 404 and the read of the last minute are forgotten.
+        GitHubCli.ForgetProblems();
+        var list = await RegisteredRunners.GetAsync(scope, Get, now.AddSeconds(10));
+
+        Assert.Equal(2, asked);
+        Assert.Equal(3, Assert.Single(list!).Id);
+    }
+
+    [Fact]
+    public async Task NotFound_OfAReadSentBeforeForgetProblems_IsNotRemembered()
+    {
+        var scope = NewOrganization();
+        var first = new TaskCompletionSource<ConditionalResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var asked = 0;
+        Task<ConditionalResult> Get(string endpoint, string? etag) => ++asked == 1 ? first.Task : NotFound();
+        var now = DateTime.UtcNow;
+
+        var sent = RegisteredRunners.GetAsync(scope, Get, now);
+        while (asked == 0) await Task.Delay(10);
+        GitHubCli.ForgetProblems();
+        first.SetResult(new ConditionalResult(404, string.Empty, string.Empty));
+        Assert.Null(await sent);
+
+        // The answer came after the reset, so it is not kept for 6 hours.
+        Assert.Null(await RegisteredRunners.GetAsync(scope, Get, now.AddMinutes(2)));
+        Assert.Equal(2, asked);
+    }
+
+    [Theory]
+    [InlineData("orgs/octo --method DELETE")]
+    [InlineData("repos/octo/app/actions")]
+    [InlineData("users/octo")]
+    [InlineData("")]
+    public async Task RunnerList_OfAScopeThatIsNotAGitHubName_IsNotAsked(string scope)
+    {
+        var asked = 0;
+        Task<ConditionalResult> Get(string endpoint, string? etag)
+        {
+            asked++;
+            return NotFound();
+        }
+
+        Assert.Null(await RegisteredRunners.GetAsync(scope, Get, DateTime.UtcNow));
+        Assert.Equal(0, asked);
     }
 }

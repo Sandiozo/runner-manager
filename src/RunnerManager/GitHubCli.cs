@@ -66,9 +66,15 @@ public static class GitHubCli
 
     /// <summary>
     /// Forgets the failures, so GitHub is asked again at once (after the user connects GitHub or asks for a refresh).
-    /// The job view's failed reads end with them: they are only kept while a failure holds their requests back.
+    /// The job view's failed reads end with them: they are only kept while a failure holds their requests back. The
+    /// health checks' runner lists are asked again too, also those that GitHub answered with 404 (see
+    /// <see cref="RegisteredRunners"/>).
     /// </summary>
-    public static void ForgetProblems() => GitHubFailures.Forget();
+    public static void ForgetProblems()
+    {
+        GitHubFailures.Forget();
+        RegisteredRunners.Forget();
+    }
 
     private static readonly string[] ActiveAuthStatus = { "auth", "status", "--active", "--hostname", "github.com" };
     private static readonly string[] AuthStatus = { "auth", "status", "--hostname", "github.com" };
@@ -173,7 +179,7 @@ public static class GitHubCli
             throw new InvalidOperationException(string.IsNullOrWhiteSpace(logout.Error)
                 ? "Could not disconnect the GitHub account." : logout.Error.Trim());
         // The remembered failures were that account's: its rate limit, what it may read.
-        GitHubFailures.Forget();
+        ForgetProblems();
     }
 
     /// <summary>What a request says when its repository or organization name failed <see cref="GitHubNames"/>.</summary>
