@@ -17,6 +17,8 @@ public partial class SetupWindow : Window
     private string _installedExe = string.Empty;
     /// <summary>The folder setup offers: this user's install where it is, the install that is on this PC, or Program Files.</summary>
     private readonly string _proposedFolder;
+    /// <summary>The offered folder may be this user's install, but setup could not confirm it (see <see cref="SetupOffer"/>).</summary>
+    private readonly bool _proposedUnconfirmed;
     private string _installFolder;
     private readonly Task _presetDone;
 
@@ -25,7 +27,8 @@ public partial class SetupWindow : Window
         InitializeComponent();
         WindowTheme.Apply(this);
         VersionText.Text = $"Setup · version {AppUpdater.CurrentVersion}";
-        _proposedFolder = _installFolder = MachineInstall.SetupProposal();
+        (_proposedFolder, _proposedUnconfirmed) = MachineInstall.SetupProposal();
+        _installFolder = _proposedFolder;
         // What setup says below is about the folder it offers.
         AppUpdater.UseInstallDir(_installFolder);
         ShowInstallFolder();
@@ -233,10 +236,18 @@ public partial class SetupWindow : Window
     internal static (bool Visible, string Label) FolderResetButton(string folder, string proposed, string programFilesDir)
         => (!AppUpdater.SameFolder(folder, proposed), AppUpdater.SameFolder(proposed, programFilesDir) ? "Default" : "Current folder");
 
-    /// <summary>A note under the folder when the user chose one outside Program Files, which Windows does not protect by itself.</summary>
-    internal static string? FolderNote(string folder, string proposed, string programFilesDir)
-        => AppUpdater.SameFolder(folder, programFilesDir) || AppUpdater.SameFolder(folder, proposed) ? null
-            : "Runner Manager runs with administrator rights. Outside Program Files, check that only administrators can change the files in this folder.";
+    /// <summary>
+    /// A note under the folder when it is outside Program Files, which Windows does not protect by itself: a folder the
+    /// user chose, or the offered folder when setup could not confirm the install in it (<paramref name="proposedUnconfirmed"/>).
+    /// </summary>
+    internal static string? FolderNote(string folder, string proposed, string programFilesDir, bool proposedUnconfirmed)
+    {
+        if (AppUpdater.SameFolder(folder, programFilesDir)) return null;
+        var offered = AppUpdater.SameFolder(folder, proposed);
+        if (offered && !proposedUnconfirmed) return null;
+        return (offered ? "Setup could not confirm that Runner Manager is installed in this folder. " : string.Empty) +
+               "Runner Manager runs with administrator rights. Outside Program Files, check that only administrators can change the files in this folder.";
+    }
 
     private void ShowInstallFolder()
     {
@@ -245,7 +256,7 @@ public partial class SetupWindow : Window
         DefaultInstallFolderButton.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
         DefaultInstallFolderButton.Content = label;
         DefaultInstallFolderButton.ToolTip = _proposedFolder;
-        var note = FolderNote(_installFolder, _proposedFolder, MachineInstall.ProgramFilesDir);
+        var note = FolderNote(_installFolder, _proposedFolder, MachineInstall.ProgramFilesDir, _proposedUnconfirmed);
         FolderNoteText.Text = note ?? string.Empty;
         FolderNoteText.Visibility = note == null ? Visibility.Collapsed : Visibility.Visible;
     }

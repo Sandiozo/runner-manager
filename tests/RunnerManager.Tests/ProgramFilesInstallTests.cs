@@ -52,20 +52,43 @@ public class ProgramFilesInstallTests
         Assert.Equal(Path.Combine(old, AppPaths.LegacyExeName), LegacyInstall.LegacyExe);
     }
 
+    private static SetupOffer Offer(string? ownRecord, string? userEntry, Func<string, bool> fileExists, IEnumerable<InstallRecord>? others = null)
+        => MachineInstall.SetupProposal(ownRecord, userEntry, others ?? Array.Empty<InstallRecord>(), Profiles, ProgramFiles, OldDefault, fileExists);
+
     [Fact]
     public void Setup_OffersProgramFiles_OnAPcWithoutAnInstall()
-        => Assert.Equal(ProgramFiles, MachineInstall.SetupProposal(null, null, Array.Empty<InstallRecord>(), Profiles, ProgramFiles, OldDefault, _ => false));
+        => Assert.Equal(new SetupOffer(ProgramFiles, Unconfirmed: false), Offer(null, null, _ => false));
 
     [Fact]
     public void Setup_RunAgain_OffersTheFolderTheInstallIsIn()
     {
-        var none = Array.Empty<InstallRecord>();
-        // Recorded for this user, then the Settings → Apps entry, then the default of earlier versions when it has the exe.
-        Assert.Equal(Chosen, MachineInstall.SetupProposal(Chosen, OldDefault, none, Profiles, ProgramFiles, OldDefault, _ => true));
-        Assert.Equal(Chosen, MachineInstall.SetupProposal(null, Chosen, none, Profiles, ProgramFiles, OldDefault, _ => true));
-        Assert.Equal(OldDefault, MachineInstall.SetupProposal(null, null, none, Profiles, ProgramFiles, OldDefault, f => f == OldDefault));
+        // Recorded for this user (also from this user's own tasks, before setup opens): confirmed.
+        Assert.Equal(new SetupOffer(Chosen, Unconfirmed: false), Offer(Chosen, OldDefault, _ => true));
         // An empty old default (for example after an uninstall that kept other files) is no install.
-        Assert.Equal(ProgramFiles, MachineInstall.SetupProposal(null, null, none, Profiles, ProgramFiles, OldDefault, _ => false));
+        Assert.Equal(new SetupOffer(ProgramFiles, Unconfirmed: false), Offer(null, null, _ => false));
+    }
+
+    [Fact]
+    public void Setup_OffersTheSettingsAppsEntryAndTheOldDefault_OnlyAsUnconfirmed()
+    {
+        // Any program of the user can set the entry's InstallLocation, or put a RunnerManager.exe in the old default, before
+        // the first setup. Setup still offers the folder, so that an install without a record is not moved by surprise,
+        // but says that it could not confirm it.
+        Assert.Equal(new SetupOffer(Chosen, Unconfirmed: true), Offer(null, Chosen, _ => true));
+        Assert.Equal(new SetupOffer(OldDefault, Unconfirmed: true), Offer(null, null, f => f == ExeIn(OldDefault)));
+        var note = SetupWindow.FolderNote(OldDefault, OldDefault, ProgramFiles, proposedUnconfirmed: true);
+        Assert.NotNull(note);
+        Assert.StartsWith("Setup could not confirm that Runner Manager is installed in this folder.", note);
+        Assert.Contains("only administrators", note);
+    }
+
+    [Fact]
+    public void Setup_FindsARunnerWidgetInstallInTheOldDefault()
+    {
+        // Versions before 2.2 installed RunnerWidget.exe there; setup updates it where it is instead of moving it.
+        var offer = Offer(null, null, f => f == Path.Combine(OldDefault, AppPaths.LegacyExeName));
+        Assert.Equal(OldDefault, offer.Folder);
+        Assert.True(offer.Unconfirmed);
     }
 
     [Fact]
@@ -80,15 +103,21 @@ public class ProgramFilesInstallTests
     }
 
     [Fact]
-    public void Setup_FolderNote_OnlyForAFolderTheUserChoseOutsideProgramFiles()
+    public void Setup_FolderNote_ForAChosenFolderOutsideProgramFiles_AndForAnUnconfirmedInstall()
     {
-        Assert.Null(SetupWindow.FolderNote(ProgramFiles, ProgramFiles, ProgramFiles));
-        Assert.Null(SetupWindow.FolderNote(OldDefault, OldDefault, ProgramFiles));
-        Assert.Null(SetupWindow.FolderNote(ProgramFiles, OldDefault, ProgramFiles));
-        var note = SetupWindow.FolderNote(Chosen, ProgramFiles, ProgramFiles);
+        // Program Files, and a confirmed install where it is: no note.
+        Assert.Null(SetupWindow.FolderNote(ProgramFiles, ProgramFiles, ProgramFiles, proposedUnconfirmed: false));
+        Assert.Null(SetupWindow.FolderNote(ProgramFiles, OldDefault, ProgramFiles, proposedUnconfirmed: true));
+        Assert.Null(SetupWindow.FolderNote(OldDefault, OldDefault, ProgramFiles, proposedUnconfirmed: false));
+        // A folder the user chose outside Program Files.
+        var note = SetupWindow.FolderNote(Chosen, ProgramFiles, ProgramFiles, proposedUnconfirmed: false);
         Assert.NotNull(note);
         Assert.Contains("only administrators", note);
-        Assert.DoesNotContain("n't", note);
+        Assert.DoesNotContain("could not confirm", note);
+        // The offered folder when setup could not confirm the install in it.
+        Assert.Contains("could not confirm", SetupWindow.FolderNote(Chosen, Chosen, ProgramFiles, proposedUnconfirmed: true));
+        foreach (var text in new[] { note, SetupWindow.FolderNote(Chosen, Chosen, ProgramFiles, proposedUnconfirmed: true)! })
+            Assert.DoesNotContain("n't", text);
     }
 
     [Fact]
@@ -143,8 +172,19 @@ public class ProgramFilesInstallTests
         Assert.Equal(OldDefault, MachineInstall.Resolve(Facts(ExeIn(OldDefault), userEntry: evil, hasExe: _ => true)));
         // A copy that is not installed (a build folder), and an exe in the folder the entry names.
         Assert.Equal(ProgramFiles, MachineInstall.Resolve(Facts(@"D:\src\bin\Release\RunnerManager.exe", userEntry: evil, hasExe: f => f == evil)));
-        Assert.Equal(OldDefault, MachineInstall.Resolve(Facts(@"D:\src\bin\Release\RunnerManager.exe", userEntry: evil,
-            hasExe: f => f == evil || f == OldDefault)));
+    }
+
+    [Fact]
+    public void Elevated_NeverTakesAFileInTheOldDefault_ForTheInstall()
+    {
+        // Any program of the user can put a RunnerManager.exe there. A copy that is not installed and has no record (its
+        // tasks would have given one, see RecordRunningInstallAsync) uses Program Files, so a newer file planted there never
+        // becomes "the installed copy" that the fleet agent's task starts.
+        const string build = @"D:\src\bin\Release\RunnerManager.exe";
+        Assert.Equal(ProgramFiles, MachineInstall.Resolve(Facts(build, hasExe: f => f == OldDefault)));
+        Assert.Equal(ProgramFiles, MachineInstall.Resolve(Facts(build, userEntry: @"C:\Users\me\Evil", hasExe: _ => true)));
+        // Without administrator rights (an AI tool's host) it changes nothing, so the old default still counts there.
+        Assert.Equal(OldDefault, MachineInstall.Resolve(Facts(build, elevated: false, hasExe: f => f == OldDefault)));
     }
 
     [Fact]
@@ -260,18 +300,19 @@ public class ProgramFilesInstallTests
     [Fact]
     public void ASecondUser_GetsTheInstallThatIsThere()
     {
+        // Another user's record, which only administrators can write: confirmed.
         var others = new[] { new InstallRecord(OtherSid, ProgramFiles) };
-        Assert.Equal(ProgramFiles, MachineInstall.SetupProposal(null, null, others, Profiles, ProgramFiles, OldDefault, f => f == ProgramFiles));
+        Assert.Equal(new SetupOffer(ProgramFiles, Unconfirmed: false), Offer(null, null, f => f == ExeIn(ProgramFiles), others));
         // A folder another user chose outside the profiles is shared as well.
         var chosen = new[] { new InstallRecord(OtherSid, Chosen) };
-        Assert.Equal(Chosen, MachineInstall.SetupProposal(null, null, chosen, Profiles, ProgramFiles, OldDefault, f => f == Chosen));
+        Assert.Equal(new SetupOffer(Chosen, Unconfirmed: false), Offer(null, null, f => f == ExeIn(Chosen), chosen));
         // Another user's copy in their own profile is theirs: this user gets Program Files.
         var theirs = new[] { new InstallRecord(OtherSid, @"C:\Users\them\AppData\Local\Programs\RunnerManager") };
-        Assert.Equal(ProgramFiles, MachineInstall.SetupProposal(null, null, theirs, Profiles, ProgramFiles, OldDefault, f => f == theirs[0].Folder));
+        Assert.Equal(ProgramFiles, Offer(null, null, f => f == ExeIn(theirs[0].Folder), theirs).Folder);
         // A record whose folder has no exe is no install.
-        Assert.Equal(ProgramFiles, MachineInstall.SetupProposal(null, null, chosen, Profiles, ProgramFiles, OldDefault, _ => false));
+        Assert.Equal(ProgramFiles, Offer(null, null, _ => false, chosen).Folder);
         // This user's own install still comes first.
-        Assert.Equal(OldDefault, MachineInstall.SetupProposal(null, null, others, Profiles, ProgramFiles, OldDefault, _ => true));
+        Assert.Equal(OldDefault, Offer(null, null, _ => true, others).Folder);
     }
 
     [Fact]
@@ -334,13 +375,11 @@ public class ProgramFilesInstallTests
     }
 
     [Fact]
-    public void OwnInstall_IsThisUsersInstallOnly()
+    public void OwnInstall_IsTheRecordedOneOnly()
     {
-        Assert.Equal(Chosen, Installer.OwnInstall(Chosen, OldDefault, OldDefault, _ => true));
-        Assert.Equal(Chosen, Installer.OwnInstall(null, Chosen, OldDefault, _ => true));
-        Assert.Equal(OldDefault, Installer.OwnInstall(null, null, OldDefault, _ => true));
-        // A copy in Program Files that only another user installed is not this user's to move or remove.
-        Assert.Null(Installer.OwnInstall(null, null, OldDefault, f => f == ProgramFiles));
+        // A move closes and removes the copy it leaves. The Settings → Apps entry and the old default are no reason to.
+        Assert.Equal(Chosen, Installer.OwnInstall(Chosen));
+        Assert.Null(Installer.OwnInstall(null));
     }
 
     [Fact]
@@ -614,6 +653,33 @@ public class InstallEvidenceTests
             Directory.Delete(folder, recursive: true);
             Directory.Delete(other, recursive: true);
         }
+    }
+
+    [Fact]
+    public async Task ARunnerWidgetInstall_IsConfirmedByItsTasks()
+    {
+        // Its tasks were registered with the highest rights too, under RunnerWidget's names.
+        using var state = new TestInstallState();
+        var folder = NewFolder("widget");
+        try
+        {
+            state.Tasks.Definitions[ScheduledTasks.LegacyAgentTaskName] = TaskOf(Me, Path.Combine(folder, AppPaths.LegacyExeName));
+            await MachineInstall.RecordRunningInstallAsync(elevated: true, @"C:\Users\me\Downloads\RunnerManagerSetup.exe", _ => { });
+            Assert.Equal(folder, MachineInstall.ReadOwnRecord());
+        }
+        finally { Directory.Delete(folder, recursive: true); }
+    }
+
+    [Fact]
+    public void Setup_RecordsTheInstallThatItsTasksStart_BeforeItOpens()
+    {
+        // So setup offers that folder as confirmed (the record), also when the Settings → Apps entry was changed.
+        var code = File.ReadAllText(Path.Combine(SourceDir, "App.xaml.cs"));
+        var call = code.IndexOf("await MachineInstall.RecordRunningInstallAsync(", StringComparison.Ordinal);
+        Assert.True(call > 0);
+        var condition = code[code.LastIndexOf("if (", call, StringComparison.Ordinal)..call];
+        Assert.DoesNotContain("IsSetupLaunch", condition);
+        Assert.True(call < code.IndexOf("new SetupWindow()", StringComparison.Ordinal));
     }
 
     [Fact]

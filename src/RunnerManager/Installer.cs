@@ -82,8 +82,8 @@ public static class Installer
     public static async Task<string> InstallAsync(SetupChoices choices, Action<string> log)
     {
         var target = AppUpdater.InstallDir;
-        // The copy that is installed now, when setup moves it to another folder.
-        var previous = OwnInstall(MachineInstall.ReadOwnRecord(), RegisteredInstallDir(), MachineInstall.OldDefaultDir, MachineInstall.HasExe);
+        // The copy that is installed now, when setup moves it to another folder: only the recorded one (see OwnInstall).
+        var previous = OwnInstall(MachineInstall.ReadOwnRecord());
         var moving = previous != null && !AppUpdater.SameFolder(previous, target);
         var recordBefore = MachineInstall.ReadOwnRecordRaw();
         // Program Files is shared by the Windows users of the PC. A copy that others use is never replaced by an older one.
@@ -110,11 +110,12 @@ public static class Installer
     }
 
     /// <summary>
-    /// This user's install before setup: the folder recorded for this user, the folder in this user's Settings → Apps
-    /// entry, or the default of earlier versions when it holds the exe. Null when this user has none.
+    /// This user's install before setup, which a move to another folder closes and removes: the folder recorded for this
+    /// user (an install of an earlier version that this user's own tasks start is recorded before setup opens). Never the
+    /// folder of the Settings → Apps entry or the default of earlier versions alone: any program of the user can change
+    /// those, so a copy there that setup could not confirm is left where it is.
     /// </summary>
-    internal static string? OwnInstall(string? ownRecord, string? userEntry, string oldDefaultDir, Func<string, bool> hasExe)
-        => ownRecord ?? userEntry ?? (hasExe(oldDefaultDir) ? oldDefaultDir : null);
+    internal static string? OwnInstall(string? ownRecord) => ownRecord;
 
     /// <summary>
     /// Whether setup keeps the copy in the install folder instead of putting its own build there: other Windows users use

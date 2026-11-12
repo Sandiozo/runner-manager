@@ -106,8 +106,9 @@ public partial class App : Application
             MachineRelay.AppendAgentLog("Runner Manager was started below normal priority. It now runs at normal priority.");
         // An install of an earlier version has no record of its folder yet: the folder of the exe that this user's own
         // tasks start is recorded once, where only administrators can change it, also when this copy is not the install.
-        // First, so the repair below looks in that folder. Setup and uninstall write or remove the record themselves.
-        if (!Installer.IsSetupLaunch(startArgs) && !startArgs.Contains("--uninstall", StringComparer.OrdinalIgnoreCase))
+        // First, so the repair below looks in that folder, and setup offers that folder as confirmed. Uninstall removes
+        // the record.
+        if (!startArgs.Contains("--uninstall", StringComparer.OrdinalIgnoreCase))
             await MachineInstall.RecordRunningInstallAsync(MachineRelay.AppendAgentLog);
         // Logs what it found; the dashboard tells the user about an exe that is missing for another reason.
         UpdateGuard.RepairMissingExe(tellUser: false);

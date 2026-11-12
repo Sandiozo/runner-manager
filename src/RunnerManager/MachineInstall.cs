@@ -8,6 +8,12 @@ namespace RunnerManager;
 /// <summary>A Windows user's install, as recorded for administrators: the user's SID and the install folder.</summary>
 public sealed record InstallRecord(string Sid, string Folder);
 
+/// <summary>
+/// The folder setup offers. <paramref name="Unconfirmed"/>: it may be this user's install, but neither this user's record
+/// nor this user's own tasks show it (see <see cref="MachineInstall.SetupProposal(string?, string?, IEnumerable{InstallRecord}, string?, string, string, Func{string, bool})"/>).
+/// </summary>
+public sealed record SetupOffer(string Folder, bool Unconfirmed);
+
 /// <summary>A scheduled task of Runner Manager: the account it runs as, whether that is this user, and the exe it starts.</summary>
 public sealed record TaskUse(string Account, bool IsOwn, string Command);
 
@@ -66,15 +72,17 @@ public static class MachineInstall
     /// <summary>
     /// The install folder of this process. In this order: this user's recorded install; the folder of the running copy
     /// when it is an install (see <see cref="RunningInstallFolder"/>); for a copy without administrator rights (an AI tool's
-    /// host) the Settings → Apps entry; otherwise the default of earlier versions when it holds the exe, or Program Files.
-    /// So the Settings → Apps entry alone never decides it for a copy with administrator rights: it can only confirm the
-    /// folder that copy runs from.
+    /// host) the Settings → Apps entry, or the default of earlier versions when it holds the exe; otherwise Program Files.
+    /// So the Settings → Apps entry and the files in the default of earlier versions, which any program of the user can
+    /// change, never decide it for a copy with administrator rights: they can only confirm the folder that copy runs from.
+    /// An install of an earlier version that this user's tasks start is recorded before (see <see cref="RecordRunningInstallAsync(Action{string})"/>).
     /// </summary>
     internal static string Resolve(InstallFacts f)
     {
         if (f.OwnRecord != null) return f.OwnRecord;
         if (RunningInstallFolder(f) is { } running) return running;
-        if (!f.Elevated && f.UserEntry != null) return f.UserEntry;
+        if (f.Elevated) return f.ProgramFilesDir;
+        if (f.UserEntry != null) return f.UserEntry;
         return f.HasExe(f.OldDefaultDir) ? f.OldDefaultDir : f.ProgramFilesDir;
     }
 
@@ -154,13 +162,14 @@ public static class MachineInstall
     }
 
     /// <summary>
-    /// The exes that this user's launch, startup and fleet agent tasks start. Only tasks that run with the highest rights
-    /// count (see <see cref="ScheduledTasks.ExeOfOwnElevatedTask"/>).
+    /// The exes that this user's launch, startup and fleet agent tasks start, and those of RunnerWidget's tasks (before
+    /// 2.2). Only tasks that run with the highest rights count (see <see cref="ScheduledTasks.ExeOfOwnElevatedTask"/>).
     /// </summary>
     internal static async Task<List<string>> OwnTaskExesAsync()
     {
         var exes = new List<string>();
-        foreach (var name in new[] { ScheduledTasks.LaunchTaskName, ScheduledTasks.DashboardTaskName, ScheduledTasks.AgentTaskName })
+        foreach (var name in new[] { ScheduledTasks.LaunchTaskName, ScheduledTasks.DashboardTaskName, ScheduledTasks.AgentTaskName,
+                     ScheduledTasks.LegacyAgentTaskName, ScheduledTasks.LegacyDashboardTaskName })
         {
             if (await Tasks.ReadAsync(name) is not { Length: > 0 } xml) continue;
             if (ScheduledTasks.ExeOfOwnElevatedTask(xml) is { } command && Path.IsPathFullyQualified(command)) exes.Add(command);
@@ -195,22 +204,28 @@ public static class MachineInstall
     // ================= Setup =================
 
     /// <summary>
-    /// The folder setup offers: this user's install (recorded, in Settings → Apps, or in the default of earlier versions),
-    /// so setup run again updates it where it is; otherwise the install another Windows user of this PC has outside the
-    /// user profiles (see <see cref="SharedInstall"/>); otherwise Program Files.
+    /// The folder setup offers: this user's install (recorded, in Settings → Apps, or in the default of earlier versions,
+    /// also with RunnerWidget.exe of the versions before 2.2), so setup run again updates it where it is; otherwise the
+    /// install another Windows user of this PC has outside the user profiles (see <see cref="SharedInstall"/>); otherwise
+    /// Program Files. The Settings → Apps entry and the default of earlier versions are offered too, so that an install
+    /// without a record is not moved by surprise, but as <see cref="SetupOffer.Unconfirmed"/>: any program of the user can
+    /// change them. An install that this user's own tasks start is recorded before setup opens.
+    /// <paramref name="fileExists"/> tells whether a file exists.
     /// </summary>
-    internal static string SetupProposal(string? ownRecord, string? userEntry, IEnumerable<InstallRecord> otherRecords, string? profilesRoot,
-        string programFilesDir, string oldDefaultDir, Func<string, bool> hasExe)
+    internal static SetupOffer SetupProposal(string? ownRecord, string? userEntry, IEnumerable<InstallRecord> otherRecords, string? profilesRoot,
+        string programFilesDir, string oldDefaultDir, Func<string, bool> fileExists)
     {
-        if (ownRecord != null) return ownRecord;
-        if (userEntry != null) return userEntry;
-        if (hasExe(oldDefaultDir)) return oldDefaultDir;
-        return SharedInstall(otherRecords, profilesRoot, programFilesDir, hasExe) ?? programFilesDir;
+        if (ownRecord != null) return new SetupOffer(ownRecord, Unconfirmed: false);
+        if (userEntry != null) return new SetupOffer(userEntry, Unconfirmed: true);
+        if (fileExists(Path.Combine(oldDefaultDir, AppPaths.ExeName)) || fileExists(Path.Combine(oldDefaultDir, AppPaths.LegacyExeName)))
+            return new SetupOffer(oldDefaultDir, Unconfirmed: true);
+        return new SetupOffer(SharedInstall(otherRecords, profilesRoot, programFilesDir, f => fileExists(Path.Combine(f, AppPaths.ExeName)))
+                              ?? programFilesDir, Unconfirmed: false);
     }
 
     /// <summary>The folder setup offers on this PC (see <see cref="SetupProposal(string?, string?, IEnumerable{InstallRecord}, string?, string, string, Func{string, bool})"/>).</summary>
-    internal static string SetupProposal() => SetupProposal(ReadOwnRecord(), Installer.RegisteredInstallDir(), OtherRecords(), ProfilesRoot(),
-        ProgramFilesDir, OldDefaultDir, HasExe);
+    internal static SetupOffer SetupProposal() => SetupProposal(ReadOwnRecord(), Installer.RegisteredInstallDir(), OtherRecords(), ProfilesRoot(),
+        ProgramFilesDir, OldDefaultDir, File.Exists);
 
     /// <summary>
     /// Another Windows user's install that this user can share: one that holds the exe and is not inside a user profile
