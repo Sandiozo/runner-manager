@@ -90,10 +90,12 @@ and updates keep it there. To move it to Program Files, run the setup again, cli
 `C:\Program Files`. To uninstall, use **Settings → Apps** in Windows, or **Settings → Updates → Uninstall…** in Runner
 Manager. Your runners keep running.
 
-On a PC with several Windows users, they share one install: when a second user runs the setup, it offers the folder
-that is already there, and it never puts an older version in place of a newer one that another user runs. Each user has
-their own shortcuts, settings and Settings → Apps entry. Uninstall by one user keeps the program files while another
-user still uses them.
+On a PC with several Windows users, they can share one install outside the user profiles, such as in Program Files:
+when a second user runs the setup, it offers such an install folder that Runner Manager recorded for another user. An
+install in `%LOCALAPPDATA%\Programs\RunnerManager` is in its user's profile and is not shared. Setup never puts an older
+version in place of a newer one that another user runs, as far as their records and the scheduled tasks that setup can
+read show. Each user has their own shortcuts, settings and Settings → Apps entry. Uninstall by one user keeps the
+program files while another user still uses them.
 
 Updates install a newer .NET Desktop Runtime automatically when a release needs one. Installs from version 2.1 or
 earlier (called RunnerWidget) need the setup run once on each PC; it moves the settings and scheduled tasks over.
