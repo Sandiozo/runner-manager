@@ -34,8 +34,9 @@ internal static class FleetAddressRules
     /// </summary>
     /// <param name="machines">The PCs of the last fleet refresh, with a placeholder for each address where none answered.</param>
     /// <param name="answer">
-    /// What the address answered when Settings asked it: the PC, or a placeholder with the reason. The fleet refresh
-    /// lists a PC that answers there at the address it already had, so only this names it.
+    /// What the address answered when Settings asked it: the PC, or a placeholder with the reason. A PC that answers is
+    /// saved at this address then (<see cref="MachineRelay.RememberPeer"/>), so the line for a known PC names it first;
+    /// this names it only after a later refresh has moved it to another address.
     /// </param>
     internal static string Status(string address, IEnumerable<PeerRecord> knownPeers, IEnumerable<ManagedPcRecord> managedPcs,
         IReadOnlyCollection<MachineInfo> machines, MachineInfo? answer, Func<DateTime, string> lastSeen)

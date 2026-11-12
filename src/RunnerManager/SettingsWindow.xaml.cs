@@ -425,8 +425,10 @@ public partial class SettingsWindow : Window
     }
 
     /// <summary>
-    /// Asks the addresses that no known PC has, with the status request the fleet refresh sends there. The refresh
-    /// lists a PC that answers at such an address under the address it already had, so this is what names it.
+    /// Asks the addresses that no known PC has, with the status request the fleet refresh sends there, so the list shows
+    /// what each one answers without waiting for a refresh. A PC that answers is saved at that address
+    /// (<see cref="MachineRelay.RememberPeer"/>), and the list names it from then on; an address where none answers
+    /// shows why.
     /// </summary>
     private async Task CheckAddressesAsync(bool again)
     {
