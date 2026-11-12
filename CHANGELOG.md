@@ -21,6 +21,15 @@ Runner Manager no longer starts a runner's service next to its console window.
 - A runner that has a Windows service and also opens in a console window when you sign in is no longer started as a
   service from Runner Manager, also not by auto-recovery. To use its service, turn off **Start when you sign in** on
   the runner first (see **Runners and jobs**).
+- A new file, `RunnerManagerLauncher.exe`, is in the install folder: the start helper (see **Security**). While Runner
+  Manager runs, it also shows in Task Manager, next to each RunnerManager.exe that it started. A self-contained
+  Runner Manager unpacks its files into a `.net` folder there.
+- The scheduled tasks move to the start helper by themselves after the update: the launch task and the startup task
+  when the dashboard or the fleet agent runs with administrator rights and the task does not run the dashboard at that
+  moment, and the fleet agent's task only once the update has proven itself. The fleet agent then restarts once, when
+  it has no work.
+- GitHub CLI that is installed for one Windows user only, in a folder that only that user's PATH names, is no longer
+  found by Runner Manager, because it starts with the PC's PATH. Install GitHub CLI for all users instead.
 
 ### Security
 
@@ -67,6 +76,28 @@ Runner Manager no longer starts a runner's service next to its console window.
   not followed.
 - The console window in which Runner Manager runs gh for the GitHub sign-in no longer runs the AutoRun commands of
   cmd.exe, which any program of the user can set in the registry.
+- Runner Manager now starts through a start helper, `RunnerManagerLauncher.exe`, beside RunnerManager.exe. Its
+  scheduled tasks (the launch task, the startup task and the fleet agent's task) run the start helper, and so do the
+  UAC prompt, the start after setup, **Restart now** after an update and **Settings → Updates → Uninstall…**. The
+  uninstall entry in Windows **Settings → Apps** still starts RunnerManager.exe itself. The start helper ignores the
+  environment it is started with and starts RunnerManager.exe with a new one: the PC's variables, the user's name and
+  folders as Windows gives them, and only the proxy and GitHub token variables (`HTTP_PROXY`, `HTTPS_PROXY`,
+  `ALL_PROXY`, `NO_PROXY`, `GH_TOKEN`, `GITHUB_TOKEN`) from the environment it was given. Variables that any program of
+  the user can set for the user, such as `DOTNET_*`, `CORECLR_*` and `PATH`, no longer reach Runner Manager with
+  administrator rights through its tasks and its own starts. This protects an install that programs without
+  administrator rights cannot change, such as one in Program Files. Setup writes the start helper before it registers
+  the tasks, and the installed copy puts it back when it is missing. When antivirus software removes it again, or it
+  cannot be written, Runner Manager runs without it and its tasks start RunnerManager.exe as before, until the next
+  update or setup. The fleet agent's log says so, and so do Activity on every start and **Settings → Updates**.
+- The framework-dependent RunnerManager.exe looks for the .NET runtime only where it is installed for the whole PC, no
+  longer in a folder that `DOTNET_ROOT` names.
+- Runner Manager with administrator rights no longer takes its data folder from `RUNNER_MANAGER_STATE_DIR`, which any
+  program of the user can set.
+- Still open: an install in the user's profile, such as `%LOCALAPPDATA%\Programs\RunnerManager`, can be changed by any
+  program of the user, so the start helper does not protect it until it is moved to Program Files. Runner Manager says
+  so once for each version in Activity, and in **Settings → Updates**. The settings files in the user's data folder can
+  also be changed by any program of the user. After the update from 2.9.0, the first start of the dashboard and the
+  fleet agent until the update has proven itself still start as before.
 
 ### Fleet and pairing
 

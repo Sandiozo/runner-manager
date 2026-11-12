@@ -85,6 +85,12 @@ changed without administrator rights. This matters because Runner Manager runs w
 click **Change…** on the first page of the setup; it gets its own `RunnerManager` folder there. Outside Program Files,
 check that only administrators can change the files in that folder.
 
+Runner Manager starts through a small start helper in its folder, `RunnerManagerLauncher.exe`. It starts
+RunnerManager.exe with a clean environment, so variables that any program can set for your Windows user do not reach
+Runner Manager with administrator rights. This protects only an install that programs without administrator rights
+cannot change, such as one in Program Files. When such programs can change the install folder, Runner Manager says so
+in Activity and in **Settings → Updates**.
+
 An install from version 2.9.0 or earlier, for example in `%LOCALAPPDATA%\Programs\RunnerManager`, stays where it is,
 and updates keep it there. To move it to Program Files, run the setup again, click **Change…** and choose
 `C:\Program Files`. To uninstall, use **Settings → Apps** in Windows, or **Settings → Updates → Uninstall…** in Runner
