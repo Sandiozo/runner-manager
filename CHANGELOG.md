@@ -36,9 +36,12 @@ A large release with many fixes from a review of 2.8.2, most of them for securit
 - A PC in the fleet, or a PC managed one way, can no longer make the dashboard send other requests to GitHub with
   your GitHub sign-in through the repository names it reports. Such names are checked before gh runs, and again when
   the PC's status arrives: a name that is not a GitHub name is left out, and at most 200 runners and 100 repositories
-  are taken from one PC.
-- A PC that joins another fleet forgets the PCs of the fleet before, so they do not get the access codes of its
-  managed PCs.
+  are taken from one PC. Problems in another PC's status are logged once per PC and on one line, so a PC cannot fill
+  the fleet agent's log or write lines of its own into it.
+- A PC that joins another fleet forgets the PCs it manages one way, so the new fleet does not get their access codes.
+  This also holds for a fleet code entered by hand in **Settings → Fleet** that differs from the PC's code: Settings
+  asks first, and when the code is the new code of the same fleet, the managed PCs come back from the other PCs. A PC
+  without a code that joins a fleet also forgets the PCs and addresses of the fleet before.
 - On a PC that is managed one way, **Add a PC** no longer opens. It would have handed out that PC's access code as if
   it were a fleet code.
 - A new fleet code from **Change the fleet code on every PC** that is not used within 10 minutes expires, so a former
@@ -47,11 +50,12 @@ A large release with many fixes from a review of 2.8.2, most of them for securit
 - Process arguments that other PCs and AI assistants see hide more passwords and tokens: the value after -pw, -p and
   -P of programs that take a password there (mysql, docker, podman, helm, az, psexec, the PuTTY tools and more), also
   when the program is named with a path or started through cmd, --pass, --passphrase, user:password in URLs, tokens of
-  GitHub, GitLab, Slack, npm, PyPI and others, Cookie headers and more. A port, mkdir -p and Unity's -projectPath stay
-  visible.
-- Approvals and the action log show an AI tool's name on one line, with letters, digits and a few marks only,
-  so a name cannot look like Runner Manager's own text. The action log keeps one line per entry, and assistant.log
-  starts again at 1 MB.
+  GitHub, GitLab, Slack, npm, PyPI and others, Cookie and API key headers, and the passwords and keys given to
+  redis-cli, the LDAP tools, ssh-keygen, Chocolatey, sshpass, smbclient and rabbitmqctl. A port, mkdir -p and Unity's
+  -projectPath stay visible.
+- Approvals and the action log show an AI tool's name on one line, with letters, digits and a few marks only, and
+  without characters that are not shown, so a name cannot look like Runner Manager's own text. The action log keeps
+  one line per entry, and assistant.log starts again at 1 MB.
 
 ### Fleet and pairing
 
@@ -66,8 +70,12 @@ A large release with many fixes from a review of 2.8.2, most of them for securit
   stray Enter cannot hand over the fleet code. Esc denies the request. The window stays open while a request is on
   screen and says that it closes by itself after 10 minutes without one.
 - **Add a PC** warns before Allow when a PC asks to join under the name of a PC that is already in the fleet, managed
-  by it or allowed a moment ago, unless it is that same PC. It also warns when the PC says it is a saved PC under a
-  new name, and names the PC it would replace. A PC with the name or the machine ID of this PC cannot be allowed.
+  by it or allowed a moment ago, also when it says that it is that PC: a machine ID proves nothing. The warning says
+  what allowing it replaces, and that a fleet member allowed one way stops being a fleet member. It also warns when the
+  PC says it is a saved PC under a new name, and names every PC it would replace. Names that differ only in how a
+  letter is written (Ā as one character or as A with a mark, full-width letters) count as one name. A PC with the name
+  or the machine ID of this PC, or with characters in its name that cannot be seen, cannot be allowed. When what is
+  known about the PC changes while the request is on screen, Allow first shows the new warning.
 - **Add a PC** saves the PC's machine ID, so a renamed PC, or a PC that changes between fleet member and managed one
   way, is known as the same PC.
 - The dashboard, the pairing windows, Settings and the fleet agent's messages call the fleet's long code the fleet
@@ -101,8 +109,10 @@ A large release with many fixes from a review of 2.8.2, most of them for securit
 ### Runners and jobs
 
 - **Add runner** can add the runner on another PC of the fleet: choose the PC in the window, or click **Add runner**
-  on that PC's card. The other PC reports no progress until it is done. Adding or moving a runner to another PC waits
-  as long as the download and registration may take, and an update of the fleet agent does not cut it off.
+  on that PC's card. The other PC reports no progress until it is done, and this PC's view keeps updating meanwhile.
+  The other PC registers the runner with its own GitHub sign-in, so this PC needs none for it; without one, the
+  workflow check is skipped and the log says so. While this PC is chosen and is not connected to GitHub, the window
+  says so. Adding or moving a runner to another PC waits as long as the download and registration may take.
 - Fix: auto-recovery tries a runner again an hour after it gave up, and reports giving up only once, until the runner
   is seen running. It leaves a runner alone while it starts or stops, and restarts it only when it is stopped at two
   checks in a row, so a Start, Stop or Restart on this PC no longer counts as a stop. It no longer starts a stopped
@@ -113,14 +123,15 @@ A large release with many fixes from a review of 2.8.2, most of them for securit
 - Fix: stuck detection no longer misses a step that has printed nothing for more than 30 minutes, no longer shows
   **Stuck** after the PC wakes from sleep, and one failed GitHub read no longer raises **Running long**. A runner is
   also no longer reported because of the job of another runner with the same ID, or of a job it gave up when it was
-  restarted.
+  restarted. A job that runs far too long is still reported as running long when GitHub cannot tell how long it
+  usually takes.
 - Fix: health checks use the runners' real labels from GitHub, so runners on ARM64 PCs and runners without default
   labels are matched, and jobs without self-hosted in runs-on are checked too. "No runner in the fleet has the labels"
   is no longer raised for Linux, macOS or GitHub-hosted jobs, or for jobs that a runner outside the fleet can take.
 - Fix: **Stop the job's processes** no longer stops an older process, such as explorer.exe, whose parent had the
   same process ID as the job. Job checks read the process list once for all busy runners.
 - The live job output of an idle runner no longer shows a page left over from an earlier job, and it shows the newest
-  output when the list of processes on the PC cannot be read.
+  output when the list of processes on the PC cannot be read, if that output is at most 5 minutes old.
 - A runner download that stops getting data now fails after 60 seconds, or after 45 minutes in all, with a clear
   message. Before, it could block the fleet agent's commands for good.
 - Fix: the fleet agent refuses **Start**, **Stop** and **Restart** for a runner that runs in a console window, instead
@@ -137,7 +148,8 @@ A large release with many fixes from a review of 2.8.2, most of them for securit
   is a warning: the runner was created.
 - **Edit runner** fills in the labels of runners on other PCs and enables **Save changes** only when the name or labels
   changed. It can remove every custom label of a runner on this PC, and says that it cannot for a runner on another
-  PC, instead of keeping the labels silently.
+  PC, instead of keeping the labels silently. A runner that was set up without default labels keeps at least one
+  label, because it could not take jobs without any.
 - Fix: **Start with Windows** in a runner's menu shows its check mark, and sets the delayed start that GitHub's setup
   gives runner services. A service turned on again after a failed move also starts delayed.
 - When a move fails after the runner's registration was replaced, the error says that the old copy must be registered
@@ -177,7 +189,8 @@ A large release with many fixes from a review of 2.8.2, most of them for securit
   Hindi. When the fleet agent did not answer a sign-in in time, an AI tool is told so at once for the next 30 seconds
   instead of waiting again.
 - **Settings → AI assistants** says why when **Allow AI assistants** or **Ask before changes** cannot be saved, and
-  shows the setting that is in effect.
+  shows the setting that is in effect. Without administrator rights it says to start Runner Manager as administrator,
+  before it creates a fleet code, installs the fleet agent or opens firewall ports.
 
 ### Setup and updates
 
@@ -188,6 +201,9 @@ A large release with many fixes from a review of 2.8.2, most of them for securit
   Manager, unless you uninstall or install to another folder.
 - An update is marked as working only after its fleet agent answers on this PC. An update whose agent stays up without
   answering is kept, not rolled back later, and rollback messages say what happened.
+- An update restarts the fleet agent once its commands and its AI assistant calls are done. It restarts the agent
+  anyway when no command has finished for 70 minutes, or 3 hours after the update at the latest; work that still runs
+  then is cut off.
 - Updates leave RunnerManager.exe missing for a shorter time, and put it back when an update was cut off. Otherwise a
   missing exe is not replaced, and the dashboard asks you to run setup again.
 - Downloads of updates stop when no data arrives for 60 seconds, and the .NET runtime download also has an overall
@@ -203,8 +219,8 @@ A large release with many fixes from a review of 2.8.2, most of them for securit
 ### Dashboard and windows
 
 - A **Needs attention** tile counts PCs that are offline, runners that are stopped, and runners whose job looks stuck,
-  runs long or waits although the runner is idle. Click it to show only those; click it again to show everything. It
-  is hidden when nothing needs attention.
+  runs long or waits although the runner is idle. A runner that was stopped with **Stop** is not counted. Click the
+  tile to show only those; click it again to show everything. It is hidden when nothing needs attention.
 - Danger dialogs (Delete runner, Leave fleet, Uninstall and the like) start on **Cancel**, so a repeated Enter no
   longer deletes anything. Long dialogs scroll, and their text can be selected and copied with Ctrl+C.
 - Fix: actions on other PCs show their result. A command that could not be sent shows a dialog, and a failed start or
