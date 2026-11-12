@@ -9,14 +9,14 @@ namespace RunnerManager.Tests;
 /// <summary>The joining PC accepts a code only after its own user has confirmed the 6-digit code.</summary>
 public class JoinConfirmationTests
 {
-    private static readonly TimeSpan Step = TimeSpan.FromSeconds(5);
+    // How long a test waits for what should happen at once: a step that hangs fails the test, a slow machine does not.
+    private static readonly TimeSpan Step = TimeSpan.FromSeconds(30);
 
     private static Pairing.PairingHost StartHost(byte[] key, Action<Pairing.JoinRequest> answer, out string address)
     {
-        var port = TestPorts.FreeRange(2);
-        var host = new Pairing.PairingHost(key, "HOSTPC", port, port + 1);
+        var port = 0;
+        var host = FreePorts.Listen(2, p => new Pairing.PairingHost(key, "HOSTPC", port = p, p + 1), h => h.Start());
         host.JoinRequested += answer;
-        host.Start();
         address = $"127.0.0.1:{port}";
         return host;
     }
@@ -119,14 +119,15 @@ public class JoinConfirmationTests
 /// <summary>The host's name and the one-way flag in "allow" are sealed with the code, and PCs from before that still pair.</summary>
 public class SealedAllowTests
 {
-    private static readonly TimeSpan Step = TimeSpan.FromSeconds(5);
+    // How long a test waits for what should happen at once: a step that hangs fails the test, a slow machine does not.
+    private static readonly TimeSpan Step = TimeSpan.FromSeconds(30);
 
     private static Pairing.PairingHost StartHost(byte[] key, Action<Pairing.JoinRequest> answer, out int port)
     {
-        port = TestPorts.FreeRange(2);
-        var host = new Pairing.PairingHost(key, "HOSTPC", port, port + 1);
+        var chosen = 0;
+        var host = FreePorts.Listen(2, p => new Pairing.PairingHost(key, "HOSTPC", chosen = p, p + 1), h => h.Start());
         host.JoinRequested += answer;
-        host.Start();
+        port = chosen;
         return host;
     }
 
@@ -323,16 +324,20 @@ public class SealedAllowTests
 /// </summary>
 public class ConfirmedMessageTests
 {
-    private static readonly TimeSpan Step = TimeSpan.FromSeconds(5);
+    // How long a test waits for what should happen at once: a step that hangs fails the test, a slow machine does not.
+    private static readonly TimeSpan Step = TimeSpan.FromSeconds(30);
     internal const Pairing.JoinerFeatures Current =
         Pairing.JoinerFeatures.SealedAllow | Pairing.JoinerFeatures.CanBeManaged | Pairing.JoinerFeatures.Confirms;
 
     internal static Pairing.PairingHost StartHost(Action<Pairing.JoinRequest> answer, out int port, TimeSpan? confirmTimeout = null)
     {
-        port = TestPorts.FreeRange(2);
-        var host = new Pairing.PairingHost(CommandSigner.NewKey(), "HOSTPC", port, port + 1) { ConfirmTimeout = confirmTimeout ?? Pairing.ConfirmTimeout };
+        var chosen = 0;
+        var host = FreePorts.Listen(2, p => new Pairing.PairingHost(CommandSigner.NewKey(), "HOSTPC", chosen = p, p + 1)
+        {
+            ConfirmTimeout = confirmTimeout ?? Pairing.ConfirmTimeout
+        }, h => h.Start());
         host.JoinRequested += answer;
-        host.Start();
+        port = chosen;
         return host;
     }
 
@@ -539,17 +544,45 @@ public class ConfirmedMessageTests
     }
 
     [Fact]
+    public async Task AHostThatDoesNotAnswerAfterTheYes_EndsTheJoinWhenTheWaitForDoneIsOver()
+    {
+        var key = CommandSigner.NewKey();
+        var port = 0;
+        using var host = FreePorts.Listen(2, p => new Pairing.PairingHost(key, "HOSTPC", port = p, p + 1), h => h.Start());
+        host.JoinRequested += request => request.Allow();
+        // The host is still saving the PC (or has gone) when the new PC stops waiting.
+        using var saved = new ManualResetEventSlim();
+        host.Joined += _ => saved.Wait(Step);
+        try
+        {
+            var waits = Pairing.JoinWaits.Default with { Done = TimeSpan.FromMilliseconds(200) };
+            var error = await Assert.ThrowsAsync<InvalidOperationException>(() => Pairing.JoinAsync($"127.0.0.1:{port}", "NEWPC", _ => { },
+                _ => Task.FromResult(true), CancellationToken.None, machineId: null, waits).WaitAsync(Step));
+            Assert.Equal("HOSTPC did not answer after the codes were confirmed. This PC has not joined. Try again.", error.Message);
+            Assert.IsType<TimeoutException>(error.InnerException);
+        }
+        finally { saved.Set(); }
+    }
+
+    [Fact]
+    public void ThePcWaitsForDone_LongerThanForAStep_AndLongerThanTheHostWaitsForItsSettings()
+    {
+        Assert.Equal(Pairing.JoinWaits.Default, new Pairing.JoinWaits(Pairing.StepTimeout, Pairing.DoneTimeout));
+        // The host may wait up to 10 seconds for its settings file before it answers.
+        Assert.True(Pairing.DoneTimeout >= Pairing.StepTimeout + TimeSpan.FromSeconds(10));
+    }
+
+    [Fact]
     public async Task AfterItsYes_ThePcWaitsForTheHostsAnswer_AlsoWhenTheJoinIsCancelled()
     {
         // The host adds the PC before it answers. A PC that left in that moment would have no code, and the host a PC.
         using var cancel = new CancellationTokenSource();
         var key = CommandSigner.NewKey();
-        var port = TestPorts.FreeRange(2);
-        using var host = new Pairing.PairingHost(key, "HOSTPC", port, port + 1);
+        var port = 0;
+        using var host = FreePorts.Listen(2, p => new Pairing.PairingHost(key, "HOSTPC", port = p, p + 1), h => h.Start());
         host.JoinRequested += request => request.Allow();
         // Back or Cancel, while the host saves the PC.
         host.Joined += _ => cancel.Cancel();
-        host.Start();
 
         var result = await Pairing.JoinAsync($"127.0.0.1:{port}", "NEWPC", _ => { }, _ => Task.FromResult(true), cancel.Token).WaitAsync(Step);
 
@@ -629,7 +662,8 @@ public class ConfirmedMessageTests
 /// </summary>
 public class JoinerMachineIdTests
 {
-    private static readonly TimeSpan Step = TimeSpan.FromSeconds(5);
+    // How long a test waits for what should happen at once: a step that hangs fails the test, a slow machine does not.
+    private static readonly TimeSpan Step = TimeSpan.FromSeconds(30);
     private const string Id = "0f8fad5bd9cb469fa16570867728950e";
 
     [Fact]
@@ -820,16 +854,16 @@ public class JoinerMachineIdTests
 
 public class PairingCommitmentTests
 {
-    private static readonly TimeSpan Step = TimeSpan.FromSeconds(5);
+    // How long a test waits for what should happen at once: a step that hangs fails the test, a slow machine does not.
+    private static readonly TimeSpan Step = TimeSpan.FromSeconds(30);
 
     [Fact]
     public async Task ACommitment_OpensToOneKeyOnly()
     {
-        var port = TestPorts.FreeRange(2);
-        using var host = new Pairing.PairingHost(CommandSigner.NewKey(), "HOSTPC", port, port + 1);
+        var port = 0;
+        using var host = FreePorts.Listen(2, p => new Pairing.PairingHost(CommandSigner.NewKey(), "HOSTPC", port = p, p + 1), h => h.Start());
         var requested = false;
         host.JoinRequested += request => { requested = true; request.Deny(); };
-        host.Start();
 
         using var client = new TcpClient();
         await client.ConnectAsync(IPAddress.Loopback, port);

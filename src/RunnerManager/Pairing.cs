@@ -36,12 +36,19 @@ public static class Pairing
     internal static readonly TimeSpan DecisionTimeout = TimeSpan.FromMinutes(3);
     /// <summary>How long a host waits for the user of the new PC to confirm the codes there.</summary>
     internal static readonly TimeSpan ConfirmTimeout = TimeSpan.FromMinutes(3);
-    private static readonly TimeSpan StepTimeout = TimeSpan.FromSeconds(10);
+    /// <summary>How long one PC waits for the other's next message while they exchange keys.</summary>
+    internal static readonly TimeSpan StepTimeout = TimeSpan.FromSeconds(10);
     /// <summary>
     /// How long a new PC waits for "done" after its "confirmed". Longer than a step: the host saves the PC before it
     /// answers, and may first wait for its settings file, for up to 10 seconds.
     /// </summary>
     internal static readonly TimeSpan DoneTimeout = TimeSpan.FromSeconds(30);
+
+    /// <summary>How long a new PC waits for the host's answers (tests shorten them).</summary>
+    internal sealed record JoinWaits(TimeSpan Step, TimeSpan Done)
+    {
+        public static readonly JoinWaits Default = new(StepTimeout, DoneTimeout);
+    }
 
     public sealed record Host(string Name, string Address, int Version = Version)
     {
@@ -233,8 +240,13 @@ public static class Pairing
     /// This PC's machine ID (<see cref="FleetConfig.LocalMachineId"/>). The host uses it to tell this PC from another
     /// PC with the same name. Without one, as in tests, none is sent, and the host treats this PC like an older one.
     /// </param>
-    public static async Task<JoinResult> JoinAsync(string address, string myName, Action<string> showCode,
+    public static Task<JoinResult> JoinAsync(string address, string myName, Action<string> showCode,
         Func<JoinOffer, Task<bool>> confirm, CancellationToken cancellationToken, string? machineId = null)
+        => JoinAsync(address, myName, showCode, confirm, cancellationToken, machineId, JoinWaits.Default);
+
+    /// <param name="waits">How long to wait for the host's answers.</param>
+    internal static async Task<JoinResult> JoinAsync(string address, string myName, Action<string> showCode,
+        Func<JoinOffer, Task<bool>> confirm, CancellationToken cancellationToken, string? machineId, JoinWaits waits)
     {
         var myId = SendableMachineId(machineId);
         var (host, typedPort) = FleetNetwork.SplitHostPort(address);
@@ -256,7 +268,7 @@ public static class Pairing
         }, cancellationToken);
         PairMessage hello;
         // A version 1 host does not know "commit" and closes the connection without an answer.
-        try { hello = await ReadAsync(stream, cancellationToken, StepTimeout); }
+        try { hello = await ReadAsync(stream, cancellationToken, waits.Step); }
         catch (IOException) { throw new InvalidOperationException($"{host} closed the connection. If it runs an older Runner Manager, update it there, then try again."); }
         if (hello.Type != "hello") throw new InvalidOperationException(hello.Error.Length > 0 ? hello.Error : "That PC is not accepting new PCs.");
         if (hello.Version < Version) throw new InvalidOperationException(UpdateMessage(hello.Name.Length > 0 ? hello.Name : host));
@@ -296,7 +308,7 @@ public static class Pairing
         try
         {
             var offer = new JoinOffer(result.HostName, result.Managed);
-            if (hostWaits) await ConfirmWithHostAsync(stream, transferKey, ConfirmedContext(myName, myId), offer, confirm, cancellationToken);
+            if (hostWaits) await ConfirmWithHostAsync(stream, transferKey, ConfirmedContext(myName, myId), offer, confirm, waits.Done, cancellationToken);
             else
             {
                 // An older host: it has added this PC already, and hears nothing more.
@@ -324,11 +336,11 @@ public static class Pairing
     /// </summary>
     /// <remarks>
     /// After a yes there is no leaving: the host may have added this PC already, so <paramref name="cancellationToken"/>
-    /// no longer ends the wait for "done". That wait ends by itself after <see cref="DoneTimeout"/>.
+    /// no longer ends the wait for "done". That wait ends by itself after <paramref name="doneTimeout"/>.
     /// </remarks>
     /// <param name="confirmedContext">What the proof in "confirmed" is sealed with: this PC's name and machine ID as it sent them.</param>
     private static async Task ConfirmWithHostAsync(Stream stream, byte[] transferKey, string confirmedContext, JoinOffer offer,
-        Func<JoinOffer, Task<bool>> confirm, CancellationToken cancellationToken)
+        Func<JoinOffer, Task<bool>> confirm, TimeSpan doneTimeout, CancellationToken cancellationToken)
     {
         var stopped = $"{offer.HostName} stopped waiting before the codes were confirmed on this PC. This PC was not added. " +
                       $"On {offer.HostName}, click “Add a PC” again, then try again.";
@@ -349,7 +361,7 @@ public static class Pairing
             cancellationToken.ThrowIfCancellationRequested();
             confirmed = true;
             await WriteAsync(stream, new PairMessage { Type = "confirmed", Payload = Proof(transferKey, confirmedContext) }, CancellationToken.None);
-            var done = await hostSays.WaitAsync(DoneTimeout);
+            var done = await hostSays.WaitAsync(doneTimeout);
             if (done.Type != "done") throw new InvalidOperationException(done.Error.Length > 0 ? done.Error : stopped);
             if (!IsProof(transferKey, done.Payload, DoneContext)) throw new CryptographicException("The pairing check failed. Try again.");
         }
@@ -457,6 +469,9 @@ public static class Pairing
 
         /// <summary>How long this host waits for the user of the new PC to confirm the codes there.</summary>
         internal TimeSpan ConfirmTimeout { get; init; } = Pairing.ConfirmTimeout;
+
+        /// <summary>How long this host waits for the new PC's next message while they exchange keys.</summary>
+        internal TimeSpan StepTimeout { get; init; } = Pairing.StepTimeout;
 
         public PairingHost(byte[] pairingKey, string name, int pairingPort = PairingPort, int announcePort = AnnouncePort)
         {

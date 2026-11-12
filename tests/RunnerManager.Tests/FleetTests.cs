@@ -17,17 +17,17 @@ public class PairingProtocolTests
         return (client, client.GetStream());
     }
 
-    private static readonly TimeSpan Step = TimeSpan.FromSeconds(5);
+    // How long a test waits for what should happen at once: a step that hangs fails the test, a slow machine does not.
+    private static readonly TimeSpan Step = TimeSpan.FromSeconds(30);
 
     [Fact]
     public async Task HostAndJoiner_OnLoopback_ShowTheSameCode_AndTheRequestEnds()
     {
         var key = CommandSigner.NewKey();
-        var port = TestPorts.FreeRange(2);
-        using var host = new Pairing.PairingHost(key, "HOSTPC", port, port + 1);
+        var port = 0;
+        using var host = FreePorts.Listen(2, p => new Pairing.PairingHost(key, "HOSTPC", port = p, p + 1), h => h.Start());
         Pairing.JoinRequest? seen = null;
         host.JoinRequested += request => { seen = request; request.Allow(); };
-        host.Start();
 
         string? joinerCode = null;
         var result = await Pairing.JoinAsync($"127.0.0.1:{port}", "NEWPC", code => joinerCode = code, CancellationToken.None);
@@ -43,11 +43,10 @@ public class PairingProtocolTests
     [Fact]
     public async Task JoinerRevealingAnotherKey_ThanItCommittedTo_IsRefused()
     {
-        var port = TestPorts.FreeRange(2);
-        using var host = new Pairing.PairingHost(CommandSigner.NewKey(), "HOSTPC", port, port + 1);
+        var port = 0;
+        using var host = FreePorts.Listen(2, p => new Pairing.PairingHost(CommandSigner.NewKey(), "HOSTPC", port = p, p + 1), h => h.Start());
         var requested = false;
         host.JoinRequested += request => { requested = true; request.Allow(); };
-        host.Start();
 
         var (client, stream) = await ConnectAsync(port);
         using (client)
@@ -80,10 +79,9 @@ public class PairingProtocolTests
     [Fact]
     public async Task OlderJoiner_IsToldToUpdate()
     {
-        var port = TestPorts.FreeRange(2);
-        using var host = new Pairing.PairingHost(CommandSigner.NewKey(), "HOSTPC", port, port + 1);
+        var port = 0;
+        using var host = FreePorts.Listen(2, p => new Pairing.PairingHost(CommandSigner.NewKey(), "HOSTPC", port = p, p + 1), h => h.Start());
         host.JoinRequested += request => request.Allow();
-        host.Start();
 
         var (client, stream) = await ConnectAsync(port);
         using (client)
@@ -144,11 +142,10 @@ public class PairingProtocolTests
     [Fact]
     public async Task StoppingTheHost_TellsWaitingPcsNo()
     {
-        var port = TestPorts.FreeRange(2);
-        var host = new Pairing.PairingHost(CommandSigner.NewKey(), "HOSTPC", port, port + 1);
+        var port = 0;
+        var host = FreePorts.Listen(2, p => new Pairing.PairingHost(CommandSigner.NewKey(), "HOSTPC", port = p, p + 1), h => h.Start());
         var requested = new TaskCompletionSource<Pairing.JoinRequest>();
         host.JoinRequested += request => requested.TrySetResult(request);
-        host.Start();
 
         var join = Pairing.JoinAsync($"127.0.0.1:{port}", "NEWPC", _ => { }, CancellationToken.None);
         var request = await requested.Task.WaitAsync(Step);
@@ -162,9 +159,8 @@ public class PairingProtocolTests
     [Fact]
     public async Task Host_TurnsAwayConnectionsBeyondItsLimit()
     {
-        var port = TestPorts.FreeRange(2);
-        using var host = new Pairing.PairingHost(CommandSigner.NewKey(), "HOSTPC", port, port + 1);
-        host.Start();
+        var port = 0;
+        using var host = FreePorts.Listen(2, p => new Pairing.PairingHost(CommandSigner.NewKey(), "HOSTPC", port = p, p + 1), h => h.Start());
         var waiting = new List<TcpClient>();
         try
         {
