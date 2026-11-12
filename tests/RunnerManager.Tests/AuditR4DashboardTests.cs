@@ -82,4 +82,27 @@ public class AuditR4DashboardTests
         Assert.True(MainWindow.ReadsLocalRunners(false, noneKnown: true, true, true, justNow));
         Assert.True(MainWindow.ReadsLocalRunners(false, false, lastReadWithGitHub: null, gitHubConnected: false, justNow));
     }
+
+    // ----- 4: a sign-in check that started before Disconnect or Reconnect -----
+
+    [Fact]
+    public void SignInCheck_ThatStartedBeforeDisconnect_ThrowsItsAnswerAway()
+    {
+        // gh still said "connected" to the check that started before Disconnect: it does not show "Connected" again.
+        Assert.Null(MainWindow.SignInToShow(wasAuthenticated: true, answer: true, changedMeanwhile: true));
+        Assert.Null(MainWindow.SignInToShow(wasAuthenticated: true, answer: null, changedMeanwhile: true));
+        // A check that started after it shows its answer.
+        Assert.False(MainWindow.SignInToShow(wasAuthenticated: false, answer: false, changedMeanwhile: false));
+        Assert.True(MainWindow.SignInToShow(wasAuthenticated: false, answer: true, changedMeanwhile: false));
+    }
+
+    // ----- 10: a sign-in check that failed -----
+
+    [Fact]
+    public void SignInCheck_ThatFailed_HasStillAnswered()
+    {
+        // gh gave no answer: what was shown stays, and the check counts as answered, so "Checking…" ends.
+        Assert.False(MainWindow.SignInToShow(wasAuthenticated: false, answer: null, changedMeanwhile: false));
+        Assert.True(MainWindow.SignInToShow(wasAuthenticated: true, answer: null, changedMeanwhile: false));
+    }
 }

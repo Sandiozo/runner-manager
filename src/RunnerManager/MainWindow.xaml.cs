@@ -291,41 +291,71 @@ public partial class MainWindow : Window
         _gitHubCheck = CheckGitHubAsync();
     }
 
+    /// <summary>
+    /// How often Disconnect and Reconnect changed the sign-in. A check that started before a change answers for the
+    /// sign-in before it, so its answer is thrown away.
+    /// </summary>
+    private int _signInChanges;
+
+    /// <summary>gh was signed out on this PC (Disconnect, Reconnect). A sign-in check that still runs answers for before.</summary>
+    private void ForgetGitHubSignIn()
+    {
+        _githubAuthenticated = false;
+        _githubLogin = string.Empty;
+        _signInChanges++;
+    }
+
+    /// <summary>
+    /// The sign-in a check shows: gh's answer, or what was shown before when gh failed to answer (the check has still
+    /// answered, so "Checking…" ends). Null when Disconnect or Reconnect changed the sign-in while gh answered: the answer
+    /// is from before the change, and nothing is shown.
+    /// </summary>
+    internal static bool? SignInToShow(bool wasAuthenticated, bool? answer, bool changedMeanwhile)
+        => changedMeanwhile ? null : answer ?? wasAuthenticated;
+
+    /// <summary>Asks gh whether GitHub is connected, and shows it. It never throws: it is awaited from event handlers.</summary>
     private async Task CheckGitHubAsync()
     {
+        var changes = _signInChanges;
         var wasAuthenticated = _githubAuthenticated;
         var wasChecked = _githubChecked;
-        bool authenticated;
+        bool? answer = null;
         var login = _githubLogin;
         try
         {
-            authenticated = await GitHubCli.IsAuthenticatedAsync();
-            if (authenticated && (!wasAuthenticated || login.Length == 0))
+            answer = await GitHubCli.IsAuthenticatedAsync();
+            if (answer == true && (!wasAuthenticated || login.Length == 0))
             {
                 var user = await GitHubCli.RunAsync("api user --jq .login");
                 // Without an answer (no network, for example) the name read before stays.
                 if (user.ExitCode == 0) login = user.Output.Trim();
             }
         }
-        catch (Exception ex)
+        catch (Exception ex) { AddActivity($"Could not check the GitHub connection: {ex.Message}"); }
+        try
         {
-            AddActivity($"Could not check the GitHub connection: {ex.Message}");
-            return;
+            if (SignInToShow(wasAuthenticated, answer, changedMeanwhile: changes != _signInChanges) is not { } authenticated)
+            {
+                // The next refresh asks again.
+                _lastAuthCheck = DateTime.MinValue;
+                return;
+            }
+            _githubAuthenticated = authenticated;
+            _githubLogin = authenticated ? login : string.Empty;
+            _githubChecked = true;
+            ApplyGitHubStatus();
+            UpdatePageHeader();
+            if (authenticated == wasAuthenticated)
+            {
+                if (!wasChecked) ShowIdleStatus();
+                return;
+            }
+            // Connected now: what GitHub refused before (no sign-in) is asked again at once, not after its pause.
+            if (authenticated) GitHubCli.ForgetProblems();
+            // This PC's runners were read the other way, with or without GitHub, so the refresh reads them again.
+            await RefreshAsync();
         }
-        _githubAuthenticated = authenticated;
-        _githubLogin = authenticated ? login : string.Empty;
-        _githubChecked = true;
-        ApplyGitHubStatus();
-        UpdatePageHeader();
-        if (authenticated == wasAuthenticated)
-        {
-            if (!wasChecked) ShowIdleStatus();
-            return;
-        }
-        // Connected now: what GitHub refused before (no sign-in) is asked again at once, not after its pause.
-        if (authenticated) GitHubCli.ForgetProblems();
-        // This PC's runners were read the other way, with or without GitHub, so the refresh reads them again.
-        await RefreshAsync();
+        catch (Exception ex) { AddActivity($"Could not show the GitHub connection: {ex.Message}"); }
     }
 
     /// <summary>
@@ -903,8 +933,7 @@ public partial class MainWindow : Window
             {
                 await GitHubCli.DisconnectAsync();
                 // So the refresh after it does not ask GitHub; the sign-in check that it starts says the same.
-                _githubAuthenticated = false;
-                _githubLogin = string.Empty;
+                ForgetGitHubSignIn();
                 ApplyGitHubStatus();
                 log("GitHub disconnected.");
             });
@@ -940,8 +969,7 @@ public partial class MainWindow : Window
                 await GitHubCli.DisconnectAsync();
             GitHubCli.LaunchLogin();
             AddActivity("Reconnecting GitHub. Complete sign-in in the browser or terminal window.");
-            _githubAuthenticated = false;
-            _githubLogin = string.Empty;
+            ForgetGitHubSignIn();
             WatchGitHubSignIn();
             await RefreshAsync(forceAuthCheck: true);
         }
