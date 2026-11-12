@@ -9,6 +9,12 @@ internal sealed record FleetAttention(int OfflinePcs, int StoppedRunners, int St
 {
     public int Total => OfflinePcs + StoppedRunners + StuckJobs + LongJobs + IdleRunners;
 
+    /// <summary>
+    /// A runner that is not running, unless it was stopped on purpose with Stop. A console runner that is stopped because
+    /// nobody is signed in on its PC counts: nothing runs its jobs.
+    /// </summary>
+    public static bool IsUnexpectedlyStopped(MachineRunnerStatus runner) => !runner.IsRunning && !runner.ManuallyStopped;
+
     public static FleetAttention Count(IEnumerable<MachineInfo> machines)
     {
         int offline = 0, stopped = 0, stuck = 0, longJobs = 0, idle = 0;
@@ -19,7 +25,7 @@ internal sealed record FleetAttention(int OfflinePcs, int StoppedRunners, int St
                 offline++;
                 continue;
             }
-            stopped += machine.Runners.Count(r => !r.IsRunning);
+            stopped += machine.Runners.Count(IsUnexpectedlyStopped);
             // A stopped runner is counted as stopped only.
             foreach (var runner in machine.ProblemRunners.Where(r => r.IsRunning))
             {
@@ -34,8 +40,11 @@ internal sealed record FleetAttention(int OfflinePcs, int StoppedRunners, int St
         return new FleetAttention(offline, stopped, stuck, longJobs, idle);
     }
 
-    /// <summary>A runner on a PC that is online needs attention when it is stopped or has a concern.</summary>
-    public static bool RunnerNeedsAttention(MachineRunnerStatus runner) => !runner.IsRunning || runner.Health.IsProblem;
+    /// <summary>
+    /// A runner on a PC that is online needs attention when it is stopped (not on purpose) or has a concern, as
+    /// <see cref="Count"/> counts it.
+    /// </summary>
+    public static bool RunnerNeedsAttention(MachineRunnerStatus runner) => IsUnexpectedlyStopped(runner) || runner.Health.IsProblem;
 
     /// <summary>A PC is shown by the filter when it is offline or has a runner that needs attention.</summary>
     public static bool PcNeedsAttention(MachineInfo machine) => !machine.IsReachable || machine.Runners.Any(RunnerNeedsAttention);
