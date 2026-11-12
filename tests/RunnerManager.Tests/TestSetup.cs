@@ -19,13 +19,18 @@ internal static class TestSetup
         Environment.SetEnvironmentVariable("RUNNER_MANAGER_STATE_DIR", StateDir);
         AssistantSwitches.Store = new FileSwitchStore(Path.Combine(StateDir, "assistant-switches.json"));
         MachineInstall.Records = new MemoryInstallRecords();
-        MachineInstall.Tasks = new MemoryTasks();
+        var tasks = new MemoryTasks();
+        MachineInstall.Tasks = tasks;
+        ScheduledTasks.Scheduler = tasks;
         MachineInstall.HasProfile = _ => true;
     }
 }
 
-/// <summary>Scheduled tasks in memory, in place of Task Scheduler. Only in the tests.</summary>
-internal sealed class MemoryTasks : ITaskReader
+/// <summary>
+/// Scheduled tasks in memory, in place of Task Scheduler: what Runner Manager reads, and what it runs schtasks.exe for
+/// (registering, deleting, starting and ending tasks), which is recorded in <see cref="Calls"/>. Only in the tests.
+/// </summary>
+internal sealed class MemoryTasks : ITaskReader, ITaskScheduler
 {
     /// <summary>The tasks by name. A null definition stands for a task that exists but cannot be read.</summary>
     public Dictionary<string, string?> Definitions { get; } = new(StringComparer.OrdinalIgnoreCase);
@@ -33,9 +38,71 @@ internal sealed class MemoryTasks : ITaskReader
     /// <summary>False stands for a list of tasks that cannot be read.</summary>
     public bool NamesReadable { get; set; } = true;
 
+    /// <summary>The tasks that run now.</summary>
+    public HashSet<string> Running { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>What was done to the tasks, in order: "Create …", "Delete …", "Run …" or "End …" and the task's name. Reads are not recorded.</summary>
+    public List<string> Calls { get; } = new();
+
     public IReadOnlyList<string>? Names() => NamesReadable ? Definitions.Keys.ToList() : null;
 
     public Task<string?> ReadAsync(string name) => Task.FromResult(Definitions.TryGetValue(name, out var xml) ? xml : string.Empty);
+
+    private static readonly System.Text.RegularExpressions.Regex Arguments =
+        new("^/(?<verb>Query|Create|Delete|Run|End)(?: /F)? /TN \"(?<name>[^\"]*)\"(?<xml> /XML(?: \"(?<path>[^\"]*)\")?)?$");
+
+    public Task<(int ExitCode, string Output)> SchtasksAsync(string arguments)
+    {
+        var match = Arguments.Match(arguments);
+        if (!match.Success) throw new InvalidOperationException($"The test scheduler does not know: schtasks {arguments}");
+        var name = match.Groups["name"].Value;
+        var exists = Definitions.TryGetValue(name, out var xml);
+        (int, string) Missing() => (1, $"ERROR: The system cannot find the file specified. ({name})");
+        lock (Calls)
+        {
+            switch (match.Groups["verb"].Value)
+            {
+                case "Query":
+                    if (!exists) return Task.FromResult(Missing());
+                    if (!match.Groups["xml"].Success) return Task.FromResult((0, name));
+                    return Task.FromResult(xml == null ? (1, "ERROR: Access is denied.") : (0, xml));
+                case "Create":
+                    Definitions[name] = File.ReadAllText(match.Groups["path"].Value);
+                    Unindexed.Remove(name);
+                    Calls.Add($"Create {name}");
+                    return Task.FromResult((0, $"SUCCESS: The scheduled task \"{name}\" has successfully been created."));
+                case "Delete":
+                    Calls.Add($"Delete {name}");
+                    Running.Remove(name);
+                    return Task.FromResult(Definitions.Remove(name) ? (0, "SUCCESS") : Missing());
+                case "Run":
+                    Calls.Add($"Run {name}");
+                    if (!exists) return Task.FromResult(Missing());
+                    Running.Add(name);
+                    return Task.FromResult((0, "SUCCESS"));
+                default:
+                    Calls.Add($"End {name}");
+                    Running.Remove(name);
+                    return Task.FromResult(exists ? (0, "SUCCESS") : Missing());
+            }
+        }
+    }
+
+    /// <summary>Tasks that exist but are missing from Task Scheduler's index, so they cannot run.</summary>
+    public HashSet<string> Unindexed { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    public bool? IsIndexed(string name) => !Definitions.ContainsKey(name) ? null : !Unindexed.Contains(name);
+
+    public bool? IsRegistered(string name) => NamesReadable ? Definitions.ContainsKey(name) : null;
+
+    public Task<bool?> IsRunningAsync(string name) => Task.FromResult<bool?>(Running.Contains(name));
+
+    public Task<IDisposable> LockAsync() => Task.FromResult<IDisposable>(new NoLock());
+
+    private sealed class NoLock : IDisposable
+    {
+        public void Dispose() { }
+    }
 }
 
 /// <summary>
@@ -46,14 +113,19 @@ internal sealed class TestInstallState : IDisposable
 {
     private readonly IInstallRecordStore _records = MachineInstall.Records;
     private readonly ITaskReader _tasks = MachineInstall.Tasks;
+    private readonly ITaskScheduler _scheduler = ScheduledTasks.Scheduler;
     private readonly Func<string, bool> _hasProfile = MachineInstall.HasProfile;
 
     public TestInstallState()
     {
         MachineInstall.Records = Records;
         MachineInstall.Tasks = Tasks;
+        ScheduledTasks.Scheduler = Tasks;
         MachineInstall.HasProfile = sid => !WithoutProfile.Contains(sid);
         MachineInstall.Forget();
+        MachineRelay.ForgetAgentInstalled();
+        AgentOwnership.Forget();
+        ScheduledTasks.ForgetLogged();
     }
 
     public MemoryInstallRecords Records { get; } = new();
@@ -67,8 +139,11 @@ internal sealed class TestInstallState : IDisposable
     {
         MachineInstall.Records = _records;
         MachineInstall.Tasks = _tasks;
+        ScheduledTasks.Scheduler = _scheduler;
         MachineInstall.HasProfile = _hasProfile;
         MachineInstall.Forget();
+        MachineRelay.ForgetAgentInstalled();
+        AgentOwnership.Forget();
     }
 }
 

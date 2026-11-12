@@ -143,22 +143,20 @@ public static class Installer
         await ScheduledTasks.RegisterLaunchTaskAsync(exe);
         await MigrateSharedTasksAsync(exe);
         if (choices.StartWithWindows == true) await RegisterStartupTaskAsync(exe);
-        else if (choices.StartWithWindows == false) await ScheduledTasks.DeleteTaskAsync(ScheduledTasks.DashboardTaskName);
+        else if (choices.StartWithWindows == false) await ScheduledTasks.DeleteOwnTaskAsync(ScheduledTasks.DashboardTaskName);
         // Unknown (the task could not be read): kept as it is, but pointed at this copy when it exists.
         else if (!await UpdateStartupTaskAsync(exe)) log("The startup task could not be updated now. Runner Manager updates it on a later start.");
         await LegacyInstall.MigrateAsync(log, fromSetup: true);
 
         // An agent from an earlier install keeps running from the old place; point it at the new copy. Another Windows
-        // user's agent is left alone.
-        if (await MachineRelay.IsAgentInstalledAsync())
+        // user's agent is left alone, and so is a task under the agent's name that is not this user's own with the
+        // highest rights (see IsAgentInstalledAsync).
+        if (await AgentOwnership.OtherUserAsync() is { } other)
+            log($"The fleet agent on this PC runs for {other}, so it was left alone.");
+        else if (await MachineRelay.IsAgentInstalledAsync())
         {
-            if (await AgentOwnership.OtherUserAsync() is { } other)
-                log($"The fleet agent on this PC runs for {other}, so it was left alone.");
-            else
-            {
-                log("Updating the fleet agent...");
-                await MachineRelay.UpdateLocalAgentAsync(log);
-            }
+            log("Updating the fleet agent...");
+            await MachineRelay.UpdateLocalAgentAsync(log);
         }
 
         if (moving && await MachineInstall.OtherUsersOfAsync(previous!) is { KeepFiles: true } others)
@@ -237,13 +235,15 @@ public static class Installer
 
     /// <summary>
     /// Whether Runner Manager starts with Windows for this user: by its own startup task, or by one of an older version
-    /// that setup moves over (the shared task of 2.3 and earlier when it is this user's, or RunnerWidget's). Null when a
-    /// task could not be read, so setup leaves the startup task as it is.
+    /// that setup moves over (the shared task of 2.3 and earlier, or RunnerWidget's). Each counts only as this user's own
+    /// task with the highest rights (see <see cref="ScheduledTasks.IsOwnElevatedTask"/>), so a task under the name that
+    /// another program created never makes setup register the startup task. Null when a task could not be read, so setup
+    /// leaves the startup task as it is.
     /// </summary>
     internal static async Task<bool?> StartsWithWindowsAsync() => AnyStartupTask(
-        await ScheduledTasks.ExistsOrUnknownAsync(ScheduledTasks.DashboardTaskName),
-        await IsOwnTaskOrUnknownAsync(ScheduledTasks.SharedDashboardTaskName),
-        await ScheduledTasks.ExistsOrUnknownAsync(ScheduledTasks.LegacyDashboardTaskName));
+        await ScheduledTasks.IsOwnElevatedTaskAsync(ScheduledTasks.DashboardTaskName),
+        await ScheduledTasks.IsOwnElevatedTaskAsync(ScheduledTasks.SharedDashboardTaskName),
+        await ScheduledTasks.IsOwnElevatedTaskAsync(ScheduledTasks.LegacyDashboardTaskName));
 
     /// <summary>True when any startup task was found, otherwise null when one could not be read, otherwise false.</summary>
     internal static bool? AnyStartupTask(params bool?[] found)
@@ -276,10 +276,18 @@ public static class Installer
         if (done) InstallChecks.MarkDone(LaunchTaskCheck);
     }
 
-    /// <summary>Registers this user's "start with Windows" task again when it needs it (see <see cref="StartupTaskNeedsRegistering"/>). False when that waits.</summary>
+    /// <summary>
+    /// Registers this user's "start with Windows" task again when it needs it (see <see cref="StartupTaskNeedsRegistering"/>).
+    /// A task under its name that is not this user's own with the highest rights is left as it is, and logged. False when
+    /// the registration waits.
+    /// </summary>
     internal static async Task<bool> UpdateStartupTaskAsync(string exe)
-        => !StartupTaskNeedsRegistering(await ScheduledTasks.QueryXmlAsync(ScheduledTasks.DashboardTaskName), exe)
-           || await RegisterIfIdleAsync(ScheduledTasks.DashboardTaskName, () => RegisterStartupTaskAsync(exe));
+    {
+        var xml = await ScheduledTasks.QueryXmlAsync(ScheduledTasks.DashboardTaskName);
+        if (xml.Length > 0 && !ScheduledTasks.IsOwnElevatedTask(xml)) ScheduledTasks.LogLeftAlone(ScheduledTasks.DashboardTaskName, xml);
+        return !StartupTaskNeedsRegistering(xml, exe)
+               || await RegisterIfIdleAsync(ScheduledTasks.DashboardTaskName, () => RegisterStartupTaskAsync(exe));
+    }
 
     /// <summary>
     /// Changes a task (<paramref name="change"/> registers it again or deletes it) only while no instance of it runs:
@@ -298,41 +306,33 @@ public static class Installer
 
     /// <summary>
     /// Whether this user's "start with Windows" task must be registered again: it is turned on but starts another exe or
-    /// runs below normal priority. A missing or turned-off task is left as the user chose.
+    /// runs below normal priority. A missing or turned-off task is left as the user chose, and so is a task under the name
+    /// that is not this user's own with the highest rights (see <see cref="ScheduledTasks.IsOwnElevatedTask"/>): any program
+    /// of the user can create one, and it must not make Runner Manager register its startup task.
     /// </summary>
     internal static bool StartupTaskNeedsRegistering(string xml, string exe)
-        => xml.Length > 0 && ScheduledTasks.IsEnabled(xml) && ScheduledTasks.IsCurrentUser(ScheduledTasks.PrincipalOf(xml))
-           && (!ScheduledTasks.HasCurrentPriority(xml) || !string.Equals(ScheduledTasks.CommandOf(xml), exe, StringComparison.OrdinalIgnoreCase));
+        => xml.Length > 0 && ScheduledTasks.IsEnabled(xml) && ScheduledTasks.ExeOfOwnElevatedTask(xml) is { } command
+           && (!ScheduledTasks.HasCurrentPriority(xml) || !string.Equals(command, exe, StringComparison.OrdinalIgnoreCase));
 
     /// <summary>
     /// 2.3 and earlier named the launch and startup tasks the same for every Windows user, so a second user's setup took
-    /// them over. When they are this user's, they move to this user's own names; another user's are left alone. A shared
-    /// task that runs now is moved on a later start. Returns false when something was left for later.
+    /// them over. When they are this user's own with the highest rights, they move to this user's own names; another
+    /// user's, and a task under the name that any program could have created, are left alone. A shared task that runs now
+    /// is moved on a later start. Returns false when something was left for later.
     /// </summary>
-    private static async Task<bool> MigrateSharedTasksAsync(string exe)
+    internal static async Task<bool> MigrateSharedTasksAsync(string exe)
     {
         var done = true;
-        if (await IsOwnTaskAsync(ScheduledTasks.SharedDashboardTaskName))
+        if (await ScheduledTasks.IsOwnElevatedTaskAsync(ScheduledTasks.SharedDashboardTaskName) == true)
             done &= await RegisterIfIdleAsync(ScheduledTasks.SharedDashboardTaskName, async () =>
             {
                 await RegisterStartupTaskAsync(exe);
                 await ScheduledTasks.DeleteTaskAsync(ScheduledTasks.SharedDashboardTaskName);
             });
-        if (await IsOwnTaskAsync(ScheduledTasks.SharedLaunchTaskName))
+        if (await ScheduledTasks.IsOwnElevatedTaskAsync(ScheduledTasks.SharedLaunchTaskName) == true)
             done &= await RegisterIfIdleAsync(ScheduledTasks.SharedLaunchTaskName,
                 () => ScheduledTasks.DeleteTaskAsync(ScheduledTasks.SharedLaunchTaskName));
         return done;
-    }
-
-    private static async Task<bool> IsOwnTaskAsync(string name) => await IsOwnTaskOrUnknownAsync(name) == true;
-
-    /// <summary>Whether the task exists and is this user's; null when it could not be read.</summary>
-    private static async Task<bool?> IsOwnTaskOrUnknownAsync(string name)
-    {
-        var xml = await ScheduledTasks.QueryXmlAsync(name);
-        if (xml.Length == 0) return ScheduledTasks.IsRegistered(name) == false ? false : null;
-        var principal = ScheduledTasks.PrincipalOf(xml);
-        return principal.Length > 0 && ScheduledTasks.IsCurrentUser(principal);
     }
 
     /// <summary>Setup writes DisplayVersion, and updates replace the exe without setup, so refresh it when it is outdated.</summary>
@@ -480,10 +480,7 @@ public static class Installer
         else if (FleetConfig.Current.FleetKey != null || await MachineRelay.IsAgentInstalledAsync())
             await MachineRelay.LeaveFleetAsync(log);
         log("Removing the scheduled tasks and shortcuts...");
-        foreach (var task in new[] { ScheduledTasks.DashboardTaskName, ScheduledTasks.LaunchTaskName, ScheduledTasks.LegacyDashboardTaskName })
-            await ScheduledTasks.DeleteTaskAsync(task);
-        foreach (var task in new[] { ScheduledTasks.SharedDashboardTaskName, ScheduledTasks.SharedLaunchTaskName })
-            if (await IsOwnTaskAsync(task)) await ScheduledTasks.DeleteTaskAsync(task);
+        await RemoveOwnDashboardTasksAsync();
         TryDelete(StartMenuShortcut);
         TryDelete(DesktopShortcut);
         try { Registry.CurrentUser.DeleteSubKeyTree(UninstallKey, throwOnMissingSubKey: false); } catch { }
@@ -533,6 +530,19 @@ public static class Installer
         AppUpdater.RunAfterExit(scripts.Count == 0 ? "$null" : string.Join("; ", scripts), timeout: null, TimeSpan.FromSeconds(1), environment);
         log("Runner Manager was removed.");
         return note;
+    }
+
+    /// <summary>
+    /// Deletes this user's dashboard tasks for uninstall: the startup and launch tasks, those of 2.3 and earlier and
+    /// RunnerWidget's startup task. Each only when it is this user's own task with the highest rights (see
+    /// <see cref="ScheduledTasks.DeleteOwnTaskAsync"/>); another Windows user's task, or one that any program could have
+    /// created under the name, is left as it is.
+    /// </summary>
+    internal static async Task RemoveOwnDashboardTasksAsync()
+    {
+        foreach (var task in new[] { ScheduledTasks.DashboardTaskName, ScheduledTasks.LaunchTaskName, ScheduledTasks.LegacyDashboardTaskName,
+                     ScheduledTasks.SharedDashboardTaskName, ScheduledTasks.SharedLaunchTaskName })
+            await ScheduledTasks.DeleteOwnTaskAsync(task);
     }
 
     /// <summary>

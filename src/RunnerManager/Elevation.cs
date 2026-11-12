@@ -45,11 +45,15 @@ public static class Elevation
         return false;
     }
 
-    /// <summary>Whether a launch task's definition starts <paramref name="exe"/> for this user and is turned on.</summary>
+    /// <summary>
+    /// Whether a launch task's definition starts <paramref name="exe"/> for this user with the highest rights and is turned
+    /// on. A launch task without the highest rights, which any program of the user can create under a free name, would
+    /// start Runner Manager without administrator rights, so it is not used, and the dashboard registers its own instead.
+    /// </summary>
     internal static bool IsUsableLaunchTask(string xml, string exe)
         => ScheduledTasks.IsEnabled(xml)
-           && ScheduledTasks.IsCurrentUser(ScheduledTasks.PrincipalOf(xml))
-           && string.Equals(ScheduledTasks.CommandOf(xml), exe, StringComparison.OrdinalIgnoreCase);
+           && ScheduledTasks.ExeOfOwnElevatedTask(xml) is { } command
+           && string.Equals(command, exe, StringComparison.OrdinalIgnoreCase);
 
     private static async Task<bool> WaitForDashboardAsync(TimeSpan timeout)
     {

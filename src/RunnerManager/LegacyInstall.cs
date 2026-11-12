@@ -19,23 +19,28 @@ public static class LegacyInstall
     /// Setup passes true for <paramref name="fromSetup"/>: it always checks, and it registers the launch and start-up
     /// tasks and the shortcuts itself, so only the legacy tasks are moved here.
     /// </summary>
-    internal static async Task MigrateAsync(Action<string> log, bool fromSetup)
+    internal static Task MigrateAsync(Action<string> log, bool fromSetup)
+        => MigrateAsync(log, fromSetup, AppUpdater.InstalledExe, LegacyExe, AppPaths.LegacyStateDir);
+
+    /// <summary>The migration with the installed exe and RunnerWidget's exe and data folder given (tests pass folders of their own).</summary>
+    internal static async Task MigrateAsync(Action<string> log, bool fromSetup, string exe, string legacyExe, string legacyStateDir)
     {
         // Nothing to point the tasks at yet (for example a build folder); setup migrates when it installs.
-        if (!File.Exists(AppUpdater.InstalledExe)) return;
+        if (!File.Exists(exe)) return;
         // Querying scheduled tasks is slow, so the dashboard only does it while legacy files remain, or once per version.
-        var legacyFilesExist = File.Exists(LegacyExe) || Directory.Exists(AppPaths.LegacyStateDir);
+        var legacyFilesExist = File.Exists(legacyExe) || Directory.Exists(legacyStateDir);
         if (!fromSetup && !legacyFilesExist && InstallChecks.IsDone(Check)) return;
 
-        var legacyAgentTask = await ScheduledTasks.ExistsAsync(ScheduledTasks.LegacyAgentTaskName);
-        var legacyDashboardTask = await ScheduledTasks.ExistsAsync(ScheduledTasks.LegacyDashboardTaskName);
-        if (!File.Exists(LegacyExe) && !legacyAgentTask && !legacyDashboardTask)
+        // RunnerWidget registered its tasks with the highest rights. A task under its names that does not run with them,
+        // or is another Windows user's, may have been created by any program, so it is left as it is (and logged).
+        var legacyAgentTask = await ScheduledTasks.IsOwnElevatedTaskAsync(ScheduledTasks.LegacyAgentTaskName) == true;
+        var legacyDashboardTask = await ScheduledTasks.IsOwnElevatedTaskAsync(ScheduledTasks.LegacyDashboardTaskName) == true;
+        if (!File.Exists(legacyExe) && !legacyAgentTask && !legacyDashboardTask)
         {
             InstallChecks.MarkDone(Check);
             return;
         }
 
-        var exe = AppUpdater.InstalledExe;
         log("Moving the install from RunnerWidget to Runner Manager...");
         if (legacyAgentTask)
         {
@@ -59,7 +64,7 @@ public static class LegacyInstall
         }
 
         // The old exe may still be running (an old dashboard); the next start removes it.
-        try { File.Delete(LegacyExe); } catch { }
+        try { File.Delete(legacyExe); } catch { }
         InstallChecks.MarkDone(Check);
         log("Install moved to Runner Manager.");
     }

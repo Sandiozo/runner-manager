@@ -91,7 +91,8 @@ public partial class SettingsWindow : Window
     {
         try
         {
-            StartupToggle.IsChecked = await ScheduledTasks.ExistsAsync(ScheduledTasks.DashboardTaskName);
+            // Only Runner Manager's own task counts: one under its name that another program created does not start it.
+            StartupToggle.IsChecked = await ScheduledTasks.IsOwnElevatedTaskAsync(ScheduledTasks.DashboardTaskName) == true;
             StartupRow.Description = StartupDescription;
         }
         catch (Exception ex)
@@ -188,7 +189,7 @@ public partial class SettingsWindow : Window
             if (StartupToggle.IsChecked == true)
                 await Installer.RegisterStartupTaskAsync(AppUpdater.PreferredExe);
             else
-                await ScheduledTasks.DeleteTaskAsync(ScheduledTasks.DashboardTaskName);
+                await ScheduledTasks.DeleteOwnTaskAsync(ScheduledTasks.DashboardTaskName);
         }
         catch (Exception ex)
         {

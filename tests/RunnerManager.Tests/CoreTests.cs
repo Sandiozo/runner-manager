@@ -663,5 +663,5 @@ public class TaskIndexTests
     [Fact]
     public void MissingTask_IsNotReportedAsUnindexed()
         // Only a task that exists and is missing from Task Scheduler's index is repaired.
-        => Assert.Null(ScheduledTasks.IsIndexed("Runner Manager test " + Guid.NewGuid().ToString("N")));
+        => Assert.Null(new WindowsTaskScheduler().IsIndexed("Runner Manager test " + Guid.NewGuid().ToString("N")));
 }

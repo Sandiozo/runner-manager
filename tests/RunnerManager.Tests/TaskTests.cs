@@ -152,10 +152,10 @@ public class TaskStateTests
     public void TheTaskState_IsReadByWindowsPowerShell_WithTheNameInTheEnvironment()
     {
         var code = System.IO.File.ReadAllText(System.IO.Path.Combine(InstallEvidenceTests.SourceDir, "ScheduledTasks.cs"));
-        var method = code[code.IndexOf("public static async Task<bool?> IsRunningAsync", StringComparison.Ordinal)..];
+        var method = code[code.IndexOf("public async Task<bool?> IsRunningAsync", StringComparison.Ordinal)..];
         method = method[..method.IndexOf("\n    }", StringComparison.Ordinal)];
         Assert.Contains("RunAsync(AppUpdater.PowerShellExe,", method);
-        Assert.Contains("[TaskNameVariable] = name", method);
+        Assert.Contains("[ScheduledTasks.TaskNameVariable] = name", method);
         Assert.DoesNotContain("TaskStateScript(", method);
     }
 
@@ -164,6 +164,6 @@ public class TaskStateTests
     {
         // The task name cannot exist, so this only reads Task Scheduler.
         var missing = $"RunnerManagerTests-NoSuchTask-{Guid.NewGuid():N}";
-        Assert.False(await ScheduledTasks.IsRunningAsync(missing));
+        Assert.False(await new WindowsTaskScheduler().IsRunningAsync(missing));
     }
 }

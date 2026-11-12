@@ -1325,17 +1325,23 @@ public static class MachineRelay
     private static int _agentInstalledVersion;
     private static readonly TimeSpan AgentInstalledCacheTime = TimeSpan.FromSeconds(60);
 
-    /// <summary>Whether the agent task exists. Cached for a minute (it runs schtasks.exe); changes here clear it.</summary>
+    /// <summary>
+    /// Whether this user's fleet agent task exists: one that runs with the highest rights, as Runner Manager registers it
+    /// (see <see cref="ScheduledTasks.IsOwnElevatedTask"/>). A task under its name that any program could have created, or
+    /// another Windows user's (see <see cref="AgentOwnership"/>), is not this user's agent: the dashboard, setup and
+    /// updates then neither start it nor register the agent in its place. Cached for a minute (it runs schtasks.exe);
+    /// changes here clear it.
+    /// </summary>
     public static async Task<bool> IsAgentInstalledAsync()
     {
         if (_agentInstalled is { } cached && DateTime.UtcNow - cached.CheckedUtc < AgentInstalledCacheTime) return cached.Installed;
         var version = Volatile.Read(ref _agentInstalledVersion);
-        var installed = await ScheduledTasks.ExistsAsync(ScheduledTasks.AgentTaskName);
+        var installed = await ScheduledTasks.IsOwnElevatedTaskAsync(ScheduledTasks.AgentTaskName) == true;
         if (version == Volatile.Read(ref _agentInstalledVersion)) _agentInstalled = new InstalledCheck(installed, DateTime.UtcNow);
         return installed;
     }
 
-    private static void ForgetAgentInstalled()
+    internal static void ForgetAgentInstalled()
     {
         Interlocked.Increment(ref _agentInstalledVersion);
         _agentInstalled = null;
@@ -1370,18 +1376,25 @@ public static class MachineRelay
         catch { return false; }
     });
 
+    /// <summary>
+    /// Ends and deletes this user's fleet agent task, and RunnerWidget's, when it is this user's own task with the highest
+    /// rights; any other task under these names, also another Windows user's, is left as it is. Then removes the firewall rules.
+    /// </summary>
     public static async Task RemoveAgentTaskAsync()
+    {
+        await RemoveOwnAgentTasksAsync();
+        await FleetNetwork.RemoveFirewallRulesAsync();
+    }
+
+    /// <summary>The tasks part of <see cref="RemoveAgentTaskAsync"/>.</summary>
+    internal static async Task RemoveOwnAgentTasksAsync()
     {
         try
         {
             foreach (var task in new[] { ScheduledTasks.AgentTaskName, ScheduledTasks.LegacyAgentTaskName })
-            {
-                await ScheduledTasks.EndTaskAsync(task);
-                await ScheduledTasks.DeleteTaskAsync(task);
-            }
+                await ScheduledTasks.DeleteOwnTaskAsync(task, end: true);
         }
         finally { ForgetAgentInstalled(); }
-        await FleetNetwork.RemoveFirewallRulesAsync();
     }
 
     /// <summary>
@@ -1748,9 +1761,12 @@ public static class MachineRelay
         catch { }
     }
 
-    /// <summary>The executable the installed agent task runs, or empty when the task doesn't exist.</summary>
+    /// <summary>
+    /// The executable that this user's agent task runs, or empty when there is no such task with the highest rights (see
+    /// <see cref="IsAgentInstalledAsync"/>).
+    /// </summary>
     public static async Task<string> AgentTaskExecutableAsync()
-        => ScheduledTasks.CommandOf(await ScheduledTasks.QueryXmlAsync(ScheduledTasks.AgentTaskName));
+        => ScheduledTasks.ExeOfOwnElevatedTask(await ScheduledTasks.QueryXmlAsync(ScheduledTasks.AgentTaskName)) ?? string.Empty;
 
     /// <summary>
     /// Tasks created by older versions used schtasks defaults: they refuse to start on battery,

@@ -67,7 +67,7 @@ public static class ScheduledTasks
                 // never runs ("Element not found"). Registering it again from scratch fixes that.
                 if (IsIndexed(name) == false)
                 {
-                    await RunAsync(WindowsTools.FullPath("schtasks.exe"), $"/Delete /F /TN \"{name}\"", ShortTimeout);
+                    await Scheduler.SchtasksAsync($"/Delete /F /TN \"{name}\"");
                     await CreateAsync(name, xml);
                     if (IsIndexed(name) == false)
                         throw new InvalidOperationException($"Task Scheduler registered \"{name}\" but cannot run it. Restart the PC and try again.");
@@ -83,7 +83,8 @@ public static class ScheduledTasks
     /// <summary>
     /// Registers a task again from its own definition when Task Scheduler cannot run it because it is missing from the
     /// scheduler's index: two registrations of the same task at the same moment (2.4 to 2.6 at update time) could leave it
-    /// so. Needs administrator rights; returns whether it was repaired.
+    /// so. Only this user's own task with the highest rights (see <see cref="IsOwnElevatedTask"/>). Needs administrator
+    /// rights; returns whether it was repaired.
     /// </summary>
     public static async Task<bool> RepairIfUnindexedAsync(string name)
     {
@@ -93,7 +94,12 @@ public static class ScheduledTasks
             if (IsIndexed(name) != false) return false;
             var xml = await QueryXmlAsync(name);
             if (string.IsNullOrWhiteSpace(xml)) return false;
-            await RunAsync(WindowsTools.FullPath("schtasks.exe"), $"/Delete /F /TN \"{name}\"", ShortTimeout);
+            if (!IsOwnElevatedTask(xml))
+            {
+                LogLeftAlone(name, xml);
+                return false;
+            }
+            await Scheduler.SchtasksAsync($"/Delete /F /TN \"{name}\"");
             await CreateAsync(name, xml);
             return IsIndexed(name) != false;
         }
@@ -119,55 +125,20 @@ public static class ScheduledTasks
         return repaired;
     }
 
-    private const string TaskCacheKey = @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Schedule\TaskCache";
+    /// <summary>Where Runner Manager reaches Task Scheduler: Windows itself, except in tests.</summary>
+    internal static ITaskScheduler Scheduler { get; set; } = new WindowsTaskScheduler();
 
     /// <summary>
     /// Whether Task Scheduler can find the task to run it: every registered task is listed in one of its indexes. Null when
     /// the task does not exist or the index cannot be read (it needs administrator rights).
     /// </summary>
-    internal static bool? IsIndexed(string name)
-    {
-        try
-        {
-            using var tree = Registry.LocalMachine.OpenSubKey($@"{TaskCacheKey}\Tree\{name}");
-            if (tree?.GetValue("Id") is not string id || id.Length == 0) return null;
-            foreach (var index in new[] { "Logon", "Boot", "Plain", "Maintenance" })
-            {
-                using var entry = Registry.LocalMachine.OpenSubKey($@"{TaskCacheKey}\{index}\{id}");
-                if (entry != null) return true;
-            }
-            return false;
-        }
-        catch (Exception ex) when (ex is SecurityException or UnauthorizedAccessException or IOException) { return null; }
-    }
+    internal static bool? IsIndexed(string name) => Scheduler.IsIndexed(name);
 
     /// <summary>
     /// Task registrations and deletions run one at a time across Runner Manager's processes (the agent, the dashboard and
     /// setup may each register the same task after an update).
     /// </summary>
-    private static async Task<IDisposable> LockAsync()
-    {
-        Semaphore semaphore;
-        try { semaphore = new Semaphore(1, 1, @"Global\RunnerManagerScheduledTasks"); }
-        // Created by an elevated process, so a process without administrator rights cannot open it; such a process
-        // cannot register these tasks either.
-        catch (UnauthorizedAccessException) { return new Release(null); }
-        // A process that ended while holding it never releases it, so a long wait goes ahead without it.
-        var acquired = await Task.Run(() => semaphore.WaitOne(TimeSpan.FromMinutes(2)));
-        if (acquired) return new Release(semaphore);
-        semaphore.Dispose();
-        return new Release(null);
-    }
-
-    private sealed class Release(Semaphore? semaphore) : IDisposable
-    {
-        public void Dispose()
-        {
-            if (semaphore == null) return;
-            semaphore.Release();
-            semaphore.Dispose();
-        }
-    }
+    private static Task<IDisposable> LockAsync() => Scheduler.LockAsync();
 
     /// <summary>Registers (or replaces) a task from its XML definition.</summary>
     private static async Task CreateAsync(string name, string xml)
@@ -187,7 +158,7 @@ public static class ScheduledTasks
             while (length < written.Length && (count = await read.ReadAsync(written.AsMemory(length))) > 0) length += count;
             if (length != bytes.Length || !written.AsSpan(0, length).SequenceEqual(bytes))
                 throw new InvalidOperationException($"The definition of the scheduled task \"{name}\" was changed by another program, so it was not registered.");
-            var (code, output) = await RunAsync(WindowsTools.FullPath("schtasks.exe"), $"/Create /F /TN \"{name}\" /XML \"{xmlPath}\"", ShortTimeout);
+            var (code, output) = await Scheduler.SchtasksAsync($"/Create /F /TN \"{name}\" /XML \"{xmlPath}\"");
             if (code != 0) throw new InvalidOperationException(string.IsNullOrWhiteSpace(output) ? $"Could not register the scheduled task \"{name}\"." : output.Trim());
         }
         finally
@@ -308,7 +279,7 @@ public static class ScheduledTasks
         if (await OtherOwnerAsync(AgentTaskName) != null) return false;
         if (ExeOfOwnElevatedTask(xml) is not { } exe)
         {
-            MachineRelay.AppendAgentLog(NotRegisteredElevatedText(AgentTaskName));
+            LogLeftAlone(AgentTaskName, xml);
             return false;
         }
         if (!File.Exists(exe) || !exe.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) return false;
@@ -318,35 +289,16 @@ public static class ScheduledTasks
         return true;
     }
 
-    public static async Task<bool> ExistsAsync(string name) => (await RunAsync(WindowsTools.FullPath("schtasks.exe"), $"/Query /TN \"{name}\"", ShortTimeout)).ExitCode == 0;
-
-    /// <summary>Whether the task exists: true, false, or null when that could not be read (so a failed read is never taken for "missing").</summary>
-    public static async Task<bool?> ExistsOrUnknownAsync(string name) => await ExistsAsync(name) ? true : IsRegistered(name);
+    public static async Task<bool> ExistsAsync(string name) => (await Scheduler.SchtasksAsync($"/Query /TN \"{name}\"")).ExitCode == 0;
 
     /// <summary>Whether the task is in Task Scheduler's own list (in the registry), or null when that cannot be read.</summary>
-    internal static bool? IsRegistered(string name)
-    {
-        try
-        {
-            using var tree = Registry.LocalMachine.OpenSubKey($@"{TaskCacheKey}\Tree");
-            if (tree == null) return null;
-            using var task = tree.OpenSubKey(name);
-            return task != null;
-        }
-        catch (Exception ex) when (ex is SecurityException or UnauthorizedAccessException or IOException) { return null; }
-    }
+    internal static bool? IsRegistered(string name) => Scheduler.IsRegistered(name);
 
     /// <summary>
     /// Whether an instance of the task runs: true, false, or null when that cannot be told. Registering a task again can
-    /// end its running instance, so a task is registered again only when this is false. Read through Task Scheduler's own
-    /// interface, because schtasks.exe words the status in the language of Windows.
+    /// end its running instance, so a task is registered again only when this is false.
     /// </summary>
-    public static async Task<bool?> IsRunningAsync(string name)
-    {
-        var (code, output) = await RunAsync(AppUpdater.PowerShellExe, $"-NoLogo -NoProfile -NonInteractive -Command \"{TaskStateScript}\"", ShortTimeout,
-            new Dictionary<string, string> { [TaskNameVariable] = name });
-        return code == 0 ? ParseTaskState(output) : null;
-    }
+    public static Task<bool?> IsRunningAsync(string name) => Scheduler.IsRunningAsync(name);
 
     /// <summary>The COM error Task Scheduler gives for a task that does not exist (HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)).</summary>
     internal const int TaskNotFound = unchecked((int)0x80070002);
@@ -375,15 +327,81 @@ public static class ScheduledTasks
 
     public static async Task<string> QueryXmlAsync(string name)
     {
-        var (code, output) = await RunAsync(WindowsTools.FullPath("schtasks.exe"), $"/Query /TN \"{name}\" /XML", ShortTimeout);
+        var (code, output) = await Scheduler.SchtasksAsync($"/Query /TN \"{name}\" /XML");
         return code == 0 ? output : string.Empty;
     }
 
-    public static Task<(int ExitCode, string Output)> RunTaskAsync(string name) => RunAsync(WindowsTools.FullPath("schtasks.exe"), $"/Run /TN \"{name}\"", ShortTimeout);
-    public static Task<(int ExitCode, string Output)> EndTaskAsync(string name) => RunAsync(WindowsTools.FullPath("schtasks.exe"), $"/End /TN \"{name}\"", ShortTimeout);
+    public static Task<(int ExitCode, string Output)> RunTaskAsync(string name) => Scheduler.SchtasksAsync($"/Run /TN \"{name}\"");
+    public static Task<(int ExitCode, string Output)> EndTaskAsync(string name) => Scheduler.SchtasksAsync($"/End /TN \"{name}\"");
     public static async Task<(int ExitCode, string Output)> DeleteTaskAsync(string name)
     {
-        using (await LockAsync()) return await RunAsync(WindowsTools.FullPath("schtasks.exe"), $"/Delete /F /TN \"{name}\"", ShortTimeout);
+        using (await LockAsync()) return await Scheduler.SchtasksAsync($"/Delete /F /TN \"{name}\"");
+    }
+
+    // ================= Only this user's own tasks with the highest rights =================
+
+    /// <summary>
+    /// Whether a task definition is this user's own task that runs with the highest rights, as Runner Manager registers
+    /// all of its tasks (also RunnerWidget 2.1). Any program of the user can create a task under a name that is free, of
+    /// any run level, but only a program with administrator rights can register one with the highest rights. So code with
+    /// administrator rights takes a task's existence as Runner Manager's only when this is true: before it starts the
+    /// task, registers it again, registers another task in its place, or deletes it.
+    /// </summary>
+    internal static bool IsOwnElevatedTask(string xml) => ExeOfOwnElevatedTask(xml) != null;
+
+    /// <summary>
+    /// Whether the task with this name is this user's own task with the highest rights (see <see cref="IsOwnElevatedTask"/>):
+    /// true; false when there is no such task, or the task under the name is another one, which is logged once (see
+    /// <see cref="LogLeftAlone"/>); null when it could not be read.
+    /// </summary>
+    internal static async Task<bool?> IsOwnElevatedTaskAsync(string name)
+    {
+        var xml = await QueryXmlAsync(name);
+        if (xml.Length == 0) return IsRegistered(name) == false ? false : null;
+        if (IsOwnElevatedTask(xml)) return true;
+        LogLeftAlone(name, xml);
+        return false;
+    }
+
+    /// <summary>
+    /// Ends (with <paramref name="end"/>) and deletes the task when it is this user's own task with the highest rights.
+    /// Any other task under the name, also another Windows user's, is left as it is and logged. Returns whether it was deleted.
+    /// </summary>
+    internal static async Task<bool> DeleteOwnTaskAsync(string name, bool end = false)
+    {
+        var own = await IsOwnElevatedTaskAsync(name);
+        if (own == null) LogOnce(name, $"Runner Manager could not read the scheduled task \"{name}\", so it left it as it is.");
+        if (own != true) return false;
+        if (end) await EndTaskAsync(name);
+        await DeleteTaskAsync(name);
+        return true;
+    }
+
+    private static readonly HashSet<string> Logged = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Logs once per process that a task under one of Runner Manager's names was left as it is, because it is not this
+    /// user's own task with the highest rights: <see cref="NotRegisteredElevatedText"/>, or for another Windows user's task, whose it is.
+    /// </summary>
+    internal static void LogLeftAlone(string name, string xml)
+    {
+        var principal = PrincipalOf(xml);
+        LogOnce(name, principal.Length > 0 && !IsCurrentUser(principal)
+            ? $"The scheduled task \"{name}\" belongs to {DisplayName(principal)}, so Runner Manager left it as it is."
+            : NotRegisteredElevatedText(name));
+    }
+
+    private static void LogOnce(string name, string text)
+    {
+        lock (Logged)
+            if (!Logged.Add($"{name}\n{text}")) return;
+        MachineRelay.AppendAgentLog(text);
+    }
+
+    /// <summary>Forgets which tasks were logged as left alone, so a test sees the line again.</summary>
+    internal static void ForgetLogged()
+    {
+        lock (Logged) Logged.Clear();
     }
 
     /// <summary>The executable a task runs, from its XML definition.</summary>
@@ -510,6 +528,95 @@ public static class ScheduledTasks
                 : string.IsNullOrWhiteSpace(result.Error) ? result.Output : result.Error);
         }
         catch (Exception ex) { return (-1, ex.Message); }
+    }
+}
+
+/// <summary>Task Scheduler as <see cref="ScheduledTasks"/> reaches it. Only tests use another than <see cref="WindowsTaskScheduler"/>.</summary>
+internal interface ITaskScheduler
+{
+    /// <summary>Runs schtasks.exe with these arguments and returns its exit code and output.</summary>
+    Task<(int ExitCode, string Output)> SchtasksAsync(string arguments);
+
+    /// <summary>See <see cref="ScheduledTasks.IsIndexed"/>.</summary>
+    bool? IsIndexed(string name);
+
+    /// <summary>See <see cref="ScheduledTasks.IsRegistered"/>.</summary>
+    bool? IsRegistered(string name);
+
+    /// <summary>See <see cref="ScheduledTasks.IsRunningAsync"/>.</summary>
+    Task<bool?> IsRunningAsync(string name);
+
+    /// <summary>Held while a task is registered or deleted (see <see cref="ScheduledTasks"/>).</summary>
+    Task<IDisposable> LockAsync();
+}
+
+/// <summary>Task Scheduler of Windows: schtasks.exe by its full path, its lists in the registry, and its own interface.</summary>
+internal sealed class WindowsTaskScheduler : ITaskScheduler
+{
+    private const string TaskCacheKey = @"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Schedule\TaskCache";
+
+    public Task<(int ExitCode, string Output)> SchtasksAsync(string arguments)
+        => ScheduledTasks.RunAsync(WindowsTools.FullPath("schtasks.exe"), arguments, ScheduledTasks.ShortTimeout);
+
+    public bool? IsIndexed(string name)
+    {
+        try
+        {
+            using var tree = Registry.LocalMachine.OpenSubKey($@"{TaskCacheKey}\Tree\{name}");
+            if (tree?.GetValue("Id") is not string id || id.Length == 0) return null;
+            foreach (var index in new[] { "Logon", "Boot", "Plain", "Maintenance" })
+            {
+                using var entry = Registry.LocalMachine.OpenSubKey($@"{TaskCacheKey}\{index}\{id}");
+                if (entry != null) return true;
+            }
+            return false;
+        }
+        catch (Exception ex) when (ex is SecurityException or UnauthorizedAccessException or IOException) { return null; }
+    }
+
+    public bool? IsRegistered(string name)
+    {
+        try
+        {
+            using var tree = Registry.LocalMachine.OpenSubKey($@"{TaskCacheKey}\Tree");
+            if (tree == null) return null;
+            using var task = tree.OpenSubKey(name);
+            return task != null;
+        }
+        catch (Exception ex) when (ex is SecurityException or UnauthorizedAccessException or IOException) { return null; }
+    }
+
+    /// <summary>Read through Task Scheduler's own interface, because schtasks.exe words the status in the language of Windows.</summary>
+    public async Task<bool?> IsRunningAsync(string name)
+    {
+        var (code, output) = await ScheduledTasks.RunAsync(AppUpdater.PowerShellExe, $"-NoLogo -NoProfile -NonInteractive -Command \"{ScheduledTasks.TaskStateScript}\"",
+            ScheduledTasks.ShortTimeout, new Dictionary<string, string> { [ScheduledTasks.TaskNameVariable] = name });
+        return code == 0 ? ScheduledTasks.ParseTaskState(output) : null;
+    }
+
+    /// <summary>Across Runner Manager's processes (the agent, the dashboard and setup may each register the same task after an update).</summary>
+    public async Task<IDisposable> LockAsync()
+    {
+        Semaphore semaphore;
+        try { semaphore = new Semaphore(1, 1, @"Global\RunnerManagerScheduledTasks"); }
+        // Created by an elevated process, so a process without administrator rights cannot open it; such a process
+        // cannot register these tasks either.
+        catch (UnauthorizedAccessException) { return new Release(null); }
+        // A process that ended while holding it never releases it, so a long wait goes ahead without it.
+        var acquired = await Task.Run(() => semaphore.WaitOne(TimeSpan.FromMinutes(2)));
+        if (acquired) return new Release(semaphore);
+        semaphore.Dispose();
+        return new Release(null);
+    }
+
+    private sealed class Release(Semaphore? semaphore) : IDisposable
+    {
+        public void Dispose()
+        {
+            if (semaphore == null) return;
+            semaphore.Release();
+            semaphore.Dispose();
+        }
     }
 }
 
