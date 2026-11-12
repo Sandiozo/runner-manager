@@ -448,7 +448,14 @@ public static partial class RunnerService
         await EnsureNameIsFreeAsync(local, wanted.Name);
         var wasRunning = local.IsRunning;
         var wasMarked = IsMarkedStopped(local.Name);
-        var restoreRecovery = HoldAutoRecovery(local.Name);
+        var restoreOldName = HoldAutoRecovery(local.Name);
+        // config.cmd gives a renamed runner a new service name and starts it, so that name is held as well.
+        var restoreNewName = HoldAutoRecovery(ServiceNameAfterRename(local.Name, wanted.Name));
+        void restoreRecovery()
+        {
+            restoreNewName();
+            restoreOldName();
+        }
         try
         {
             // A job may have started while GitHub was read.
@@ -459,14 +466,12 @@ public static partial class RunnerService
         }
         catch
         {
-            restoreRecovery();
             // Registering again with the old values (the rollback) also starts the service.
-            try { await KeepRunStateAsync(local, wasRunning, wasMarked, log); }
+            try { await KeepRunStateAsync(local, wasRunning, wasMarked, restoreRecovery, log); }
             catch (Exception ex) { log($"Could not leave the runner running or stopped as it was: {ex.Message}"); }
             throw;
         }
-        restoreRecovery();
-        await KeepRunStateAsync(local, wasRunning, wasMarked, log);
+        await KeepRunStateAsync(local, wasRunning, wasMarked, restoreRecovery, log);
         log("Runner settings updated.");
     }
 
@@ -479,30 +484,58 @@ public static partial class RunnerService
         => requested.Length > 0 || clearLabels ? requested : current;
 
     /// <summary>
+    /// The service name config.cmd gives a runner that is renamed: actions.runner.{owner-repo}.{name}. Empty when the
+    /// name does not change, and when config.cmd would shorten the name (over 80 characters, with a random ending).
+    /// Only used to hold auto-recovery, so a guess that is wrong does no harm.
+    /// </summary>
+    internal static string ServiceNameAfterRename(string serviceName, string newName)
+    {
+        var dot = serviceName.LastIndexOf('.');
+        if (!serviceName.StartsWith("actions.runner.", StringComparison.OrdinalIgnoreCase) || dot < "actions.runner.".Length) return string.Empty;
+        if (serviceName[(dot + 1)..].Equals(newName, StringComparison.OrdinalIgnoreCase)) return string.Empty;
+        var renamed = serviceName[..(dot + 1)] + newName;
+        return renamed.Length <= 80 ? renamed : string.Empty;
+    }
+
+    /// <summary>
     /// After a runner was registered again: config.cmd starts the service it installs, and a new runner name gives the
     /// service a new name. The runner is left running or stopped as it was, and the stopped mark moves to the new name.
+    /// Auto-recovery stays held (under the new name too) until the runner is as it was, and only then
+    /// <paramref name="restoreRecovery"/> runs: a runner the watchdog sees running while it is not held counts as one
+    /// to keep running, and the watchdog would start it again after the stop below.
     /// </summary>
-    private static async Task KeepRunStateAsync(RunnerInfo before, bool wasRunning, bool wasMarked, Action<string> log)
+    private static async Task KeepRunStateAsync(RunnerInfo before, bool wasRunning, bool wasMarked, Action restoreRecovery, Action<string> log)
     {
-        var updated = (await ReadSnapshotAsync(queryGitHub: false))
-            .FirstOrDefault(r => r.InstallPath.Equals(before.InstallPath, StringComparison.OrdinalIgnoreCase));
-        if (updated == null || !updated.ServiceInstalled) return;
-        if (!string.IsNullOrEmpty(before.Name) && !updated.Name.Equals(before.Name, StringComparison.OrdinalIgnoreCase))
+        RunnerInfo? updated = null;
+        var renamed = false;
+        try
         {
-            MarkStopped(before.Name, false);
-            if (wasMarked) MarkStopped(updated.Name, true);
-        }
-        if (wasRunning && !updated.IsRunning) await ControlServiceAsync(updated.Name, "Start");
-        else if (!wasRunning && updated.IsRunning)
-        {
-            if (HasWorkerNow(updated))
+            updated = (await ReadSnapshotAsync(queryGitHub: false))
+                .FirstOrDefault(r => r.InstallPath.Equals(before.InstallPath, StringComparison.OrdinalIgnoreCase));
+            if (updated == null || !updated.ServiceInstalled) return;
+            renamed = !string.IsNullOrEmpty(before.Name) && !updated.Name.Equals(before.Name, StringComparison.OrdinalIgnoreCase);
+            if (renamed) MarkStopped(updated.Name, true);
+            if (wasRunning && !updated.IsRunning) await ControlServiceAsync(updated.Name, "Start");
+            else if (!wasRunning && updated.IsRunning)
             {
-                log("The runner took a job right after it was registered again, so it keeps running. Stop it when the job is done.");
-                return;
+                if (HasWorkerNow(updated))
+                {
+                    log("The runner took a job right after it was registered again, so it keeps running. Stop it when the job is done.");
+                    return;
+                }
+                // No mark is added: a runner that stopped without one (after a crash) stays under auto-recovery.
+                log("Stopping the runner again, as it was stopped before…");
+                await ControlServiceAsync(updated.Name, "Stop");
             }
-            // No mark is added: a runner that stopped without one (after a crash) stays under auto-recovery.
-            log("Stopping the runner again, as it was stopped before…");
-            await ControlServiceAsync(updated.Name, "Stop");
+        }
+        finally
+        {
+            restoreRecovery();
+            if (renamed)
+            {
+                MarkStopped(before.Name, false);
+                MarkStopped(updated!.Name, wasMarked);
+            }
         }
     }
 

@@ -695,6 +695,53 @@ public class AuditRunnerTests
         Assert.Equal(current, RunnerService.LabelsAfterEdit(current, Array.Empty<string>(), clearLabels: false));
         Assert.Empty(RunnerService.LabelsAfterEdit(current, Array.Empty<string>(), clearLabels: true));
     }
+
+    [Theory]
+    [InlineData("actions.runner.octo-app.build-01", "build-02", "actions.runner.octo-app.build-02")]
+    [InlineData("actions.runner.octo.build-01", "gpu", "actions.runner.octo.gpu")]
+    [InlineData("actions.runner.octo-app.build-01", "BUILD-01", "")]
+    [InlineData("actions.runner.octo-app.build-01", "a-name-long-enough-for-config-cmd-to-shorten-the-service-name", "")]
+    [InlineData(@"C:\GitHub-Runners\app", "build-02", "")]
+    [InlineData("", "build-02", "")]
+    public void RenamedRunner_GetsTheServiceNameThatConfigCmdGives(string serviceName, string newName, string expected)
+        => Assert.Equal(expected, RunnerService.ServiceNameAfterRename(serviceName, newName));
+
+    private static readonly DateTime Watch = new(2026, 11, 12, 9, 0, 0, DateTimeKind.Utc);
+
+    [Fact]
+    public void Runner_SeenRunningWhileAutoRecoveryIsHeld_IsNotStartedAfterItIsStoppedAgain()
+    {
+        const string key = "actions.runner.octo-app.edited";
+        var recovery = new RunnerRecovery();
+
+        // An edit of a stopped runner holds auto-recovery (the runner is marked), config.cmd starts the runner, and
+        // the edit stops it again. Then the mark is taken away.
+        recovery.Check(key, interactive: false, running: true, pending: false, mayRecover: false, Watch);
+        recovery.Check(key, interactive: false, running: false, pending: false, mayRecover: false, Watch.AddSeconds(10));
+        var after = Enumerable.Range(2, 4)
+            .Select(i => recovery.Check(key, interactive: false, running: false, pending: false, mayRecover: true, Watch.AddSeconds(10 * i)))
+            .ToList();
+
+        Assert.All(after, step => Assert.Equal(RunnerRecovery.Step.None, step));
+    }
+
+    [Fact]
+    public void Runner_SeenRunningWhileAutoRecoveryWasOff_IsStillRecoveredWhenItIsTurnedOn()
+    {
+        const string key = "actions.runner.octo-app.off";
+        var recovery = new RunnerRecovery();
+
+        recovery.Check(key, interactive: false, running: true, pending: false, watchdogOn: false, held: false, Watch);
+        Assert.Equal(RunnerRecovery.Step.None, recovery.Check(key, false, running: false, pending: false, watchdogOn: false, held: false, Watch.AddSeconds(10)));
+        Assert.Equal(RunnerRecovery.Step.None, recovery.Check(key, false, running: false, pending: false, watchdogOn: true, held: false, Watch.AddSeconds(20)));
+        Assert.Equal(RunnerRecovery.Step.Start, recovery.Check(key, false, running: false, pending: false, watchdogOn: true, held: false, Watch.AddSeconds(30)));
+
+        // Held while it was seen running: not remembered.
+        var held = new RunnerRecovery();
+        held.Check(key, interactive: false, running: true, pending: false, watchdogOn: true, held: true, Watch);
+        Assert.Equal(RunnerRecovery.Step.None, held.Check(key, false, running: false, pending: false, watchdogOn: true, held: false, Watch.AddSeconds(10)));
+        Assert.Equal(RunnerRecovery.Step.None, held.Check(key, false, running: false, pending: false, watchdogOn: true, held: false, Watch.AddSeconds(20)));
+    }
 }
 
 /// <summary>The gh calls of runner setup, with gh replaced (see <see cref="FakeGh"/>).</summary>
