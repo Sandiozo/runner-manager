@@ -239,10 +239,13 @@ public class LookAlikeNameTests
 
     [Theory]
     [InlineData("\u041E\u0424\u0418\u0421-\u041F\u041A")] // ОФИС-ПК: Cyrillic
+    [InlineData("\u043E\u0444\u0438\u0441-2")]            // офис-2: Cyrillic, in small letters
     [InlineData("\u0395\u03BB\u03BB\u03AC\u03B4\u03B1")] // Ελλάδα: Greek
-    [InlineData("\u6771\u4EAC-PC")]                       // Tokyo in Japanese, with Latin letters
+    [InlineData("\u6771\u4EAC-2")]                        // 東京-2: Tokyo in Japanese, with a digit
+    [InlineData("\u0540\u0561\u0575-1")]                  // Հայ-1: Armenian
     [InlineData("J\u0100NIS-PC")]                         // JĀNIS-PC: Latin with a macron
     [InlineData("LAPTOP")]
+    [InlineData("build-01")]
     public void ANameInOneAlphabet_IsNotWarnedAbout(string name)
         => Assert.Equal(new PairingHostWindow.RequestCheck(null, CanAllow: true), Check(name));
 
@@ -258,10 +261,86 @@ public class LookAlikeNameTests
     public void Alphabets_AreFoundByLetter()
     {
         Assert.Equal(new[] { LookAlikes.Alphabet.Latin, LookAlikes.Alphabet.Cyrillic }, LookAlikes.AlphabetsIn("PC-\u0430"));
-        Assert.Equal(new[] { LookAlikes.Alphabet.Latin }, LookAlikes.AlphabetsIn("\u6771\u4EAC-PC-2"));
+        // The letters of all other scripts count as one more alphabet.
+        Assert.Equal(new[] { LookAlikes.Alphabet.Latin, LookAlikes.Alphabet.Other }, LookAlikes.AlphabetsIn("\u6771\u4EAC-PC-2"));
+        Assert.Equal(new[] { LookAlikes.Alphabet.Other }, LookAlikes.AlphabetsIn("\u6771\u4EAC-\u3068\u3046\u304D\u3087\u3046"));
+        // Modifier letters, such as the apostrophe of O'NEIL, are Latin.
+        Assert.Equal(new[] { LookAlikes.Alphabet.Latin }, LookAlikes.AlphabetsIn("O\u02BCNEIL"));
         Assert.Empty(LookAlikes.AlphabetsIn("123-_"));
         Assert.Equal(LookAlikes.AsItLooks("OFFICE-PC"), LookAlikes.AsItLooks("\u043Effice-\u0440c"));
         Assert.NotEqual(LookAlikes.AsItLooks("OFFICE-PC"), LookAlikes.AsItLooks("\u041E\u0424\u0418\u0421-\u041F\u041A"));
+    }
+
+    private static FleetConfig HomeFleet() => new()
+    {
+        KnownPeers =
+        {
+            new PeerRecord { Name = "HOME-PC" }, new PeerRecord { Name = "GAME-PC" }, new PeerRecord { Name = "DEV-VM" },
+            new PeerRecord { Name = "FILE-SRV" }, new PeerRecord { Name = "BUILD-3" }
+        }
+    };
+
+    private static string? HomeWarning(string name)
+        => PairingHostWindow.CheckRequest(HomeFleet(), name, null, [], "HOST-PC", "8888").Warning;
+
+    [Theory]
+    [InlineData("\u0397\u039F\u039C\u0395-\u03A1\u03F9", "HOME-PC")]  // ΗΟΜΕ-ΡϹ: Greek, with a capital lunate sigma
+    [InlineData("\u03B7\u03BF\u03BC\u03B5-\u03C1\u03F2", "HOME-PC")]  // ηομε-ρϲ: the same in small letters
+    [InlineData("\u050C\u0410\u041C\u0415-\u0420\u0421", "GAME-PC")]  // ԌАМЕ-РС: Cyrillic, with a Komi Sje
+    [InlineData("\u043D\u043E\u043C\u0435-\u0440\u0441", "HOME-PC")]  // номе-рс: Cyrillic in small letters
+    [InlineData("DEV-\u0474M", "DEV-VM")]                             // DEV-ѴM: a Cyrillic izhitsa
+    [InlineData("\u03DCILE-SRV", "FILE-SRV")]                         // ϜILE-SRV: a Greek digamma
+    [InlineData("BUILD-\u0417", "BUILD-3")]                           // BUILD-З: a Cyrillic Ze for the digit 3
+    public void ANameWhoseLettersOnlyLookLikeASavedName_IsWarnedAbout(string name, string saved)
+        => Assert.Equal($"{name} looks like {saved}, a PC in this fleet, but some of its letters only look alike, so it is not the same name. " +
+                        "Allow only if you expect a PC with this name.", HomeWarning(name));
+
+    [Theory]
+    // Letters that look like a Latin letter or a digit.
+    [InlineData("\u0405\u0406\u0408\u051A\u051C\u04BA\u04AE\u037F", "SIJQWHYJ")]
+    [InlineData("\u050C\u0474\u0417\u042C\u04D4\u04D8\u04E8\u0472\u04E0\u04AA", "GV3B\u00C6\u018F\u019F\u019F\u01B7\u00C7")]
+    [InlineData("\u0475\u0461\u045B\u0431\u04D5\u04D9\u04E9\u0473\u04E1\u04AB", "VW\u01266\u00C6\u018F\u019F\u019F\u01B7\u00C7")]
+    [InlineData("\u03DC\u03FA\u03F7\u03F9", "FM\u00DEC")]
+    [InlineData("\u03B3\u03C3\u03B2\u03F8\u03F2", "YO\u00DF\u00DEC")]
+    // Accented letters: a Cyrillic Ё, Ї and Ӧ, a Greek Ά and ό.
+    [InlineData("\u0401\u0407\u04E6\u0386\u03CC", "\u00CB\u00CF\u00D6\u00C1\u00D3")]
+    public void LookAlikeLetters_AreReadAsTheLatinLetterOrDigitTheyLookLike(string letters, string latin)
+        => Assert.True(LookAlikes.LookAlike(letters, latin), $"{letters} {LookAlikes.AsItLooks(letters)} {LookAlikes.AsItLooksInCapitals(letters)}");
+
+    [Fact]
+    public void SmallLetters_AreAlsoReadInCapitals()
+    {
+        // н and м look like small capitals; in capitals, Н and М look like H and M.
+        Assert.NotEqual("HOME_PC", LookAlikes.AsItLooks("\u043D\u043E\u043C\u0435-\u0440\u0441"));
+        Assert.Equal("HOME_PC", LookAlikes.AsItLooksInCapitals("\u043D\u043E\u043C\u0435-\u0440\u0441"));
+        // A Greek ν looks like v as it is written; its capital Ν looks like N.
+        Assert.Equal("DEV", LookAlikes.AsItLooks("de\u03BD"));
+        Assert.Equal("DEN", LookAlikes.AsItLooksInCapitals("de\u03BD"));
+        Assert.True(LookAlikes.LookAlike("de\u03BD", "DEV"));
+        Assert.False(LookAlikes.LookAlike("\u041E\u0424\u0418\u0421", "OFIS"));
+    }
+
+    [Theory]
+    [InlineData("H\u0555ME-PC")]      // HՕME-PC: an Armenian Oh
+    [InlineData("HOME-\u13E2C")]      // HOME-ᏢC: a Cherokee Tlv, which looks like P
+    [InlineData("HOME-\uA4D1C")]      // HOME-ꓑC: a Lisu Pa, which looks like P
+    [InlineData("\u6771\u4EAC-PC")]   // 東京-PC: Tokyo in Japanese, with Latin letters
+    [InlineData("\u0E01\u0E34\u0E19-PC")] // กิน-PC: Thai, with Latin letters
+    public void LatinLettersWithLettersOfAnyOtherScript_GetTheMixedAlphabetsWarning(string name)
+    {
+        var check = PairingHostWindow.CheckRequest(HomeFleet(), name, null, [], "HOST-PC", "8888");
+        Assert.True(check.CanAllow);
+        Assert.Equal($"The name {name} mixes Latin letters with letters of another alphabet, so it can look like the name of another PC. " +
+                     "Allow only if you expect a PC with this name.", check.Warning);
+    }
+
+    [Fact]
+    public void TheMixedAlphabetsWarning_NamesTheAlphabetsItFound()
+    {
+        Assert.StartsWith("The name A\u0392\u0412 mixes Latin, Greek and Cyrillic letters, so", HomeWarning("A\u0392\u0412"));
+        Assert.StartsWith("The name A\u0392\u0412\u6771 mixes Latin, Greek and Cyrillic letters with letters of another alphabet, so", HomeWarning("A\u0392\u0412\u6771"));
+        Assert.StartsWith("The name \u0394\u0416 mixes Greek and Cyrillic letters, so", HomeWarning("\u0394\u0416"));
+        Assert.StartsWith("The name \u0416\u6771 mixes Cyrillic letters with letters of another alphabet, so", HomeWarning("\u0416\u6771"));
     }
 }
 

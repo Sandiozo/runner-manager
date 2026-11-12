@@ -255,17 +255,17 @@ public partial class PairingHostWindow : Window
     /// <summary>
     /// What to tell the user when the name of a joining PC only looks like another name: like the name of this PC (in
     /// full-width letters, for example), or of a PC saved here or allowed a moment ago, once look-alike letters of the
-    /// Latin, Greek and Cyrillic alphabets are read as one (<see cref="LookAlikes.AsItLooks"/>). A name that is the same
-    /// for <see cref="SameNameForWarning"/> is left to <see cref="SameNameWarning"/>. Otherwise, a name that mixes these
-    /// alphabets is warned about, as it can look like a name that is not saved here. A name written in one alphabet
-    /// alone is not. Null when there is nothing to say.
+    /// Latin, Greek and Cyrillic alphabets are read as one (<see cref="LookAlikes.LookAlike"/>). A name that is the same
+    /// for <see cref="SameNameForWarning"/> is left to <see cref="SameNameWarning"/>. Otherwise, a name that mixes
+    /// alphabets (Latin, Greek, Cyrillic, and the letters of any other script as one more) is warned about, as it can
+    /// look like a name that is not saved here. A name written in one alphabet alone is not. Null when there is nothing
+    /// to say.
     /// </summary>
     internal static string? LookAlikeWarning(FleetConfig config, string name, string thisPc, IEnumerable<(string Name, string? MachineId)>? allowed = null)
     {
         const string allowIf = "Allow only if you expect a PC with this name.";
-        var looks = LookAlikes.AsItLooks(name);
-        bool LooksLike(string other) => LookAlikes.AsItLooks(other) == looks && !SameNameForWarning(other, name);
-        if (MachineRelay.Sanitize(name) != MachineRelay.Sanitize(thisPc) && LookAlikes.AsItLooks(thisPc) == looks)
+        bool LooksLike(string other) => LookAlikes.LookAlike(other, name) && !SameNameForWarning(other, name);
+        if (MachineRelay.Sanitize(name) != MachineRelay.Sanitize(thisPc) && LookAlikes.LookAlike(thisPc, name))
             return $"{name} looks like {thisPc}, the name of this PC, but some of its letters only look alike, so it is another PC. {allowIf}";
         var like = config.KnownPeers.Where(p => LooksLike(p.Name)).Select(p => (p.Name, What: "a PC in this fleet", Short: "in this fleet"))
             .Concat(config.ManagedPcs.Where(p => LooksLike(p.Name))
@@ -283,8 +283,10 @@ public partial class PairingHostWindow : Window
         }
         var alphabets = LookAlikes.AlphabetsIn(name);
         if (alphabets.Count < 2) return null;
-        var names = alphabets.Select(a => a.ToString()).ToArray();
-        return $"The name {name} mixes {string.Join(", ", names[..^1])} and {names[^1]} letters, so it can look like the name of another PC. {allowIf}";
+        var names = alphabets.Where(a => a != LookAlikes.Alphabet.Other).Select(a => a.ToString()).ToArray();
+        var named = names.Length == 1 ? names[0] : $"{string.Join(", ", names[..^1])} and {names[^1]}";
+        var mix = alphabets.Contains(LookAlikes.Alphabet.Other) ? $"{named} letters with letters of another alphabet" : $"{named} letters";
+        return $"The name {name} mixes {mix}, so it can look like the name of another PC. {allowIf}";
     }
 
     /// <summary>
