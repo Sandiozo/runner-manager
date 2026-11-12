@@ -1879,7 +1879,7 @@ public partial class MainWindow : Window
             SetStatus($"Folder not found: {path}", StatusKind.Warning);
             return;
         }
-        Process.Start(new ProcessStartInfo("explorer.exe", $"\"{path}\"") { UseShellExecute = true });
+        Process.Start(new ProcessStartInfo(WindowsTools.Explorer, $"\"{path}\"") { UseShellExecute = true });
     }
 
     private void OpenUrl(string? url)

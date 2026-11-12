@@ -1099,7 +1099,7 @@ public static partial class RunnerService
         {
             if (runner.IsRunning) await ControlServiceAsync(runner.Name, "Stop");
             log("Removing the Windows service…");
-            var (code, output) = await ScheduledTasks.RunAsync("sc.exe", $"delete \"{runner.Name}\"", ScheduledTasks.ShortTimeout);
+            var (code, output) = await ScheduledTasks.RunAsync(WindowsTools.FullPath("sc.exe"), $"delete \"{runner.Name}\"", ScheduledTasks.ShortTimeout);
             if (code != 0) throw new InvalidOperationException($"Could not remove the Windows service {runner.Name}: {output.Trim()}");
         }
         if (deleteFolder) await Task.Run(() => DeleteRunnerFiles(runner, log));
@@ -1182,7 +1182,7 @@ public static partial class RunnerService
             }
             foreach (var task in Tasks)
             {
-                var (code, output) = await ScheduledTasks.RunAsync("schtasks.exe", $"/Change /TN \"{task}\" /ENABLE", ScheduledTasks.ShortTimeout);
+                var (code, output) = await ScheduledTasks.RunAsync(WindowsTools.FullPath("schtasks.exe"), $"/Change /TN \"{task}\" /ENABLE", ScheduledTasks.ShortTimeout);
                 log(code == 0 ? $"Enabled the scheduled task {task} again." : $"Could not enable the scheduled task {task} again: {output.Trim()}");
                 if (code != 0) failed.Tasks.Add(task);
             }
@@ -1348,7 +1348,7 @@ public static partial class RunnerService
                 log($"The scheduled task {name} also starts other runners, so it was left enabled. Remove this runner from it by hand.");
                 continue;
             }
-            var (changeCode, changeOutput) = await ScheduledTasks.RunAsync("schtasks.exe", $"/Change /TN \"{name}\" /DISABLE", ScheduledTasks.ShortTimeout);
+            var (changeCode, changeOutput) = await ScheduledTasks.RunAsync(WindowsTools.FullPath("schtasks.exe"), $"/Change /TN \"{name}\" /DISABLE", ScheduledTasks.ShortTimeout);
             if (changeCode == 0)
             {
                 changes.Tasks.Add(name);
@@ -1675,7 +1675,7 @@ public static partial class RunnerService
         {
             log($"Removing the Windows service {service.Name} the failed install created…");
             try { await ControlServiceAsync(service.Name, "Stop"); } catch { }
-            var (code, output) = await ScheduledTasks.RunAsync("sc.exe", $"delete \"{service.Name}\"", ScheduledTasks.ShortTimeout);
+            var (code, output) = await ScheduledTasks.RunAsync(WindowsTools.FullPath("sc.exe"), $"delete \"{service.Name}\"", ScheduledTasks.ShortTimeout);
             if (code != 0) log($"Could not remove the Windows service {service.Name}: {output.Trim()}");
         }
         return replaced;
@@ -1938,7 +1938,7 @@ public static partial class RunnerService
         EnsureSafeFolder(root);
         var startInfo = new ProcessStartInfo
         {
-            FileName = "cmd.exe",
+            FileName = WindowsTools.FullPath("cmd.exe"),
             Arguments = $"/d /s /c \"\"{Path.Combine(root, "config.cmd")}\" {arguments}\"",
             WorkingDirectory = root
         };

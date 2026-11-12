@@ -132,6 +132,6 @@ public partial class LogViewerWindow : Window
     private void Folder_Click(object sender, RoutedEventArgs e)
     {
         if (_folder != null && Directory.Exists(_folder))
-            Process.Start(new ProcessStartInfo("explorer.exe", $"\"{_folder}\"") { UseShellExecute = true });
+            Process.Start(new ProcessStartInfo(WindowsTools.Explorer, $"\"{_folder}\"") { UseShellExecute = true });
     }
 }

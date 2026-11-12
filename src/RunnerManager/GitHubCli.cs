@@ -12,12 +12,42 @@ public static class GitHubCli
     /// <summary>Status polls share this gate, so a refresh never starts more than four gh processes at a time.</summary>
     private static readonly SemaphoreSlim PollGate = new(4);
 
+    /// <summary>
+    /// gh by its full path: where its installer puts it, or else the first gh.exe in a folder on PATH. PATH is searched
+    /// here, not by Windows, which looks in the app's folder and the current folder first: those, and folders on PATH
+    /// without a full path, are left out, so a gh.exe put there is not started. When none is found, the usual path is
+    /// returned, and starting it fails as it does when gh is not installed.
+    /// </summary>
     public static string ExecutablePath
     {
         get
         {
             var installed = @"C:\Program Files\GitHub CLI\gh.exe";
-            return File.Exists(installed) ? installed : "gh.exe";
+            return File.Exists(installed) ? installed
+                : FindOnPath("gh.exe", Environment.GetEnvironmentVariable("PATH"), AppContext.BaseDirectory, Environment.CurrentDirectory) ?? installed;
+        }
+    }
+
+    /// <summary>
+    /// The first <paramref name="file"/> in the folders of <paramref name="path"/> (a PATH value), leaving out the
+    /// <paramref name="leftOut"/> folders and folders without a full path, such as "." or "tools".
+    /// </summary>
+    internal static string? FindOnPath(string file, string? path, params string[] leftOut)
+    {
+        var skipped = leftOut.Select(Folder).OfType<string>().ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (var entry in (path ?? string.Empty).Split(';'))
+        {
+            var folder = entry.Trim().Trim('"');
+            if (!Path.IsPathFullyQualified(folder) || Folder(folder) is not { } full || skipped.Contains(full)) continue;
+            var candidate = Path.Combine(full, file);
+            if (File.Exists(candidate)) return candidate;
+        }
+        return null;
+
+        static string? Folder(string folder)
+        {
+            try { return Path.TrimEndingDirectorySeparator(Path.GetFullPath(folder)); }
+            catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException) { return null; }
         }
     }
 
@@ -201,7 +231,7 @@ public static class GitHubCli
     {
         var startInfo = new ProcessStartInfo
         {
-            FileName = "cmd.exe",
+            FileName = WindowsTools.FullPath("cmd.exe"),
             Arguments = $"/k \"\"{ExecutablePath}\" {arguments}\"",
             UseShellExecute = false
         };

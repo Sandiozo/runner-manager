@@ -1218,13 +1218,13 @@ public static class MachineRelay
             {
                 case "Reboot":
                     var from = string.IsNullOrWhiteSpace(command.Value) ? "another PC" : command.Value;
-                    var (code, output) = await ScheduledTasks.RunAsync("shutdown.exe",
+                    var (code, output) = await ScheduledTasks.RunAsync(WindowsTools.FullPath("shutdown.exe"),
                         $"/r /t 60 /c \"Runner Manager: restart requested from {from.Replace("\"", "")}\"");
                     if (code != 0) throw new InvalidOperationException(output.Trim());
                     AddEvent($"Restart requested from {from}. Restarting in 60 seconds.", warning: true);
                     return "Restarting in 60 seconds";
                 case "CancelReboot":
-                    await ScheduledTasks.RunAsync("shutdown.exe", "/a");
+                    await ScheduledTasks.RunAsync(WindowsTools.FullPath("shutdown.exe"), "/a");
                     return "Restart cancelled";
                 default:
                     throw new InvalidOperationException($"Unsupported PC action: {command.Action}");

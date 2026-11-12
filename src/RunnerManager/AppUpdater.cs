@@ -859,7 +859,7 @@ public static class AppUpdater
         "$s = Get-AuthenticodeSignature -LiteralPath $env:RUNNER_MANAGER_PATH; if ($s.Status -eq 'Valid') { $s.SignerCertificate.Subject }";
 
     /// <summary>Windows PowerShell by its full path, so no powershell.exe in the current or program folder is started instead.</summary>
-    internal static string PowerShellExe => Path.Combine(Environment.SystemDirectory, @"WindowsPowerShell\v1.0\powershell.exe");
+    internal static string PowerShellExe => WindowsTools.FullPath(@"WindowsPowerShell\v1.0\powershell.exe");
 
     private static async Task<(int ExitCode, string Output)> ProbeAsync(string exe)
     {
@@ -907,7 +907,7 @@ public static class AppUpdater
     /// the task is re-registered, so the agent comes back even if re-registering ends the running instance.
     /// </summary>
     public static void ScheduleAgentTaskRestart(string taskName)
-        => RunAfterExit($"schtasks.exe /Run /TN '{taskName.Replace("'", "''")}' | Out-Null", TimeSpan.FromSeconds(120), TimeSpan.FromSeconds(2));
+        => RunAfterExit($"& '{WindowsTools.FullPath("schtasks.exe")}' /Run /TN '{taskName.Replace("'", "''")}' | Out-Null", TimeSpan.FromSeconds(120), TimeSpan.FromSeconds(2));
 
     /// <summary>
     /// Starts a hidden, detached PowerShell helper that waits for this process to exit (at most <paramref name="timeout"/>,

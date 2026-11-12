@@ -513,13 +513,13 @@ public static class FleetNetwork
     {
         // Rules from the first direct-connection build were named without the port.
         foreach (var legacy in new[] { "TCP", "UDP" })
-            await ScheduledTasks.RunAsync("netsh.exe", $"advfirewall firewall delete rule name=\"{FirewallRulePrefix} ({legacy})\"");
+            await ScheduledTasks.RunAsync(WindowsTools.FullPath("netsh.exe"), $"advfirewall firewall delete rule name=\"{FirewallRulePrefix} ({legacy})\"");
         foreach (var (protocol, port) in RulePorts)
         {
             var name = RuleName(protocol, port);
-            var (exists, _) = await ScheduledTasks.RunAsync("netsh.exe", $"advfirewall firewall show rule name=\"{name}\"");
+            var (exists, _) = await ScheduledTasks.RunAsync(WindowsTools.FullPath("netsh.exe"), $"advfirewall firewall show rule name=\"{name}\"");
             if (exists == 0) continue;
-            await ScheduledTasks.RunAsync("netsh.exe",
+            await ScheduledTasks.RunAsync(WindowsTools.FullPath("netsh.exe"),
                 $"advfirewall firewall add rule name=\"{name}\" dir=in action=allow protocol={protocol} localport={port} " +
                 $"remoteip={AllowedRemotes} profile=any description=\"Runner Manager fleet agent. Allows the other PCs in the fleet to connect to this PC.\"");
         }
@@ -528,7 +528,7 @@ public static class FleetNetwork
     public static async Task RemoveFirewallRulesAsync()
     {
         foreach (var (protocol, port) in RulePorts)
-            await ScheduledTasks.RunAsync("netsh.exe", $"advfirewall firewall delete rule name=\"{RuleName(protocol, port)}\"");
+            await ScheduledTasks.RunAsync(WindowsTools.FullPath("netsh.exe"), $"advfirewall firewall delete rule name=\"{RuleName(protocol, port)}\"");
     }
 
     // Agent (TCP), discovery (UDP), and pairing (TCP exchange + UDP announce while "Add a PC" is open).

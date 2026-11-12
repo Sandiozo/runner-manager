@@ -398,6 +398,61 @@ public class ProgramFilesInstallTests
         }
     }
 
+    [Fact]
+    public void WindowsTools_AreStartedByTheirFullPath()
+    {
+        Assert.Equal(Path.Combine(Environment.SystemDirectory, "sc.exe"), WindowsTools.FullPath("sc.exe"));
+        foreach (var tool in new[] { "sc.exe", "schtasks.exe", "netsh.exe", "shutdown.exe", "cmd.exe" })
+            Assert.True(File.Exists(WindowsTools.FullPath(tool)), tool);
+        Assert.True(File.Exists(WindowsTools.Explorer));
+        Assert.Equal(WindowsTools.FullPath(@"WindowsPowerShell\v1.0\powershell.exe"), AppUpdater.PowerShellExe);
+
+        // As for PowerShell: no tool is started by its bare name, in a start, a command line or a script. A line that
+        // compares a process's name with a tool's name starts nothing.
+        var bare = new System.Text.RegularExpressions.Regex(
+            @"(?<![\w.])""(schtasks|sc|netsh|cmd|icacls|taskkill|where|reg|whoami|conhost|explorer|shutdown|tasklist|wmic|takeown|attrib)(\.exe)?(?=[""\s])",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        var found = new List<string>();
+        foreach (var file in Directory.GetFiles(InstallEvidenceTests.SourceDir, "*.cs", SearchOption.AllDirectories))
+        {
+            if (Path.GetFileName(file) == "WindowsTools.cs" || Path.GetRelativePath(InstallEvidenceTests.SourceDir, file).Split(Path.DirectorySeparatorChar)[0] is "obj" or "bin")
+                continue;
+            var lines = File.ReadAllLines(file);
+            for (var i = 0; i < lines.Length; i++)
+                foreach (System.Text.RegularExpressions.Match match in bare.Matches(lines[i]))
+                {
+                    var before = lines[i][..match.Index];
+                    if (before.EndsWith("WindowsTools.FullPath(", StringComparison.Ordinal)
+                        || System.Text.RegularExpressions.Regex.IsMatch(before, @"(\.Equals\(|==\s*)$")) continue;
+                    found.Add($"{Path.GetFileName(file)}:{i + 1}: {lines[i].Trim()}");
+                }
+        }
+        Assert.Empty(found);
+    }
+
+    [Fact]
+    public void Gh_FoundOnPath_IsStartedByItsFullPath_AndNeverFromTheAppOrTheCurrentFolder()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "rm-gh-" + Guid.NewGuid().ToString("N"));
+        var app = Directory.CreateDirectory(Path.Combine(root, "app")).FullName;
+        var current = Directory.CreateDirectory(Path.Combine(root, "current")).FullName;
+        var empty = Directory.CreateDirectory(Path.Combine(root, "empty")).FullName;
+        var tools = Directory.CreateDirectory(Path.Combine(root, "tools")).FullName;
+        try
+        {
+            foreach (var folder in new[] { app, current, tools }) File.WriteAllText(Path.Combine(folder, "gh.exe"), string.Empty);
+            // The app's folder (also with a trailing backslash), the current folder (also in quotes), empty and relative
+            // entries are passed over; the first gh.exe after them is taken, by its full path.
+            var path = string.Join(';', app + "\\", string.Empty, ".", "tools", $"\"{current}\"", empty, $" \"{tools}\" ", app);
+            Assert.Equal(Path.Combine(tools, "gh.exe"), GitHubCli.FindOnPath("gh.exe", path, app, current));
+            Assert.Null(GitHubCli.FindOnPath("gh.exe", string.Join(';', app, current, ".", empty), app, current));
+            Assert.Null(GitHubCli.FindOnPath("gh.exe", null, app, current));
+        }
+        finally { Directory.Delete(root, recursive: true); }
+        // Found or not, gh is started by a full path: one that is not there fails to start, as a missing gh does.
+        Assert.True(Path.IsPathFullyQualified(GitHubCli.ExecutablePath));
+    }
+
     // ================= 4. Several Windows users =================
 
     [Fact]

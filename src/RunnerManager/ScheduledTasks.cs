@@ -67,7 +67,7 @@ public static class ScheduledTasks
                 // never runs ("Element not found"). Registering it again from scratch fixes that.
                 if (IsIndexed(name) == false)
                 {
-                    await RunAsync("schtasks.exe", $"/Delete /F /TN \"{name}\"", ShortTimeout);
+                    await RunAsync(WindowsTools.FullPath("schtasks.exe"), $"/Delete /F /TN \"{name}\"", ShortTimeout);
                     await CreateAsync(name, xml);
                     if (IsIndexed(name) == false)
                         throw new InvalidOperationException($"Task Scheduler registered \"{name}\" but cannot run it. Restart the PC and try again.");
@@ -93,7 +93,7 @@ public static class ScheduledTasks
             if (IsIndexed(name) != false) return false;
             var xml = await QueryXmlAsync(name);
             if (string.IsNullOrWhiteSpace(xml)) return false;
-            await RunAsync("schtasks.exe", $"/Delete /F /TN \"{name}\"", ShortTimeout);
+            await RunAsync(WindowsTools.FullPath("schtasks.exe"), $"/Delete /F /TN \"{name}\"", ShortTimeout);
             await CreateAsync(name, xml);
             return IsIndexed(name) != false;
         }
@@ -187,7 +187,7 @@ public static class ScheduledTasks
             while (length < written.Length && (count = await read.ReadAsync(written.AsMemory(length))) > 0) length += count;
             if (length != bytes.Length || !written.AsSpan(0, length).SequenceEqual(bytes))
                 throw new InvalidOperationException($"The definition of the scheduled task \"{name}\" was changed by another program, so it was not registered.");
-            var (code, output) = await RunAsync("schtasks.exe", $"/Create /F /TN \"{name}\" /XML \"{xmlPath}\"", ShortTimeout);
+            var (code, output) = await RunAsync(WindowsTools.FullPath("schtasks.exe"), $"/Create /F /TN \"{name}\" /XML \"{xmlPath}\"", ShortTimeout);
             if (code != 0) throw new InvalidOperationException(string.IsNullOrWhiteSpace(output) ? $"Could not register the scheduled task \"{name}\"." : output.Trim());
         }
         finally
@@ -318,7 +318,7 @@ public static class ScheduledTasks
         return true;
     }
 
-    public static async Task<bool> ExistsAsync(string name) => (await RunAsync("schtasks.exe", $"/Query /TN \"{name}\"", ShortTimeout)).ExitCode == 0;
+    public static async Task<bool> ExistsAsync(string name) => (await RunAsync(WindowsTools.FullPath("schtasks.exe"), $"/Query /TN \"{name}\"", ShortTimeout)).ExitCode == 0;
 
     /// <summary>Whether the task exists: true, false, or null when that could not be read (so a failed read is never taken for "missing").</summary>
     public static async Task<bool?> ExistsOrUnknownAsync(string name) => await ExistsAsync(name) ? true : IsRegistered(name);
@@ -375,15 +375,15 @@ public static class ScheduledTasks
 
     public static async Task<string> QueryXmlAsync(string name)
     {
-        var (code, output) = await RunAsync("schtasks.exe", $"/Query /TN \"{name}\" /XML", ShortTimeout);
+        var (code, output) = await RunAsync(WindowsTools.FullPath("schtasks.exe"), $"/Query /TN \"{name}\" /XML", ShortTimeout);
         return code == 0 ? output : string.Empty;
     }
 
-    public static Task<(int ExitCode, string Output)> RunTaskAsync(string name) => RunAsync("schtasks.exe", $"/Run /TN \"{name}\"", ShortTimeout);
-    public static Task<(int ExitCode, string Output)> EndTaskAsync(string name) => RunAsync("schtasks.exe", $"/End /TN \"{name}\"", ShortTimeout);
+    public static Task<(int ExitCode, string Output)> RunTaskAsync(string name) => RunAsync(WindowsTools.FullPath("schtasks.exe"), $"/Run /TN \"{name}\"", ShortTimeout);
+    public static Task<(int ExitCode, string Output)> EndTaskAsync(string name) => RunAsync(WindowsTools.FullPath("schtasks.exe"), $"/End /TN \"{name}\"", ShortTimeout);
     public static async Task<(int ExitCode, string Output)> DeleteTaskAsync(string name)
     {
-        using (await LockAsync()) return await RunAsync("schtasks.exe", $"/Delete /F /TN \"{name}\"", ShortTimeout);
+        using (await LockAsync()) return await RunAsync(WindowsTools.FullPath("schtasks.exe"), $"/Delete /F /TN \"{name}\"", ShortTimeout);
     }
 
     /// <summary>The executable a task runs, from its XML definition.</summary>

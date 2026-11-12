@@ -568,7 +568,7 @@ public partial class MainWindow
                 "Restart PC", danger: true)) return;
         if (machine.IsLocal)
         {
-            var (code, output) = await ScheduledTasks.RunAsync("shutdown.exe", "/r /t 60 /c \"Restart requested from Runner Manager\"");
+            var (code, output) = await ScheduledTasks.RunAsync(WindowsTools.FullPath("shutdown.exe"), "/r /t 60 /c \"Restart requested from Runner Manager\"");
             if (code != 0)
             {
                 DialogWindow.Error(this, $"Could not restart {machine.MachineName}", output.Trim());
@@ -578,7 +578,7 @@ public partial class MainWindow
             if (DialogWindow.Show(this, DialogTone.Warning, $"{machine.MachineName} restarts in 60 seconds",
                     "Save your work. You can cancel the restart until then.", "OK", cancel: null, secondary: "Cancel restart") == "Cancel restart")
             {
-                await ScheduledTasks.RunAsync("shutdown.exe", "/a");
+                await ScheduledTasks.RunAsync(WindowsTools.FullPath("shutdown.exe"), "/a");
                 AddActivity("Restart cancelled.");
             }
             return;

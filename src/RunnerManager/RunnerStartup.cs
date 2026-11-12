@@ -47,7 +47,7 @@ public static partial class RunnerService
 
     internal static async Task SetServiceStartModeAsync(string serviceName, string mode)
     {
-        var (code, output) = await ScheduledTasks.RunAsync("sc.exe",
+        var (code, output) = await ScheduledTasks.RunAsync(WindowsTools.FullPath("sc.exe"),
             $"config \"{serviceName.Replace("\"", "")}\" start= {mode}", ScheduledTasks.ShortTimeout);
         if (code != 0)
             throw new InvalidOperationException($"Could not change how the Windows service {serviceName} starts: {output.Trim()}");
