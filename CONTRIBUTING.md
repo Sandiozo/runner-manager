@@ -24,6 +24,12 @@ dotnet test
 To try a build without replacing your installed copy, run `src/RunnerManager/bin/Release/net10.0-windows/RunnerManager.exe`.
 It asks for administrator rights, because it controls Windows services.
 
+Setup installs to `C:\Program Files\RunnerManager` on a PC without an install. The install folder of each Windows user is
+recorded in `HKLM\SOFTWARE\RunnerManager\Installs` (one value per user SID), where only administrators can change it.
+The parts that run as administrator take the folder from there, or from the folder the running installed copy is in,
+never from the Settings → Apps entry alone (see `MachineInstall.cs`). A build run from `bin` uses that recorded folder
+for updates and for the fleet agent's task. Tests never read or write the real records: `TestSetup.cs` replaces the store.
+
 ## Project layout
 
 | Path | Contents |
@@ -32,6 +38,7 @@ It asks for administrator rights, because it controls Windows services.
 | `src/RunnerManager/RunnerService.cs` | Finding, installing and controlling runners |
 | `src/RunnerManager/MachineRelay.cs`, `FleetNetwork.cs`, `FleetCrypto.cs`, `Pairing.cs` | Fleet agent, encrypted connection and pairing |
 | `src/RunnerManager/AppUpdater.cs`, `Installer.cs`, `SetupWindow*` | Updates, setup and uninstall |
+| `src/RunnerManager/MachineInstall.cs` | The install folder: the default, the record of each Windows user, shared installs |
 | `src/RunnerManager/RunnerActivity.cs` | Live job output and processes |
 | `tests/RunnerManager.Tests/` | xUnit tests |
 

@@ -10,14 +10,35 @@ internal static class TestSetup
 
     /// <summary>
     /// Keeps tests away from the real settings in %LOCALAPPDATA%\RunnerManager, and from the real AI assistant switches
-    /// in HKLM\SOFTWARE\RunnerManager. Runner Manager itself always keeps the switches in the registry: only code sets
-    /// another store, never the environment.
+    /// and install records in HKLM\SOFTWARE\RunnerManager. Runner Manager itself always keeps them in the registry: only
+    /// code sets another store, never the environment.
     /// </summary>
     [ModuleInitializer]
     internal static void UseTemporaryStateDir()
     {
         Environment.SetEnvironmentVariable("RUNNER_MANAGER_STATE_DIR", StateDir);
         AssistantSwitches.Store = new FileSwitchStore(Path.Combine(StateDir, "assistant-switches.json"));
+        MachineInstall.Records = new MemoryInstallRecords();
+    }
+}
+
+/// <summary>Install records in memory, in place of HKLM\SOFTWARE\RunnerManager\Installs. Only in the tests.</summary>
+internal sealed class MemoryInstallRecords : IInstallRecordStore
+{
+    private readonly List<InstallRecord> _records = new();
+
+    public IReadOnlyList<InstallRecord> ReadAll()
+    {
+        lock (_records) return _records.ToList();
+    }
+
+    public void Write(string sid, string? folder)
+    {
+        lock (_records)
+        {
+            _records.RemoveAll(r => r.Sid.Equals(sid, StringComparison.OrdinalIgnoreCase));
+            if (folder != null) _records.Add(new InstallRecord(sid, folder));
+        }
     }
 }
 

@@ -9,19 +9,22 @@ using System.Text.RegularExpressions;
 namespace RunnerManager;
 
 /// <summary>
-/// Installs Runner Manager from its GitHub Releases into
-/// %LOCALAPPDATA%\Programs\RunnerManager, so PCs don't need the .NET SDK or a git checkout.
+/// Installs Runner Manager from its GitHub Releases into its install folder (Program Files\RunnerManager for new
+/// installs, see <see cref="MachineInstall"/>), so PCs don't need the .NET SDK or a git checkout.
 /// </summary>
 public static class AppUpdater
 {
     public const string AssetName = AppPaths.ExeName;
     /// <summary>The first version that answers --probe, so an update can be test-started before it replaces this one.</summary>
     private const string ProbeSupportedSince = "2.2.0";
-    public static readonly string DefaultInstallDir = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "RunnerManager");
+    /// <summary>Where setup installs on a PC without an install: Program Files\RunnerManager.</summary>
+    public static string DefaultInstallDir => MachineInstall.ProgramFilesDir;
     private static string? _installDir;
-    /// <summary>Where Runner Manager is installed: the folder chosen in setup (kept in the Settings → Apps entry), or the default.</summary>
-    public static string InstallDir => _installDir ??= Installer.RegisteredInstallDir() ?? DefaultInstallDir;
+    /// <summary>
+    /// Where Runner Manager is installed: the folder chosen in setup, otherwise the folder recorded for this user where only
+    /// administrators can change it, or the folder of the running install (see <see cref="MachineInstall.Resolve"/>).
+    /// </summary>
+    public static string InstallDir => _installDir ?? MachineInstall.CurrentInstallDir();
     /// <summary>Setup installs into the folder the user chose.</summary>
     internal static void UseInstallDir(string folder)
     {
@@ -352,8 +355,10 @@ public static class AppUpdater
             return InstalledExe;
         }
 
-        // Each process downloads into its own folder, so the agent and the dashboard never share files.
-        var staging = Path.Combine(FleetConfig.StateDir, $"update-{Environment.ProcessId}");
+        // Each process downloads into its own folder, so the agent and the dashboard never share files. It is inside the
+        // install folder: in Program Files only administrators can change files there, so a program without administrator
+        // rights can neither swap the file between the checksum and the copy nor put a DLL beside it for the test start.
+        var staging = StagingFolder(InstallDir, Environment.ProcessId);
         RemoveStaleStagingFolders();
         if (Directory.Exists(staging)) Directory.Delete(staging, recursive: true);
         Directory.CreateDirectory(staging);
@@ -404,18 +409,33 @@ public static class AppUpdater
         }
     }
 
-    /// <summary>Removes download folders left by processes that have exited.</summary>
+    /// <summary>Where this process prepares an update: a folder of its own inside the install folder.</summary>
+    internal static string StagingFolder(string installDir, int processId) => Path.Combine(installDir, $"update-{processId}");
+
+    /// <summary>Whether a folder name is one that <see cref="StagingFolder"/> gives.</summary>
+    internal static bool IsStagingFolderName(string name) => StagingName.IsMatch(name);
+
+    private static readonly Regex StagingName = new(@"^update-\d+$", RegexOptions.IgnoreCase);
+
+    /// <summary>
+    /// Removes download folders left by processes that have exited: in the install folder, and in the data folder, where
+    /// versions up to 2.9.0 prepared updates.
+    /// </summary>
     private static void RemoveStaleStagingFolders()
     {
-        try
+        foreach (var parent in new[] { InstallDir, FleetConfig.StateDir })
         {
-            foreach (var folder in Directory.EnumerateDirectories(FleetConfig.StateDir, "update-*"))
+            try
             {
-                if (int.TryParse(Path.GetFileName(folder)["update-".Length..], out var id) && IsProcessRunning(id)) continue;
-                try { Directory.Delete(folder, recursive: true); } catch { }
+                foreach (var folder in Directory.EnumerateDirectories(parent, "update-*"))
+                {
+                    if (!IsStagingFolderName(Path.GetFileName(folder))) continue;
+                    if (int.TryParse(Path.GetFileName(folder)["update-".Length..], out var id) && IsProcessRunning(id)) continue;
+                    try { Directory.Delete(folder, recursive: true); } catch { }
+                }
             }
+            catch { }
         }
-        catch { }
     }
 
     private static bool IsProcessRunning(int id)
@@ -678,7 +698,7 @@ public static class AppUpdater
     {
         try
         {
-            var anyAppFile = IsDefaultInstallDir(InstallDir);
+            var anyAppFile = MachineInstall.HoldsOnlyThisApp(InstallDir);
             foreach (var file in Directory.EnumerateFiles(InstallDir))
             {
                 if (!IsOldFile(Path.GetFileName(file), anyAppFile)) continue;
@@ -774,9 +794,7 @@ public static class AppUpdater
             throw new InvalidOperationException($"The .NET {major} Desktop Runtime could not be downloaded. {reason} The current version is kept.", ex);
         }
 
-        var signer = await ScheduledTasks.RunAsync("powershell.exe",
-            $"-NoLogo -NoProfile -NonInteractive -Command \"$s = Get-AuthenticodeSignature -LiteralPath '{installer.Replace("'", "''")}'; " +
-            "if ($s.Status -eq 'Valid') { $s.SignerCertificate.Subject }\"");
+        var signer = await SignerOfAsync(installer);
         if (signer.ExitCode != 0 || !signer.Output.Contains("O=Microsoft Corporation", StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("The downloaded .NET runtime is not signed by Microsoft and was not installed. The current version is kept.");
 
@@ -791,6 +809,33 @@ public static class AppUpdater
             throw new InvalidOperationException($"The update still could not start after installing .NET {major} (exit code {probe.ExitCode}). The current version is kept.");
         log($".NET {major} Desktop Runtime installed.");
     }
+
+    /// <summary>
+    /// The subject of the certificate that signed <paramref name="file"/> when its signature is valid, otherwise empty
+    /// output. The path reaches PowerShell as an environment variable, never inside the script's text, so no character in
+    /// it (such as ’ or ‘, which also end a PowerShell string) can change what runs.
+    /// </summary>
+    internal static async Task<(int ExitCode, string Output)> SignerOfAsync(string file)
+    {
+        var start = new ProcessStartInfo(PowerShellExe)
+        {
+            ArgumentList = { "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", SignerScript }
+        };
+        start.Environment[PathVariable] = file;
+        try
+        {
+            var result = await ProcessRunner.RunAsync(start, ScheduledTasks.ShortTimeout);
+            return result == null ? (-1, "The signature check did not finish in time.") : (result.ExitCode, result.Output);
+        }
+        catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException) { return (-1, ex.Message); }
+    }
+
+    internal const string PathVariable = "RUNNER_MANAGER_PATH";
+    internal const string SignerScript =
+        "$s = Get-AuthenticodeSignature -LiteralPath $env:RUNNER_MANAGER_PATH; if ($s.Status -eq 'Valid') { $s.SignerCertificate.Subject }";
+
+    /// <summary>Windows PowerShell by its full path, so no powershell.exe in the current or program folder is started instead.</summary>
+    internal static string PowerShellExe => Path.Combine(Environment.SystemDirectory, @"WindowsPowerShell\v1.0\powershell.exe");
 
     private static async Task<(int ExitCode, string Output)> ProbeAsync(string exe)
     {
@@ -843,15 +888,18 @@ public static class AppUpdater
     /// <summary>
     /// Starts a hidden, detached PowerShell helper that waits for this process to exit (at most <paramref name="timeout"/>,
     /// or for as long as it runs when null), waits <paramref name="delay"/> more, then runs <paramref name="script"/>.
+    /// Paths go to the script in <paramref name="environment"/>, never inside its text.
     /// </summary>
-    internal static void RunAfterExit(string script, TimeSpan? timeout, TimeSpan delay)
+    internal static void RunAfterExit(string script, TimeSpan? timeout, TimeSpan delay, IReadOnlyDictionary<string, string>? environment = null)
     {
-        using var process = Process.Start(new ProcessStartInfo("powershell.exe")
+        var start = new ProcessStartInfo(PowerShellExe)
         {
             ArgumentList = { "-NoLogo", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", AfterExitScript(script, Environment.ProcessId, timeout, delay) },
             UseShellExecute = false,
             CreateNoWindow = true
-        });
+        };
+        foreach (var (name, value) in environment ?? new Dictionary<string, string>()) start.Environment[name] = value;
+        using var process = Process.Start(start);
     }
 
     internal static string AfterExitScript(string script, int processId, TimeSpan? timeout, TimeSpan delay)
@@ -888,8 +936,9 @@ public static class AppUpdater
         await Task.Run(() => WithUpdateLock(() =>
         {
             // Going from a multi-file build to a single-file exe: clear the old app files so only the exe remains.
-            // Only builds before 2.2 were multi-file, and they always used the default folder, which only holds this app.
-            if (files.Count == 1 && IsDefaultInstallDir(InstallDir))
+            // Only builds before 2.2 were multi-file, and they always used the default folder of that time, which only
+            // holds this app. An update that another process prepares there (see StagingFolder) is left alone.
+            if (files.Count == 1 && MachineInstall.HoldsOnlyThisApp(InstallDir))
             {
                 foreach (var stale in Directory.EnumerateFiles(InstallDir)
                              .Where(f => !Path.GetFileName(f).StartsWith(AssetName, StringComparison.OrdinalIgnoreCase) && !f.Contains(".old.")))
@@ -897,7 +946,7 @@ public static class AppUpdater
                     try { File.Delete(stale); }
                     catch { try { File.Move(stale, $"{stale}.{DateTime.UtcNow.Ticks}.old{Path.GetExtension(stale)}"); } catch { } }
                 }
-                foreach (var folder in Directory.EnumerateDirectories(InstallDir))
+                foreach (var folder in Directory.EnumerateDirectories(InstallDir).Where(f => !IsStagingFolderName(Path.GetFileName(f))))
                 {
                     try { Directory.Delete(folder, recursive: true); } catch { }
                 }

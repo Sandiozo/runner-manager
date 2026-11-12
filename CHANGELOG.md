@@ -3,6 +3,44 @@
 Runner Manager updates itself from [Releases](https://github.com/Sandiozo/runner-manager/releases): open
 **Settings → Updates**, or click **Update** on a PC's card.
 
+## 2.10.0
+
+New installs go to Program Files, where only administrators can change Runner Manager's files.
+
+### After updating
+
+- An install in `%LOCALAPPDATA%\Programs\RunnerManager` or in a folder chosen in setup stays where it is, and updates
+  keep it there. To move it to Program Files, run the setup again, click **Change…** and choose `C:\Program Files`.
+- On its first start as administrator, Runner Manager records the folder it is installed in, and the fleet agent's log
+  says so (see **Security**).
+- The setup of AI tools does not change. Copy it again from **Settings → AI assistants** only after a move to another
+  folder.
+
+### Security
+
+- The folder Runner Manager is installed in is now recorded for each Windows user where only an administrator can
+  change it. The parts that run with administrator rights, such as updates and the fleet agent's task, take the folder
+  from there or from the folder the installed copy runs in, never from the Settings → Apps entry alone, which another
+  program of the user can change. An install of an earlier version is recorded once, from the folder it runs in.
+- Updates are prepared in the install folder instead of the user's data folder. In Program Files, no program without
+  administrator rights can change the new files between the checksum check and the copy, or place files next to them.
+  A missing or half-written RunnerManager.exe is still put back, and rollback still works.
+- The signature check of the .NET runtime download, and the scripts that setup and uninstall run, take folder and file
+  names from the environment instead of from the script text, so a name with quotes cannot run commands. PowerShell is
+  started from the Windows folder.
+- Uninstall and a move to another folder remove the whole folder only in Program Files. From any other folder, also
+  the default of earlier versions, they remove only Runner Manager's own files.
+
+### Setup and updates
+
+- On a PC without Runner Manager, setup installs it to `C:\Program Files\RunnerManager`. On a PC with an install,
+  setup shows the folder it is in, and **Default** or **Current folder** goes back to that folder.
+- For a folder outside Program Files, setup says to check that only administrators can change the files in it.
+- Several Windows users on one PC share one install. When a second user runs the setup, it offers the folder that is
+  already there. Setup never puts an older version in place of one that another user runs, and keeps the installed
+  version instead. Uninstall and a move to another folder keep the program files while another user still uses them.
+- Setup and uninstall close only the dashboards of the Windows user who runs them.
+
 ## 2.9.0
 
 A large release with many fixes from a review of 2.8.2, most of them for security and for the fleet.
