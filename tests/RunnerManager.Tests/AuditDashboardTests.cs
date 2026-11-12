@@ -2,6 +2,8 @@ using System.Globalization;
 using System.IO;
 using System.Text.RegularExpressions;
 using System.Windows;
+using System.Windows.Automation;
+using System.Windows.Automation.Peers;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Input;
@@ -1022,6 +1024,74 @@ public class AuditDashboardTests
             var wait = code.IndexOf("await WaitForFleetReadAsync();", start, StringComparison.Ordinal);
             Assert.True(wait > start && wait - start < 300, title);
         }
+    }
+
+    // ----- 4: what is pressed is a button -----
+
+    [Fact]
+    public void PressableAreas_AreButtonsWithANameForScreenReaders()
+    {
+        var xaml = Xaml("MainWindow.xaml");
+        // A focusable panel or border has no automation peer: a screen reader does not offer it as something to press.
+        Assert.DoesNotMatch(@"<(Grid|Border|StackPanel|DockPanel)\b[^>]*(MouseLeftButtonUp=|Focusable=""True"")", xaml);
+        Assert.DoesNotMatch(@"TargetType=""(Grid|Border)""[^>]*>(\s*<Setter[^>]*/>)*\s*<Setter Property=""Focusable"" Value=""True""/>", xaml);
+        // The PC header, the runner header, and the rows of the queue and of the recent runs.
+        var flat = Regex.Matches(xaml, @"<Button\b[^>]*Style=""\{StaticResource (FlatButton|RunRow)\}""[^>]*>(\s*<AutomationProperties\.Name>)?");
+        Assert.Equal(4, flat.Count);
+        Assert.All(flat, m => Assert.True(m.Value.Contains("AutomationProperties.Name=") || m.Groups[2].Success, m.Value));
+    }
+
+    [Fact]
+    public void FlatButton_IsAButtonForTheKeyboardAndScreenReaders()
+        => WpfTestApp.Run(() =>
+        {
+            var rerun = new Button { Content = "Re-run" };
+            var row = new Button
+            {
+                Style = (Style)Application.Current.FindResource("FlatButton"),
+                Content = new StackPanel { Children = { new TextBlock { Text = "CI  #42" }, rerun } }
+            };
+            AutomationProperties.SetName(row, "CI  #42, Failed");
+            WpfTestApp.Layout(row);
+
+            var peer = UIElementAutomationPeer.CreatePeerForElement(row);
+            Assert.Equal(AutomationControlType.Button, peer.GetAutomationControlType());
+            Assert.Equal("CI  #42, Failed", peer.GetName());
+            // In the tab order, so Enter and Space press it (the peer says focusable only once it is on screen).
+            Assert.True(row.Focusable && row.IsTabStop);
+            Assert.NotNull(peer.GetPattern(PatternInterface.Invoke));
+            // No look of its own: its content gives the look, and text keeps the window's color.
+            Assert.Equal(Colors.Transparent, WpfTestApp.ColorOf(row.Background));
+            Assert.Equal(new Thickness(0), row.BorderThickness);
+            Assert.Equal(WpfTestApp.Resource("TextBrush"), WpfTestApp.ColorOf(row.Foreground));
+
+            // A button inside it keeps its own click: only the row's own click opens the row.
+            var own = new List<bool>();
+            row.Click += (sender, e) => own.Add(MainWindow.IsOwnClick(sender, e));
+            rerun.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent, rerun));
+            row.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent, row));
+            Assert.Equal(new[] { false, true }, own);
+        });
+
+    [Fact]
+    public void HeaderButtons_SayWhatAClickShowsOrHides()
+    {
+        var pc = PcWith("BUILD-21", RunnerWith("api"));
+        var changed = new List<string?>();
+        pc.PropertyChanged += (_, e) => changed.Add(e.PropertyName);
+        try
+        {
+            Assert.Equal($"BUILD-21, {pc.StatusText}. Hide its runners", pc.HeaderName);
+            pc.ToggleCollapsed();
+            Assert.Equal($"BUILD-21, {pc.StatusText}. Show its runners", pc.HeaderName);
+            Assert.Contains(nameof(MachineInfo.HeaderName), changed);
+        }
+        finally { MachineInfo.CollapsedPcs.Remove("BUILD-21"); }
+
+        var runner = pc.Runners[0];
+        Assert.Equal($"api, {runner.StatusText}. Show details", runner.HeaderName);
+        runner.IsExpanded = true;
+        Assert.Equal($"api, {runner.StatusText}. Hide details", runner.HeaderName);
     }
 
     // ----- 4: OptionCard -----

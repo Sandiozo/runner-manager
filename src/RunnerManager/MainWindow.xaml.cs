@@ -1189,38 +1189,26 @@ public partial class MainWindow : Window
 
     private static T? ItemFrom<T>(object sender) where T : class => (sender as FrameworkElement)?.DataContext as T;
 
-    private void RunnerRow_Click(object sender, MouseButtonEventArgs e)
+    /// <summary>
+    /// The click of this flat button itself. A button inside it, such as a card's update badge, its ⋯ menu or a run's
+    /// Re-run, raises its own Click, which reaches the outer button too.
+    /// </summary>
+    internal static bool IsOwnClick(object sender, RoutedEventArgs e) => ReferenceEquals(e.OriginalSource, sender);
+
+    private void RunnerRow_Click(object sender, RoutedEventArgs e)
     {
-        var current = e.OriginalSource as DependencyObject;
-        while (current != null && current != sender)
-        {
-            // Buttons, links and the live job panel (so its output can be read and selected) do not toggle the row.
-            if (current is ButtonBase || current is TextBlock { Tag: string { Length: > 0 } } || current is FrameworkElement { Name: "LiveJobPanel" }) return;
-            // Text pieces such as a Run (a Hyperlink's text) are not visuals; their parent is in the logical tree.
-            current = current is Visual or System.Windows.Media.Media3D.Visual3D
-                ? VisualTreeHelper.GetParent(current)
-                : LogicalTreeHelper.GetParent(current);
-        }
-        if (ItemFrom<MachineRunnerStatus>(sender) is { } runner) ToggleRunner(runner);
+        if (IsOwnClick(sender, e) && ItemFrom<MachineRunnerStatus>(sender) is { } runner) ToggleRunner(runner);
     }
 
-    // Enter or Space on a focused card header, runner row or link does what a click does.
+    /// <summary>A job of the queue or a recent run: opens it on GitHub.</summary>
+    private void RunRow_Click(object sender, RoutedEventArgs e)
+    {
+        if (IsOwnClick(sender, e) && sender is FrameworkElement { Tag: string { Length: > 0 } url }) OpenUrl(url);
+    }
+
+    // Enter or Space on a focused link does what a click does.
     private static bool IsActivation(object sender, KeyEventArgs e)
         => e.Key is Key.Enter or Key.Space && Keyboard.Modifiers == ModifierKeys.None && ReferenceEquals(e.OriginalSource, sender);
-
-    private void RunnerRow_KeyDown(object sender, KeyEventArgs e)
-    {
-        if (!IsActivation(sender, e) || ItemFrom<MachineRunnerStatus>(sender) is not { } runner) return;
-        ToggleRunner(runner);
-        e.Handled = true;
-    }
-
-    private void MachineHeader_KeyDown(object sender, KeyEventArgs e)
-    {
-        if (!IsActivation(sender, e) || ItemFrom<MachineInfo>(sender) is not { } machine) return;
-        ToggleCollapsed(machine);
-        e.Handled = true;
-    }
 
     private void Link_KeyDown(object sender, KeyEventArgs e)
     {
@@ -1254,15 +1242,10 @@ public partial class MainWindow : Window
         foreach (var runner in Machines.SelectMany(m => m.Runners)) runner.Refresh();
     }
 
-    private void MachineHeader_Click(object sender, MouseButtonEventArgs e)
+    private void MachineHeader_Click(object sender, RoutedEventArgs e)
     {
-        for (var current = e.OriginalSource as DependencyObject; current != null && current != sender;
-             current = current is Visual ? VisualTreeHelper.GetParent(current) : LogicalTreeHelper.GetParent(current))
-        {
-            // The update badge, the ⋯ menu and other buttons keep working without collapsing the card.
-            if (current is ButtonBase) return;
-        }
-        if (ItemFrom<MachineInfo>(sender) is { } machine) ToggleCollapsed(machine);
+        // The update badge and the ⋯ menu keep working without collapsing the card.
+        if (IsOwnClick(sender, e) && ItemFrom<MachineInfo>(sender) is { } machine) ToggleCollapsed(machine);
     }
 
     private void ToggleCollapsed(MachineInfo machine)

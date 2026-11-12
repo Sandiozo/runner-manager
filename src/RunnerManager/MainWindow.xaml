@@ -87,28 +87,22 @@
                 </Setter.Value>
             </Setter>
         </Style>
-        <Style x:Key="RunRow" TargetType="Border">
-            <Setter Property="Background" Value="Transparent"/>
-            <Setter Property="Focusable" Value="True"/>
-            <Setter Property="FocusVisualStyle" Value="{StaticResource SubtleFocus}"/>
-            <Setter Property="CornerRadius" Value="6"/>
+        <!-- A job or run that opens on GitHub -->
+        <Style x:Key="RunRow" TargetType="Button" BasedOn="{StaticResource FlatButton}">
             <Setter Property="Padding" Value="6,4"/>
             <Setter Property="Margin" Value="-6,0,0,0"/>
-            <Setter Property="Cursor" Value="Hand"/>
             <Style.Triggers>
                 <Trigger Property="IsMouseOver" Value="True">
                     <Setter Property="Background" Value="{DynamicResource Bg3Brush}"/>
                 </Trigger>
             </Style.Triggers>
         </Style>
+        <!-- A runner; its header is a flat button that shows or hides the details -->
         <Style x:Key="RunnerRow" TargetType="Border">
             <Setter Property="Background" Value="Transparent"/>
-            <Setter Property="Focusable" Value="True"/>
-            <Setter Property="FocusVisualStyle" Value="{StaticResource SubtleFocus}"/>
             <Setter Property="CornerRadius" Value="8"/>
             <Setter Property="Padding" Value="8,5"/>
             <Setter Property="Margin" Value="0,1"/>
-            <Setter Property="Cursor" Value="Hand"/>
             <Style.Triggers>
                 <Trigger Property="IsMouseOver" Value="True">
                     <Setter Property="Background" Value="{DynamicResource Bg2Brush}"/>
@@ -353,9 +347,9 @@
                                         </Grid.RowDefinitions>
 
                                         <!-- Machine header: click it to collapse or expand the card -->
-                                        <Grid Margin="12,9,12,9" Background="Transparent" Cursor="Hand" MouseLeftButtonUp="MachineHeader_Click"
-                                              Focusable="True" FocusVisualStyle="{StaticResource SubtleFocus}" KeyDown="MachineHeader_KeyDown"
-                                              ToolTip="Click to show or hide this PC's runners">
+                                        <Button Style="{StaticResource FlatButton}" Margin="12,9,12,9" Click="MachineHeader_Click"
+                                                ToolTip="Click to show or hide this PC's runners" AutomationProperties.Name="{Binding HeaderName}">
+                                        <Grid>
                                             <Grid.ColumnDefinitions>
                                                 <ColumnDefinition Width="Auto"/>
                                                 <ColumnDefinition Width="Auto"/>
@@ -436,6 +430,7 @@
                                                 </Button>
                                             </StackPanel>
                                         </Grid>
+                                        </Button>
 
                                         <!-- Health strip -->
                                         <WrapPanel Grid.Row="1" Margin="73,0,12,8" Visibility="{Binding HealthVisibility}">
@@ -483,7 +478,7 @@
                                                     <ItemsControl ItemsSource="{Binding Runners}">
                                                         <ItemsControl.ItemTemplate>
                                                             <DataTemplate DataType="{x:Type local:MachineRunnerStatus}">
-                                                                <Border Style="{StaticResource RunnerRow}" Visibility="{Binding RowVisibility}" MouseLeftButtonUp="RunnerRow_Click" KeyDown="RunnerRow_KeyDown">
+                                                                <Border Style="{StaticResource RunnerRow}" Visibility="{Binding RowVisibility}">
                                                                     <Grid>
                                                                         <Grid.RowDefinitions>
                                                                             <RowDefinition Height="Auto"/>
@@ -496,6 +491,15 @@
                                                                             <ColumnDefinition Width="Auto"/>
                                                                             <ColumnDefinition Width="Auto"/>
                                                                         </Grid.ColumnDefinitions>
+                                                                        <!-- The header: click it, or press Enter or Space on it, to show or hide the details -->
+                                                                        <Button Grid.ColumnSpan="3" Style="{StaticResource FlatButton}" Click="RunnerRow_Click"
+                                                                                AutomationProperties.Name="{Binding HeaderName}">
+                                                                        <Grid>
+                                                                            <Grid.ColumnDefinitions>
+                                                                                <ColumnDefinition Width="Auto"/>
+                                                                                <ColumnDefinition Width="*"/>
+                                                                                <ColumnDefinition Width="Auto"/>
+                                                                            </Grid.ColumnDefinitions>
                                                                         <TextBlock Text="{Binding ExpandGlyph}" Style="{StaticResource Icon}" FontSize="9"
                                                                                    Foreground="{DynamicResource TextFaintBrush}" Margin="2,0,10,0"/>
                                                                         <StackPanel Grid.Column="1" VerticalAlignment="Center">
@@ -515,6 +519,8 @@
                                                                                 <TextBlock Text="{Binding StatusText}" Foreground="{Binding StatusTextBrush}" FontSize="11" FontWeight="SemiBold"/>
                                                                             </StackPanel>
                                                                         </Border>
+                                                                        </Grid>
+                                                                        </Button>
                                                                         <Button Grid.Column="3" Click="RunnerPower_Click" IsEnabled="{Binding CanControl}" Padding="10,4" MinWidth="76"
                                                                                 VerticalAlignment="Center" Visibility="{Binding PowerVisibility}">
                                                                             <AutomationProperties.Name>
@@ -705,7 +711,13 @@
                                                                                 <ItemsControl ItemsSource="{Binding Queue}" Visibility="{Binding QueueListVisibility}">
                                                                                     <ItemsControl.ItemTemplate>
                                                                                         <DataTemplate DataType="{x:Type local:QueueEntry}">
-                                                                                            <Border Style="{StaticResource RunRow}" Tag="{Binding Url}" MouseLeftButtonUp="Link_Click" KeyDown="Link_KeyDown" ToolTip="Open the job on GitHub">
+                                                                                            <Button Style="{StaticResource RunRow}" Tag="{Binding Url}" Click="RunRow_Click" ToolTip="Open the job on GitHub">
+                                                                                                <AutomationProperties.Name>
+                                                                                                    <MultiBinding StringFormat="{}{0}, {1}">
+                                                                                                        <Binding Path="Title"/>
+                                                                                                        <Binding Path="Detail"/>
+                                                                                                    </MultiBinding>
+                                                                                                </AutomationProperties.Name>
                                                                                                 <DockPanel>
                                                                                                     <TextBlock FontSize="11" Margin="0,0,10,0" VerticalAlignment="Center">
                                                                                                         <TextBlock.Style>
@@ -724,7 +736,7 @@
                                                                                                     <TextBlock DockPanel.Dock="Right" Text="{Binding Detail}" Style="{StaticResource Caption}" FontSize="11" Margin="12,0,6,0" VerticalAlignment="Center"/>
                                                                                                     <TextBlock Text="{Binding Title}" FontSize="12" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" local:TrimmedText.ToolTip="True"/>
                                                                                                 </DockPanel>
-                                                                                            </Border>
+                                                                                            </Button>
                                                                                         </DataTemplate>
                                                                                     </ItemsControl.ItemTemplate>
                                                                                 </ItemsControl>
@@ -741,7 +753,13 @@
                                                                                 <ItemsControl ItemsSource="{Binding RecentRuns}" Visibility="{Binding RecentRunsListVisibility}">
                                                                                     <ItemsControl.ItemTemplate>
                                                                                         <DataTemplate DataType="{x:Type local:WorkflowRunSummary}">
-                                                                                            <Border Style="{StaticResource RunRow}" Tag="{Binding HtmlUrl}" MouseLeftButtonUp="Link_Click" KeyDown="Link_KeyDown" ToolTip="{Binding Title}">
+                                                                                            <Button Style="{StaticResource RunRow}" Tag="{Binding HtmlUrl}" Click="RunRow_Click" ToolTip="{Binding Title}">
+                                                                                                <AutomationProperties.Name>
+                                                                                                    <MultiBinding StringFormat="{}{0}, {1}">
+                                                                                                        <Binding Path="TitleText"/>
+                                                                                                        <Binding Path="StateText"/>
+                                                                                                    </MultiBinding>
+                                                                                                </AutomationProperties.Name>
                                                                                                 <DockPanel>
                                                                                                     <!-- Colors come from the theme resources, so they follow theme changes. -->
                                                                                                     <TextBlock Text="{Binding Glyph}" FontSize="11" Margin="0,0,10,0">
@@ -773,7 +791,7 @@
                                                                                                     <TextBlock DockPanel.Dock="Right" Text="{Binding DetailText}" Style="{StaticResource Caption}" FontSize="11" Margin="12,0,6,0" VerticalAlignment="Center"/>
                                                                                                     <TextBlock Text="{Binding TitleText}" FontSize="12" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
                                                                                                 </DockPanel>
-                                                                                            </Border>
+                                                                                            </Button>
                                                                                         </DataTemplate>
                                                                                     </ItemsControl.ItemTemplate>
                                                                                 </ItemsControl>

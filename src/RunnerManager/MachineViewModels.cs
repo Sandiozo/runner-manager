@@ -183,6 +183,8 @@ public sealed class MachineRunnerStatus : INotifyPropertyChanged
     [JsonIgnore] public Visibility LocalDetailsVisibility => IsExpanded && LocalRunner != null ? Visibility.Visible : Visibility.Collapsed;
     [JsonIgnore] public Visibility ManuallyStoppedVisibility => ManuallyStopped && !IsRunning ? Visibility.Visible : Visibility.Collapsed;
     [JsonIgnore] public string ExpandGlyph => IsExpanded ? "" : "";
+    /// <summary>The name of the header button for screen readers: the runner, its state and what a click does.</summary>
+    [JsonIgnore] public string HeaderName => $"{TitleText}, {StatusText}. {(IsExpanded ? "Hide details" : "Show details")}";
     /// <summary>This PC's own reading of the labels when it has one, otherwise what the runner's agent reports.</summary>
     [JsonIgnore] private string[] EffectiveCustomLabels => LocalRunner is { CustomLabels.Length: > 0 } local ? local.CustomLabels : CustomLabels;
     [JsonIgnore] public string LabelsText => EffectiveCustomLabels is { Length: > 0 } labels
@@ -245,6 +247,7 @@ public sealed class MachineRunnerStatus : INotifyPropertyChanged
             Notify(nameof(Health));
             Notify(nameof(HealthVisibility));
             Notify(nameof(StatusText));
+            Notify(nameof(HeaderName));
             Notify(nameof(StatusBrush));
             Notify(nameof(StatusTextBrush));
             Notify(nameof(StatusTint));
@@ -488,6 +491,8 @@ public sealed class MachineInfo : INotifyPropertyChanged
     // ----- Collapsed to its header -----
     public bool IsCollapsed => CollapsedPcs.Contains(MachineName);
     public string CollapseGlyph => IsCollapsed ? "\uE76C" : "\uE70D";
+    /// <summary>The name of the header button for screen readers: the PC, its state and what a click does.</summary>
+    public string HeaderName => $"{MachineName}, {StatusText}. {(IsCollapsed ? "Show its runners" : "Hide its runners")}";
     public Visibility BodyVisibility => IsCollapsed && !_openForSearch ? Visibility.Collapsed : Visibility.Visible;
     /// <summary>With the runners hidden, the header says how they are and whether one needs attention.</summary>
     public Visibility CollapsedSummaryVisibility => BodyVisibility == Visibility.Visible ? Visibility.Collapsed : Visibility.Visible;
@@ -509,7 +514,7 @@ public sealed class MachineInfo : INotifyPropertyChanged
     public bool ToggleCollapsed()
     {
         if (!CollapsedPcs.Remove(MachineName)) CollapsedPcs.Add(MachineName);
-        Notify(new[] { nameof(IsCollapsed), nameof(CollapseGlyph), nameof(BodyVisibility), nameof(HealthVisibility), nameof(CollapsedSummaryVisibility) });
+        Notify(new[] { nameof(IsCollapsed), nameof(CollapseGlyph), nameof(HeaderName), nameof(BodyVisibility), nameof(HealthVisibility), nameof(CollapsedSummaryVisibility) });
         return IsCollapsed;
     }
 
@@ -635,7 +640,7 @@ public sealed class MachineInfo : INotifyPropertyChanged
         nameof(UpdatedUtc), nameof(SyncText), nameof(CpuPercent), nameof(CpuText), nameof(CpuBrush),
         nameof(MemoryPercent), nameof(MemoryText), nameof(MemoryBrush), nameof(UptimeText),
         nameof(LastResultText), nameof(LastResultVisibility),
-        nameof(IsOnline), nameof(IsReachable), nameof(StatusText), nameof(StatusBrush), nameof(StatusTint), nameof(StatusTextBrush),
+        nameof(IsOnline), nameof(IsReachable), nameof(StatusText), nameof(HeaderName), nameof(StatusBrush), nameof(StatusTint), nameof(StatusTextBrush),
         nameof(SupportsFleetTools), nameof(CanUpdateAgent), nameof(SidebarSubtitle), nameof(NoRunnersText),
         // Runner health is read after the card is built.
         nameof(ProblemBadgeVisibility), nameof(ProblemBadgeText), nameof(ProblemTip)
@@ -644,7 +649,7 @@ public sealed class MachineInfo : INotifyPropertyChanged
     /// <summary>Properties that depend on the pending PC action (an update or a restart).</summary>
     private static readonly string[] PendingProperties =
     {
-        nameof(PendingAction), nameof(StatusText), nameof(StatusBrush), nameof(StatusTint), nameof(StatusTextBrush), nameof(CanUpdateAgent),
+        nameof(PendingAction), nameof(StatusText), nameof(HeaderName), nameof(StatusBrush), nameof(StatusTint), nameof(StatusTextBrush), nameof(CanUpdateAgent),
         nameof(SidebarSubtitle)
     };
 
