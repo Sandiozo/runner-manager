@@ -291,15 +291,41 @@ public sealed class MachineRunnerStatus : INotifyPropertyChanged
             Notify(nameof(LiveJob));
             Notify(nameof(LiveJobVisibility));
             Notify(nameof(JobLineVisibility));
+            Notify(nameof(GitHubNoteVisibility));
             Notify(nameof(NoJobsVisibility));
         }
     }
     [JsonIgnore] public Visibility LiveJobVisibility => IsExpanded && IsBusy && _liveJob != null ? Visibility.Visible : Visibility.Collapsed;
+
+    private string _gitHubNote = string.Empty;
+    private string? _gitHubNoteTip;
+    /// <summary>Why GitHub could not be read for this runner's repository or organization, and when it is asked again.</summary>
+    [JsonIgnore] public string GitHubNote => _gitHubNote;
+    /// <summary>What gh said, when it said something.</summary>
+    [JsonIgnore] public string? GitHubNoteTip => _gitHubNoteTip;
+    /// <summary>In the details, unless the job panel says it already.</summary>
+    [JsonIgnore] public Visibility GitHubNoteVisibility => IsExpanded && _gitHubNote.Length > 0 && LiveJobVisibility != Visibility.Visible
+        ? Visibility.Visible : Visibility.Collapsed;
+
+    /// <summary>Sets why GitHub could not be read for this runner, or null when it could; set by the dashboard.</summary>
+    public void SetGitHubProblem(GitHubProblem? problem, DateTime nowUtc)
+    {
+        var note = problem == null ? string.Empty : GitHubNotes.Describe(GitHubNotes.RunnerLead, problem, nowUtc);
+        var tip = string.IsNullOrWhiteSpace(problem?.Detail) ? null : problem.Detail.Trim();
+        if (note == _gitHubNote && tip == _gitHubNoteTip) return;
+        _gitHubNote = note;
+        _gitHubNoteTip = tip;
+        Notify(nameof(GitHubNote));
+        Notify(nameof(GitHubNoteTip));
+        Notify(nameof(GitHubNoteVisibility));
+        Notify(nameof(NoJobsVisibility));
+    }
     [JsonIgnore] public Visibility JobLineVisibility => IsBusy && !string.IsNullOrEmpty(_liveJob?.Summary) ? Visibility.Visible : Visibility.Collapsed;
     /// <summary>The details' left column has no job, runs or note to show.</summary>
     [JsonIgnore] public Visibility NoJobsVisibility => IsExpanded && LiveJobVisibility != Visibility.Visible
         && RecentRunsVisibility != Visibility.Visible && ConsoleNoteVisibility != Visibility.Visible
-        && QueueVisibility != Visibility.Visible && HealthVisibility != Visibility.Visible ? Visibility.Visible : Visibility.Collapsed;
+        && QueueVisibility != Visibility.Visible && HealthVisibility != Visibility.Visible
+        && GitHubNoteVisibility != Visibility.Visible ? Visibility.Visible : Visibility.Collapsed;
     /// <summary>The live output shown in the dashboard's bottom panel while the runner is open (empty otherwise).</summary>
     [JsonIgnore] public string OutputText => LiveJobVisibility == Visibility.Visible ? _liveJob?.Output ?? string.Empty : string.Empty;
 

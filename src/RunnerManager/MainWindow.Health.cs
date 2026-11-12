@@ -68,7 +68,15 @@ public partial class MainWindow
         var key = JobHealth.Key(runner);
         runner.Health = StillApplies(_runnerHealth.GetValueOrDefault(key) ?? RunnerHealth.Healthy, runner);
         runner.Queue = _runnerQueues.GetValueOrDefault(key) ?? (IReadOnlyList<QueueEntry>)Array.Empty<QueueEntry>();
+        runner.SetGitHubProblem(_githubAuthenticated ? GitHubProblemFor(runner) : null, DateTime.UtcNow);
     }
+
+    /// <summary>
+    /// Why GitHub could not be read for the runner: for its repository or organization, or a pause of every request.
+    /// A runner from an older agent may have no scope; its repository then says where it is.
+    /// </summary>
+    internal static GitHubProblem? GitHubProblemFor(MachineRunnerStatus runner)
+        => runner.Scope.Length > 0 ? GitHubCli.ProblemFor(runner.Scope) : GitHubApi.ProblemFor(runner.RepositoryPath);
 
     /// <summary>
     /// A concern found on an earlier reading, if it still fits the runner as it is now. The check runs beside the

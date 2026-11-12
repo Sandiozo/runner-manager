@@ -244,6 +244,9 @@ public partial class MainWindow : Window
         if (_operationRunning || DateTime.UtcNow < _noticeUntilUtc) return;
         if (_agentOwner != null) SetStatus($"The fleet agent on this PC runs for {_agentOwner}.", StatusKind.Warning);
         else if (!_githubChecked) SetStatus("Checking the GitHub connection…", StatusKind.Busy);
+        // Not the problem of one repository: only a pause that holds back every request to GitHub is about the whole view.
+        else if (_githubAuthenticated && GitHubCli.ProblemFor(null) is { } pause)
+            SetStatus(GitHubNotes.Describe(GitHubNotes.PauseLead, pause, DateTime.UtcNow), StatusKind.Warning);
         else if (_githubAuthenticated) SetStatus("Ready", StatusKind.Ok);
         else SetStatus("GitHub is not connected. Jobs, queues and recent runs are not shown.", StatusKind.Warning);
     }
@@ -1458,6 +1461,8 @@ public partial class MainWindow : Window
         SetStatus("Refreshing…", StatusKind.Busy);
         try
         {
+            // GitHub is asked again at once, so the user does not wait out a pause after fixing its cause.
+            GitHubCli.ForgetProblems();
             _forceDiscovery = true;
             _lastLocalRunnerRefresh = DateTime.MinValue;
             await RefreshAsync(forceAuthCheck: true);

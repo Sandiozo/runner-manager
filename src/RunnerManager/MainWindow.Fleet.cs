@@ -219,7 +219,7 @@ public partial class MainWindow
         else
         {
             var (read, job) = await GitHubApi.GetCurrentJobAsync(runner.RepositoryPath, runner.AgentId);
-            if (!read) state.JobNote = "Could not read the job from GitHub. Trying again.";
+            if (!read) state.JobNote = GitHubNotes.Describe(GitHubNotes.JobLead, GitHubApi.ProblemFor(runner.RepositoryPath), DateTime.UtcNow);
             else
             {
                 state.Job = job;

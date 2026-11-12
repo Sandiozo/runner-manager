@@ -1170,4 +1170,66 @@ public class AuditDashboardTests
         var open = MethodBody("MainWindow.Fleet.cs", "new SettingsWindow(");
         Assert.Contains("finishJoining: () => SetUpFleetAsync(FleetStart.Ask)", open);
     }
+
+    // ----- 9: GitHub problems for what is on screen -----
+
+    [Fact]
+    public void GitHubNote_SaysWhyAndWhenItIsTriedAgain()
+    {
+        var now = new DateTime(2026, 11, 12, 13, 0, 0, DateTimeKind.Utc);
+        var limit = new GitHubProblem("GitHub's request limit is reached.", now.AddMinutes(20), RateLimited: true, Detail: "");
+        Assert.Equal($"Could not read the job from GitHub. GitHub's request limit is reached. Trying again at {TimeFormat.WithSeconds(now.AddMinutes(20).ToLocalTime())}.",
+            GitHubNotes.Describe(GitHubNotes.JobLead, limit, now));
+        // Its pause has ended, and nothing asked again yet: no time in the past.
+        Assert.Equal("Could not read the job from GitHub. GitHub's request limit is reached. Trying again.",
+            GitHubNotes.Describe(GitHubNotes.JobLead, limit, now.AddMinutes(21)));
+        // No reason is known.
+        Assert.Equal("Could not read the job from GitHub. Trying again.", GitHubNotes.Describe(GitHubNotes.JobLead, null, now));
+    }
+
+    [Fact]
+    public void OpenRunner_ShowsWhyGitHubCouldNotBeReadForIt()
+    {
+        var now = DateTime.UtcNow;
+        var runner = new MachineRunnerStatus { ServiceName = "actions.runner.api", DisplayName = "api", Scope = "repos/octo/api" };
+        var problem = new GitHubProblem("GitHub did not find this, or the sign-in has no access to it.", now.AddSeconds(40), false, "HTTP 404: Not Found");
+
+        runner.SetGitHubProblem(problem, now);
+        Assert.Equal(Visibility.Collapsed, runner.GitHubNoteVisibility);
+        runner.IsExpanded = true;
+        Assert.Equal(Visibility.Visible, runner.GitHubNoteVisibility);
+        Assert.StartsWith(GitHubNotes.RunnerLead + " GitHub did not find this", runner.GitHubNote);
+        Assert.Equal("HTTP 404: Not Found", runner.GitHubNoteTip);
+        // The note takes the place of "No job is running, and there are no recent runs to show."
+        Assert.Equal(Visibility.Collapsed, runner.NoJobsVisibility);
+
+        runner.SetGitHubProblem(null, now);
+        Assert.Equal(Visibility.Collapsed, runner.GitHubNoteVisibility);
+        Assert.Null(runner.GitHubNoteTip);
+        Assert.Equal(Visibility.Visible, runner.NoJobsVisibility);
+        Assert.Contains(@"Visibility=""{Binding GitHubNoteVisibility}""", Xaml("MainWindow.xaml"));
+    }
+
+    [Fact]
+    public void GitHubProblems_AreThoseOfTheThingOnScreen()
+    {
+        var code = string.Join("\n", new[] { "MainWindow.xaml.cs", "MainWindow.Fleet.cs", "MainWindow.Health.cs", "MachineViewModels.cs" }
+            .Select(file => File.ReadAllText(Path.Combine(SourceDir, file))));
+        // Not the problem of any endpoint: CurrentProblem would show one repository's failure on every runner.
+        Assert.DoesNotContain("CurrentProblem", code);
+        Assert.Contains("GitHubApi.ProblemFor(runner.RepositoryPath)", MethodBody("MainWindow.Fleet.cs", "private async Task RefreshLiveJobAsync("));
+        Assert.Contains("GitHubCli.ProblemFor(runner.Scope)", MethodBody("MainWindow.Health.cs", "internal static GitHubProblem? GitHubProblemFor("));
+        Assert.Contains("GitHubCli.ProblemFor(null)", MethodBody("MainWindow.xaml.cs", "private void ShowIdleStatus("));
+    }
+
+    [Fact]
+    public void ManualRefreshAndConnectingGitHub_AskGitHubAgainAtOnce()
+    {
+        // After the user fixed the cause, they do not wait out the pause.
+        var manual = MethodBody("MainWindow.xaml.cs", "private async Task ManualRefreshAsync(");
+        var forget = manual.IndexOf("GitHubCli.ForgetProblems();", StringComparison.Ordinal);
+        Assert.True(forget > 0 && forget < manual.IndexOf("await RefreshAsync(", StringComparison.Ordinal));
+        // A sign-in check that finds GitHub connected now.
+        Assert.Contains("if (authenticated) GitHubCli.ForgetProblems();", MethodBody("MainWindow.xaml.cs", "private async Task CheckGitHubAsync("));
+    }
 }

@@ -597,6 +597,12 @@
                                                                                 <TextBlock TextWrapping="Wrap" FontSize="12" Foreground="{DynamicResource TextMutedBrush}"
                                                                                            Text="This runner runs in a console window in your session, opened when you sign in. Its jobs can use your desktop, which builds that open windows, such as Unity, need. It is offline while you are signed out. A Windows service runs without sign-in but has no desktop; “Run as service” changes it, if its jobs don't need one."/>
                                                                             </Border>
+                                                                            <!-- GitHub could not be read for this runner: why, and when it is asked again -->
+                                                                            <DockPanel Margin="0,0,0,8" Visibility="{Binding GitHubNoteVisibility}" ToolTip="{Binding GitHubNoteTip}">
+                                                                                <TextBlock Text="&#xE7BA;" Style="{StaticResource Icon}" FontSize="11" Foreground="{DynamicResource WarningBrush}"
+                                                                                           VerticalAlignment="Top" Margin="0,2,8,0"/>
+                                                                                <TextBlock Text="{Binding GitHubNote}" TextWrapping="Wrap" FontSize="12" Foreground="{DynamicResource TextMutedBrush}"/>
+                                                                            </DockPanel>
                                                                             <!-- Live job: steps from GitHub, output and processes from the runner's PC -->
                                                                             <Border x:Name="LiveJobPanel" Visibility="{Binding LiveJobVisibility}" Background="{DynamicResource Bg2Brush}"
                                                                                     BorderBrush="{DynamicResource BorderSubtleBrush}" BorderThickness="1" CornerRadius="8" Padding="12,10" Margin="0,0,0,10">
