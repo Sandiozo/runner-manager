@@ -45,8 +45,12 @@ public partial class PairingHostWindow : Window
     /// <summary>Names of the PCs that were paired one way while the window was open.</summary>
     public IReadOnlyList<string> ManagedPcs => _managed;
 
+    /// <summary>Shows an error over the window, with its heading and message; tests replace it.</summary>
+    internal Action<string, string> ShowError { get; set; }
+
     public PairingHostWindow(byte[] pairingKey)
     {
+        ShowError = (heading, message) => DialogWindow.Error(this, heading, message);
         InitializeComponent();
         WindowTheme.Apply(this);
         ThisPcRun.Text = Environment.MachineName;
@@ -505,7 +509,7 @@ public partial class PairingHostWindow : Window
                 _notSaved.Add((request.Name, request.MachineId));
                 _added.Add(failure.Result);
                 ShowResults();
-                DialogWindow.Error(this, "Could not save the PC", failure.Message);
+                ShowError("Could not save the PC", failure.Message);
                 return;
             }
             _joined.Add(request.Name);

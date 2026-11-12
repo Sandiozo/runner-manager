@@ -312,6 +312,7 @@ public class AgentTaskSwitchTests
 /// "Add a PC": a PC that joined with the fleet code but could not be saved here. The error is shown, and the state stays
 /// one the window knows: a newer PC is told it was not added, and an older one, which kept the code, still counts.
 /// </summary>
+[Collection(FleetSettingsCollection.Name)]
 public class JoinNotSavedTests
 {
     [Fact]
@@ -340,14 +341,44 @@ public class JoinNotSavedTests
         }
     }
 
+    private static object? Call(PairingHostWindow window, string method, object argument)
+        => typeof(PairingHostWindow).GetMethod(method, System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
+            .Invoke(window, [argument]);
+
     [Fact]
     public void ANextRequestWithItsName_IsStillWarnedAbout()
-    {
-        // The window checks a request also against the PCs that joined but were not saved.
-        var check = PairingHostWindow.CheckRequest(new FleetConfig(), "LAPTOP", "2222", [("LAPTOP", "1111")], "HOST-PC", "9999");
-        Assert.True(check.CanAllow);
-        Assert.Contains("A PC named LAPTOP was allowed a moment ago", check.Warning);
-    }
+        => WpfTestApp.Run(() =>
+        {
+            // This PC is not in a fleet, so the window cannot save a PC that joined.
+            FleetConfig.Update(c =>
+            {
+                c.KnownPeers.Clear();
+                c.ProtectedFleetKey = string.Empty;
+            });
+            var window = new PairingHostWindow(CommandSigner.NewKey());
+            var errors = new List<string>();
+            window.ShowError = (_, message) => errors.Add(message);
+            try
+            {
+                // An older PC, which kept the fleet code as it arrived.
+                Call(window, "OnJoined", new Pairing.JoinRequest { Name = "LAPTOP", MachineId = "1111", Address = "10.0.0.5", Confirms = false });
+                Assert.Equal(new[] { "LAPTOP" }, window.JoinedPcs);
+                Assert.Contains("has the fleet code and is in the fleet", Assert.Single(errors));
+                Assert.Empty(FleetConfig.Current.KnownPeers);
+
+                // The window checks the next request also against the PCs that joined but were not saved.
+                var check = (PairingHostWindow.RequestCheck)Call(window, "Check", new Pairing.JoinRequest { Name = "LAPTOP", MachineId = "2222" })!;
+                Assert.True(check.CanAllow);
+                Assert.Contains("A PC named LAPTOP was allowed a moment ago", check.Warning);
+                Assert.Null(((PairingHostWindow.RequestCheck)Call(window, "Check", new Pairing.JoinRequest { Name = "DESKTOP", MachineId = "3333" })!).Warning);
+            }
+            finally
+            {
+                // The window was never shown: its timer would close it later.
+                ((System.Windows.Threading.DispatcherTimer)typeof(PairingHostWindow)
+                    .GetField("_expiry", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(window)!).Stop();
+            }
+        });
 }
 
 /// <summary>
