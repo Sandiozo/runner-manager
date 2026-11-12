@@ -1578,8 +1578,10 @@ public class InstallFolderSafetyTests
     [Fact]
     public void TheTextsForTheUser_SayStartHelper_InPlainWords()
     {
-        Assert.Equal($"Runner Manager is installed in a folder that programs without administrator rights can change. To move it, run setup again and choose {MachineInstall.ProgramFilesDir}.",
+        Assert.Equal($"Runner Manager is installed in a folder that programs without administrator rights can change. To move it, run the setup again, click Change… and choose {MachineInstall.ProgramFilesDir}.",
             InstallFolderSafety.UnsafeActivityText);
+        Assert.Equal($"Programs without administrator rights can change this folder. To move it, run the setup again, click Change… and choose {MachineInstall.ProgramFilesDir}.",
+            InstallFolderSafety.UnsafeNoteText);
         foreach (var text in new[]
                  {
                      InstallFolderSafety.UnsafeActivityText, InstallFolderSafety.UnsafeNoteText, InstallFolderSafety.WithoutStartHelperActivityText,

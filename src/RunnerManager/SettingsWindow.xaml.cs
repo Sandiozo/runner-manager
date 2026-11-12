@@ -73,7 +73,7 @@ public partial class SettingsWindow : Window
     /// </summary>
     private static string ProgramDescription(bool unsafeFolder)
     {
-        var text = $"{AppUpdater.InstallDir}. " + (unsafeFolder ? InstallFolderSafety.UnsafeNoteText : "To move it, run the setup again and choose another folder.");
+        var text = $"{AppUpdater.InstallDir}. " + (unsafeFolder ? InstallFolderSafety.UnsafeNoteText : "To move it, run the setup again, click Change… and choose another folder.");
         return InstallFolderSafety.RunsWithoutStartHelper ? $"{text} {InstallFolderSafety.WithoutStartHelperNoteText}" : text;
     }
 

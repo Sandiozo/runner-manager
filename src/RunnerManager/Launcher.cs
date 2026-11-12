@@ -598,7 +598,7 @@ internal static class Launcher
     /// <summary>The fleet agent log's line when this PC runs without the start helper.</summary>
     internal static string OffLogText(string reason)
         => $"Runner Manager runs without its start helper {FileName} ({reason}), so its scheduled tasks start RunnerManager.exe directly. " +
-           "Antivirus software may have removed it. Runner Manager tries again after the next update, or when setup runs again.";
+           "Antivirus software may have removed or blocked it. Runner Manager tries again after the next update, or when the setup runs again.";
 
     private static readonly HashSet<string> Logged = new(StringComparer.Ordinal);
 
