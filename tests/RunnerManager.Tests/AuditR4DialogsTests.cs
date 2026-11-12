@@ -173,3 +173,66 @@ public class AddAPcCheckTests
         Assert.NotEqual(shown, Check(fleet, "LAPTOP", "4444"));
     }
 }
+
+/// <summary>Settings → AI assistants: the two switches (round 4 of the review).</summary>
+[Collection(FleetSettingsCollection.Name)]
+public class AssistantSwitchFormTests
+{
+    private static readonly string ConfigPath = Path.Combine(FleetConfig.StateDir, "fleet.json");
+
+    [Fact]
+    public void WithoutAdministratorRights_ItSaysWhatHelpsOnThatPage_AndChangesNothing()
+    {
+        using var switches = new TestSwitches(enabled: false, administrator: false);
+
+        Assert.Equal(AssistantSwitchForm.NotAdministratorText, AssistantSwitchForm.Problem());
+        Assert.Equal(AssistantSwitchForm.NotAdministratorText, AssistantSwitchForm.Set(enabled: true));
+        Assert.False(AssistantSwitches.Current.Enabled);
+        Assert.Contains("Start Runner Manager as administrator", AssistantSwitchForm.NotAdministratorText);
+        Assert.DoesNotContain("Settings", AssistantSwitchForm.NotAdministratorText);
+        Assert.DoesNotContain("n't", AssistantSwitchForm.NotAdministratorText);
+    }
+
+    [Fact]
+    public void AWriteThatIsRefused_SaysWhatHelpsOnThatPage()
+    {
+        var before = AssistantSwitches.Store;
+        AssistantSwitches.Store = new RefusingStore();
+        try
+        {
+            Assert.Null(AssistantSwitchForm.Problem());
+            Assert.Equal(AssistantSwitchForm.NotAdministratorText, AssistantSwitchForm.Set(askBeforeChanges: false));
+        }
+        finally { AssistantSwitches.Store = before; }
+    }
+
+    [Fact]
+    public async Task AFleetJsonThatCannotBeRead_DoesNotBlockTheSwitches()
+    {
+        using var switches = new TestSwitches(enabled: false, askBeforeChanges: true);
+        await AuditFleetConfig.WithConfigAsync(() =>
+        {
+            FleetConfig.Update(c => c.Watchdog = false);
+            using (new FileStream(ConfigPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+            {
+                // Through fleet.json, the change fails.
+                Assert.ThrowsAny<IOException>(() => FleetConfig.Update(c => c.Watchdog = true));
+
+                Assert.Null(AssistantSwitchForm.Set(enabled: true));
+                Assert.Null(AssistantSwitchForm.Set(askBeforeChanges: false));
+            }
+            Assert.Equal(new AssistantSwitchValues(Enabled: true, AskBeforeChanges: false), AssistantSwitches.Current);
+            return Task.CompletedTask;
+        });
+    }
+
+    /// <summary>A store that this process may write, by its rights, but whose write is refused.</summary>
+    private sealed class RefusingStore : IAssistantSwitchStore
+    {
+        public string Where => "a test store";
+        public bool CanWrite => true;
+        public AssistantSwitchValues? Read() => null;
+        public void Write(AssistantSwitchValues values) => throw new UnauthorizedAccessException("Access is denied.");
+        public void Remove() { }
+    }
+}

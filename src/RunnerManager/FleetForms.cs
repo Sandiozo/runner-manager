@@ -108,6 +108,42 @@ internal static class CodeRowText
         => $"Only {managedBy}'s fleet changes this PC's access code. To stop it from managing this PC, click Disconnect.";
 }
 
+/// <summary>Settings → AI assistants: "Allow AI assistants" and "Ask before changes".</summary>
+internal static class AssistantSwitchForm
+{
+    internal const string ErrorHeading = "Could not change the AI assistant settings";
+
+    /// <summary>
+    /// What helps on that page when this process may not change the switches. <see cref="AssistantSwitches.NotAdministratorText"/>
+    /// is for <c>--mcp</c> and <c>ai</c>, and points to the page itself.
+    /// </summary>
+    internal const string NotAdministratorText =
+        "Only a program with administrator rights can change this setting. Start Runner Manager as administrator to change it.";
+
+    /// <summary>
+    /// Null when this process may change the switches, otherwise what to show. Asked before anything else is done for
+    /// a switch, so that nothing on this PC changes for a switch that cannot be saved.
+    /// </summary>
+    internal static string? Problem() => AssistantSwitches.Store.CanWrite ? null : NotAdministratorText;
+
+    /// <summary>
+    /// Changes one switch or both where they are kept (<see cref="AssistantSwitches"/>), not through fleet.json: they are
+    /// not in it, so a fleet.json that cannot be read does not block them, and one that cannot be written cannot report
+    /// a failure after they changed. Null when it worked, otherwise what to show.
+    /// </summary>
+    internal static string? Set(bool? enabled = null, bool? askBeforeChanges = null)
+    {
+        if (Problem() is { } problem) return problem;
+        try
+        {
+            AssistantSwitches.Set(enabled, askBeforeChanges);
+            return null;
+        }
+        catch (UnauthorizedAccessException) { return NotAdministratorText; }
+        catch (Exception ex) { return ex.Message; }
+    }
+}
+
 /// <summary>Forgetting a PC, worded and done the same way on the dashboard and in Settings.</summary>
 internal static class ForgetPc
 {
