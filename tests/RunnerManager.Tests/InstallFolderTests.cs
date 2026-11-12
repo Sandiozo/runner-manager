@@ -68,6 +68,59 @@ public class InstallFolderTests
         finally { Directory.Delete(root, recursive: true); }
     }
 
+    [Fact]
+    public void RemovalScript_RemovesItsOwnDownloadFolder_OutsideProgramFiles()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"rm-remove-update-{Guid.NewGuid():N}");
+        var folder = Path.Combine(root, "Apps", "RunnerManager");
+        // The download folder of an update that was cut off, with a full exe in it.
+        var left = Path.Combine(folder, "RunnerManager.update-1234");
+        Directory.CreateDirectory(left);
+        try
+        {
+            File.WriteAllText(Path.Combine(folder, AppPaths.ExeName), string.Empty);
+            File.WriteAllText(Path.Combine(left, AppPaths.ExeName), "x");
+            RunPowerShell(Installer.RemoveProgramFilesScript(folder), Installer.FolderEnvironment(folder));
+            Assert.False(Directory.Exists(folder));
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [JunctionFact]
+    public void RemovalScript_RemovesNoDownloadFolderThatIsOrHoldsALink_NorFoldersOfOtherNames()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"rm-remove-links-{Guid.NewGuid():N}");
+        var folder = Path.Combine(root, "Apps", "RunnerManager");
+        var elsewhere = Path.Combine(root, "elsewhere");
+        var linked = Path.Combine(folder, "RunnerManager.update-3");
+        var holdsLink = Path.Combine(folder, "RunnerManager.update-4");
+        var other = Path.Combine(folder, "RunnerManager.update-old");
+        Directory.CreateDirectory(elsewhere);
+        Directory.CreateDirectory(holdsLink);
+        Directory.CreateDirectory(other);
+        try
+        {
+            File.WriteAllText(Path.Combine(folder, AppPaths.ExeName), string.Empty);
+            File.WriteAllText(Path.Combine(elsewhere, AppPaths.ExeName), "keep");
+            File.WriteAllText(Path.Combine(other, "notes.txt"), "keep");
+            Junctions.Create(linked, elsewhere);
+            Junctions.Create(Path.Combine(holdsLink, "inner"), elsewhere);
+
+            RunPowerShell(Installer.RemoveProgramFilesScript(folder), Installer.FolderEnvironment(folder));
+
+            Assert.False(File.Exists(Path.Combine(folder, AppPaths.ExeName)));
+            Assert.True(File.Exists(Path.Combine(elsewhere, AppPaths.ExeName)));
+            Assert.True(Directory.Exists(linked));
+            Assert.True(Directory.Exists(holdsLink));
+            Assert.True(File.Exists(Path.Combine(other, "notes.txt")));
+        }
+        finally
+        {
+            Junctions.Delete(linked, Path.Combine(holdsLink, "inner"));
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
     internal static void RunPowerShell(string script, IReadOnlyDictionary<string, string>? environment = null)
     {
         var start = new System.Diagnostics.ProcessStartInfo(AppUpdater.PowerShellExe)

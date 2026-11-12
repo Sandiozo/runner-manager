@@ -600,6 +600,8 @@ public static class Installer
     /// it, so it is removed completely. Any other folder loses only Runner Manager's own files, and is removed when it is
     /// then empty: the default of earlier versions is in the user's profile, where a program without administrator rights
     /// could put a link in it that a recursive delete would follow, and a folder chosen in setup may hold other files.
+    /// Runner Manager's own download folders there (see <see cref="AppUpdater.StagingFolder"/>) go too, when they hold
+    /// only files and are no link themselves.
     /// </summary>
     internal static string RemoveProgramFilesScript(string folder)
     {
@@ -609,6 +611,10 @@ public static class Installer
             ? "Remove-Item -LiteralPath $f -Recurse -Force -ErrorAction SilentlyContinue"
             : "foreach ($p in 'RunnerManager.exe', 'RunnerManager.exe.new', 'RunnerManager.exe.new.partial', 'RunnerManager.exe.previous', 'RunnerManager.exe.swapping', 'RunnerManager.exe.pending', 'RunnerManager.*.old.exe') " +
               "{ Get-ChildItem -LiteralPath $f -Filter $p -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue }; " +
+              "Get-ChildItem -LiteralPath $f -Directory -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^RunnerManager\\.update-\\d+$' -and -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) } | " +
+              "ForEach-Object { $u = $_; $c = @(Get-ChildItem -LiteralPath $u.FullName -Force -ErrorAction SilentlyContinue); " +
+              "if (-not ($c | Where-Object { $_.PSIsContainer -or ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) })) " +
+              "{ $c | Remove-Item -Force -ErrorAction SilentlyContinue; Remove-Item -LiteralPath $u.FullName -Force -ErrorAction SilentlyContinue } }; " +
               "$left = @(Get-ChildItem -LiteralPath $f -Force -ErrorAction SilentlyContinue); " +
               "if ($left.Count -eq 0) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue } " +
               // Only other files are left: the folder stays, and there is nothing more to wait for.

@@ -281,7 +281,7 @@ public class ProgramFilesInstallTests
         Assert.False(AppUpdater.IsStagingFolderName("RunnerManager.update-x"));
     }
 
-    [Fact]
+    [JunctionFact]
     public void StaleUpdateFolders_AreRemoved_OnlyWithTheirOwnNames_AndNeverThroughALink()
     {
         var root = Path.Combine(Path.GetTempPath(), $"rm-staging-{Guid.NewGuid():N}");
@@ -306,8 +306,8 @@ public class ProgramFilesInstallTests
             var oldStale = Folder(data, "update-333");
             var link = Path.Combine(data, "update-444");
             var holdsLink = Folder(data, "update-555", withFile: false);
-            Junction(link, Path.Combine(elsewhere, "target"));
-            Junction(Path.Combine(holdsLink, "inner"), Path.Combine(elsewhere, "target"));
+            Junctions.Create(link, Path.Combine(elsewhere, "target"));
+            Junctions.Create(Path.Combine(holdsLink, "inner"), Path.Combine(elsewhere, "target"));
 
             // With administrator rights (an update): only the install folder is cleaned up, never the data folder, where a
             // program of the user could swap a folder for a link while it is deleted.
@@ -335,20 +335,6 @@ public class ProgramFilesInstallTests
         }
     }
 
-    private static void Junction(string link, string target)
-    {
-        var start = new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "cmd.exe"))
-        {
-            ArgumentList = { "/c", "mklink", "/J", link, target },
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            RedirectStandardOutput = true
-        };
-        using var process = Process.Start(start)!;
-        process.StandardOutput.ReadToEnd();
-        Assert.True(process.WaitForExit(30_000));
-        Assert.True(new DirectoryInfo(link).Attributes.HasFlag(FileAttributes.ReparsePoint), $"No junction at {link}");
-    }
 
     [Fact]
     public async Task SignatureCheck_TakesThePathFromTheEnvironment()
