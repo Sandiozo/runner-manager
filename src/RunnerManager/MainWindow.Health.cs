@@ -44,6 +44,9 @@ public partial class MainWindow
             foreach (var (key, value) in health.Queues) _runnerQueues[key] = value;
             // Cards may have been rebuilt meanwhile; the results are kept by runner key.
             foreach (var runner in Machines.SelectMany(m => m.Runners)) ApplyHealth(runner);
+            // A concern found or gone changes what the Needs attention tile counts and shows.
+            ApplyFilter();
+            UpdateAttentionTile(Machines.ToList());
 
             if (!_settings.NotifyOnJobProblems) return;
             foreach (var machine in Machines)

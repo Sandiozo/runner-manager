@@ -522,7 +522,7 @@ public sealed class MachineInfo : INotifyPropertyChanged
     public Visibility BodyVisibility => IsCollapsed && !_openForSearch ? Visibility.Collapsed : Visibility.Visible;
     /// <summary>With the runners hidden, the header says how they are and whether one needs attention.</summary>
     public Visibility CollapsedSummaryVisibility => BodyVisibility == Visibility.Visible ? Visibility.Collapsed : Visibility.Visible;
-    private MachineRunnerStatus[] ProblemRunners => Runners.Where(r => r.Health.IsProblem).ToArray();
+    internal MachineRunnerStatus[] ProblemRunners => Runners.Where(r => r.Health.IsProblem).ToArray();
     public Visibility ProblemBadgeVisibility => ProblemRunners.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
     public string ProblemBadgeText => ProblemRunners.Length == 1 ? "1 runner needs attention" : $"{ProblemRunners.Length} runners need attention";
     public string ProblemTip => string.Join("\n", ProblemRunners.Select(r => $"{r.TitleText}: {r.Health.Label}"));

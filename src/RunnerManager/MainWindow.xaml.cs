@@ -642,7 +642,7 @@ public partial class MainWindow : Window
 
     private static string Plural(int count, string word) => $"{count} {word}{(count == 1 ? "" : "s")}";
 
-    private void UpdateSummary()
+    internal void UpdateSummary()
     {
         var machines = Machines.ToList();
         var reachable = machines.Count(m => m.IsReachable);
@@ -661,6 +661,8 @@ public partial class MainWindow : Window
         TileBusy.Text = busy.Count.ToString();
         TileBusySub.Text = busy.Count > 0 ? string.Join(", ", busy.Select(r => r.TitleText))
             : queued > 0 ? $"{queued} job{(queued == 1 ? "" : "s")} queued on this PC" : "No jobs running";
+        // Like the other tiles, over the whole fleet, not the filtered view.
+        UpdateAttentionTile(machines);
 
         _allMachines.Update($"{Plural(machines.Count, "PC")}  ·  {Plural(runners.Count, "runner")}");
         ApplyOptionalSections(machines);
@@ -685,8 +687,12 @@ public partial class MainWindow : Window
     {
         if (item is not MachineInfo machine) return false;
         if (_selectedMachineKey != null && machine.MachineKey != _selectedMachineKey) return false;
-        return MatchesSearch(machine);
+        return ShownWithoutSelection(machine);
     }
+
+    /// <summary>The search and the Needs attention tile show the PC, whatever is selected in the sidebar.</summary>
+    private bool ShownWithoutSelection(MachineInfo machine)
+        => (!_attentionOnly || FleetAttention.PcNeedsAttention(machine)) && MatchesSearch(machine);
 
     private bool MatchesSearch(MachineInfo machine)
         => string.IsNullOrWhiteSpace(_filter)
@@ -695,37 +701,47 @@ public partial class MainWindow : Window
 
     private void ApplyFilter()
     {
+        var searching = !string.IsNullOrWhiteSpace(_filter);
         foreach (var machine in Machines)
         {
-            var machineMatch = !string.IsNullOrWhiteSpace(_filter)
-                && machine.MachineName.Contains(_filter, StringComparison.OrdinalIgnoreCase);
+            var machineMatch = searching && machine.MachineName.Contains(_filter, StringComparison.OrdinalIgnoreCase);
             var runnerMatch = false;
+            var shown = false;
             foreach (var runner in machine.Runners)
             {
                 var match = runner.Matches(_filter);
                 runnerMatch |= match;
-                runner.MatchesFilter = machineMatch || match;
+                runner.MatchesFilter = (machineMatch || match) && (!_attentionOnly || FleetAttention.ShowsRunner(machine, runner));
+                shown |= runner.MatchesFilter;
             }
-            // A match in a runner's own details is otherwise hidden in a collapsed card.
-            machine.SetOpenForSearch(runnerMatch && !string.IsNullOrWhiteSpace(_filter));
+            // A match in a runner's own details, or a runner that needs attention, is otherwise hidden in a collapsed card.
+            machine.SetOpenForSearch((runnerMatch && searching) || (_attentionOnly && shown));
         }
         // Refreshing the view rebuilds every card, so only do it when the visible set actually changes.
         var visible = MachinesView.Cast<MachineInfo>().Select(m => m.MachineKey);
         var wanted = Machines.Where(FilterMachine).Select(m => m.MachineKey);
         if (!visible.SequenceEqual(wanted)) MachinesView.Refresh();
-        var empty = MachinesView.IsEmpty && !string.IsNullOrWhiteSpace(_filter);
+        var empty = MachinesView.IsEmpty && (searching || _attentionOnly);
         NoResultsPanel.Visibility = empty ? Visibility.Visible : Visibility.Collapsed;
         NoResultsText.Text = NoResultsMessage();
     }
 
-    /// <summary>With one PC selected in the sidebar, the search covers only that PC: say so, and whether others match.</summary>
+    /// <summary>
+    /// Why nothing is shown. With one PC selected in the sidebar, the search and the Needs attention tile cover only
+    /// that PC: say so, and whether other PCs have something to show.
+    /// </summary>
     private string NoResultsMessage()
     {
+        var searching = !string.IsNullOrWhiteSpace(_filter);
         if (_selectedMachineKey == null || Machines.FirstOrDefault(m => m.MachineKey == _selectedMachineKey) is not { } selected)
-            return $"No runners or PCs match “{_filter}”.";
-        return Machines.Any(m => m != selected && MatchesSearch(m))
-            ? $"Nothing on {selected.MachineName} matches “{_filter}”. Other PCs have matches. Select All PCs to see them."
-            : $"Nothing on {selected.MachineName} matches “{_filter}”.";
+            return !searching ? "Nothing needs attention."
+                : _attentionOnly ? $"Nothing that needs attention matches “{_filter}”."
+                : $"No runners or PCs match “{_filter}”.";
+        var what = !searching ? "needs attention" : _attentionOnly ? $"needs attention and matches “{_filter}”" : $"matches “{_filter}”";
+        if (!Machines.Any(m => m != selected && ShownWithoutSelection(m))) return $"Nothing on {selected.MachineName} {what}.";
+        return searching
+            ? $"Nothing on {selected.MachineName} {what}. Other PCs have matches. Select All PCs to see them."
+            : $"Nothing on {selected.MachineName} {what}. Other PCs do. Select All PCs to see them.";
     }
 
     private void SearchBox_TextChanged(object sender, TextChangedEventArgs e)

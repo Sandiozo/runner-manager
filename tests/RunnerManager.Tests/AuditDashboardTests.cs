@@ -1331,4 +1331,174 @@ public class AuditDashboardTests
         });
         Assert.Equal(Visibility.Collapsed, old.AddRunnerVisibility);
     }
+
+    // ----- 13: the Needs attention tile -----
+
+    private static readonly RunnerHealth StuckJob = new(RunnerConcern.Stuck, "Stuck", "The job has used no CPU and printed no output for 30 min.");
+    private static readonly RunnerHealth WaitingJobs = new(RunnerConcern.IdleWithWaitingJobs, "Idle · jobs waiting", "A job it can run has waited 20 min.");
+
+    private static MachineRunnerStatus RunnerNamed(string name, string state) => new()
+    {
+        ServiceName = $"actions.runner.{name}", DisplayName = name,
+        IsRunning = state != "stopped", ActivityText = state == "busy" ? "Busy" : "Idle"
+    };
+
+    /// <summary>
+    /// BUILD-40: all well. BUILD-41: one stopped runner, one stuck job, one idle while jobs wait, one well.
+    /// BUILD-42: offline, with a stopped runner that is not counted. BUILD-43: not answered yet.
+    /// </summary>
+    private static List<MachineInfo> FleetNeedingAttention()
+    {
+        var well = PcWith("BUILD-40", RunnerNamed("web", "idle"));
+        var mixed = PcWith("BUILD-41", RunnerNamed("api", "stopped"), RunnerNamed("build", "busy"), RunnerNamed("docs", "idle"), RunnerNamed("lint", "idle"));
+        mixed.Runners.Single(r => r.DisplayName == "build").Health = StuckJob;
+        mixed.Runners.Single(r => r.DisplayName == "docs").Health = WaitingJobs;
+        var offline = MachineInfo.FromPayload("build-42", new MachineStatusPayload
+        {
+            MachineName = "BUILD-42", AgentProtocolVersion = 14, UpdatedUtc = DateTime.UtcNow.AddHours(-3), FleetAgentRunning = true,
+            Runners = new[] { RunnerNamed("gpu", "stopped") }
+        });
+        var unknown = MachineInfo.Placeholder("build-43", "BUILD-43", DateTime.UtcNow.AddDays(-1), "10.0.0.43", "No answer.");
+        return new List<MachineInfo> { well, mixed, offline, unknown };
+    }
+
+    [Fact]
+    public void NeedsAttention_CountsOfflinePcsOnce_AndStoppedAndStuckRunnersOnPcsThatAreOnline()
+    {
+        var fleet = FleetNeedingAttention();
+        Assert.False(fleet[2].IsReachable);
+        Assert.False(fleet[1].Runners.Single(r => r.DisplayName == "api").IsRunning);
+
+        var attention = FleetAttention.Count(fleet);
+        Assert.Equal(new FleetAttention(OfflinePcs: 2, StoppedRunners: 1, StuckJobs: 1, LongJobs: 0, IdleRunners: 1), attention);
+        Assert.Equal(5, attention.Total);
+        Assert.Equal("2 PCs are offline, 1 runner is stopped, 1 job looks stuck, 1 runner is idle while jobs wait for it.", attention.Summary);
+        Assert.Equal("2 offline · 1 stopped · 1 stuck · 1 idle, jobs waiting", attention.SubText);
+
+        var single = FleetAttention.Count(new[] { fleet[0], fleet[2] });
+        Assert.Equal("1 PC is offline.", single.Summary);
+        Assert.Equal(0, FleetAttention.Count(new[] { fleet[0] }).Total);
+        Assert.Equal("Nothing needs attention.", FleetAttention.Count(new[] { fleet[0] }).Summary);
+    }
+
+    [Fact]
+    public void NeedsAttention_ShowsOnlyThosePcsAndRunners()
+    {
+        var fleet = FleetNeedingAttention();
+        Assert.Equal(new[] { false, true, true, true }, fleet.Select(FleetAttention.PcNeedsAttention));
+        var mixed = fleet[1];
+        Assert.Equal(new[] { "api", "build", "docs" },
+            mixed.Runners.Where(r => FleetAttention.ShowsRunner(mixed, r)).Select(r => r.DisplayName));
+        // An offline PC's runners are all shown with it: their state is not known.
+        Assert.All(fleet[2].Runners, r => Assert.True(FleetAttention.ShowsRunner(fleet[2], r)));
+    }
+
+    [Fact]
+    public void NeedsAttentionTile_FiltersTheView_WithTheSearch_AndLetsGoAtZero()
+    {
+        var window = NewDashboard();
+        var fleet = FleetNeedingAttention();
+        WpfTestApp.Run(() =>
+        {
+            foreach (var pc in fleet) window.Machines.Add(pc);
+            window.UpdateSummary();
+            Assert.Equal(Visibility.Visible, window.AttentionTile.Visibility);
+            Assert.Equal("5", window.TileAttention.Text);
+            Assert.StartsWith("2 PCs are offline, 1 runner is stopped", (string)window.AttentionTile.ToolTip);
+            Assert.Equal("Needs attention, 5", AutomationProperties.GetName(window.AttentionTile));
+            var runnersTile = window.TileRunners.Text;
+
+            // Pressed: only those PCs and runners, and the other tiles still count the whole fleet.
+            window.AttentionTile.IsChecked = true;
+            window.AttentionTile.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent, window.AttentionTile));
+            Assert.True(window.AttentionOnly);
+            Assert.Equal(new[] { "BUILD-41", "BUILD-42", "BUILD-43" }, window.MachinesView.Cast<MachineInfo>().Select(m => m.MachineName));
+            Assert.Equal(new[] { "api", "build", "docs" }, fleet[1].Runners.Where(r => r.MatchesFilter).Select(r => r.DisplayName));
+            Assert.Equal(Visibility.Collapsed, fleet[1].Runners.Single(r => r.DisplayName == "lint").RowVisibility);
+            window.UpdateSummary();
+            Assert.Equal(runnersTile, window.TileRunners.Text);
+            Assert.EndsWith("Click to show everything again.", (string)window.AttentionTile.ToolTip);
+
+            // With the search: both must hold.
+            window.SearchBox.Text = "lint";
+            Assert.Equal(Visibility.Visible, window.NoResultsPanel.Visibility);
+            Assert.Equal("Nothing that needs attention matches “lint”.", window.NoResultsText.Text);
+            window.SearchBox.Text = "docs";
+            Assert.Equal(new[] { "BUILD-41" }, window.MachinesView.Cast<MachineInfo>().Select(m => m.MachineName));
+            Assert.Equal(new[] { "docs" }, fleet[1].Runners.Where(r => r.MatchesFilter).Select(r => r.DisplayName));
+            window.SearchBox.Text = string.Empty;
+
+            // A second click shows everything again.
+            window.AttentionTile.IsChecked = false;
+            window.AttentionTile.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent, window.AttentionTile));
+            Assert.False(window.AttentionOnly);
+            Assert.Equal(4, window.MachinesView.Cast<MachineInfo>().Count());
+            Assert.All(fleet.SelectMany(m => m.Runners), r => Assert.True(r.MatchesFilter));
+
+            // Pressed when the count reaches zero: it lets go by itself and hides.
+            window.ShowAttentionOnly(true);
+            foreach (var pc in fleet.Skip(1)) window.Machines.Remove(pc);
+            window.UpdateSummary();
+            Assert.False(window.AttentionOnly);
+            Assert.False(window.AttentionTile.IsChecked);
+            Assert.Equal(Visibility.Collapsed, window.AttentionTile.Visibility);
+            Assert.Equal(new[] { "BUILD-40" }, window.MachinesView.Cast<MachineInfo>().Select(m => m.MachineName));
+        });
+    }
+
+    [Fact]
+    public void NeedsAttentionTile_WithOnePcSelected_SaysWhetherOtherPcsNeedAttention()
+    {
+        var window = NewDashboard();
+        var fleet = FleetNeedingAttention();
+        WpfTestApp.Run(() =>
+        {
+            foreach (var pc in fleet)
+            {
+                window.Machines.Add(pc);
+                window.NavItems.Add(pc);
+            }
+        });
+        WpfTestApp.Flush();
+        WpfTestApp.Run(() =>
+        {
+            window.UpdateSummary();
+            window.MachineNav.SelectedItem = fleet[0];
+            window.ShowAttentionOnly(true);
+            Assert.Equal(Visibility.Visible, window.NoResultsPanel.Visibility);
+            Assert.Equal("Nothing on BUILD-40 needs attention. Other PCs do. Select All PCs to see them.", window.NoResultsText.Text);
+            window.ShowAttentionOnly(false);
+            Assert.Equal(Visibility.Collapsed, window.NoResultsPanel.Visibility);
+        });
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void NeedsAttentionTile_LooksPressedWhileItFilters_InBothThemes(bool light)
+        => WpfTestApp.Run(() =>
+        {
+            try
+            {
+                WpfTestApp.UseColors(light);
+                var window = new MainWindow();
+                var tile = WpfTestApp.Layout(new ToggleButton { Style = (Style)window.FindResource("ToggleTile"), Content = new TextBlock { Text = "5" } });
+                var chrome = (Border)tile.Template.FindName("Chrome", tile);
+                Assert.Equal(WpfTestApp.Resource("Bg1Brush"), WpfTestApp.ColorOf(chrome.Background));
+                Assert.Equal(WpfTestApp.Resource("BorderSubtleBrush"), WpfTestApp.ColorOf(chrome.BorderBrush));
+
+                tile.IsChecked = true;
+                WpfTestApp.Layout(tile);
+                var pressed = WpfTestApp.ColorOf(chrome.Background);
+                Assert.Equal(WpfTestApp.Resource("BadgeWarnBgBrush"), pressed);
+                Assert.Equal(WpfTestApp.Resource("WarningBrush"), WpfTestApp.ColorOf(chrome.BorderBrush));
+                Assert.NotEqual(WpfTestApp.Resource("Bg1Brush"), pressed);
+                // The tile's number, caption and second line stay readable on it.
+                foreach (var text in new[] { "TextBrush", "TextMutedBrush", "WarningBrush" })
+                    Assert.True(Palette.Contrast(WpfTestApp.Resource(text), pressed) >= Palette.MinContrast, text);
+                // The other tiles' look when not pressed.
+                Assert.Equal(new CornerRadius(10), chrome.CornerRadius);
+            }
+            finally { WpfTestApp.UseColors(light: false); }
+        });
 }
