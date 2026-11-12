@@ -13,6 +13,15 @@ public sealed class FleetActions
 
     public FleetActions(bool viaLocalAgent) => _viaLocalAgent = viaLocalAgent;
 
+    /// <summary>
+    /// The longest a runner create may take on a PC, and so how long a create on another PC (also the one of a move) is
+    /// waited for. RunnerService gives the download up to 45 minutes and config.cmd up to 10; finding the runner
+    /// package, the checksum, unpacking, the registration token and the workflow check take a few minutes more. No other
+    /// command takes longer, so the waits for commands and for an update restart are as long (see
+    /// <see cref="MachineRelay.MaxCommandWait"/>).
+    /// </summary>
+    internal static readonly TimeSpan CreateWait = TimeSpan.FromMinutes(60);
+
     /// <summary>Runs an action on this PC directly, or sends it to a fleet agent and waits for its result.</summary>
     public async Task RunOnMachineAsync(MachineInfo machine, string target, string targetKey, string action, Action<string> log,
         Func<Task> local, TimeSpan timeout, string runnerName = "", string[]? labels = null, string value = "",
@@ -50,7 +59,7 @@ public sealed class FleetActions
                 InstallPath = RunnerService.SuggestInstallPath(url),
                 Labels = labels
             }, log),
-            TimeSpan.FromMinutes(10), runnerName: name, labels: labels);
+            CreateWait, runnerName: name, labels: labels);
 
     /// <summary>
     /// Why Start, Stop or Restart can't be used on a runner, or null. A runner can have a Windows service and still run in
@@ -118,7 +127,7 @@ public sealed class FleetActions
                     ReplaceExisting = true,
                     Options = options
                 }, log),
-                TimeSpan.FromMinutes(10), runnerName: runner.AgentName, labels: labels, value: "replace", options: options);
+                CreateWait, runnerName: runner.AgentName, labels: labels, value: "replace", options: options);
         }
         catch (Exception ex) when (!RunsHere(target) && ex is TimeoutException or OperationCanceledException)
         {

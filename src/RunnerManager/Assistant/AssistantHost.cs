@@ -22,8 +22,11 @@ public static class AssistantHost
     /// <summary>An approval nobody answers in this time counts as declined.</summary>
     public static readonly TimeSpan ApprovalTimeout = TimeSpan.FromMinutes(10);
 
-    /// <summary>After stdin closes, requests still running get this long to finish.</summary>
-    private static readonly TimeSpan DrainLimit = TimeSpan.FromMinutes(15);
+    /// <summary>
+    /// After stdin closes, requests still running get this long to finish: enough for a change that waits for its
+    /// approval and then creates a runner (<see cref="FleetActions.CreateWait"/>).
+    /// </summary>
+    internal static readonly TimeSpan DrainLimit = ApprovalTimeout + FleetActions.CreateWait;
 
     /// <summary>The fleet agent's approvals, shown one at a time in the order they came in.</summary>
     public static ApprovalQueue Approvals { get; } = new(ShowApprovalAsync, ApprovalTimeout);

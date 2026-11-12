@@ -44,10 +44,19 @@ public static class MachineRelay
     private static readonly RunnerRecovery Recovery = new();
     private static StatusCache? _status;
     private static volatile bool _restartAgentAfterUpdate;
-    /// <summary>How long an update waits for the agent's work to finish before it restarts the agent anyway.</summary>
-    private static readonly TimeSpan UpdateRestartWait = TimeSpan.FromMinutes(15);
-    /// <summary>The longest a caller waits for a command its agent still reports as queued or running.</summary>
-    private static readonly TimeSpan MaxCommandWait = TimeSpan.FromMinutes(30);
+    /// <summary>
+    /// How long an update waits for the agent's work to finish before it restarts the agent anyway: as long as the
+    /// longest command, a runner create (<see cref="FleetActions.CreateWait"/>), counted again each time the agent
+    /// finishes a command. So a create is never cut off; only an agent that finishes nothing for that long is.
+    /// </summary>
+    internal static readonly TimeSpan UpdateRestartWait = FleetActions.CreateWait;
+
+    /// <summary>
+    /// The longest a caller waits for a command its agent still reports as queued or running: as long as the longest
+    /// command, a runner create (<see cref="FleetActions.CreateWait"/>), counted again each time the agent finishes a
+    /// command that was queued before it.
+    /// </summary>
+    internal static readonly TimeSpan MaxCommandWait = FleetActions.CreateWait;
 
     public static string LocalMachineKey => Sanitize(Environment.MachineName);
 
@@ -692,16 +701,26 @@ public static class MachineRelay
     /// Waits until a machine's agent reports that it processed a command, and returns its result. Throws when the agent
     /// reports a failure, or when there is no result after <paramref name="timeout"/>. Agents that report what is
     /// queued and running (protocol 12) are waited for longer while the command still waits or runs, up to
-    /// <see cref="MaxCommandWait"/>; the exception then says that it is still running.
+    /// <see cref="MaxCommandWait"/> after the agent last finished a command queued before it; the exception then says
+    /// that it is still running.
     /// </summary>
-    public static async Task<string> WaitForCommandAsync(string machineKey, string commandId, TimeSpan timeout, CancellationToken cancellationToken = default)
+    public static Task<string> WaitForCommandAsync(string machineKey, string commandId, TimeSpan timeout, CancellationToken cancellationToken = default)
+        => WaitForCommandAsync(machineKey, commandId, timeout, () => DateTime.UtcNow, cancellationToken);
+
+    /// <param name="utcNow">The clock (tests pass their own).</param>
+    internal static async Task<string> WaitForCommandAsync(string machineKey, string commandId, TimeSpan timeout, Func<DateTime> utcNow,
+        CancellationToken cancellationToken = default)
     {
-        var started = DateTime.UtcNow;
+        var started = utcNow();
         var deadline = started + timeout;
-        var cap = started + (timeout > MaxCommandWait ? timeout : MaxCommandWait);
+        var longest = timeout > MaxCommandWait ? timeout : MaxCommandWait;
+        var cap = started + longest;
         var runningSeenUtc = DateTime.MinValue;
-        bool StillRunning() => DateTime.UtcNow - runningSeenUtc < TimeSpan.FromMinutes(1);
-        while (DateTime.UtcNow < cap && (DateTime.UtcNow < deadline || StillRunning()))
+        // The results the agent reported last time. A new one while this command still waits means the agent works
+        // through the commands queued before it, so this one may only now get its turn.
+        HashSet<string>? finished = null;
+        bool StillRunning() => utcNow() - runningSeenUtc < TimeSpan.FromMinutes(1);
+        while (utcNow() < cap && (utcNow() < deadline || StillRunning()))
         {
             await Task.Delay(CommandPollInterval, cancellationToken);
             MachineStatusPayload? status;
@@ -712,10 +731,13 @@ public static class MachineRelay
             }
             catch { continue; }
             if (status == null) continue;
-            var result = (status.RecentCommands ?? Array.Empty<FleetCommandResult>()).FirstOrDefault(r => r.Id.Equals(commandId, StringComparison.OrdinalIgnoreCase))?.Result;
-            if (result == null && (status.PendingCommandIds ?? Array.Empty<string>()).Contains(commandId, StringComparer.OrdinalIgnoreCase))
+            var result = status.RecentCommands.FirstOrDefault(r => r.Id.Equals(commandId, StringComparison.OrdinalIgnoreCase))?.Result;
+            if (result == null && status.PendingCommandIds.Contains(commandId, StringComparer.OrdinalIgnoreCase))
             {
-                runningSeenUtc = DateTime.UtcNow;
+                runningSeenUtc = utcNow();
+                var now = status.RecentCommands.Select(r => r.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                if (finished != null && !now.IsSubsetOf(finished)) cap = runningSeenUtc + longest;
+                finished = now;
                 continue;
             }
             // Older agents only report the last command.
@@ -724,7 +746,7 @@ public static class MachineRelay
             if (IsFailedResult(result)) throw new InvalidOperationException(result);
             return result;
         }
-        var minutes = Math.Max(1, (int)Math.Round((DateTime.UtcNow - started).TotalMinutes));
+        var minutes = Math.Max(1, (int)Math.Round((utcNow() - started).TotalMinutes));
         throw new TimeoutException(StillRunning()
             ? $"{machineKey} is still running the command after {minutes} minutes. Check its fleet agent log."
             : $"{machineKey} did not report a result within {minutes} minutes. Check its fleet agent log.");
@@ -804,7 +826,8 @@ public static class MachineRelay
         var watchdogRead = new GuardedRead<LocalState>(() => GatherLocalStateAsync(), StatusCache.DefaultBuildTimeout, AppendAgentLog,
             $"Auto-recovery skipped its check: reading this PC's runners took more than {(int)StatusCache.DefaultBuildTimeout.TotalSeconds} seconds.",
             "Auto-recovery can read this PC's runners again.");
-        DateTime? restartByUtc = null;
+        var restart = new UpdateRestartClock(() => DateTime.UtcNow, UpdateRestartWait);
+        var toldRestart = false;
         while (!cancellationToken.IsCancellationRequested)
         {
             try
@@ -838,6 +861,7 @@ public static class MachineRelay
                     lastResult = result;
                     state.MarkProcessed(command.Id, result);
                     pending.TryRemove(command.Id, out _);
+                    restart.WorkFinished();
                     InvalidateStatus();
                     try { SaveAgentState(state); }
                     catch (Exception ex) { AppendAgentLog($"Could not save the agent state: {ex.Message}"); }
@@ -845,14 +869,15 @@ public static class MachineRelay
 
                 if (_restartAgentAfterUpdate)
                 {
-                    // Exit once queued commands and other work (AI assistant calls) are done, or after a generous wait.
+                    // Exit once queued commands and other work (AI assistant calls) are done. Commands run in this loop, so
+                    // a queued one always runs first; other work is waited for until nothing finished for a long time.
                     var quiet = pending.IsEmpty && AgentWork.IsIdle;
-                    if (restartByUtc == null && !quiet) AppendAgentLog("Restarting to finish the update once the current work is done.");
-                    restartByUtc ??= DateTime.UtcNow + UpdateRestartWait;
-                    if (quiet || DateTime.UtcNow >= restartByUtc)
+                    if (!toldRestart && !quiet) AppendAgentLog("Restarting to finish the update once the current work is done.");
+                    toldRestart = true;
+                    if (restart.Due(quiet))
                     {
                         AppendAgentLog(quiet ? "Restarting to finish the update."
-                            : $"Restarting to finish the update, although work is still running after {(int)UpdateRestartWait.TotalMinutes} minutes.");
+                            : $"Restarting to finish the update, although work is still running. Nothing finished in {(int)UpdateRestartWait.TotalMinutes} minutes.");
                         await Task.Delay(TimeSpan.FromSeconds(3), CancellationToken.None); // let the dashboard read the result
                         // The helper started with the update gives up after two minutes; this one starts the new agent.
                         AppUpdater.ScheduleAgentTaskRestart(ScheduledTasks.AgentTaskName);
@@ -1336,7 +1361,7 @@ public static class MachineRelay
 
     /// <summary>
     /// Restarts the local agent (after an update or a settings change that needs it). Unless <paramref name="force"/>
-    /// is set, it first waits (up to 15 minutes) for the agent to finish commands and AI assistant calls.
+    /// is set, it first waits for the agent to finish commands and AI assistant calls (see <see cref="WaitWhileBusyAsync"/>).
     /// </summary>
     public static async Task RestartLocalAgentAsync(bool force = false, Action<string>? log = null)
     {
@@ -1347,31 +1372,43 @@ public static class MachineRelay
         await ScheduledTasks.RunTaskAsync(ScheduledTasks.AgentTaskName);
     }
 
-    /// <summary>
-    /// Waits while this PC's agent reports that it is busy (protocol 12), at most <see cref="UpdateRestartWait"/>.
-    /// Returns right away when the agent doesn't answer or is older, since there is then nothing to wait for.
-    /// </summary>
-    private static async Task WaitForLocalAgentIdleAsync(Action<string>? log)
+    private static Task WaitForLocalAgentIdleAsync(Action<string>? log)
     {
-        if (FleetConfig.Current.FleetKey == null) return;
-        var deadline = DateTime.UtcNow + UpdateRestartWait;
+        if (FleetConfig.Current.FleetKey == null) return Task.CompletedTask;
+        return WaitWhileBusyAsync(async () => (await FleetNetwork.CallAsync("127.0.0.1", LocalMachineKey, new FleetRequest { Op = "status" })).Status,
+            () => DateTime.UtcNow, () => Task.Delay(TimeSpan.FromSeconds(3)), log);
+    }
+
+    /// <summary>
+    /// Waits while this PC's agent reports that it is busy (protocol 12): until it is done, or until it finished no
+    /// command for <see cref="UpdateRestartWait"/>, so a runner create that is running or queued is not cut off.
+    /// Returns right away when the agent does not answer or is older, since there is then nothing to wait for.
+    /// </summary>
+    internal static async Task WaitWhileBusyAsync(Func<Task<MachineStatusPayload?>> readStatus, Func<DateTime> utcNow, Func<Task> pause,
+        Action<string>? log)
+    {
+        var restart = new UpdateRestartClock(utcNow, UpdateRestartWait);
+        HashSet<string>? finished = null;
         var told = false;
         while (true)
         {
             MachineStatusPayload? status;
-            try { status = (await FleetNetwork.CallAsync("127.0.0.1", LocalMachineKey, new FleetRequest { Op = "status" })).Status; }
+            try { status = await readStatus(); }
             catch { return; }
             if (status is not { Busy: true }) return;
-            if (DateTime.UtcNow >= deadline)
+            var now = status.RecentCommands.Select(r => r.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            if (finished != null && !now.IsSubsetOf(finished)) restart.WorkFinished();
+            finished = now;
+            if (restart.Due(quiet: false))
             {
-                var message = $"The fleet agent is still busy after {(int)UpdateRestartWait.TotalMinutes} minutes. Restarting it anyway.";
+                var message = $"The fleet agent is still busy, and it finished nothing in {(int)UpdateRestartWait.TotalMinutes} minutes. Restarting it anyway.";
                 log?.Invoke(message);
                 AppendAgentLog(message);
                 return;
             }
             if (!told) log?.Invoke("Waiting for the fleet agent to finish its current work…");
             told = true;
-            await Task.Delay(TimeSpan.FromSeconds(3));
+            await pause();
         }
     }
 
@@ -1736,6 +1773,31 @@ public static class LogReader
         }
         kept.Reverse();
         return string.Join('\n', kept).TrimEnd();
+    }
+}
+
+/// <summary>
+/// When an agent restarts for an update although it still has work: once it finished nothing for a while. Each
+/// finished command starts the wait again, so work that moves on (a long runner create, or several queued) is never
+/// cut off; only work that seems stuck is.
+/// </summary>
+internal sealed class UpdateRestartClock(Func<DateTime> utcNow, TimeSpan wait)
+{
+    private DateTime? _byUtc;
+
+    /// <summary>A command finished: the wait, once it began, starts again from now.</summary>
+    public void WorkFinished()
+    {
+        if (_byUtc != null) _byUtc = utcNow() + wait;
+    }
+
+    /// <summary>Whether to restart now. <paramref name="quiet"/>: no work is left.</summary>
+    public bool Due(bool quiet)
+    {
+        if (quiet) return true;
+        var now = utcNow();
+        _byUtc ??= now + wait;
+        return now >= _byUtc;
     }
 }
 
