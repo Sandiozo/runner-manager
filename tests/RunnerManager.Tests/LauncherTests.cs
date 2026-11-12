@@ -97,14 +97,37 @@ public class LauncherTests
         using var folder = new LauncherFolder();
         var child = folder.Launch(environment: new Dictionary<string, string> { ["GH_TOKEN"] = "test-token-not-real" }).ChildOrFail();
 
-        var expected = SystemBlock().Names
-            .Where(name => !LeftOutPrefixes.Any(prefix => name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)))
-            .Where(name => !name.Equals("__COMPAT_LAYER", StringComparison.OrdinalIgnoreCase))
-            .Where(name => !IdentityNames.Contains(name, StringComparer.OrdinalIgnoreCase) && !PassThroughNames.Contains(name, StringComparer.OrdinalIgnoreCase))
-            .Concat(IdentityNames)
-            .Concat(["DOTNET_EnableDiagnostics", "DOTNET_BUNDLE_EXTRACT_BASE_DIR", "GH_TOKEN"])
-            .OrderBy(name => name, StringComparer.OrdinalIgnoreCase);
-        Assert.Equal(expected, child.Names.OrderBy(name => name, StringComparer.OrdinalIgnoreCase));
+        Assert.Equal(ExpectedNames([.. IdentityNames, "DOTNET_EnableDiagnostics", "DOTNET_BUNDLE_EXTRACT_BASE_DIR", "GH_TOKEN"]),
+            child.Names.OrderBy(name => name, StringComparer.OrdinalIgnoreCase));
+    }
+
+    /// <summary>
+    /// The names the launcher leaves out of the system variables can only be set machine-wide, which a test must not do.
+    /// The test build (LauncherTestBuild.exe, see TestSystemEntries in launcher.c) adds such names to the system
+    /// variables before the same filter runs; only RM_LAUNCHER_TEST_BUILD=kept may come through.
+    /// </summary>
+    [Fact]
+    public void SystemVariablesThatMustNotReachTheApp_AreLeftOut()
+    {
+        using var folder = new LauncherFolder(testBuild: true);
+        var child = folder.Launch().ChildOrFail();
+
+        Assert.Equal("kept", child.Value("RM_LAUNCHER_TEST_BUILD"));   // so the test build's entries were added
+        Assert.DoesNotContain(child.Block, entry => entry.Contains("RM_LAUNCHER_TEST_BUILD", StringComparison.OrdinalIgnoreCase)
+            && entry != "RM_LAUNCHER_TEST_BUILD=kept");
+        foreach (var name in new[] { "DOTNET_ROOT", "DOTNET_gcServer", "COMPlus_EnableDiagnostics", "CORECLR_PROFILER_PATH", "COR_ENABLE_PROFILING", "COREHOST_TRACE", "__COMPAT_LAYER", "GH_TOKEN" })
+            Assert.Null(child.Value(name));
+        Assert.Equal(ExpectedNames([.. IdentityNames, "DOTNET_EnableDiagnostics", "DOTNET_BUNDLE_EXTRACT_BASE_DIR", "RM_LAUNCHER_TEST_BUILD"]),
+            child.Names.OrderBy(name => name, StringComparer.OrdinalIgnoreCase));
+        AssertIdentity(child);
+    }
+
+    [Fact]
+    public void TheLauncher_HasNoCodeOfTheTestBuild()
+    {
+        var marker = Encoding.Unicode.GetBytes("RM_LAUNCHER_TEST_BUILD");
+        Assert.True(File.ReadAllBytes(TestBuildExe).AsSpan().IndexOf(marker) >= 0, "The test build does not hold its marker, so this test proves nothing.");
+        Assert.True(File.ReadAllBytes(LauncherExe).AsSpan().IndexOf(marker) < 0, "RunnerManagerLauncher.exe was built with LAUNCHER_TEST_BUILD.");
     }
 
     [Fact]
@@ -544,15 +567,30 @@ public class LauncherTests
         Assert.Equal(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), child.Value("LOCALAPPDATA"));
     }
 
+    /// <summary>
+    /// The names the app gets: the system variables less those the launcher leaves out or sets itself, then
+    /// <paramref name="own"/>, sorted.
+    /// </summary>
+    private static IEnumerable<string> ExpectedNames(IEnumerable<string> own)
+        => SystemBlock().Names
+            .Where(name => !LeftOutPrefixes.Any(prefix => name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)))
+            .Where(name => !name.Equals("__COMPAT_LAYER", StringComparison.OrdinalIgnoreCase))
+            .Where(name => !IdentityNames.Contains(name, StringComparer.OrdinalIgnoreCase) && !PassThroughNames.Contains(name, StringComparer.OrdinalIgnoreCase))
+            .Concat(own)
+            .OrderBy(name => name, StringComparer.OrdinalIgnoreCase);
+
     private static string NameOf(string entry) => entry[..entry.IndexOf('=', 1)];
 
-    private static string LauncherExe => Binary("RunnerManagerLauncher.exe");
+    private static string LauncherExe => Binary(Path.Combine(AppContext.BaseDirectory, "launcher"), "RunnerManagerLauncher.exe");
 
-    private static string StubExe => Binary("LauncherTestStub.exe");
+    private static string StubExe => Binary(Path.Combine(AppContext.BaseDirectory, "launcher"), "LauncherTestStub.exe");
 
-    private static string Binary(string name)
+    /// <summary>launcher.c built with LAUNCHER_TEST_BUILD. Not copied to the test output: read where build.ps1 puts it.</summary>
+    private static string TestBuildExe => Binary(Path.Combine(RepoRoot(), "src", "RunnerManagerLauncher", "bin"), "LauncherTestBuild.exe");
+
+    private static string Binary(string folder, string name)
     {
-        var path = Path.Combine(AppContext.BaseDirectory, "launcher", name);
+        var path = Path.Combine(folder, name);
         if (!File.Exists(path))
             throw new InvalidOperationException(
                 $"{name} was not built. The test project builds it with src\\RunnerManagerLauncher\\build.ps1, which needs the Visual C++ " +
@@ -757,10 +795,11 @@ public class LauncherTests
         /// <param name="subfolder">A folder in the temp folder to put the programs in.</param>
         /// <param name="folderLength">Instead: a folder of this many characters (padded with a subfolder).</param>
         /// <param name="withChild">False: no RunnerManager.exe next to the launcher.</param>
-        public LauncherFolder(string? subfolder = null, int? folderLength = null, bool withChild = true)
+        /// <param name="testBuild">True: the test build (LauncherTestBuild.exe) as RunnerManagerLauncher.exe.</param>
+        public LauncherFolder(string? subfolder = null, int? folderLength = null, bool withChild = true, bool testBuild = false)
         {
             // Before anything is created: these fail when the binaries were not built.
-            var launcher = LauncherExe;
+            var launcher = testBuild ? TestBuildExe : LauncherExe;
             var stub = StubExe;
             if (folderLength != null) subfolder = new string('p', folderLength.Value - _root.Length - 1);
             Folder = subfolder == null ? _root : Path.Combine(_root, subfolder);

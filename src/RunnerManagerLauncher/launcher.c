@@ -39,7 +39,8 @@
  * In none of these cases is anything started with the environment the launcher was given.
  *
  * Built without the C runtime (see build.ps1): none of the launcher's own code runs before LauncherStart, and no
- * runtime code reads the environment on the launcher's behalf.
+ * runtime code reads the environment on the launcher's behalf. Code under #ifdef LAUNCHER_TEST_BUILD is only in the
+ * copy built for the tests (see TestSystemEntries), never in RunnerManagerLauncher.exe.
  */
 
 #define WIN32_LEAN_AND_MEAN
@@ -112,6 +113,30 @@ static const WCHAR *const OwnNames[] = {
  * DOTNET_BUNDLE_EXTRACT_BASE_DIR come from the launcher instead.
  */
 static const WCHAR *const LeftOutPrefixes[] = { L"DOTNET_", L"COMPlus_", L"CORECLR_", L"COR_", L"COREHOST_" };
+
+#ifdef LAUNCHER_TEST_BUILD
+/*
+ * The test build only: bin\LauncherTestBuild.exe, which build.ps1 -TestStub compiles from this file with
+ * LAUNCHER_TEST_BUILD defined, for LauncherTests. It is never embedded or shipped, and RunnerManagerLauncher.exe is
+ * compiled without the define. These strings are added to the system variables as if CreateEnvironmentBlock had
+ * returned them, so the tests can check the filter with names that a test cannot set machine-wide. Only
+ * RM_LAUNCHER_TEST_BUILD=kept may reach the app.
+ */
+static const WCHAR TestSystemEntries[] =
+    L"DOTNET_ROOT=C:\\RM_LAUNCHER_TEST_BUILD\\dotnet\0"
+    L"dotnet_gcServer=1\0"
+    L"COMPlus_EnableDiagnostics=1\0"
+    L"CORECLR_PROFILER_PATH=C:\\RM_LAUNCHER_TEST_BUILD\\profiler.dll\0"
+    L"COR_ENABLE_PROFILING=1\0"
+    L"COREHOST_TRACE=1\0"
+    L"__COMPAT_LAYER=RunAsInvoker\0"
+    L"USERNAME=RM_LAUNCHER_TEST_BUILD\0"
+    L"USERPROFILE=C:\\RM_LAUNCHER_TEST_BUILD\0"
+    L"GH_TOKEN=RM_LAUNCHER_TEST_BUILD\0"
+    L"=C:=C:\\RM_LAUNCHER_TEST_BUILD\0"
+    L"RM_LAUNCHER_TEST_BUILD_WITHOUT_EQUALS_SIGN\0"
+    L"RM_LAUNCHER_TEST_BUILD=kept\0";   /* and the null that ends the block */
+#endif
 
 /* ---- Memory and text. No C runtime, so no memset, memcpy or wcslen; these do the same with compiler intrinsics. */
 
@@ -628,6 +653,9 @@ static DWORD Run(void)
     if (!CreateEnvironmentBlock(&systemBlock, NULL, FALSE)) { systemBlock = NULL; result = EXIT_SYSTEM_ENVIRONMENT; goto done; }
 
     capacity = CountStrings(systemBlock);
+#ifdef LAUNCHER_TEST_BUILD
+    capacity += CountStrings(TestSystemEntries);
+#endif
     if (!AddSize(&capacity, OWN_ENTRY_COUNT)) { result = EXIT_BLOCK; goto done; }
     list.items = Allocate(capacity, sizeof(Entry));
     if (list.items == NULL) { result = EXIT_OUT_OF_MEMORY; goto done; }
@@ -645,6 +673,9 @@ static DWORD Run(void)
     if ((result = AddOwnEntry(&list, L"DOTNET_BUNDLE_EXTRACT_BASE_DIR", extractFolder, TextLength(extractFolder))) != 0) goto done;
     if ((result = AddPassThrough(&list, passThrough)) != 0) goto done;
     if ((result = AddSystemEntries(&list, systemBlock)) != 0) goto done;
+#ifdef LAUNCHER_TEST_BUILD
+    if ((result = AddSystemEntries(&list, TestSystemEntries)) != 0) goto done;
+#endif
     SortEntries(list.items, list.count);
     if ((result = WriteBlock(&list, &block)) != 0) goto done;
 

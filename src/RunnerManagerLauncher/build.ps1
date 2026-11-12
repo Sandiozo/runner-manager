@@ -9,7 +9,9 @@
     Works in Windows PowerShell 5.1 and in PowerShell 7.
 
 .PARAMETER TestStub
-    Also builds bin\LauncherTestStub.exe from tests\RunnerManager.Tests\LauncherStub\stub.c.
+    Also builds what only the launcher tests use: bin\LauncherTestStub.exe from tests\RunnerManager.Tests\LauncherStub\stub.c,
+    and bin\LauncherTestBuild.exe, the launcher compiled from the same sources with LAUNCHER_TEST_BUILD defined (see
+    launcher.c). RunnerManagerLauncher.exe is built without that define, whatever the switches.
 
 .PARAMETER IfToolsPresent
     Without the C++ tools: warn, remove outputs that are out of date, and exit with 0 instead of failing. The test
@@ -44,8 +46,14 @@ $stub = @{
     Exe     = Join-Path $bin 'LauncherTestStub.exe'
     Inputs  = @(Join-Path $repo 'tests\RunnerManager.Tests\LauncherStub\stub.c')
 }
+# Never embedded or shipped: the app embeds bin\RunnerManagerLauncher.exe by that name.
+$testBuild = @{
+    Name    = 'LauncherTestBuild'
+    Exe     = Join-Path $bin 'LauncherTestBuild.exe'
+    Inputs  = $launcher.Inputs
+}
 $targets = @($launcher)
-if ($TestStub) { $targets += $stub }
+if ($TestStub) { $targets += $stub, $testBuild }
 
 function Test-UpToDate($target) {
     if ($Force -or -not (Test-Path -LiteralPath $target.Exe)) { return $false }
@@ -154,21 +162,27 @@ $linkCommon = '/nologo /NODEFAULTLIB /SUBSYSTEM:WINDOWS /MACHINE:X64 /DYNAMICBAS
 
 New-Item -ItemType Directory -Force -Path $bin, $obj | Out-Null
 
-if ($stale -contains $launcher) {
+# The launcher's sources into $target.Exe, with the objects in $objFolder. $defines is empty for RunnerManagerLauncher.exe.
+function Build-Launcher($target, [string]$objFolder, [string]$defines) {
+    New-Item -ItemType Directory -Force -Path $objFolder | Out-Null
     $objects = @()
     foreach ($source in 'launcher.c', 'loadcfg.c') {
-        $object = Join-Path $obj ([System.IO.Path]::ChangeExtension($source, '.obj'))
-        Invoke-Step "compiling $source" $cl "$compile /GS /guard:cf /Fo$(Quote $object) $(Quote (Join-Path $here $source))"
+        $object = Join-Path $objFolder ([System.IO.Path]::ChangeExtension($source, '.obj'))
+        Invoke-Step "compiling $source" $cl "$compile$defines /GS /guard:cf /Fo$(Quote $object) $(Quote (Join-Path $here $source))"
         $objects += $object
     }
-    $res = Join-Path $obj 'launcher.res'
+    $res = Join-Path $objFolder 'launcher.res'
     # Every tool runs in this folder (Invoke-Tool), so launcher.rc finds launcher.manifest.
     Invoke-Step 'compiling launcher.rc' $rc "/nologo /fo $(Quote $res) launcher.rc"
     # /DEPENDENTLOADFLAG:0x800 (LOAD_LIBRARY_SEARCH_SYSTEM32): the imported DLLs come from System32 only.
     # /GUARD:CF and /CETCOMPAT: Control Flow Guard and shadow stacks. loadcfg.c holds the load configuration.
-    $linkArgs = "$linkCommon /ENTRY:LauncherStart /GUARD:CF /CETCOMPAT /DEPENDENTLOADFLAG:0x800 /OUT:$(Quote $launcher.Exe) " +
+    $linkArgs = "$linkCommon /ENTRY:LauncherStart /GUARD:CF /CETCOMPAT /DEPENDENTLOADFLAG:0x800 /OUT:$(Quote $target.Exe) " +
         (($objects + $res | ForEach-Object { Quote $_ }) -join ' ') + ' kernel32.lib advapi32.lib userenv.lib shell32.lib ole32.lib'
-    Invoke-Step 'linking RunnerManagerLauncher.exe' $link $linkArgs
+    Invoke-Step "linking $($target.Name).exe" $link $linkArgs
+}
+
+if ($stale -contains $launcher) {
+    Build-Launcher $launcher $obj ''
     $hash = (Get-FileHash -LiteralPath $launcher.Exe -Algorithm SHA256).Hash
     Write-Host "RunnerManagerLauncher: built $($launcher.Exe) ($((Get-Item -LiteralPath $launcher.Exe).Length) bytes, SHA-256 $hash)."
 }
@@ -178,5 +192,11 @@ if ($stale -contains $stub) {
     Invoke-Step 'compiling stub.c' $cl "$compile /GS- /Fo$(Quote $object) $(Quote $stub.Inputs[0])"
     Invoke-Step 'linking LauncherTestStub.exe' $link "$linkCommon /ENTRY:StubStart /OUT:$(Quote $stub.Exe) $(Quote $object) kernel32.lib"
     Write-Host "RunnerManagerLauncher: built $($stub.Exe)."
+}
+
+if ($stale -contains $testBuild) {
+    # Objects of its own, so they are never linked into RunnerManagerLauncher.exe.
+    Build-Launcher $testBuild (Join-Path $obj 'test') ' /DLAUNCHER_TEST_BUILD'
+    Write-Host "RunnerManagerLauncher: built $($testBuild.Exe)."
 }
 exit 0
