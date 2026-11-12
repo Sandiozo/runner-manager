@@ -66,9 +66,20 @@ public partial class MainWindow
     private void ApplyHealth(MachineRunnerStatus runner)
     {
         var key = JobHealth.Key(runner);
-        runner.Health = _runnerHealth.GetValueOrDefault(key) ?? RunnerHealth.Healthy;
+        runner.Health = StillApplies(_runnerHealth.GetValueOrDefault(key) ?? RunnerHealth.Healthy, runner);
         runner.Queue = _runnerQueues.GetValueOrDefault(key) ?? (IReadOnlyList<QueueEntry>)Array.Empty<QueueEntry>();
     }
+
+    /// <summary>
+    /// A concern found on an earlier reading, if it still fits the runner as it is now. The check runs beside the
+    /// refresh, so a newer reading can arrive while it asks GitHub: a job that ended meanwhile is no longer stuck.
+    /// </summary>
+    internal static RunnerHealth StillApplies(RunnerHealth health, MachineRunnerStatus runner) => health.Concern switch
+    {
+        RunnerConcern.Stuck or RunnerConcern.RunningLong when !runner.IsBusy => RunnerHealth.Healthy,
+        RunnerConcern.IdleWithWaitingJobs when !runner.IsRunning || runner.IsBusy => RunnerHealth.Healthy,
+        _ => health
+    };
 
     private async void RunnerStopJob_Click(object sender, RoutedEventArgs e)
     {

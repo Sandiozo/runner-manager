@@ -66,8 +66,13 @@ public partial class MainWindow
 
     // ================= Periodic extras =================
 
+    /// <summary>The checks run beside the refresh; a refresh that ends while they still run does not start them again.</summary>
+    private bool _extrasRunning;
+
     private async Task RefreshFleetExtrasAsync()
     {
+        if (_extrasRunning) return;
+        _extrasRunning = true;
         try
         {
             // Releases are public, so updates are checked whether or not GitHub is connected.
@@ -104,6 +109,7 @@ public partial class MainWindow
             }
         }
         catch (Exception ex) { AddActivity($"Background check failed: {ex.Message}"); }
+        finally { _extrasRunning = false; }
     }
 
     private async Task RefreshRecentRunsAsync()

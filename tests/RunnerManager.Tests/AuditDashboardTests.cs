@@ -868,4 +868,29 @@ public class AuditDashboardTests
     [InlineData(Key.A, ModifierKeys.Control, null)]
     public void CtrlAndADigit_SelectsASidebarEntry(Key key, ModifierKeys modifiers, int? index)
         => Assert.Equal(index, MainWindow.NavShortcutIndex(key, modifiers));
+
+    // ================= Round 3 =================
+
+    // ----- 1: the refresh does not wait for gh; checks that run beside it see newer readings -----
+
+    private static MachineRunnerStatus RunnerIn(string state) => new()
+    {
+        ServiceName = "actions.runner.api", DisplayName = "api",
+        IsRunning = state != "stopped", ActivityText = state == "busy" ? "Busy" : "Idle"
+    };
+
+    [Theory]
+    [InlineData(RunnerConcern.Stuck, "busy", true)]
+    [InlineData(RunnerConcern.Stuck, "idle", false)]
+    [InlineData(RunnerConcern.RunningLong, "busy", true)]
+    [InlineData(RunnerConcern.RunningLong, "stopped", false)]
+    [InlineData(RunnerConcern.IdleWithWaitingJobs, "idle", true)]
+    [InlineData(RunnerConcern.IdleWithWaitingJobs, "busy", false)]
+    [InlineData(RunnerConcern.IdleWithWaitingJobs, "stopped", false)]
+    public void JobHealth_FromAnEarlierReading_IsShownOnlyWhileItStillFits(RunnerConcern concern, string state, bool shown)
+    {
+        var health = new RunnerHealth(concern, "Label", "Detail.");
+        var applied = MainWindow.StillApplies(health, RunnerIn(state));
+        Assert.Equal(shown ? health : RunnerHealth.Healthy, applied);
+    }
 }
