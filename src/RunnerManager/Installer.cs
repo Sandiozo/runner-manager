@@ -384,8 +384,7 @@ public static class Installer
                     var id = Convert.ToInt32(item["ProcessId"]);
                     var path = item["ExecutablePath"]?.ToString() ?? string.Empty;
                     var inThisSession = Convert.ToInt32(item["SessionId"]) == session;
-                    if (id == Environment.ProcessId || !IsClosedBySetup(item["CommandLine"]?.ToString(), endAssistants, path, inThisSession)) continue;
-                    if (!installDirs.Any(dir => path.StartsWith(dir, StringComparison.OrdinalIgnoreCase))) continue;
+                    if (!ClosesProcess(id, item["CommandLine"]?.ToString(), path, inThisSession, installDirs, endAssistants)) continue;
                     try { dashboards.Add(Process.GetProcessById(id)); } catch (ArgumentException) { }
                 }
             }
@@ -422,6 +421,14 @@ public static class Installer
     }
 
     private static readonly TimeSpan DashboardExitTimeout = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// The filter of <see cref="CloseRunningDashboards"/>: a process that <see cref="IsClosedBySetup"/> ends, which runs
+    /// from one of <paramref name="installDirs"/> (each ending in a folder separator), and never this process.
+    /// </summary>
+    internal static bool ClosesProcess(int processId, string? commandLine, string path, bool inThisSession, IReadOnlyList<string> installDirs, bool endAssistants)
+        => processId != Environment.ProcessId && IsClosedBySetup(commandLine, endAssistants, path, inThisSession)
+           && installDirs.Any(dir => path.StartsWith(dir, StringComparison.OrdinalIgnoreCase));
 
     /// <summary>
     /// Whether setup or uninstall ends a Runner Manager process with this command line before it replaces the exe. Only

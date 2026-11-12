@@ -511,6 +511,17 @@ public class ProgramFilesInstallTests
         Assert.True(Installer.IsClosedBySetup(dashboard, endAssistants: true, inThisSession: true));
         Assert.False(Installer.IsClosedBySetup(dashboard, endAssistants: true, inThisSession: false));
         Assert.False(Installer.IsClosedBySetup("\"C:\\Program Files\\RunnerManager\\RunnerManager.exe\" --mcp", endAssistants: true, inThisSession: false));
+
+        // The filter that setup and uninstall use on the running processes.
+        const string exe = @"C:\Program Files\RunnerManager\RunnerManager.exe";
+        var dirs = new[] { @"C:\Program Files\RunnerManager\" };
+        Assert.True(Installer.ClosesProcess(12345, dashboard, exe, inThisSession: true, dirs, endAssistants: false));
+        // Another Windows user's dashboard of the same install.
+        Assert.False(Installer.ClosesProcess(12345, dashboard, exe, inThisSession: false, dirs, endAssistants: true));
+        // A copy in another folder, setup itself, and the fleet agent.
+        Assert.False(Installer.ClosesProcess(12345, dashboard, @"C:\Program Files\RunnerManager2\RunnerManager.exe", true, dirs, true));
+        Assert.False(Installer.ClosesProcess(Environment.ProcessId, dashboard, exe, true, dirs, true));
+        Assert.False(Installer.ClosesProcess(12345, $"\"{exe}\" --agent", exe, true, dirs, true));
     }
 
     [Theory]
@@ -565,7 +576,22 @@ public class ProgramFilesInstallTests
         try
         {
             File.WriteAllText(Path.Combine(root, AppPaths.ExeName), string.Empty);
-            var start = new ProcessStartInfo("powershell.exe")
+            // Everything the script does is inside the check that the variable is set, for either way of removing.
+            foreach (var script in new[] { Installer.RemoveProgramFilesScript(root), Installer.RemoveProgramFilesScript(ProgramFiles) })
+            {
+                var guard = $"$f = $env:{Installer.FolderVariable}; if ($f) {{ ";
+                Assert.StartsWith(guard, script);
+                Assert.EndsWith(" }", script);
+                Assert.Equal(script.Count(c => c == '{'), script.Count(c => c == '}'));
+                var body = script[guard.Length..^2];
+                var depth = 0;
+                foreach (var c in body)
+                {
+                    depth += c == '{' ? 1 : c == '}' ? -1 : 0;
+                    Assert.True(depth >= 0, "The script leaves the check that the variable is set.");
+                }
+            }
+            var start = new ProcessStartInfo(AppUpdater.PowerShellExe)
             {
                 ArgumentList = { "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", Installer.RemoveProgramFilesScript(root) },
                 UseShellExecute = false,
