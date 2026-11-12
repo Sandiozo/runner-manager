@@ -132,4 +132,80 @@ public class AuditR4RunnerTests
         }
         finally { Directory.Delete(root, recursive: true); }
     }
+
+    // ----- The job a runner runs -----
+
+    private static GitHubJobState Running(long id, DateTime startedUtc, string runnerName = "r14")
+        => new() { Id = id, Name = $"job{id}", WorkflowName = "CI", Status = "in_progress", RunnerId = 14, RunnerName = runnerName,
+                   StartedUtc = startedUtc, Labels = new[] { "self-hosted" } };
+
+    [Fact]
+    public void RunningJob_ThatStartedLongBeforeTheWorker_IsNotTheWorkersJob_AlsoWhenItIsTheOnlyOne()
+    {
+        var worker = Noon;
+        var givenUp = Running(505, worker.AddHours(-3));
+
+        // With more than 20 runs in progress, the run of the worker's own job may not be read.
+        Assert.Null(GitHubApi.RunningJobOf(new[] { givenUp }, 14, "r14", worker));
+        Assert.Null(GitHubApi.RunningJobOf(new[] { givenUp, Running(506, worker.AddMinutes(-40)) }, 14, "r14", worker));
+        // Without the worker's start, it is still taken.
+        Assert.Equal(505, GitHubApi.RunningJobOf(new[] { givenUp }, 14, "r14")!.Id);
+    }
+
+    [Theory]
+    // Clocks differ a little: a job that started up to 5 minutes before the worker is its job.
+    [InlineData(-4, 507L)]
+    [InlineData(-5, 507L)]
+    [InlineData(-6, null)]
+    [InlineData(2, 507L)]
+    public void RunningJob_ThatStartedShortlyBeforeTheWorker_IsTheWorkersJob(int minutes, long? expected)
+        => Assert.Equal(expected, GitHubApi.RunningJobOf(new[] { Running(507, Noon.AddMinutes(minutes)) }, 14, "r14", Noon)?.Id);
+
+    [Fact]
+    public void RunningJob_OfSeveral_IsStillTheOneThatStartedClosestToTheWorker()
+    {
+        var jobs = new[] { Running(505, Noon.AddHours(-5)), Running(506, Noon.AddMinutes(-3)), Running(507, Noon.AddMinutes(20)) };
+
+        Assert.Equal(506, GitHubApi.RunningJobOf(jobs, 14, "r14", Noon)!.Id);
+    }
+
+    private static MachineInfo Pc(string name, MachineRunnerStatus runner)
+        => MachineInfo.FromPayload(name, new MachineStatusPayload
+        {
+            MachineName = name, UpdatedUtc = DateTime.UtcNow, FleetAgentRunning = true, Runners = new[] { runner }
+        });
+
+    private static MachineRunnerStatus Busy(string repository, long id, DateTime workerStarted)
+        => new()
+        {
+            ServiceName = $"actions.runner.{repository.Replace('/', '-')}.r{id}", AgentName = $"r{id}", AgentId = id,
+            RepositoryPath = repository, Scope = $"repos/{repository}", IsRunning = true, ServiceInstalled = true,
+            ActivityText = "Busy", JobStartedUtc = workerStarted
+        };
+
+    private static RepositoryWorkState Work(params GitHubJobState[] jobs)
+    {
+        var state = new RepositoryWorkState();
+        state.Jobs.AddRange(jobs);
+        return state;
+    }
+
+    private static JobHealth.GitHubReads Reads(Func<RepositoryWorkState?> jobs, Func<(bool Read, TimeSpan? Usual)> usual)
+        => new(_ => Task.FromResult(jobs()), (_, _, _) => Task.FromResult(usual()),
+            _ => Task.FromResult<IReadOnlyList<RegisteredRunner>?>(null));
+
+    private static readonly TimeSpan Quiet = TimeSpan.FromMinutes(15);
+
+    [Fact]
+    public async Task BusyRunner_WhoseOnlyListedJobStartedHoursBeforeItsWorker_IsNotRunningLong()
+    {
+        var now = Noon;
+        var machine = Pc("PC-R4-GIVENUP", Busy("audit-r4/given-up", 14, now.AddMinutes(-10)));
+        var key = JobHealth.Key(machine.Runners[0]);
+        var reads = Reads(() => Work(Running(505, now.AddHours(-3))), () => (true, TimeSpan.FromMinutes(20)));
+
+        var health = (await JobHealth.EvaluateAsync(new[] { machine }, Quiet, null, reads, now)).Runners[key];
+
+        Assert.False(health.IsProblem, health.Detail);
+    }
 }
