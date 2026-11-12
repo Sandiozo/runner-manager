@@ -1192,3 +1192,106 @@ public class AssistantSwitchTests
         });
     }
 }
+
+[Collection(FleetSettingsCollection.Name)]
+public class FullJoinTests
+{
+    /// <summary>A PC in a fleet: it knows a PC, an address added by hand and a PC it manages one way.</summary>
+    private static void InAFleet(byte[] key)
+    {
+        FleetConfig.SetFleetKey(key);
+        FleetConfig.Update(c =>
+        {
+            c.KnownPeers.Add(new PeerRecord { Name = "OLDPC", Address = "10.0.0.5:47821", LastSeenUtc = DateTime.UtcNow });
+            c.ManualAddresses.Add("old-pc.example.ts.net");
+            c.RemovedManagedPcs.Add(new RemovedManagedPc { KeyId = "0123abcd", RemovedUtc = DateTime.UtcNow });
+            c.Watchdog = false;
+            c.RunnerFolder = @"D:\Runners";
+        });
+        FleetConfig.AddManagedPc("MANAGEDPC", "10.0.0.9", CommandSigner.NewKey());
+    }
+
+    private static bool KeepsTheFleet(FleetConfig c)
+        => c.KnownPeers.Count == 1 && c.ManualAddresses.Count == 1 && c.ManagedPcs.Count == 1 && c.RemovedManagedPcs.Count == 1;
+
+    private static void AssertForgotten(FleetConfig c)
+    {
+        Assert.Empty(c.KnownPeers);
+        Assert.Empty(c.ManualAddresses);
+        Assert.Empty(c.ManagedPcs);
+        Assert.Empty(c.RemovedManagedPcs);
+    }
+
+    [Fact]
+    public async Task JoiningAnotherFleet_ForgetsTheEarlierFleet_AndKeepsThisPcsOwnSettings()
+    {
+        await AuditFleetConfig.WithConfigAsync(() =>
+        {
+            var machineId = FleetConfig.LocalMachineId;
+            InAFleet(CommandSigner.NewKey());
+            // Remove code keeps them, for when the code is entered again.
+            FleetConfig.SetFleetKey(null);
+            Assert.True(KeepsTheFleet(FleetConfig.Current));
+
+            var other = CommandSigner.NewKey();
+            FleetConfig.SetFleetKey(other);
+
+            var config = FleetConfig.Current;
+            Assert.Equal(other, config.FleetKey);
+            AssertForgotten(config);
+            Assert.False(config.Watchdog);
+            Assert.Equal(@"D:\Runners", config.RunnerFolder);
+            Assert.Equal(machineId, config.MachineId);
+            Assert.Empty(config.RemovedFleetKeyId);
+            return Task.CompletedTask;
+        });
+    }
+
+    [Fact]
+    public async Task EnteringTheRemovedCodeAgain_KeepsTheFleet()
+    {
+        await AuditFleetConfig.WithConfigAsync(() =>
+        {
+            var key = CommandSigner.NewKey();
+            InAFleet(key);
+            FleetConfig.SetFleetKey(null);
+            Assert.Equal(CommandSigner.KeyId(key), FleetConfig.Current.RemovedFleetKeyId);
+
+            FleetConfig.SetFleetKey(key);
+            Assert.True(KeepsTheFleet(FleetConfig.Current));
+            Assert.Empty(FleetConfig.Current.RemovedFleetKeyId);
+            return Task.CompletedTask;
+        });
+    }
+
+    [Fact]
+    public async Task ANewCodeForTheSameFleet_KeepsItsPcs()
+    {
+        await AuditFleetConfig.WithConfigAsync(() =>
+        {
+            InAFleet(CommandSigner.NewKey());
+            // Change fleet code, or a new code entered by hand on each PC: the code replaces the one before it.
+            FleetConfig.SetFleetKey(CommandSigner.NewKey());
+            Assert.True(KeepsTheFleet(FleetConfig.Current));
+            return Task.CompletedTask;
+        });
+    }
+
+    [Fact]
+    public async Task ANewFleet_OnAPcWithoutACode_StartsWithoutTheEarlierFleet()
+    {
+        await AuditFleetConfig.WithConfigAsync(() =>
+        {
+            InAFleet(CommandSigner.NewKey());
+            // As a version before 2.9 left it: no code, and nothing to tell which code the PCs belonged to.
+            FleetConfig.Update(c =>
+            {
+                c.ProtectedFleetKey = string.Empty;
+                c.RemovedFleetKeyId = string.Empty;
+            });
+            FleetConfig.SetFleetKey(CommandSigner.NewKey());
+            AssertForgotten(FleetConfig.Current);
+            return Task.CompletedTask;
+        });
+    }
+}

@@ -354,6 +354,7 @@ public sealed class FleetConfig
     private void Normalize()
     {
         ProtectedFleetKey ??= string.Empty;
+        RemovedFleetKeyId ??= string.Empty;
         ProtectedPendingFleetKey ??= string.Empty;
         KnownPeers ??= new();
         KnownPeers.RemoveAll(p => p == null);
@@ -431,13 +432,48 @@ public sealed class FleetConfig
         catch { return null; }
     }
 
-    /// <summary>Sets the fleet's pairing code (a new fleet, a full join or a pasted code), so this PC is no longer managed.</summary>
+    /// <summary>
+    /// Sets the fleet code (a new fleet, a full join, a pasted code, or Change fleet code), so this PC is no longer
+    /// managed. A PC without a code that gets one starts or joins a fleet: unless it is the code removed here last, what
+    /// belonged to its earlier fleet goes (<see cref="ForgetEarlierFleet"/>). A code that replaces another keeps it: that
+    /// is the same fleet with a new code, as after Change fleet code or a code entered by hand on each PC.
+    /// </summary>
     public static void SetFleetKey(byte[]? key) => Update(c =>
     {
+        var before = c.FleetKey;
+        if (key == null)
+        {
+            // Entering this code again is the same fleet, so it finds its PCs again.
+            if (before != null) c.RemovedFleetKeyId = CommandSigner.KeyId(before);
+        }
+        else
+        {
+            if (before == null && CommandSigner.KeyId(key) != c.RemovedFleetKeyId) c.ForgetEarlierFleet();
+            c.RemovedFleetKeyId = string.Empty;
+        }
         c.ProtectedFleetKey = Protect(key);
         c.ClearPendingFleetKey();
         c.ManagedBy = string.Empty;
     });
+
+    /// <summary>
+    /// The fingerprint of the fleet code removed last (Settings → Fleet → Remove code), while this PC has no code. Empty
+    /// otherwise.
+    /// </summary>
+    public string RemovedFleetKeyId { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Forgets what belonged to the fleet this PC was in before: its PCs, the addresses added by hand to find them, and
+    /// the PCs it managed one way, whose codes the new fleet would otherwise get from this PC. This PC's own settings
+    /// stay.
+    /// </summary>
+    private void ForgetEarlierFleet()
+    {
+        KnownPeers.Clear();
+        ManualAddresses.Clear();
+        ManagedPcs.Clear();
+        RemovedManagedPcs.Clear();
+    }
 
     private static string Protect(byte[]? key)
         => key == null ? string.Empty : Convert.ToBase64String(ProtectedData.Protect(key, null, DataProtectionScope.CurrentUser));
