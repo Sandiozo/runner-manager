@@ -34,7 +34,8 @@ internal static class GitHubFailures
     /// <summary>How many failed endpoints are remembered. A PC can report any number of repositories that do not exist.</summary>
     internal const int MaxEndpoints = 500;
 
-    internal const string GhMissingMessage = "GitHub CLI (gh) was not found. Install it from https://cli.github.com/ and restart Runner Manager.";
+    internal const string GhMissingMessage = "GitHub CLI (gh) was not found. Runner Manager looks for it in Program Files and in the PATH of the PC, " +
+        "not in the PATH of one Windows user. Install it for all users from https://cli.github.com/ (its installer does that) and restart Runner Manager.";
     /// <summary>How the message of a gh call that did not finish in time starts.</summary>
     internal const string TimedOutStart = "GitHub CLI timed out";
 

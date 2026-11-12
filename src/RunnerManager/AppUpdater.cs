@@ -29,7 +29,11 @@ public static class AppUpdater
     internal static void UseInstallDir(string folder)
     {
         // A setup tried again in another folder copies the build there too.
-        if (_installDir == null || !SameFolder(_installDir, folder)) _installedThisBuild = false;
+        if (_installDir == null || !SameFolder(_installDir, folder))
+        {
+            _installedThisBuild = false;
+            _copiedFile = null;
+        }
         _installDir = folder;
     }
     internal static bool IsDefaultInstallDir(string folder) => SameFolder(folder, DefaultInstallDir);
@@ -68,8 +72,27 @@ public static class AppUpdater
         }
     }
 
+    /// <summary>
+    /// Whether this process was started by the installed exe's path. It stays true after an update or a rollback replaced
+    /// the file there, so it only says where this copy came from; whether this process may look after the install is
+    /// <see cref="IsInstalledBuild"/>.
+    /// </summary>
     public static bool IsRunningInstalledCopy => string.Equals(
         Path.GetFullPath(Environment.ProcessPath ?? string.Empty), Path.GetFullPath(InstalledExe), StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Whether this process is the installed build, the only one that may look after the install (the start helper, its
+    /// marker, the tasks' commands, the unpack folders): it runs from the file that is at <see cref="InstalledExe"/> now,
+    /// or it copied its own build there (setup) and that copy is still the file there. Decided by the file itself
+    /// (<see cref="ProcessImage"/>), never by path or version: after an update or a rollback a copy that still runs from
+    /// the renamed file is not the installed build, and neither is another build of the same version.
+    /// </summary>
+    internal static bool IsInstalledBuild
+        => ProcessImage.ThisProcessRunsFrom(InstalledExe)
+           || _copiedFile is { } copied && ProcessImage.IdOf(InstalledExe) == copied;
+
+    /// <summary>The file that this process copied its build to (see <see cref="InstallCurrentBuildAsync(Action{string})"/>), while that is its build.</summary>
+    private static ProcessImage.FileId? _copiedFile;
 
     /// <summary>"v2.1.0", "2.1" or "2.1.0+abc" → "2.1.0". A pre-release keeps its label: "2.4.0-beta.1".</summary>
     public static string Normalize(string version)
@@ -622,6 +645,7 @@ public static class AppUpdater
             DeleteSwapMarker(InstalledExe);
             // This build is no longer the installed one, so a setup tried again copies it again.
             _installedThisBuild = false;
+            _copiedFile = null;
         });
     }
 
@@ -907,8 +931,9 @@ public static class AppUpdater
     /// Installs a release on this PC, as "Install update" does: downloads and verifies it, refreshes the Start menu
     /// shortcut, and switches the start-up task to the new copy. Returns the exe the fleet agent is to run, or null when
     /// it is not restarted. The caller restarts it (<see cref="MachineRelay.RestartLocalAgentAsync"/> with that exe),
-    /// which switches the agent's task to the new copy only after the agent finished its work: registering the task
-    /// may end the running agent, and with it a runner create it runs for another PC.
+    /// which switches the agent's task to the new copy only after the agent finished its work: the agent restarts to run
+    /// the new copy, which would end a runner create it runs for another PC. Registering the task again does not end the
+    /// running agent itself on Windows 11 (measured; other Windows versions were not).
     /// </summary>
     public static async Task<string?> InstallReleaseAsync(ReleaseInfo release, Action<string> log)
     {
@@ -921,8 +946,9 @@ public static class AppUpdater
     }
 
     /// <summary>
-    /// Starts a detached helper that waits for this process to exit, then starts the task again. Launched before
-    /// the task is re-registered, so the agent comes back even if re-registering ends the running instance. The helper
+    /// Starts a detached helper that waits for this process to exit, then starts the task again. Launched before the task
+    /// is registered again, so the agent comes back also on a Windows version where that ends the running instance (on
+    /// Windows 11 it does not: measured; other versions were not), and when the agent exits for another reason. The helper
     /// also waits for the start helper that started this process (see <see cref="RunAfterExit"/>), and then until Task
     /// Scheduler no longer counts the task as running, since it refuses to start a running task of the fleet agent's
     /// kind; a start it refuses is tried again (see <see cref="RestartTaskScript"/>).
@@ -971,15 +997,28 @@ public static class AppUpdater
     /// </summary>
     internal static void RunAfterExit(string script, TimeSpan? timeout, TimeSpan delay, IReadOnlyDictionary<string, string>? environment = null)
     {
+        using var process = Process.Start(AfterExitStartInfo(script, Environment.ProcessId, Launcher.HelperProcessId(), timeout, delay, environment));
+    }
+
+    /// <summary>
+    /// How <see cref="RunAfterExit"/> starts PowerShell, waiting for <paramref name="processId"/> and
+    /// <paramref name="helperId"/>. Its current folder is the system folder, never the one of this process: a process
+    /// that started from the install folder (a task, the start helper and the Start menu shortcut all start it there)
+    /// would otherwise pass that folder on, and a folder that is a running process's current folder cannot be removed.
+    /// </summary>
+    internal static ProcessStartInfo AfterExitStartInfo(string script, int processId, int? helperId, TimeSpan? timeout, TimeSpan delay,
+        IReadOnlyDictionary<string, string>? environment = null)
+    {
         var start = new ProcessStartInfo(PowerShellExe)
         {
             ArgumentList = { "-NoLogo", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command",
-                AfterExitScript(script, Environment.ProcessId, timeout, delay, Launcher.HelperProcessId()) },
+                AfterExitScript(script, processId, timeout, delay, helperId) },
             UseShellExecute = false,
-            CreateNoWindow = true
+            CreateNoWindow = true,
+            WorkingDirectory = Environment.SystemDirectory
         };
         foreach (var (name, value) in environment ?? new Dictionary<string, string>()) start.Environment[name] = value;
-        using var process = Process.Start(start);
+        return start;
     }
 
     internal static string AfterExitScript(string script, int processId, TimeSpan? timeout, TimeSpan delay, int? helperId = null)
@@ -1041,6 +1080,8 @@ public static class AppUpdater
                 var isExe = relative.Equals(AssetName, StringComparison.OrdinalIgnoreCase);
                 ReplaceFile(source, destination, keepPrevious: isExe, isExe ? install : null);
             }
+            // Still under the update lock, so the file recorded is the one just copied.
+            _copiedFile = ProcessImage.IdOf(InstalledExe);
         }));
         _installedThisBuild = true;
         // Before any task is registered for the new copy (setup registers them next), so they start it through the start helper.
@@ -1050,13 +1091,14 @@ public static class AppUpdater
     }
 
     /// <summary>
-    /// Writes the start helper into the install folder after this process installed its build there (see
-    /// <see cref="Launcher.EnsureAsync"/>); only with administrator rights, which setup always has. A PC where it cannot
-    /// be kept runs without it, as before.
+    /// Writes the start helper into the install folder after this process installed its build there, and checks that it
+    /// starts Runner Manager (see <see cref="Launcher.EnsureAsync"/>); only with administrator rights, which setup always
+    /// has, and only while this process is the installed build (<see cref="IsInstalledBuild"/>). A PC where it cannot be
+    /// kept runs without it, as before.
     /// </summary>
     internal static async Task EnsureStartHelperAsync(Action<string> log)
     {
-        if (!Elevation.IsElevated) return;
+        if (!Launcher.Decides()) return;
         try
         {
             if (!await Launcher.EnsureAsync(InstallDir, afterInstall: true, MachineRelay.AppendAgentLog) && Launcher.RunsWithout(InstallDir))

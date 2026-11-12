@@ -73,7 +73,7 @@ public partial class SettingsWindow : Window
     /// </summary>
     private static string ProgramDescription(bool unsafeFolder)
     {
-        var text = $"{AppUpdater.InstallDir}. " + (unsafeFolder ? InstallFolderSafety.UnsafeNoteText : "To move it, run the setup again and choose another folder.");
+        var text = $"{AppUpdater.InstallDir}. " + (unsafeFolder ? InstallFolderSafety.UnsafeNoteText : "To move it, run the setup again, click Change… and choose another folder.");
         return InstallFolderSafety.RunsWithoutStartHelper ? $"{text} {InstallFolderSafety.WithoutStartHelperNoteText}" : text;
     }
 
@@ -937,18 +937,19 @@ public partial class SettingsWindow : Window
     private void Releases_Click(object sender, RoutedEventArgs e)
     {
         var url = _release?.HtmlUrl is { Length: > 0 } html ? html : AppUpdater.ReleasesUrl;
-        Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+        // Through Explorer, so the browser does not get Runner Manager's administrator rights.
+        if (WindowsTools.OpenUrl(url) is { } problem) DialogWindow.Error(this, "Could not open the page", problem);
     }
 
     private void OpenProgramFolder_Click(object sender, RoutedEventArgs e)
     {
-        if (Directory.Exists(AppUpdater.InstallDir)) Process.Start(new ProcessStartInfo(AppUpdater.InstallDir) { UseShellExecute = true });
+        if (WindowsTools.OpenFolder(AppUpdater.InstallDir) is { } problem) DialogWindow.Error(this, "Could not open the folder", problem);
     }
 
     private void OpenDataFolder_Click(object sender, RoutedEventArgs e)
     {
         Directory.CreateDirectory(FleetConfig.StateDir);
-        Process.Start(new ProcessStartInfo(FleetConfig.StateDir) { UseShellExecute = true });
+        if (WindowsTools.OpenFolder(FleetConfig.StateDir) is { } problem) DialogWindow.Error(this, "Could not open the folder", problem);
     }
 
     private void Uninstall_Click(object sender, RoutedEventArgs e)

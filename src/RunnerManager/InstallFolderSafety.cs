@@ -132,21 +132,24 @@ internal static class InstallFolderSafety
 
     /// <summary>The Activity line, once per version, for an install that programs without administrator rights can change.</summary>
     internal static string UnsafeActivityText
-        => $"Runner Manager is installed in a folder that programs without administrator rights can change. To move it, run setup again and choose {MachineInstall.ProgramFilesDir}.";
+        => $"Runner Manager is installed in a folder that programs without administrator rights can change. {MoveText}";
 
     /// <summary>The note in Settings → Updates beside the install folder.</summary>
     internal static string UnsafeNoteText
-        => $"Programs without administrator rights can change this folder. To move it, run setup again and choose {MachineInstall.ProgramFilesDir}.";
+        => $"Programs without administrator rights can change this folder. {MoveText}";
+
+    /// <summary>How to move the install to Program Files, in the same words as the README and the changelog.</summary>
+    private static string MoveText => $"To move it, run the setup again, click Change… and choose {MachineInstall.ProgramFilesDir}.";
 
     /// <summary>The Activity line on every start of a PC that runs without the start helper.</summary>
     internal const string WithoutStartHelperActivityText =
-        "Runner Manager works, but its start is not protected: it runs without its start helper. Antivirus software may have removed " +
-        Launcher.FileName + ". Runner Manager tries again after the next update, or when you run setup again.";
+        "Runner Manager works, but its start is not protected: it runs without its start helper. Antivirus software may have removed or blocked " +
+        Launcher.FileName + ". Runner Manager tries again after the next update, or when you run the setup again.";
 
     /// <summary>The note in Settings → Updates on a PC that runs without the start helper.</summary>
     internal const string WithoutStartHelperNoteText =
-        "Runner Manager runs without its start helper here, so its start is not protected. Antivirus software may have removed " +
-        Launcher.FileName + ". Runner Manager tries again after the next update, or when you run setup again.";
+        "Runner Manager runs without its start helper here, so its start is not protected. Antivirus software may have removed or blocked " +
+        Launcher.FileName + ". Runner Manager tries again after the next update, or when you run the setup again.";
 
     /// <summary>Whether the installed copy that runs runs without the start helper (see <see cref="Launcher.RunsWithout"/>).</summary>
     internal static bool RunsWithoutStartHelper => AppUpdater.IsRunningInstalledCopy && Launcher.RunsWithout(AppUpdater.InstallDir);

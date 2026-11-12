@@ -97,7 +97,8 @@ public static class Installer
         var replacing = File.Exists(AppUpdater.InstalledExe) && !AppUpdater.IsRunningInstalledCopy && !keepInstalled;
         // Setup warns on its first page when it is older than this user's installed copy, so going ahead is the user's choice.
         var exe = await AppUpdater.InstallCurrentBuildAsync(log, createShortcut: false, allowOlder: !keepInstalled);
-        // The installed copy run as setup copies nothing, but still puts its start helper in place before the tasks.
+        // The installed copy run as setup copies nothing, but still puts its start helper in place, and checks it, before
+        // the tasks; only while it is still the installed file (see AppUpdater.IsInstalledBuild).
         if (AppUpdater.IsRunningInstalledCopy) await AppUpdater.EnsureStartHelperAsync(log);
         try
         {
@@ -288,7 +289,9 @@ public static class Installer
     /// </summary>
     public static async Task EnsureLaunchTaskAsync(bool force = false)
     {
-        if (!AppUpdater.IsRunningInstalledCopy) return;
+        // Only the installed build: an earlier copy that still runs after an update leaves the tasks, the start helper and
+        // the version in Settings → Apps to the copy that is installed now.
+        if (!AppUpdater.IsInstalledBuild) return;
         RefreshUninstallEntryVersion();
         // On every start: antivirus software may remove the start helper at any time, and a task must never name a file
         // that is gone. Puts it back or points this user's tasks at the exe (see Launcher.EnsureForThisCopyAsync).
@@ -307,16 +310,26 @@ public static class Installer
 
     /// <summary>
     /// Whether this user's launch task, or turned-on startup task, starts <paramref name="exe"/> directly although the start
-    /// helper beside it is in place. Reads no task while the start helper is not in place.
+    /// helper beside it is in place and this process saw it work (see <see cref="Launcher.CommandFor"/>). Reads no task
+    /// otherwise.
     /// </summary>
     internal static async Task<bool> SkipsStartHelperAsync(string exe)
+        => string.Equals(Launcher.CommandFor(exe), Launcher.PathBeside(exe), StringComparison.OrdinalIgnoreCase)
+           && (await TasksStartingExeAsync(exe)).Count > 0;
+
+    /// <summary>
+    /// This user's own launch task and turned-on startup task, with the highest rights, that start <paramref name="exe"/>
+    /// itself rather than the start helper beside it.
+    /// </summary>
+    internal static async Task<List<string>> TasksStartingExeAsync(string exe)
     {
-        if (!Launcher.IsInPlace(Path.GetDirectoryName(exe)!)) return false;
+        var names = new List<string>();
         bool StartsExe(string xml) => ScheduledTasks.CommandOfOwnElevatedTask(xml) is { } command
                                       && string.Equals(command, exe, StringComparison.OrdinalIgnoreCase);
-        if (StartsExe(await ScheduledTasks.QueryXmlAsync(ScheduledTasks.LaunchTaskName))) return true;
+        if (StartsExe(await ScheduledTasks.QueryXmlAsync(ScheduledTasks.LaunchTaskName))) names.Add(ScheduledTasks.LaunchTaskName);
         var startup = await ScheduledTasks.QueryXmlAsync(ScheduledTasks.DashboardTaskName);
-        return startup.Length > 0 && ScheduledTasks.IsEnabled(startup) && StartsExe(startup);
+        if (startup.Length > 0 && ScheduledTasks.IsEnabled(startup) && StartsExe(startup)) names.Add(ScheduledTasks.DashboardTaskName);
+        return names;
     }
 
     /// <summary>
@@ -333,8 +346,10 @@ public static class Installer
     }
 
     /// <summary>
-    /// Changes a task (<paramref name="change"/> registers it again or deletes it) only while no instance of it runs:
-    /// that can end the running instance, and the dashboard that asks may be one. Returns false when it was left for later.
+    /// Changes a task (<paramref name="change"/> registers it again or deletes it) only while no instance of it runs.
+    /// Registering a running task again does not end its instance on Windows 11 (measured; other Windows versions were
+    /// not), but Task Scheduler then refuses a new start of the task until that instance ends. The dashboard that asks may
+    /// be such an instance itself (see <see cref="StartHelperRestart"/>). Returns false when it was left for later.
     /// </summary>
     internal static async Task<bool> RegisterIfIdleAsync(string name, Func<Task> change)
     {
@@ -365,10 +380,10 @@ public static class Installer
            && (!ScheduledTasks.HasCurrentPriority(xml) || !string.Equals(started, exe, StringComparison.OrdinalIgnoreCase)
                || !RunsCommandFor(xml, exe));
 
-    /// <summary>Whether a task runs exactly what <see cref="Launcher.CommandFor"/> gives for <paramref name="exe"/>.</summary>
+    /// <summary>Whether a task runs exactly what <see cref="Launcher.CommandFor"/> gives for <paramref name="exe"/> and what it runs now.</summary>
     private static bool RunsCommandFor(string xml, string exe)
         => ScheduledTasks.CommandOfOwnElevatedTask(xml) is { } command
-           && string.Equals(command, Launcher.CommandFor(exe), StringComparison.OrdinalIgnoreCase);
+           && string.Equals(command, Launcher.CommandFor(exe, command), StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// 2.3 and earlier named the launch and startup tasks the same for every Windows user, so a second user's setup took
@@ -665,11 +680,17 @@ public static class Installer
     /// only files and are no link themselves, and so do the start helper with its files and what a self-contained exe
     /// unpacked through it (.net\RunnerManager, without going into links; .net itself only when it is then empty).
     /// </summary>
-    internal static string RemoveProgramFilesScript(string folder)
+    internal static string RemoveProgramFilesScript(string folder) => RemoveProgramFilesScript(AppUpdater.IsDefaultInstallDir(folder));
+
+    /// <summary>
+    /// <see cref="RemoveProgramFilesScript(string)"/>, with the whole folder removed when <paramref name="wholeFolder"/>
+    /// is true and only Runner Manager's own files otherwise. Only tests choose the form themselves.
+    /// </summary>
+    internal static string RemoveProgramFilesScript(bool wholeFolder)
     {
         // Retried for about 20 seconds: a process that just exited, or one using the folder as its working folder, can
         // still hold it for a moment.
-        var remove = AppUpdater.IsDefaultInstallDir(folder)
+        var remove = wholeFolder
             ? "Remove-Item -LiteralPath $f -Recurse -Force -ErrorAction SilentlyContinue"
             : "foreach ($p in " + string.Join(", ", OwnFilePatterns.Select(p => $"'{p}'")) + ") " +
               "{ Get-ChildItem -LiteralPath $f -Filter $p -File -Force -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue }; " +

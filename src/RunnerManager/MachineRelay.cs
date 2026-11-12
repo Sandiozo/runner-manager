@@ -1202,17 +1202,35 @@ public static class MachineRelay
 
     /// <summary>
     /// The fleet agent's check of its start (every few minutes): asks the loop to restart through the start helper when
-    /// <see cref="Launcher.AgentStep"/> says so. Only for the installed copy with administrator rights.
+    /// <see cref="Launcher.AgentStep"/> says so. Only for the installed build with administrator rights
+    /// (<see cref="Launcher.Decides"/>), and only once this process saw the start helper start Runner Manager (see
+    /// <see cref="StartHelperWorksAsync"/>): a probe runs before the task moves to it.
     /// </summary>
     internal static async Task CheckStartHelperAsync()
     {
-        if (!Elevation.IsElevated || !AppUpdater.IsRunningInstalledCopy) return;
+        if (!Launcher.Decides()) return;
         var exe = AppUpdater.InstalledExe;
         var command = ScheduledTasks.CommandOfOwnElevatedTask(await ScheduledTasks.QueryXmlAsync(ScheduledTasks.AgentTaskName));
-        var step = Launcher.AgentStep(Launcher.StartedThisProcess(), Launcher.IsInPlace(AppUpdater.InstallDir), command, exe,
+        var startedByHelper = Launcher.StartedThisProcess();
+        var step = Launcher.AgentStep(startedByHelper, Launcher.IsInPlace(AppUpdater.InstallDir), command, exe,
             UpdateWatched(), InstallChecks.IsDone(Launcher.AgentRestartCheck));
-        if (step != Launcher.AgentStartStep.Nothing && await ScheduledTasks.OtherOwnerAsync(ScheduledTasks.AgentTaskName) == null)
-            AskStartHelperStep(step);
+        if (step == Launcher.AgentStartStep.Nothing || await ScheduledTasks.OtherOwnerAsync(ScheduledTasks.AgentTaskName) != null) return;
+        if (await StartHelperWorksAsync(AppUpdater.InstallDir, Launcher.EnsureForThisCopyAsync)) AskStartHelperStep(step);
+    }
+
+    /// <summary>
+    /// Whether the start helper in <paramref name="folder"/> starts Runner Manager, checked before the agent moves its task
+    /// to it and restarts through it (see <see cref="Launcher.ProveAsync"/>). One that does not is given up on by
+    /// <paramref name="giveUp"/>, as one that was removed is (see <see cref="Launcher.EnsureForThisCopyAsync"/>, which
+    /// finds the result of the probe): this PC runs without it and this user's tasks start the exe. False without a
+    /// decision while an update holds the update lock; the next check tries again.
+    /// </summary>
+    internal static async Task<bool> StartHelperWorksAsync(string folder, Func<Task> giveUp)
+    {
+        var proof = await Launcher.ProveAsync(folder, TimeSpan.FromSeconds(2));
+        if (proof.Outcome == Launcher.Proof.Works) return true;
+        if (proof.Outcome == Launcher.Proof.Fails) await giveUp();
+        return false;
     }
 
     /// <summary>The agent's answer to a status request: the built status as an answer, with its commands and its work.</summary>
@@ -1355,7 +1373,9 @@ public static class MachineRelay
             ?? throw new InvalidOperationException($"No Runner Manager release found in {AppUpdater.ReleaseRepository}.");
         if (!force && !AppUpdater.IsNewer(release.Version, AppUpdater.CurrentVersion) && AppUpdater.IsRunningInstalledCopy)
             return $"Already up to date (v{AppUpdater.CurrentVersion})";
-        // The task is switched to the new copy when the agent exits, after its work: registering may end this agent.
+        // The task is switched to the new copy when the agent exits, after its work: the new copy runs only from the next
+        // start of the task, because registering it again does not end this agent on Windows 11 (measured; other Windows
+        // versions were not), and on a version where it does, the agent would stop in the middle of its work.
         _agentExeAfterUpdate = await AppUpdater.DownloadAndInstallAsync(release, message => AppendAgentLog($"Update: {message}"));
         _agentUpdateCommandId = commandId;
         AgentWork.AskRestart();
@@ -1711,8 +1731,9 @@ public static class MachineRelay
 
     /// <summary>
     /// The last step before the agent exits to finish an update: starts the helper that starts the task again once this
-    /// agent has exited, and only then registers the task for <paramref name="exe"/>, since registering may end this
-    /// agent. Returns whether the agent is to exit. When the helper cannot be started (PowerShell is blocked or
+    /// agent has exited, and only then registers the task for <paramref name="exe"/>: registering it again does not end
+    /// this agent on Windows 11 (measured; other Windows versions were not), but the helper must be there in case a Windows
+    /// version does. Returns whether the agent is to exit. When the helper cannot be started (PowerShell is blocked or
     /// missing), nothing would start the agent again, so it stays as it is and takes commands again
     /// (<see cref="TakeCommandsAgain"/>). After a failed registration it exits, and the helper starts the task as it
     /// was. A failure is given to <paramref name="failed"/>.
@@ -1794,8 +1815,10 @@ public static class MachineRelay
 
     /// <summary>
     /// Waits for the agent's work, stops the agent, registers its task for <paramref name="switchTo"/> (when given),
-    /// and starts it. Registering may end a running agent, so it comes only after the wait. When registering fails,
-    /// the agent is still started (with the task as it was), and then the failure is thrown.
+    /// and starts it. Registering comes only after the wait: it does not end a running agent on Windows 11 (measured;
+    /// other Windows versions were not), but Task Scheduler refuses to start the task again until the agent that runs
+    /// has exited. When registering fails, the agent is still started (with the task as it was), and then the failure is
+    /// thrown.
     /// </summary>
     internal static async Task RestartAgentAsync(AgentRestartSteps steps, string? switchTo, Action<string>? log)
     {
@@ -1896,7 +1919,9 @@ public static class MachineRelay
     /// <summary>
     /// Tasks created by older versions used schtasks defaults: they refuse to start on battery,
     /// are killed when a laptop unplugs, and are force-stopped after 72 hours. Re-register those
-    /// with always-on settings, keeping the executable path the task already points to.
+    /// with always-on settings, keeping the executable path the task already points to. A task whose exe is gone gets the
+    /// installed exe when there is one, never the exe of this process (which may be a build folder or a download), and is
+    /// otherwise left as it is.
     /// </summary>
     public static async Task<bool> RepairAgentTaskSettingsAsync()
     {
@@ -1913,12 +1938,17 @@ public static class MachineRelay
             AppendAgentLog(ScheduledTasks.NotRegisteredElevatedText(ScheduledTasks.AgentTaskName));
             return false;
         }
-        if (!File.Exists(exe)) exe = Environment.ProcessPath ?? string.Empty;
+        if (!File.Exists(exe))
+        {
+            if (!File.Exists(AppUpdater.InstalledExe)) return false;
+            exe = AppUpdater.InstalledExe;
+        }
         if (!exe.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) return false;
 
         await RegisterAgentTaskAsync(exe);
-        // If re-registering ended the running instance this starts it again; otherwise the task's
-        // IgnoreNew policy (and the agent's own mutex) make this a no-op.
+        // Registering again does not end a running agent on Windows 11 (measured; other versions were not), and the
+        // task's IgnoreNew policy (and the agent's own mutex) make this a no-op then. An agent that was not running, or
+        // one that a Windows version ended, starts again.
         await ScheduledTasks.RunTaskAsync(ScheduledTasks.AgentTaskName);
         return true;
     }

@@ -1871,22 +1871,19 @@ public partial class MainWindow : Window
         ActivityCount.Text = ActivityTabCount.Text = ActivityLog.Count.ToString();
     }
 
+    /// <summary>Opens a folder through Explorer, without administrator rights (see <see cref="WindowsTools.OpenFolder"/>).</summary>
     private void OpenFolder(string path)
     {
-        if (!Directory.Exists(path))
-        {
-            AddActivity($"Folder not found: {path}");
-            SetStatus($"Folder not found: {path}", StatusKind.Warning);
-            return;
-        }
-        Process.Start(new ProcessStartInfo(WindowsTools.Explorer, $"\"{path}\"") { UseShellExecute = true });
+        if (WindowsTools.OpenFolder(path) is not { } problem) return;
+        AddActivity(problem);
+        SetStatus(problem, StatusKind.Warning);
     }
 
+    /// <summary>Opens an https address through Explorer, without administrator rights (see <see cref="WindowsTools.OpenUrl"/>).</summary>
     private void OpenUrl(string? url)
     {
-        if (string.IsNullOrWhiteSpace(url) || !url.StartsWith("https://", StringComparison.OrdinalIgnoreCase)) return;
-        try { Process.Start(new ProcessStartInfo(url) { UseShellExecute = true }); }
-        catch (Exception ex) { AddActivity($"Could not open {url}: {ex.Message}"); }
+        if (string.IsNullOrWhiteSpace(url)) return;
+        if (WindowsTools.OpenUrl(url) is { } problem) AddActivity(problem);
     }
 
     private sealed record PendingCommand(string CommandId, string Action, DateTime QueuedUtc);
