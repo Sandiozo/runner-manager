@@ -1050,7 +1050,11 @@ public partial class MainWindow : Window
         if (IsOperationRunning("Add runner")) return;
         // A PC card's button adds on that PC; the toolbar and Ctrl+N on the PC selected in the sidebar.
         var selected = ItemFrom<MachineInfo>(sender) ?? Machines.FirstOrDefault(m => m.MachineKey == _selectedMachineKey);
-        var dialog = new AddRunnerWindow(null, Machines, selected) { Owner = this };
+        // Another PC can be chosen, so the window opens without this PC's sign-in. It says so while this PC is chosen,
+        // before the form is filled in. The first sign-in check runs beside the first refresh: wait for its answer.
+        if (!_githubChecked && _gitHubCheck is { } firstCheck) await firstCheck;
+        var dialog = new AddRunnerWindow(null, Machines, selected,
+            thisPcProblem: _githubAuthenticated ? null : AddRunnerForm.ThisPcNeedsGitHub) { Owner = this };
         if (dialog.ShowDialog() != true || dialog.Setup is not { } setup) return;
         if (OtherPcToAddOn(dialog.TargetPc, Machines) is not { } pc)
         {
@@ -1463,7 +1467,8 @@ public partial class MainWindow : Window
         }
         if (IsOperationRunning(runner, $"Edit {runner.TitleText}")) return;
         // Only a runner on this PC can lose every custom label: the fleet's Edit command has no field for it.
-        var dialog = new EditRunnerWindow(runner, canClearLabels: runner.IsLocalMachine) { Owner = this };
+        var dialog = new EditRunnerWindow(runner, canClearLabels: runner.IsLocalMachine,
+            noDefaultLabels: runner.RegistrationOptions?.NoDefaultLabels == true) { Owner = this };
         if (dialog.ShowDialog() != true || dialog.Edit == null) return;
         var edit = dialog.Edit;
         await RunRunnerActionAsync(runner, "Edit", $"Edit {runner.TitleText}",

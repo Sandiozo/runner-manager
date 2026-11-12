@@ -156,6 +156,13 @@ internal static class AddRunnerForm
         return $"{selectedPc.MachineName} cannot be chosen: {reason} The runner is added on {addedOn}.";
     }
 
+    /// <summary>
+    /// Shown in the Add runner window while this PC is chosen and is not connected to GitHub: a runner on this PC is
+    /// registered with this PC's GitHub sign-in, one on another PC with that PC's.
+    /// </summary>
+    internal const string ThisPcNeedsGitHub =
+        "This PC is not connected to GitHub, so a runner cannot be added on it. Connect GitHub first, or choose another PC.";
+
     /// <summary>The PC as the picker shows it, and as screen readers read it.</summary>
     internal static (string Label, string AccessibleName) PcLabel(MachineInfo pc)
         => pc.IsLocal ? ($"{pc.MachineName} (this PC)", $"{pc.MachineName}, this PC") : (pc.MachineName, pc.MachineName);
@@ -195,7 +202,12 @@ internal static class EditRunnerForm
 
     /// <param name="currentName">The runner's name; another PC can report none.</param>
     /// <param name="currentLabels">The runner's custom labels; another PC can report none, or a list with empty entries.</param>
-    internal static Result Check(string? currentName, IEnumerable<string?>? currentLabels, string? name, string? labelsText, bool canClearLabels)
+    /// <param name="noDefaultLabels">
+    /// The runner was set up without the default labels, so it cannot lose every custom label: it would have no label
+    /// at all (<see cref="RunnerService.NoLabelsLeftMessage"/>). RunnerService checks this again before it changes anything.
+    /// </param>
+    internal static Result Check(string? currentName, IEnumerable<string?>? currentLabels, string? name, string? labelsText, bool canClearLabels,
+        bool noDefaultLabels = false)
     {
         var newName = (name ?? string.Empty).Trim();
         var labels = AddRunnerForm.ParseLabels(labelsText);
@@ -207,7 +219,7 @@ internal static class EditRunnerForm
 
         // The name a runner has stays allowed, whatever its length: only a new name must keep to the limit.
         var nameProblem = RunnerService.RunnerNameProblem(newName) ?? (nameChanged ? AddRunnerForm.LengthProblem(newName) : null);
-        var labelsProblem = RunnerService.LabelsProblem(labels) ?? (clears && !canClearLabels ? ClearNotPossible : null);
+        var labelsProblem = RunnerService.LabelsProblem(labels) ?? (clears && !canClearLabels ? ClearNotPossible : clears && noDefaultLabels ? RunnerService.NoLabelsLeftMessage : null);
         var request = changed && nameProblem == null && labelsProblem == null
             ? new RunnerEditRequest(newName, labels, ClearLabels: clears)
             : null;

@@ -42,6 +42,41 @@ public class AuditWiringTests
     }
 
     [Fact]
+    public void EditRunner_RefusesToRemoveEveryLabel_OfARunnerWithoutDefaultLabels()
+    {
+        var result = EditRunnerForm.Check("build-01", ["gpu"], "build-01", "", canClearLabels: true, noDefaultLabels: true);
+
+        // The same text RunnerService gives when it refuses the edit, so Save is off before anything is tried.
+        Assert.Equal(RunnerService.NoLabelsLeftMessage, result.LabelsProblem);
+        Assert.False(result.CanSave);
+    }
+
+    [Fact]
+    public void EditRunner_StillRemovesEveryCustomLabel_OfARunnerWithDefaultLabels()
+    {
+        var result = EditRunnerForm.Check("build-01", ["gpu"], "build-01", "", canClearLabels: true, noDefaultLabels: false);
+
+        Assert.Null(result.LabelsProblem);
+        Assert.True(result.Request is { ClearLabels: true });
+    }
+
+    [Fact]
+    public void EditRunner_KeepsALabel_OfARunnerWithoutDefaultLabels()
+    {
+        var result = EditRunnerForm.Check("build-01", ["gpu", "fast"], "build-01", "gpu", canClearLabels: true, noDefaultLabels: true);
+
+        Assert.Null(result.LabelsProblem);
+        Assert.True(result.CanSave);
+    }
+
+    [Fact]
+    public void AddRunner_OnThisPcWithoutGitHub_SaysWhatToDo()
+    {
+        Assert.Contains("Connect GitHub first, or choose another PC", AddRunnerForm.ThisPcNeedsGitHub);
+        Assert.DoesNotContain("n't", AddRunnerForm.ThisPcNeedsGitHub);
+    }
+
+    [Fact]
     public void AddAPc_OnAManagedPc_SaysWhyItCannotAddPcs()
     {
         var text = MainWindow.ManagedCannotAddText("OFFICE-PC");

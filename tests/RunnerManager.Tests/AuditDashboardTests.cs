@@ -1307,7 +1307,9 @@ public class AuditDashboardTests
         Assert.Equal("BUILD-30 downloads and sets up the runner. It reports no progress until it is done, which can take several minutes.",
             MainWindow.RemoteAddRunnerNote("BUILD-30"));
         var click = MethodBody("MainWindow.xaml.cs", "private async void AddRunner_Click(");
-        Assert.Contains("new AddRunnerWindow(null, Machines, selected)", click);
+        Assert.Contains("new AddRunnerWindow(null, Machines, selected,", click);
+        // Signed out, the window says so while this PC is chosen, and the other PCs can still be chosen.
+        Assert.Contains("thisPcProblem: _githubAuthenticated ? null : AddRunnerForm.ThisPcNeedsGitHub", click);
         Assert.Contains("if (!CanSendTo(pc.MachineKey)) return;", click);
         var note = click.IndexOf("log(RemoteAddRunnerNote(pc.MachineName));", StringComparison.Ordinal);
         var create = click.IndexOf("_fleetActions.CreateRunnerAsync(pc, setup.RepositoryUrl, setup.RunnerName, setup.Labels, log)", StringComparison.Ordinal);

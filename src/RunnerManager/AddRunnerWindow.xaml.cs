@@ -16,6 +16,10 @@ public partial class AddRunnerWindow : Window
     private AddRunnerForm.RepositoryCheck _repository = AddRunnerForm.CheckRepository(string.Empty);
     /// <summary>The PC to add the runner on; null is this PC, when no PCs were passed.</summary>
     private MachineInfo? _target;
+    /// <summary>Why a runner cannot be added on this PC right now, or null.</summary>
+    private readonly string? _thisPcProblem;
+    /// <summary>What to say about the dashboard's PC when it cannot be chosen, or null.</summary>
+    private readonly string? _missingPcHint;
     private bool _pathEdited;
     private bool _nameEdited;
     /// <summary>The folder last typed or chosen, kept while a PC without a folder box is selected.</summary>
@@ -41,11 +45,16 @@ public partial class AddRunnerWindow : Window
     /// Whether a folder typed for another PC reaches that PC. Null: no PC's does, so for another PC the folder box stays
     /// empty and the runner goes in that PC's folder for new runners.
     /// </param>
+    /// <param name="thisPcProblem">
+    /// Why a runner cannot be added on this PC right now (it is not connected to GitHub), or null. Shown while this PC
+    /// is chosen, and Create stays off, so the form is not filled in for nothing; the other PCs can still be chosen.
+    /// </param>
     public AddRunnerWindow(IEnumerable<MachineRunnerStatus>? existingRunners = null, IEnumerable<MachineInfo>? pcs = null,
-        MachineInfo? selectedPc = null, Func<MachineInfo, bool>? canChooseFolder = null)
+        MachineInfo? selectedPc = null, Func<MachineInfo, bool>? canChooseFolder = null, string? thisPcProblem = null)
     {
         InitializeComponent();
         WindowTheme.Apply(this);
+        _thisPcProblem = thisPcProblem;
         var fleet = pcs?.OfType<MachineInfo>().ToList() ?? new List<MachineInfo>();
         // Runners that other PCs report can have a null scope or name, which AddRunnerForm.NameProblem allows for.
         _existing = (existingRunners ?? fleet.SelectMany(m => m.Runners ?? Array.Empty<MachineRunnerStatus>()))
@@ -58,11 +67,8 @@ public partial class AddRunnerWindow : Window
         if (targets.Count > 1) ShowPcChoices(targets);
         else PcFieldLabel.Visibility = PcChoicesHost.Visibility = Visibility.Collapsed;
         // The PC selected on the dashboard is missing when it is offline or its fleet agent cannot create runners.
-        if (AddRunnerForm.MissingPcHint(selectedPc, targets) is { } missing)
-        {
-            PcHint.Text = missing;
-            PcHint.Visibility = PcPanel.Visibility = Visibility.Visible;
-        }
+        _missingPcHint = AddRunnerForm.MissingPcHint(selectedPc, targets);
+        if (_missingPcHint != null || _thisPcProblem != null) PcPanel.Visibility = Visibility.Visible;
 
         // Typing in a box keeps what was typed; until then, the name and folder follow the repository and the PC.
         RunnerNameBox.TextChanged += (_, _) =>
@@ -188,7 +194,14 @@ public partial class AddRunnerWindow : Window
                                : $"The runner is installed in {TargetName}'s folder for new runners.");
         InstallHint.Foreground = folderProblem != null ? Palette.Warning : Palette.TextMuted;
 
-        var valid = _repository.IsValid && nameProblem == null && labelsProblem == null && folderProblem == null;
+        // This PC's problem counts only while this PC is chosen; otherwise the hint about the dashboard's PC stays.
+        var pcProblem = IsRemote ? null : _thisPcProblem;
+        var pcText = pcProblem ?? _missingPcHint;
+        PcHint.Text = pcText ?? string.Empty;
+        PcHint.Foreground = pcProblem != null ? Palette.Warning : Palette.TextMuted;
+        PcHint.Visibility = pcText != null ? Visibility.Visible : Visibility.Collapsed;
+
+        var valid = _repository.IsValid && nameProblem == null && labelsProblem == null && folderProblem == null && pcProblem == null;
         CreateButton.IsEnabled = valid;
         return valid;
     }

@@ -8,19 +8,22 @@ public partial class EditRunnerWindow : Window
     private readonly string[] _currentLabels;
     private readonly bool _canClearLabels;
     private readonly string _alwaysAdded;
+    private readonly bool _noDefaultLabels;
     public RunnerEditRequest? Edit { get; private set; }
 
     /// <param name="canClearLabels">
     /// Whether the runner's PC can remove every custom label. Without that, an empty list keeps the current labels, so
     /// emptying the box is refused instead of silently doing nothing.
     /// </param>
-    public EditRunnerWindow(MachineRunnerStatus runner, bool canClearLabels = false)
+    /// <param name="noDefaultLabels">The runner was set up without the default labels, so it must keep at least one label.</param>
+    public EditRunnerWindow(MachineRunnerStatus runner, bool canClearLabels = false, bool noDefaultLabels = false)
     {
         InitializeComponent();
         WindowTheme.Apply(this);
         // Another PC can send null for the name and the labels.
         _currentName = runner.AgentName ?? string.Empty;
         _canClearLabels = canClearLabels;
+        _noDefaultLabels = noDefaultLabels;
         // Runners on other PCs report their labels in their status; for runners on this PC they are read from GitHub.
         _currentLabels = EditRunnerForm.CurrentLabels(runner.CustomLabels, runner.LocalRunner?.CustomLabels);
         _alwaysAdded = runner.IsLocalMachine
@@ -37,7 +40,7 @@ public partial class EditRunnerWindow : Window
 
     private EditRunnerForm.Result Check()
     {
-        var result = EditRunnerForm.Check(_currentName, _currentLabels, RunnerNameBox.Text, LabelsBox.Text, _canClearLabels);
+        var result = EditRunnerForm.Check(_currentName, _currentLabels, RunnerNameBox.Text, LabelsBox.Text, _canClearLabels, _noDefaultLabels);
         NameHint.Text = result.NameProblem ?? string.Empty;
         NameHint.Foreground = Palette.Warning;
         NameHint.Visibility = result.NameProblem != null ? Visibility.Visible : Visibility.Collapsed;
