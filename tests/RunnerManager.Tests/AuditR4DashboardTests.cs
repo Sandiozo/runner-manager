@@ -62,4 +62,24 @@ public class AuditR4DashboardTests
     [InlineData(true, true, false)]
     public void Refreshes_ReadThisPc_WhileOnlyAnotherPcIsWorkedOn(bool operationRunning, bool onOtherPcOnly, bool holdsBack)
         => Assert.Equal(holdsBack, MainWindow.HoldsThisPcBack(operationRunning, onOtherPcOnly));
+
+    // ----- 3: this PC's runners are read again when the sign-in changed since they were read -----
+
+    [Fact]
+    public void ThisPcsRunners_AreReadAgain_WhenTheyWereReadWithAnotherSignIn()
+    {
+        var justNow = TimeSpan.FromSeconds(2);
+        // Start-up: the first refresh read them without GitHub, then the sign-in check found GitHub connected.
+        Assert.True(MainWindow.ReadsLocalRunners(forced: false, noneKnown: false, lastReadWithGitHub: false, gitHubConnected: true, justNow));
+        // Disconnected since they were read with GitHub.
+        Assert.True(MainWindow.ReadsLocalRunners(false, false, lastReadWithGitHub: true, gitHubConnected: false, justNow));
+        // Read the way GitHub is now: again only after 30 seconds.
+        Assert.False(MainWindow.ReadsLocalRunners(false, false, lastReadWithGitHub: true, gitHubConnected: true, justNow));
+        Assert.False(MainWindow.ReadsLocalRunners(false, false, lastReadWithGitHub: false, gitHubConnected: false, justNow));
+        Assert.True(MainWindow.ReadsLocalRunners(false, false, true, true, TimeSpan.FromSeconds(30)));
+        // Forced, none known, or not read yet.
+        Assert.True(MainWindow.ReadsLocalRunners(forced: true, false, true, true, justNow));
+        Assert.True(MainWindow.ReadsLocalRunners(false, noneKnown: true, true, true, justNow));
+        Assert.True(MainWindow.ReadsLocalRunners(false, false, lastReadWithGitHub: null, gitHubConnected: false, justNow));
+    }
 }

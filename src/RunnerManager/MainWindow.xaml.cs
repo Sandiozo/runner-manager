@@ -60,6 +60,8 @@ public partial class MainWindow : Window
     private string _filter = string.Empty;
     private DateTime _lastAuthCheck = DateTime.MinValue;
     private DateTime _lastLocalRunnerRefresh = DateTime.MinValue;
+    /// <summary>Whether this PC's runners were last read with GitHub (connected then), or null before the first reading.</summary>
+    private bool? _localRunnersReadWithGitHub;
     private bool _forceDiscovery = true;
 
     public MainWindow()
@@ -147,9 +149,10 @@ public partial class MainWindow : Window
         => _fleetRead is { IsCompleted: false } read ? read.ContinueWith(_ => { }, TaskScheduler.Default) : Task.CompletedTask;
 
     /// <summary>
-    /// Reads the fleet and this PC's runners and shows them. Nothing here waits for gh: the GitHub sign-in is checked
-    /// beside it (<see cref="StartGitHubCheck"/>), and the job health, update and recent-run checks run after it, so the
-    /// next timer tick is not skipped while GitHub is slow.
+    /// Reads the fleet and this PC's runners and shows them. The GitHub sign-in is checked beside it
+    /// (<see cref="StartGitHubCheck"/>), and the job health, update and recent-run checks run after it without being
+    /// waited for, so a slow gh does not hold those back. Reading this PC's runners with GitHub (every 30 seconds, see
+    /// <see cref="ReadsLocalRunners"/>) still waits for gh, and a timer tick that comes meanwhile is skipped.
     /// </summary>
     private async Task RefreshAsync(bool forceAuthCheck = false)
     {
@@ -179,12 +182,13 @@ public partial class MainWindow : Window
                 return;
             }
             if (forceAuthCheck || DateTime.Now - _lastAuthCheck > AuthCheckInterval) StartGitHubCheck();
-            // This PC's runners are read with GitHub when it was connected at the last check. When the check that runs
-            // now says otherwise, they are read again (see CheckGitHubAsync).
-            var refreshLocalRunners = forceAuthCheck || Runners.Count == 0
-                || DateTime.Now - _lastLocalRunnerRefresh >= LocalGitHubRefreshInterval;
+            // This PC's runners are read with GitHub when it was connected at the last check. When a check says otherwise,
+            // the next refresh reads them again.
+            var withGitHub = _githubAuthenticated;
+            var refreshLocalRunners = ReadsLocalRunners(forceAuthCheck, Runners.Count == 0, _localRunnersReadWithGitHub, withGitHub,
+                DateTime.Now - _lastLocalRunnerRefresh);
             var runnersTask = refreshLocalRunners
-                ? RunnerService.ReadSnapshotAsync(_githubAuthenticated)
+                ? RunnerService.ReadSnapshotAsync(withGitHub)
                 : Task.FromResult(Runners.ToList());
 
             _isEnrolled = await MachineRelay.IsAgentInstalledAsync();
@@ -210,6 +214,7 @@ public partial class MainWindow : Window
                 return;
             }
             ApplyFleet(machines, runners, refreshLocalRunners);
+            if (refreshLocalRunners) _localRunnersReadWithGitHub = withGitHub;
             completed = true;
             LastUpdatedText.Text = $"Updated {TimeFormat.WithSeconds(DateTime.Now)}  ·  Refreshes every {_settings.RefreshSeconds}s";
             ShowIdleStatus();
@@ -234,6 +239,15 @@ public partial class MainWindow : Window
             await RefreshAsync(force);
         }
     }
+
+    /// <summary>
+    /// Whether a refresh reads this PC's runners again. Read with GitHub, each costs several requests, so they are read
+    /// every 30 seconds, and at once when the refresh is forced or none are known. Also at once when they were last read
+    /// with another sign-in than GitHub has now: at start-up, the first refresh reads them before the sign-in check has
+    /// answered, and a refresh that was still running when it answered reads them the old way too.
+    /// </summary>
+    internal static bool ReadsLocalRunners(bool forced, bool noneKnown, bool? lastReadWithGitHub, bool gitHubConnected, TimeSpan sinceLastRead)
+        => forced || noneKnown || lastReadWithGitHub != gitHubConnected || sinceLastRead >= LocalGitHubRefreshInterval;
 
     /// <summary>
     /// The checks that ask Windows and GitHub, after a refresh has shown the fleet. They are not awaited by the refresh,
@@ -310,8 +324,7 @@ public partial class MainWindow : Window
         }
         // Connected now: what GitHub refused before (no sign-in) is asked again at once, not after its pause.
         if (authenticated) GitHubCli.ForgetProblems();
-        // This PC's runners were read the other way, with or without GitHub.
-        _lastLocalRunnerRefresh = DateTime.MinValue;
+        // This PC's runners were read the other way, with or without GitHub, so the refresh reads them again.
         await RefreshAsync();
     }
 
