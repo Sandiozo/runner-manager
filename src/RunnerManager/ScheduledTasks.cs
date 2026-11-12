@@ -343,22 +343,27 @@ public static class ScheduledTasks
     /// </summary>
     public static async Task<bool?> IsRunningAsync(string name)
     {
-        var (code, output) = await RunAsync("powershell.exe", $"-NoLogo -NoProfile -NonInteractive -Command \"{TaskStateScript(name)}\"", ShortTimeout);
+        var (code, output) = await RunAsync(AppUpdater.PowerShellExe, $"-NoLogo -NoProfile -NonInteractive -Command \"{TaskStateScript}\"", ShortTimeout,
+            new Dictionary<string, string> { [TaskNameVariable] = name });
         return code == 0 ? ParseTaskState(output) : null;
     }
 
     /// <summary>The COM error Task Scheduler gives for a task that does not exist (HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)).</summary>
     internal const int TaskNotFound = unchecked((int)0x80070002);
 
+    /// <summary>The environment variable that gives <see cref="TaskStateScript"/> the task name, which is never part of the script.</summary>
+    internal const string TaskNameVariable = "RUNNER_MANAGER_TASK";
+
     /// <summary>
-    /// Prints the task's TASK_STATE; -1 when the task does not exist, and "unknown" for any other error (Task Scheduler
-    /// not reachable, access denied), so such an error is never taken for a missing task.
+    /// Prints the TASK_STATE of the task named in <see cref="TaskNameVariable"/>; -1 when the task does not exist, and
+    /// "unknown" for any other error (Task Scheduler not reachable, access denied), so such an error is never taken for a
+    /// missing task.
     /// </summary>
-    internal static string TaskStateScript(string name)
-        => "$s = New-Object -ComObject Schedule.Service; " +
-           $"try {{ $s.Connect(); [int]$s.GetFolder('\\').GetTask('{name.Replace("'", "''")}').State }} " +
-           "catch { $e = $_.Exception; while ($e.InnerException) { $e = $e.InnerException }; " +
-           $"if ($e.HResult -eq {TaskNotFound}) {{ -1 }} else {{ 'unknown' }} }}";
+    internal static readonly string TaskStateScript =
+        "$s = New-Object -ComObject Schedule.Service; " +
+        $"try {{ $s.Connect(); [int]$s.GetFolder('\\').GetTask($env:{TaskNameVariable}).State }} " +
+        "catch { $e = $_.Exception; while ($e.InnerException) { $e = $e.InnerException }; " +
+        $"if ($e.HResult -eq {TaskNotFound}) {{ -1 }} else {{ 'unknown' }} }}";
 
     /// <summary>
     /// Task Scheduler's state of a task (TASK_STATE): 4 running and 2 queued count as running, 1 disabled and 3 ready do
@@ -491,12 +496,15 @@ public static class ScheduledTasks
     /// Runs a program hidden and returns its exit code with its output (or its error text when it failed).
     /// When it does not finish within the timeout, its process tree is killed and the exit code is -1.
     /// </summary>
-    public static async Task<(int ExitCode, string Output)> RunAsync(string fileName, string arguments, TimeSpan? timeout = null)
+    public static async Task<(int ExitCode, string Output)> RunAsync(string fileName, string arguments, TimeSpan? timeout = null,
+        IReadOnlyDictionary<string, string>? environment = null)
     {
         var limit = timeout ?? DefaultTimeout;
         try
         {
-            var result = await ProcessRunner.RunAsync(new ProcessStartInfo { FileName = fileName, Arguments = arguments }, limit);
+            var start = new ProcessStartInfo { FileName = fileName, Arguments = arguments };
+            foreach (var (key, value) in environment ?? new Dictionary<string, string>()) start.Environment[key] = value;
+            var result = await ProcessRunner.RunAsync(start, limit);
             if (result == null) return (-1, $"{Path.GetFileName(fileName)} did not finish within {ProcessRunner.Describe(limit)}.");
             return (result.ExitCode, result.ExitCode == 0 ? result.Output
                 : string.IsNullOrWhiteSpace(result.Error) ? result.Output : result.Error);

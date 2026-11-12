@@ -376,6 +376,18 @@ public class ProgramFilesInstallTests
         Assert.True(File.Exists(AppUpdater.PowerShellExe));
     }
 
+    [Fact]
+    public void PowerShell_IsNeverStartedByItsBareName()
+    {
+        // A bare name is looked for in the program's folder and the current folder before the Windows folder.
+        foreach (var file in Directory.GetFiles(InstallEvidenceTests.SourceDir, "*.cs", SearchOption.AllDirectories))
+        {
+            var code = File.ReadAllText(file);
+            Assert.False(code.Contains("\"powershell.exe\"", StringComparison.OrdinalIgnoreCase), $"{Path.GetFileName(file)} starts powershell.exe by its bare name.");
+            Assert.False(code.Contains("\"powershell\"", StringComparison.OrdinalIgnoreCase), $"{Path.GetFileName(file)} starts powershell by its bare name.");
+        }
+    }
+
     // ================= 4. Several Windows users =================
 
     [Fact]

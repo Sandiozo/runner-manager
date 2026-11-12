@@ -233,7 +233,7 @@ public static partial class RunnerService
         try
         {
             var script = Convert.ToBase64String(Encoding.Unicode.GetBytes(ListTasksScript));
-            var (code, output) = await ScheduledTasks.RunAsync("powershell.exe",
+            var (code, output) = await ScheduledTasks.RunAsync(AppUpdater.PowerShellExe,
                 $"-NoLogo -NoProfile -NonInteractive -EncodedCommand {script}", ScheduledTasks.ShortTimeout);
             return code == 0 ? ParseTaskList(output).Select(t => t.Actions).ToList() : null;
         }

@@ -68,7 +68,7 @@ public class InstallFolderTests
 
     internal static void RunPowerShell(string script, IReadOnlyDictionary<string, string>? environment = null)
     {
-        var start = new System.Diagnostics.ProcessStartInfo("powershell.exe")
+        var start = new System.Diagnostics.ProcessStartInfo(AppUpdater.PowerShellExe)
         {
             ArgumentList = { "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script },
             UseShellExecute = false,

@@ -1107,7 +1107,7 @@ public static partial class RunnerService
     private static async Task DisableScheduledTasksAsync(string root, List<string> others, StartupChanges changes, Action<string> log)
     {
         var script = Convert.ToBase64String(System.Text.Encoding.Unicode.GetBytes(ListTasksScript));
-        var (code, output) = await ScheduledTasks.RunAsync("powershell.exe",
+        var (code, output) = await ScheduledTasks.RunAsync(AppUpdater.PowerShellExe,
             $"-NoLogo -NoProfile -NonInteractive -EncodedCommand {script}", ScheduledTasks.ShortTimeout);
         if (code != 0)
         {
