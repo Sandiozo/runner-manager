@@ -8,6 +8,11 @@ public partial class App : Application
 {
     /// <summary>Exits right away. An update is test-started with it, to check that its .NET runtime is installed.</summary>
     public const string ProbeArgument = "--probe";
+    /// <summary>
+    /// Followed by one https address: gives it to Explorer and exits, with 0 when Explorer was started. gh runs this as its
+    /// browser for the GitHub sign-in page (see <see cref="GitHubCli.BrowserForGh"/> and <see cref="WindowsTools.OpenUrlExitCode"/>).
+    /// </summary>
+    public const string OpenUrlArgument = "--open-url";
     /// <summary>Passed by the launch task, so a copy that still is not elevated asks with UAC instead of looping.</summary>
     public const string FromTaskArgument = "--from-task";
     /// <summary>Added when a copy asks for administrator rights, so a copy that still is not elevated stops instead of looping.</summary>
@@ -52,6 +57,13 @@ public partial class App : Application
         base.OnStartup(e);
         // An AI tool may start the exe by a path with spaces but without quotes; the pieces of that path are not arguments.
         var startArgs = RunningCopies.WithoutProgramPathPieces(e.Args, Environment.CommandLine, Environment.ProcessPath);
+        // Started by gh as its browser: only hands the address to Explorer and exits, without a window. First, so this copy
+        // takes no mutex, hands nothing to an elevated copy, and reads or writes no file, registry, task or setting.
+        if (startArgs.Contains(OpenUrlArgument, StringComparer.OrdinalIgnoreCase))
+        {
+            Shutdown(WindowsTools.OpenUrlExitCode(startArgs));
+            return;
+        }
         // An exception on another thread ends the process; this is where it gets recorded.
         AppDomain.CurrentDomain.UnhandledException += (_, args) =>
             MachineRelay.AppendAgentLog($"Runner Manager stopped after an unexpected error: {args.ExceptionObject}");

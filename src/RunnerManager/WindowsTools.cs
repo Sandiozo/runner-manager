@@ -36,6 +36,19 @@ internal static class WindowsTools
         return Start(start, address);
     }
 
+    /// <summary>
+    /// What Runner Manager does when it is started with <see cref="App.OpenUrlArgument"/>, as gh's browser for the GitHub
+    /// sign-in page (see <see cref="GitHubCli.BrowserForGh"/>): it opens the address with <see cref="OpenUrl"/>. Accepted
+    /// only as exactly the argument and one address. Returns the exit code: 0 when Explorer was started, otherwise 1, which
+    /// gh reports as a failure to open the page.
+    /// </summary>
+    internal static int OpenUrlExitCode(IReadOnlyList<string> args)
+    {
+        if (args.Count != 2 || !args[0].Equals(App.OpenUrlArgument, StringComparison.OrdinalIgnoreCase)) return 1;
+        try { return OpenUrl(args[1]) is null ? 0 : 1; }
+        catch { return 1; }
+    }
+
     /// <summary>The https address to open for <paramref name="url"/> (see <see cref="OpenUrl"/>), or null when it is not opened.</summary>
     internal static string? SafeUrl(string? url)
     {

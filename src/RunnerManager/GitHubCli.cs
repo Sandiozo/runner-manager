@@ -237,7 +237,8 @@ public static class GitHubCli
     /// registry (which any program of the user can set in HKCU) do not run in the console that Runner Manager opens.
     /// The console stays open after Runner Manager exits, so its current folder is the system folder: the install folder,
     /// which Runner Manager starts in, could not be removed or updated while the console is open. gh opens the GitHub
-    /// sign-in page through Explorer (GH_BROWSER), so the browser does not get Runner Manager's administrator rights.
+    /// sign-in page with the command in GH_BROWSER (see <see cref="BrowserForGh"/>): Runner Manager, which gives the page to
+    /// Explorer, so the browser does not get Runner Manager's administrator rights.
     /// </summary>
     internal static ProcessStartInfo ConsoleStartInfo(string gh, string arguments)
     {
@@ -254,10 +255,25 @@ public static class GitHubCli
     }
 
     /// <summary>
-    /// Explorer's full path for GH_BROWSER, with forward slashes: gh splits the value as a shell does, where a backslash
-    /// escapes the next character. Windows takes forward slashes in a path as well.
+    /// The browser command for GH_BROWSER: the running exe with <see cref="App.OpenUrlArgument"/> (see
+    /// <see cref="BrowserFor"/>). gh adds the address of the page as the last argument, runs the command without a shell,
+    /// waits for it, and reports an exit code other than 0 as a failure to open a web browser. The exe gives the address
+    /// to Explorer and exits with 0 when Explorer was started (see <see cref="WindowsTools.OpenUrlExitCode"/>). Explorer is
+    /// not the command itself: explorer.exe exits with 1 also when it opened the page, so gh would report a failure
+    /// although the page is open.
     /// </summary>
-    internal static string BrowserForGh => WindowsTools.Explorer.Replace('\\', '/');
+    internal static string BrowserForGh => BrowserFor(Environment.ProcessPath);
+
+    /// <summary>
+    /// <paramref name="exe"/> with forward slashes and in double quotes, then <see cref="App.OpenUrlArgument"/>. gh splits
+    /// the value as a shell does: double quotes keep a path with spaces in one piece, and no Windows path can contain a
+    /// double quote; a backslash escapes the next character, and Windows takes forward slashes in a path as well. Without
+    /// a path, Explorer's full path with forward slashes: the page still opens, but gh reports that it did not.
+    /// </summary>
+    internal static string BrowserFor(string? exe)
+        => string.IsNullOrEmpty(exe)
+            ? WindowsTools.Explorer.Replace('\\', '/')
+            : $"\"{exe.Replace('\\', '/')}\" {App.OpenUrlArgument}";
 
     /// <summary>
     /// The app only supports github.com, so GH_HOST (which sends gh api calls to another host) is always cleared. The
