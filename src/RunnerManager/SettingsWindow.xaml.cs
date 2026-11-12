@@ -939,9 +939,10 @@ public partial class SettingsWindow : Window
         // Asked here, so cancelling keeps this dashboard running.
         if (App.AskUninstall(this) is not { } removeData) return;
         if (Owner is MainWindow main && !main.ConfirmExitDuringOperation()) return;
-        var start = new ProcessStartInfo(AppUpdater.PreferredExe) { UseShellExecute = true, ArgumentList = { "--uninstall", App.ConfirmedArgument } };
-        if (removeData) start.ArgumentList.Add(App.RemoveDataArgument);
-        Process.Start(start);
+        // Through the start helper while it is in place beside that exe (see Launcher.StartInfo).
+        var arguments = new List<string> { "--uninstall", App.ConfirmedArgument };
+        if (removeData) arguments.Add(App.RemoveDataArgument);
+        Process.Start(Launcher.StartInfo(AppUpdater.PreferredExe, arguments));
         ((App)Application.Current).ExitApplication();
     }
 }

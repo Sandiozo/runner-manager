@@ -26,6 +26,9 @@ public partial class MainWindow
     private DateTime _lastRunnerReleaseCheck = DateTime.MinValue;
     private static readonly TimeSpan UpdateGuardInterval = TimeSpan.FromMinutes(1);
     private DateTime _lastUpdateGuardCheck = DateTime.MinValue;
+    private static readonly TimeSpan StartHelperCheckInterval = TimeSpan.FromMinutes(5);
+    /// <summary>The start checks the start helper (see <see cref="Installer.EnsureLaunchTaskAsync"/>), so the next check is a while after it.</summary>
+    private DateTime _lastStartHelperCheck = DateTime.UtcNow;
 
     /// <summary>Starts monitoring. Called when the window loads, or directly when starting minimized to the tray.</summary>
     public async Task StartAsync()
@@ -92,6 +95,14 @@ public partial class MainWindow
             {
                 _lastUpdateGuardCheck = DateTime.UtcNow;
                 if (await UpdateGuard.CheckFromDashboardAsync(_isEnrolled) is { } notice) RaiseAlert(notice, warning: true);
+            }
+
+            // Antivirus software may remove the start helper while the dashboard runs; a task must not name it then (on a
+            // PC with a fleet agent, the agent checks too).
+            if (DateTime.UtcNow - _lastStartHelperCheck >= StartHelperCheckInterval)
+            {
+                _lastStartHelperCheck = DateTime.UtcNow;
+                await Launcher.EnsureForThisCopyAsync();
             }
 
             if (!_githubAuthenticated) return;

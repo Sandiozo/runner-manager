@@ -246,13 +246,32 @@ public partial class App : Application
                 // The dashboard leaves its own tasks alone while they run it; the agent catches a moment when they do not.
                 try { await Installer.EnsureLaunchTaskAsync(); }
                 catch (Exception ex) { MachineRelay.AppendAgentLog($"Could not update the dashboard's scheduled tasks: {ex.Message}"); }
+                // From then on every few minutes: the start helper is still there (antivirus software may remove it), the
+                // launch and startup tasks move to it once they no longer run the dashboard, and the agent restarts
+                // through it once the update has proven itself (see Launcher.AgentStep).
+                for (var first = true; ; first = false)
+                {
+                    try
+                    {
+                        if (!first) await Installer.EnsureLaunchTaskAsync();
+                        await MachineRelay.CheckStartHelperAsync();
+                    }
+                    catch (Exception ex) { MachineRelay.AppendAgentLog($"Could not check the start helper: {ex.Message}"); }
+                    await Task.Delay(StartHelperCheckInterval);
+                }
             });
         await MachineRelay.RunAgentAsync(CancellationToken.None);
         if (!another) UpdateGuard.OnAgentExiting();
         return 0;
     }
 
-    /// <summary>Passed by "Restart now" with the id of the dashboard that exits, so the new one waits for it.</summary>
+    /// <summary>How often the fleet agent checks the start helper and its own start (see <see cref="RunAgentProcessAsync"/>).</summary>
+    private static readonly TimeSpan StartHelperCheckInterval = TimeSpan.FromMinutes(5);
+
+    /// <summary>
+    /// Passed by "Restart now" with the id of the dashboard that exits, or of the start helper that started it (which exits
+    /// right after it), so the new one waits for it.
+    /// </summary>
     internal const string AfterArgument = "--after=";
 
     internal static int? AfterProcessId(string[] args)
@@ -268,9 +287,9 @@ public partial class App : Application
             main.AddActivity("Runner Manager restarts once the fleet agent has restarted.");
             await main.WaitForAgentWorkAsync();
         }
-        var start = new ProcessStartInfo(AppUpdater.InstalledExe) { UseShellExecute = true, WorkingDirectory = AppUpdater.InstallDir };
-        start.ArgumentList.Add(AfterArgument + Environment.ProcessId);
-        Process.Start(start);
+        // Through the start helper while it is in place. The new dashboard waits for the start helper that started this
+        // one, when one did: it exits a moment after this process, and until then its file cannot be replaced.
+        Process.Start(Launcher.StartInfo(AppUpdater.InstalledExe, new[] { AfterArgument + (Launcher.HelperProcessId() ?? Environment.ProcessId) }));
         ExitApplication();
     }
 

@@ -256,6 +256,13 @@ public static class UpdateGuard
     private static bool Counts(PendingUpdate pending) => Counts(pending, AppUpdater.InstalledExe, DateTime.UtcNow);
 
     /// <summary>
+    /// Whether an update waits to prove itself on this PC: a pending update that counts (see <see cref="PendingCounts"/>).
+    /// Only reads; the fleet agent's task stays where it is meanwhile (see <see cref="MachineRelay.AgentTaskUsesStartHelper"/>).
+    /// </summary>
+    internal static bool IsWatching()
+        => Load().Pending is { } pending && PendingCounts(pending, ReadInstallFacts(AppUpdater.InstalledExe), DateTime.UtcNow);
+
+    /// <summary>
     /// Whether the saved pending update counts for the install of <paramref name="exe"/> (see <see cref="PendingCounts"/>).
     /// One that does not is removed from the saved state, any marker beside the exe is deleted, and it is logged.
     /// </summary>
@@ -383,7 +390,9 @@ public static class UpdateGuard
             case DashboardUpdateDecision.RollBack when Counts(state.Pending):
                 var reason = DashboardRollbackReason(state.Pending);
                 if (!await Task.Run(() => RollBack(reason))) return null;
-                await ScheduledTasks.RunTaskAsync(ScheduledTasks.AgentTaskName);
+                // An agent that just ended through the start helper counts as running for a moment longer.
+                var (code, output) = await ScheduledTasks.StartAgainAsync(ScheduledTasks.AgentTaskName, MachineRelay.AgentStartWait);
+                if (code != 0) MachineRelay.AppendAgentLog($"Could not start the fleet agent after going back to the previous version: {output.Trim()}");
                 return TakeRollbackNotice();
             default:
                 return null;

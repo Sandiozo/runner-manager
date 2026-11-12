@@ -501,8 +501,11 @@ public static class AppUpdater
         => TryWithUpdateLock(UpdateLockTimeout, swap, out var result) ? result
             : throw new InvalidOperationException("Another update of Runner Manager is being installed. Try again in a few minutes.");
 
+    /// <summary>Whether no process installs or undoes an update now (the update lock is free).</summary>
+    internal static bool IsUpdateLockFree() => TryWithUpdateLock(TimeSpan.Zero, () => true, out _);
+
     /// <summary>Runs <paramref name="swap"/> under the update lock when it is free within <paramref name="wait"/>.</summary>
-    private static bool TryWithUpdateLock<T>(TimeSpan wait, Func<T> swap, out T result)
+    internal static bool TryWithUpdateLock<T>(TimeSpan wait, Func<T> swap, out T result)
     {
         using var mutex = new Mutex(initiallyOwned: false, UpdateMutexName);
         bool owned;
@@ -750,7 +753,7 @@ public static class AppUpdater
     /// <summary>Whether a file name is one that a swap gave the file it moved away; <paramref name="anyAppFile"/> also allows other app files than the exe.</summary>
     internal static bool IsOldFile(string name, bool anyAppFile) => (anyAppFile ? AnyOldFile : OwnOldFile).IsMatch(name);
 
-    private static readonly Regex OwnOldFile = new(@"^(RunnerManager|RunnerWidget)\.\d{15,}\.old\.exe$", RegexOptions.IgnoreCase);
+    private static readonly Regex OwnOldFile = new(@"^(RunnerManager|RunnerManagerLauncher|RunnerWidget)\.\d{15,}\.old\.exe$", RegexOptions.IgnoreCase);
     private static readonly Regex AnyOldFile = new(@"\.\d{15,}\.old(\.[^.]+)?$", RegexOptions.IgnoreCase);
 
     private static string OldPathFor(string file) => Path.Combine(Path.GetDirectoryName(file)!,
@@ -919,21 +922,59 @@ public static class AppUpdater
 
     /// <summary>
     /// Starts a detached helper that waits for this process to exit, then starts the task again. Launched before
-    /// the task is re-registered, so the agent comes back even if re-registering ends the running instance.
+    /// the task is re-registered, so the agent comes back even if re-registering ends the running instance. The helper
+    /// also waits for the start helper that started this process (see <see cref="RunAfterExit"/>), and then until Task
+    /// Scheduler no longer counts the task as running, since it refuses to start a running task of the fleet agent's
+    /// kind; a start it refuses is tried again (see <see cref="RestartTaskScript"/>).
     /// </summary>
     public static void ScheduleAgentTaskRestart(string taskName)
-        => RunAfterExit($"& '{WindowsTools.FullPath("schtasks.exe")}' /Run /TN '{taskName.Replace("'", "''")}' | Out-Null", TimeSpan.FromSeconds(120), TimeSpan.FromSeconds(2));
+        => RunAfterExit(RestartTaskScript(RestartTaskSeconds), TimeSpan.FromSeconds(120), TimeSpan.FromSeconds(1), new Dictionary<string, string>
+        {
+            [ScheduledTasks.TaskNameVariable] = taskName,
+            [SchtasksVariable] = WindowsTools.FullPath("schtasks.exe"),
+            [LogVariable] = MachineRelay.AgentLogPath
+        });
+
+    internal const string SchtasksVariable = "RUNNER_MANAGER_SCHTASKS";
+    internal const string LogVariable = "RUNNER_MANAGER_LOG";
+
+    /// <summary>How long <see cref="RestartTaskScript"/> tries to start the task.</summary>
+    internal const int RestartTaskSeconds = 90;
+
+    /// <summary>
+    /// PowerShell that starts the task named in <see cref="ScheduledTasks.TaskNameVariable"/> again: whenever Task
+    /// Scheduler does not count it as running (TASK_STATE 2 queued, 4 running), it runs schtasks /Run
+    /// (<see cref="SchtasksVariable"/>), until that succeeds, for at most <paramref name="seconds"/> seconds. A task that
+    /// runs for 15 seconds in a row was started by something else meanwhile (its keep-alive trigger, or a dashboard), which
+    /// counts as started too. When it was not started, a line in the fleet agent log (<see cref="LogVariable"/>, written
+    /// only when it is a file of its own) says so. The task name and paths reach the script only as environment variables.
+    /// </summary>
+    internal static string RestartTaskScript(int seconds) =>
+        "$n = $env:" + ScheduledTasks.TaskNameVariable + "; $x = $env:" + SchtasksVariable + "; $ok = $false; $since = $null; " +
+        "$end = (Get-Date).AddSeconds(" + seconds + "); $s = New-Object -ComObject Schedule.Service; try { $s.Connect() } catch { }; " +
+        "while ((Get-Date) -lt $end) { $st = -2; try { $st = [int]$s.GetFolder('\\').GetTask($n).State } catch { }; " +
+        "if ($st -eq 2 -or $st -eq 4) { if (-not $since) { $since = Get-Date }; if (((Get-Date) - $since).TotalSeconds -ge 15) { $ok = $true; break } } " +
+        "else { $since = $null; & $x /Run /TN $n 2>&1 | Out-Null; if ($LASTEXITCODE -eq 0) { $ok = $true; break } }; " +
+        "Start-Sleep -Milliseconds 500 }; " +
+        "$l = $env:" + LogVariable + "; if (-not $ok -and $l) { $i = Get-Item -LiteralPath $l -Force -ErrorAction SilentlyContinue; " +
+        "if ($i -and -not ($i.Attributes -band [IO.FileAttributes]::ReparsePoint) -and -not $i.PSIsContainer) { " +
+        "try { [IO.File]::AppendAllText($l, (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + '  The fleet agent did not start again after it exited to restart: " +
+        "Task Scheduler did not start its task within " + seconds + " seconds. Its task starts it again within five minutes.' + [Environment]::NewLine) } catch { } } }";
 
     /// <summary>
     /// Starts a hidden, detached PowerShell helper that waits for this process to exit (at most <paramref name="timeout"/>,
     /// or for as long as it runs when null), waits <paramref name="delay"/> more, then runs <paramref name="script"/>.
-    /// Paths go to the script in <paramref name="environment"/>, never inside its text.
+    /// It also waits for the start helper that started this process, when one did (see
+    /// <see cref="Launcher.HelperProcessId"/>): the start helper exits a moment after this process, and until then its
+    /// file cannot be removed and its task counts as running. Paths go to the script in <paramref name="environment"/>,
+    /// never inside its text.
     /// </summary>
     internal static void RunAfterExit(string script, TimeSpan? timeout, TimeSpan delay, IReadOnlyDictionary<string, string>? environment = null)
     {
         var start = new ProcessStartInfo(PowerShellExe)
         {
-            ArgumentList = { "-NoLogo", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", AfterExitScript(script, Environment.ProcessId, timeout, delay) },
+            ArgumentList = { "-NoLogo", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command",
+                AfterExitScript(script, Environment.ProcessId, timeout, delay, Launcher.HelperProcessId()) },
             UseShellExecute = false,
             CreateNoWindow = true
         };
@@ -941,10 +982,11 @@ public static class AppUpdater
         using var process = Process.Start(start);
     }
 
-    internal static string AfterExitScript(string script, int processId, TimeSpan? timeout, TimeSpan delay)
+    internal static string AfterExitScript(string script, int processId, TimeSpan? timeout, TimeSpan delay, int? helperId = null)
     {
         var limit = timeout is { } wait ? $" -Timeout {(int)wait.TotalSeconds}" : string.Empty;
-        return $"Wait-Process -Id {processId}{limit} -ErrorAction SilentlyContinue; Start-Sleep -Seconds {(int)delay.TotalSeconds}; {script}";
+        var ids = helperId is { } helper && helper != processId ? $"{processId},{helper}" : $"{processId}";
+        return $"Wait-Process -Id {ids}{limit} -ErrorAction SilentlyContinue; Start-Sleep -Seconds {(int)delay.TotalSeconds}; {script}";
     }
 
     /// <summary>
@@ -976,16 +1018,16 @@ public static class AppUpdater
         {
             // Going from a multi-file build to a single-file exe: clear the old app files so only the exe remains.
             // Only builds before 2.2 were multi-file, and they always used the default folder of that time, which only
-            // holds this app. An update that another process prepares there (see StagingFolder) is left alone.
+            // holds this app. An update that another process prepares there (see StagingFolder) is left alone, and so
+            // are the start helper and the folder it lets a self-contained exe unpack into (see Launcher).
             if (files.Count == 1 && MachineInstall.HoldsOnlyThisApp(InstallDir))
             {
-                foreach (var stale in Directory.EnumerateFiles(InstallDir)
-                             .Where(f => !Path.GetFileName(f).StartsWith(AssetName, StringComparison.OrdinalIgnoreCase) && !f.Contains(".old.")))
+                foreach (var stale in Directory.EnumerateFiles(InstallDir).Where(f => !IsKeptBySingleFileInstall(Path.GetFileName(f), isFolder: false)))
                 {
                     try { File.Delete(stale); }
                     catch { try { File.Move(stale, $"{stale}.{DateTime.UtcNow.Ticks}.old{Path.GetExtension(stale)}"); } catch { } }
                 }
-                foreach (var folder in Directory.EnumerateDirectories(InstallDir).Where(f => !IsStagingFolderName(Path.GetFileName(f))))
+                foreach (var folder in Directory.EnumerateDirectories(InstallDir).Where(f => !IsKeptBySingleFileInstall(Path.GetFileName(f), isFolder: true)))
                 {
                     try { Directory.Delete(folder, recursive: true); } catch { }
                 }
@@ -1001,9 +1043,41 @@ public static class AppUpdater
             }
         }));
         _installedThisBuild = true;
+        // Before any task is registered for the new copy (setup registers them next), so they start it through the start helper.
+        await EnsureStartHelperAsync(log);
         if (createShortcut) await CreateStartMenuShortcutAsync();
         return InstalledExe;
     }
+
+    /// <summary>
+    /// Writes the start helper into the install folder after this process installed its build there (see
+    /// <see cref="Launcher.EnsureAsync"/>); only with administrator rights, which setup always has. A PC where it cannot
+    /// be kept runs without it, as before.
+    /// </summary>
+    internal static async Task EnsureStartHelperAsync(Action<string> log)
+    {
+        if (!Elevation.IsElevated) return;
+        try
+        {
+            if (!await Launcher.EnsureAsync(InstallDir, afterInstall: true, MachineRelay.AppendAgentLog) && Launcher.RunsWithout(InstallDir))
+                log("Runner Manager could not keep its start helper in the install folder, so it starts without it. Details are in the fleet agent log.");
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            MachineRelay.AppendAgentLog($"Could not write the start helper: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// What setup keeps when it clears the default install folder for a single-file exe: RunnerManager.exe and the files
+    /// beside it named after it, the start helper and its files, files renamed out of the way (.old.), update folders, and
+    /// the folder that a self-contained exe unpacks into through the start helper.
+    /// </summary>
+    internal static bool IsKeptBySingleFileInstall(string name, bool isFolder)
+        => isFolder
+            ? IsStagingFolderName(name) || name.Equals(Launcher.ExtractionFolderName, StringComparison.OrdinalIgnoreCase)
+            : name.StartsWith(AssetName, StringComparison.OrdinalIgnoreCase) || name.StartsWith(Launcher.FileName, StringComparison.OrdinalIgnoreCase)
+              || name.Contains(".old.", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// The files that make up the running app. A single-file release (e.g. RunnerManagerSetup.exe in Downloads) is just

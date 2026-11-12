@@ -36,19 +36,24 @@ public static class ScheduledTasks
     /// <summary>
     /// Registers a logon task that runs elevated for the current user, keeps running on battery and has no 72-hour time
     /// limit. A <paramref name="restartOnFailure"/> task (the always-on fleet agent) also restarts after a failure and is started again
-    /// every five minutes while the user is signed in, in case it exited.
+    /// every five minutes while the user is signed in, in case it exited. The task starts <paramref name="exe"/> through
+    /// the start helper beside it while that is in place (see <see cref="Launcher.CommandFor"/>), unless
+    /// <paramref name="startHelper"/> is false.
     /// </summary>
-    public static Task RegisterLogonTaskAsync(string name, string exe, string arguments, string description, bool restartOnFailure)
-        => RegisterTaskAsync(name, exe, arguments, description, alwaysOn: restartOnFailure, atLogon: true, parallel: false);
+    public static Task RegisterLogonTaskAsync(string name, string exe, string arguments, string description, bool restartOnFailure,
+        bool startHelper = true)
+        => RegisterTaskAsync(name, startHelper ? Launcher.CommandFor(exe) : exe, arguments, description, alwaysOn: restartOnFailure, atLogon: true, parallel: false);
 
     /// <summary>
     /// Registers a task without a trigger that starts the dashboard elevated when the Start menu shortcut runs it.
-    /// Instances may run in parallel, so a second start reaches the running dashboard and brings it to the front.
+    /// Instances may run in parallel, so a second start reaches the running dashboard and brings it to the front. It starts
+    /// <paramref name="exe"/> through the start helper beside it while that is in place (see <see cref="Launcher.CommandFor"/>).
     /// </summary>
-    public static Task RegisterLaunchTaskAsync(string exe) => RegisterTaskAsync(LaunchTaskName, exe, App.FromTaskArgument,
+    public static Task RegisterLaunchTaskAsync(string exe) => RegisterTaskAsync(LaunchTaskName, Launcher.CommandFor(exe), App.FromTaskArgument,
         "Starts Runner Manager with administrator rights, without a UAC prompt.", alwaysOn: false, atLogon: false, parallel: true);
 
-    private static async Task RegisterTaskAsync(string name, string exe, string arguments, string description,
+    /// <param name="command">The program the task runs: RunnerManager.exe, or the start helper beside it. The task runs in its folder.</param>
+    private static async Task RegisterTaskAsync(string name, string command, string arguments, string description,
         bool alwaysOn, bool atLogon, bool parallel)
     {
         // A task of another Windows user is never taken over (the names are machine-wide).
@@ -57,7 +62,7 @@ public static class ScheduledTasks
                 ? AgentOwnership.Describe(other)
                 : $"The scheduled task \"{name}\" belongs to {other}, so it was not changed.");
 
-        var xml = TaskXml(WindowsIdentity.GetCurrent().Name, exe, arguments, description, alwaysOn, atLogon, parallel);
+        var xml = TaskXml(WindowsIdentity.GetCurrent().Name, command, arguments, description, alwaysOn, atLogon, parallel);
         try
         {
             using (await LockAsync())
@@ -167,13 +172,17 @@ public static class ScheduledTasks
         }
     }
 
-    /// <summary>The task definition. The repeating trigger of an always-on task only starts it while the user is signed in.</summary>
-    internal static string TaskXml(string user, string exe, string arguments, string description, bool alwaysOn, bool atLogon, bool parallel)
+    /// <summary>
+    /// The task definition. The repeating trigger of an always-on task only starts it while the user is signed in. The
+    /// task runs <paramref name="program"/> (quoted) in its folder, the install folder for RunnerManager.exe and for the
+    /// start helper beside it.
+    /// </summary>
+    internal static string TaskXml(string user, string program, string arguments, string description, bool alwaysOn, bool atLogon, bool parallel)
     {
         var userId = SecurityElement.Escape(user);
-        var command = SecurityElement.Escape(exe);
+        var command = SecurityElement.Escape(program);
         var args = SecurityElement.Escape(arguments);
-        var workingDirectory = SecurityElement.Escape(Path.GetDirectoryName(exe) ?? string.Empty);
+        var workingDirectory = SecurityElement.Escape(Path.GetDirectoryName(program) ?? string.Empty);
         var restart = alwaysOn
             ? "<RestartOnFailure>\n      <Interval>PT1M</Interval>\n      <Count>999</Count>\n    </RestartOnFailure>"
             : string.Empty;
@@ -268,9 +277,10 @@ public static class ScheduledTasks
     }
 
     /// <summary>
-    /// Registers the agent task again when its definition is from an older version, keeping the exe it runs. Re-registering
-    /// may end the running agent, so it is started again afterwards (by a helper when the agent does this itself).
-    /// Registrations take <see cref="LockAsync"/>, so the agent and the dashboard doing this at once register it one at a time.
+    /// Registers the agent task again when its definition is from an older version, keeping the exe it runs (a task that
+    /// runs the start helper keeps the exe beside it, see <see cref="ExeOfOwnElevatedTask"/>). Re-registering may end the
+    /// running agent, so it is started again afterwards (by a helper when the agent does this itself). Registrations take
+    /// <see cref="LockAsync"/>, so the agent and the dashboard doing this at once register it one at a time.
     /// </summary>
     public static async Task<bool> UpdateAgentTaskIfOutdatedAsync(bool fromAgent)
     {
@@ -332,6 +342,34 @@ public static class ScheduledTasks
     }
 
     public static Task<(int ExitCode, string Output)> RunTaskAsync(string name) => Scheduler.SchtasksAsync($"/Run /TN \"{name}\"");
+
+    /// <summary>
+    /// Starts a task that is to run again after its instance ended (the fleet agent after a restart or a rollback). The
+    /// start helper exits a moment after the RunnerManager.exe it started, and until then Task Scheduler counts the task
+    /// as running and refuses a start of a task that runs one instance at a time. So this waits until the task no longer
+    /// runs, then starts it, and tries again while Task Scheduler refuses, for at most <paramref name="wait"/>. Returns
+    /// schtasks' result, or a failure when the task still ran at the end.
+    /// </summary>
+    internal static async Task<(int ExitCode, string Output)> StartAgainAsync(string name, TimeSpan wait)
+    {
+        var deadline = DateTime.UtcNow + wait;
+        (int ExitCode, string Output)? last = null;
+        while (true)
+        {
+            if (await IsRunningAsync(name) != true)
+            {
+                last = await RunTaskAsync(name);
+                if (last.Value.ExitCode == 0) return last.Value;
+            }
+            if (DateTime.UtcNow >= deadline)
+                return last ?? (1, $"The scheduled task \"{name}\" still ran after {(int)wait.TotalSeconds} seconds, so it was not started again.");
+            await RetryPause(TimeSpan.FromMilliseconds(500));
+        }
+    }
+
+    /// <summary>The pause between the tries of <see cref="StartAgainAsync"/> (tests pass their own).</summary>
+    internal static Func<TimeSpan, Task> RetryPause { get; set; } = Task.Delay;
+
     public static Task<(int ExitCode, string Output)> EndTaskAsync(string name) => Scheduler.SchtasksAsync($"/End /TN \"{name}\"");
     public static async Task<(int ExitCode, string Output)> DeleteTaskAsync(string name)
     {
@@ -439,10 +477,19 @@ public static class ScheduledTasks
     /// The exe that a task starts, when it is this user's task and runs with the highest rights; otherwise null. Any
     /// program of the user can create a task under a name that does not exist yet, such as the fleet agent's on a PC
     /// without one, but not one that runs with the highest rights. So only such a task tells which exe is the install,
-    /// and only its exe is ever registered again with administrator rights.
+    /// and only its exe is ever registered again with administrator rights. A task that runs the start helper starts the
+    /// RunnerManager.exe beside it (see <see cref="Launcher.ExeOf"/>), so that exe is the one returned; the command
+    /// itself is <see cref="CommandOfOwnElevatedTask"/>.
     /// </summary>
     internal static string? ExeOfOwnElevatedTask(string xml)
-        => RunsWithHighestRights(xml) && IsCurrentUser(PrincipalOf(xml)) && CommandOf(xml) is { Length: > 0 } exe ? exe : null;
+        => CommandOfOwnElevatedTask(xml) is { } command ? Launcher.ExeOf(command) : null;
+
+    /// <summary>
+    /// The program that a task runs as its definition names it (RunnerManager.exe, or the start helper beside it), when it
+    /// is this user's task and runs with the highest rights; otherwise null (see <see cref="ExeOfOwnElevatedTask"/>).
+    /// </summary>
+    internal static string? CommandOfOwnElevatedTask(string xml)
+        => RunsWithHighestRights(xml) && IsCurrentUser(PrincipalOf(xml)) && CommandOf(xml) is { Length: > 0 } command ? command : null;
 
     /// <summary>The log line for a task that <see cref="ExeOfOwnElevatedTask"/> does not trust, so it is left as it is.</summary>
     internal static string NotRegisteredElevatedText(string name)

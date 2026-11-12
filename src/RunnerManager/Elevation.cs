@@ -49,11 +49,15 @@ public static class Elevation
     /// Whether a launch task's definition starts <paramref name="exe"/> for this user with the highest rights and is turned
     /// on. A launch task without the highest rights, which any program of the user can create under a free name, would
     /// start Runner Manager without administrator rights, so it is not used, and the dashboard registers its own instead.
+    /// A task that runs the start helper beside <paramref name="exe"/> starts it too, but only while the start helper is
+    /// there: one that antivirus software removed starts nothing, so the Start menu asks with UAC right away instead of
+    /// waiting for a dashboard that never comes, and the elevated copy repairs it.
     /// </summary>
     internal static bool IsUsableLaunchTask(string xml, string exe)
         => ScheduledTasks.IsEnabled(xml)
-           && ScheduledTasks.ExeOfOwnElevatedTask(xml) is { } command
-           && string.Equals(command, exe, StringComparison.OrdinalIgnoreCase);
+           && ScheduledTasks.CommandOfOwnElevatedTask(xml) is { } command
+           && string.Equals(Launcher.ExeOf(command), exe, StringComparison.OrdinalIgnoreCase)
+           && Launcher.CanStart(command);
 
     private static async Task<bool> WaitForDashboardAsync(TimeSpan timeout)
     {
@@ -103,11 +107,14 @@ public static class Elevation
         => args.LastOrDefault(a => a.StartsWith(UserSidArgument, StringComparison.OrdinalIgnoreCase)) is { } arg && arg.Length > UserSidArgument.Length
             ? arg[UserSidArgument.Length..] : null;
 
-    /// <summary>Starts this exe again with the same arguments and a UAC prompt. Returns false when the prompt is declined.</summary>
+    /// <summary>
+    /// Starts this exe again with the same arguments and a UAC prompt, through the start helper beside it while that is in
+    /// place (see <see cref="Launcher.StartInfo"/>), so the elevated copy gets a clean environment. Returns false when the
+    /// prompt is declined.
+    /// </summary>
     public static bool RelaunchElevated(IEnumerable<string> args)
     {
-        var start = new ProcessStartInfo(Environment.ProcessPath!) { UseShellExecute = true, Verb = "runas" };
-        foreach (var arg in args) start.ArgumentList.Add(arg);
+        var start = Launcher.StartInfo(Environment.ProcessPath!, args, elevate: true);
         try
         {
             Process.Start(start);

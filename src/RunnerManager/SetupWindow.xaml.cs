@@ -193,9 +193,8 @@ public partial class SetupWindow : Window
             var args = new List<string>();
             if (choices.Fleet == FleetChoice.NewFleet) args.Add("--fleet=new");
             if (choices.Fleet == FleetChoice.JoinFleet) args.Add("--fleet=join");
-            var start = new ProcessStartInfo(_installedExe) { UseShellExecute = true, WorkingDirectory = AppUpdater.InstallDir };
-            foreach (var arg in args) start.ArgumentList.Add(arg);
-            try { Process.Start(start); } catch { }
+            // Through the start helper while it is in place, in the install folder.
+            try { Process.Start(Launcher.StartInfo(_installedExe, args)); } catch { }
         }
         Close();
     }

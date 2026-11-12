@@ -73,9 +73,12 @@ public static class MachineRelay
     /// </summary>
     internal static readonly TimeSpan UpdateRestartLimit = TimeSpan.FromHours(3);
 
-    /// <summary>Why a command that comes in the last seconds before the agent exits for an update is refused.</summary>
+    /// <summary>
+    /// Why a command that comes in the last seconds before the agent exits to restart (to finish an update, or to run
+    /// through the start helper) is refused.
+    /// </summary>
     internal static string RestartingNowText
-        => $"The fleet agent on {Environment.MachineName} is restarting to finish an update and did not take the request. Try again in a minute.";
+        => $"The fleet agent on {Environment.MachineName} is restarting and did not take the request. Try again in a minute.";
 
     /// <summary>
     /// The longest a caller waits for a command its agent still reports as queued or running: as long as the longest
@@ -270,8 +273,11 @@ public static class MachineRelay
         return await ReadLocalMachineAsync(outdated, running);
     }
 
-    /// <summary>Whether the agent task runs this exact build (used before a fleet code exists).</summary>
-    private static async Task<bool> LocalAgentIsCurrentAsync()
+    /// <summary>
+    /// Whether the agent task runs this exact build (used before a fleet code exists): the version of the exe it starts,
+    /// also when it starts it through the start helper (see <see cref="AgentTaskExecutableAsync"/>).
+    /// </summary>
+    internal static async Task<bool> LocalAgentIsCurrentAsync()
     {
         var exe = await AgentTaskExecutableAsync();
         return await Task.Run(() =>
@@ -1036,6 +1042,18 @@ public static class MachineRelay
                     }
                 }
 
+                // The agent restarts through the start helper (see Launcher.AgentStep) only when it is quiet: no command
+                // queued or running, no other work, and no update in progress.
+                if (TakeStartHelperStep() is var helperStep and not Launcher.AgentStartStep.Nothing)
+                {
+                    bool Quiet() => pending.IsEmpty && AgentWork.IsIdle && !AgentWork.RestartAsked;
+                    if (Quiet() && await RestartThroughStartHelperAsync(helperStep, RunQueuedCommandsAsync, Quiet, StartHelperRestartSteps.ForThisPc))
+                    {
+                        UpdateGuard.OnAgentExiting();
+                        Environment.Exit(0);
+                    }
+                }
+
                 if (DateTime.UtcNow - lastWatchdogUtc >= WatchdogInterval)
                 {
                     lastWatchdogUtc = DateTime.UtcNow;
@@ -1098,6 +1116,103 @@ public static class MachineRelay
     {
         lock (CommandGate) _exitingForUpdate = false;
         AgentWork.ForgetRestart();
+    }
+
+    // ================= Restarting through the start helper =================
+
+    /// <summary>What the agent's check asked the agent's loop to do about its start (see <see cref="AskStartHelperStep"/>).</summary>
+    private static int _startHelperStep;
+
+    /// <summary>
+    /// Asks the agent's loop to restart the agent through the start helper (<see cref="Launcher.AgentStep"/>); it does so
+    /// once it is quiet (see <see cref="RestartThroughStartHelperAsync"/>).
+    /// </summary>
+    internal static void AskStartHelperStep(Launcher.AgentStartStep step) => Interlocked.Exchange(ref _startHelperStep, (int)step);
+
+    private static Launcher.AgentStartStep TakeStartHelperStep() => (Launcher.AgentStartStep)Interlocked.Exchange(ref _startHelperStep, 0);
+
+    /// <summary>A move of the agent's task that did not work is not tried again by this process.</summary>
+    private static bool _startHelperMoveFailed;
+
+    /// <summary>Forgets that a move of the agent's task did not work (for tests).</summary>
+    internal static void ForgetStartHelperMove() => _startHelperMoveFailed = false;
+
+    /// <summary>The steps of a restart through the start helper (tests pass their own).</summary>
+    internal sealed record StartHelperRestartSteps(
+        Func<bool> UpdateInProgress, Action ScheduleRestart, Func<Task> MoveTask, Func<Task<bool>> TaskStartsHelper, Action MarkRestarted, Action<string> Log)
+    {
+        /// <summary>This PC's: an update holds the update lock or waits to prove itself; the task is this user's fleet agent task.</summary>
+        public static StartHelperRestartSteps ForThisPc => new(
+            () => !AppUpdater.IsUpdateLockFree() || UpdateWatched(),
+            () => AppUpdater.ScheduleAgentTaskRestart(ScheduledTasks.AgentTaskName),
+            () => RegisterAgentTaskAsync(AppUpdater.InstalledExe),
+            async () => ScheduledTasks.CommandOfOwnElevatedTask(await ScheduledTasks.QueryXmlAsync(ScheduledTasks.AgentTaskName)) is { } command
+                        && Launcher.IsLauncherPath(command) && Launcher.CanStart(command),
+            () => InstallChecks.MarkDone(Launcher.AgentRestartCheck),
+            AppendAgentLog);
+    }
+
+    /// <summary>
+    /// Restarts the agent through the start helper, so it runs with a clean environment: only while no update is in
+    /// progress, and after it stopped taking commands and ran the ones it took (<paramref name="runQueued"/>), only when it
+    /// is still quiet (<paramref name="quiet"/>). It starts the helper that starts its task again once it has exited, then
+    /// (for <see cref="Launcher.AgentStartStep.MoveTaskAndRestart"/>) registers its task for the start helper and checks
+    /// that the task now starts it. Returns whether the agent is to exit (with exit code 0, so neither Task Scheduler nor
+    /// the update's watch counts it as a failure). Otherwise it takes commands again; a move that did not work is logged
+    /// and not tried again by this process, and the restart helper finds the agent still running and leaves it.
+    /// </summary>
+    internal static async Task<bool> RestartThroughStartHelperAsync(Launcher.AgentStartStep step, Func<Task> runQueued, Func<bool> quiet,
+        StartHelperRestartSteps steps)
+    {
+        if (step == Launcher.AgentStartStep.Nothing || steps.UpdateInProgress()) return false;
+        if (step == Launcher.AgentStartStep.MoveTaskAndRestart && _startHelperMoveFailed) return false;
+        await StopTakingCommandsAsync(runQueued);
+        if (!quiet())
+        {
+            lock (CommandGate) _exitingForUpdate = false;
+            return false;
+        }
+        try { steps.ScheduleRestart(); }
+        catch (Exception ex)
+        {
+            lock (CommandGate) _exitingForUpdate = false;
+            steps.Log($"The fleet agent could not restart through the start helper: {ex.Message}");
+            return false;
+        }
+        if (step == Launcher.AgentStartStep.MoveTaskAndRestart)
+        {
+            string? problem = null;
+            try { await steps.MoveTask(); }
+            catch (Exception ex) { problem = ex.Message; }
+            if (problem == null && !await steps.TaskStartsHelper()) problem = "the task does not start it after it was registered";
+            if (problem != null)
+            {
+                _startHelperMoveFailed = true;
+                lock (CommandGate) _exitingForUpdate = false;
+                steps.Log($"Could not move the fleet agent task to the start helper ({problem}). The fleet agent keeps running as it is.");
+                return false;
+            }
+        }
+        steps.MarkRestarted();
+        steps.Log(step == Launcher.AgentStartStep.MoveTaskAndRestart
+            ? "Moved the fleet agent task to the start helper. The fleet agent restarts through it, so it runs with a clean environment."
+            : "The fleet agent restarts through the start helper, so it runs with a clean environment.");
+        return true;
+    }
+
+    /// <summary>
+    /// The fleet agent's check of its start (every few minutes): asks the loop to restart through the start helper when
+    /// <see cref="Launcher.AgentStep"/> says so. Only for the installed copy with administrator rights.
+    /// </summary>
+    internal static async Task CheckStartHelperAsync()
+    {
+        if (!Elevation.IsElevated || !AppUpdater.IsRunningInstalledCopy) return;
+        var exe = AppUpdater.InstalledExe;
+        var command = ScheduledTasks.CommandOfOwnElevatedTask(await ScheduledTasks.QueryXmlAsync(ScheduledTasks.AgentTaskName));
+        var step = Launcher.AgentStep(Launcher.StartedThisProcess(), Launcher.IsInPlace(AppUpdater.InstallDir), command, exe,
+            UpdateWatched(), InstallChecks.IsDone(Launcher.AgentRestartCheck));
+        if (step != Launcher.AgentStartStep.Nothing && await ScheduledTasks.OtherOwnerAsync(ScheduledTasks.AgentTaskName) == null)
+            AskStartHelperStep(step);
     }
 
     /// <summary>The agent's answer to a status request: the built status as an answer, with its commands and its work.</summary>
@@ -1589,7 +1704,8 @@ public static class MachineRelay
         await RegisterAgentTaskAsync(exe);
         await FleetNetwork.EnsureFirewallRulesAsync();
         await Task.Delay(1500);
-        var (code, output) = await ScheduledTasks.RunTaskAsync(ScheduledTasks.AgentTaskName);
+        // Ended through the start helper, the task counts as running for a moment longer (see StartAgainAsync).
+        var (code, output) = await ScheduledTasks.StartAgainAsync(ScheduledTasks.AgentTaskName, AgentStartWait);
         if (code != 0) throw new InvalidOperationException(output.Trim());
     }
 
@@ -1661,8 +1777,17 @@ public static class MachineRelay
             async () =>
             {
                 await Task.Delay(1500);
-                await ScheduledTasks.RunTaskAsync(ScheduledTasks.AgentTaskName);
+                var (code, output) = await ScheduledTasks.StartAgainAsync(ScheduledTasks.AgentTaskName, AgentStartWait);
+                if (code != 0)
+                {
+                    var text = $"The fleet agent could not be started again: {output.Trim()} Its task starts it again within five minutes.";
+                    log?.Invoke(text);
+                    AppendAgentLog(text);
+                }
             }), switchTo, log);
+
+    /// <summary>How long a start of the fleet agent's task after it was ended waits while Task Scheduler still counts it as running.</summary>
+    internal static readonly TimeSpan AgentStartWait = TimeSpan.FromSeconds(30);
 
     /// <summary>The steps of a restart of this PC's agent (a test passes its own).</summary>
     internal sealed record AgentRestartSteps(Func<Task> WaitForIdle, Func<Task> Stop, Func<string, Task> Register, Func<Task> Start);
@@ -1798,15 +1923,35 @@ public static class MachineRelay
         return true;
     }
 
+    /// <summary>
+    /// Registers this user's fleet agent task for <paramref name="exe"/>. It starts the exe through the start helper beside
+    /// it while that is in place (see <see cref="Launcher.CommandFor"/>), but moves there only once no update waits to
+    /// prove itself (see <see cref="AgentTaskUsesStartHelper"/>).
+    /// </summary>
     internal static async Task RegisterAgentTaskAsync(string exe)
     {
         try
         {
+            var current = ScheduledTasks.CommandOfOwnElevatedTask(await ScheduledTasks.QueryXmlAsync(ScheduledTasks.AgentTaskName));
             await ScheduledTasks.RegisterLogonTaskAsync(ScheduledTasks.AgentTaskName, exe, "--agent",
-                "Runner Manager fleet agent. Reports runner status and runs commands from other PCs.", restartOnFailure: true);
+                "Runner Manager fleet agent. Reports runner status and runs commands from other PCs.", restartOnFailure: true,
+                startHelper: AgentTaskUsesStartHelper(current, UpdateWatched()));
         }
         finally { ForgetAgentInstalled(); }
     }
+
+    /// <summary>Whether an update waits to prove itself (see <see cref="UpdateGuard.IsWatching"/>); tests pass their own.</summary>
+    internal static Func<bool> UpdateWatched { get; set; } = UpdateGuard.IsWatching;
+
+    /// <summary>
+    /// Whether a registration of the fleet agent task may use the start helper: always when the task already starts it
+    /// (<paramref name="currentCommand"/>), otherwise only when no update waits to prove itself
+    /// (<paramref name="updateWatched"/>). The agent of an update moves its task itself once the update counts as working
+    /// (see <see cref="Launcher.AgentStep"/>), so a rollback to a version before the start helper finds the task as that
+    /// version left it.
+    /// </summary>
+    internal static bool AgentTaskUsesStartHelper(string? currentCommand, bool updateWatched)
+        => !updateWatched || (currentCommand != null && Launcher.IsLauncherPath(currentCommand));
 
     // ================= Local status =================
 

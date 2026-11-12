@@ -20,6 +20,14 @@ internal static class TestSetup
         // variable stays for the copies of RunnerManager.exe that tests start.
         AppPaths.TestStateDir = StateDir;
         Environment.SetEnvironmentVariable(AppPaths.StateDirVariable, StateDir);
+        // The start helper is never written by a test unless the test gives its own bytes and folder, never under the
+        // update lock that the installed Runner Manager on this PC uses, and is checked again right away.
+        Launcher.Embedded = () => null;
+        Launcher.MayBeInPlace = folder => folder.StartsWith(Path.GetTempPath(), StringComparison.OrdinalIgnoreCase);
+        Launcher.UnderUpdateLock = (_, write) => write();
+        Launcher.Settle = () => Task.CompletedTask;
+        // No update waits to prove itself, whatever the data folder of an earlier test says.
+        MachineRelay.UpdateWatched = () => false;
         AssistantSwitches.Store = new FileSwitchStore(Path.Combine(StateDir, "assistant-switches.json"));
         MachineInstall.Records = new MemoryInstallRecords();
         var tasks = new MemoryTasks();

@@ -97,6 +97,8 @@ public static class Installer
         var replacing = File.Exists(AppUpdater.InstalledExe) && !AppUpdater.IsRunningInstalledCopy && !keepInstalled;
         // Setup warns on its first page when it is older than this user's installed copy, so going ahead is the user's choice.
         var exe = await AppUpdater.InstallCurrentBuildAsync(log, createShortcut: false, allowOlder: !keepInstalled);
+        // The installed copy run as setup copies nothing, but still puts its start helper in place before the tasks.
+        if (AppUpdater.IsRunningInstalledCopy) await AppUpdater.EnsureStartHelperAsync(log);
         try
         {
             await FinishInstallAsync(choices, exe, moving ? previous : null, log);
@@ -202,6 +204,10 @@ public static class Installer
         {
             AppUpdater.UseInstallDir(previousFolder);
             await RefreshShortcutsAsync(oldExe);
+            // The tasks go back to the old folder, through the start helper there when it is in place (the old folder is
+            // only removed after a move that worked, so a start helper of a version that has one is still there). None is
+            // written there: the old copy may be a version before the start helper, and it then starts its tasks at
+            // RunnerManager.exe as before.
             await ScheduledTasks.RegisterLaunchTaskAsync(oldExe);
             await PointTasksBackAsync(oldExe, newFolder, exe => MachineRelay.ReplaceAndStartAgentTaskAsync(exe, log));
             // Kept when setup is tried again and installs there after all.
@@ -273,8 +279,9 @@ public static class Installer
 
     /// <summary>
     /// The installed dashboard opens through the launch task, so make sure this user's task exists, is turned on and starts
-    /// the installed exe, and keep the version in Settings → Apps current after updates. A launch or "start with Windows"
-    /// task that an older version registered below normal priority is registered again. The tasks are checked once per
+    /// the installed exe (through the start helper while it is in place), and keep the version in Settings → Apps current
+    /// after updates. A launch or "start with Windows" task that an older version registered below normal priority, or at
+    /// the exe while the start helper is in place, is registered again. The tasks are checked once per
     /// version, or again when <paramref name="force"/> is set (the dashboard had to ask with UAC). A task that runs now (the
     /// dashboard itself may have been started by it) is left for a later start, by the dashboard or by the fleet agent.
     /// </summary>
@@ -282,14 +289,33 @@ public static class Installer
     {
         if (!AppUpdater.IsRunningInstalledCopy) return;
         RefreshUninstallEntryVersion();
-        if (!force && InstallChecks.IsDone(LaunchTaskCheck)) return;
+        // On every start: antivirus software may remove the start helper at any time, and a task must never name a file
+        // that is gone. Puts it back or points this user's tasks at the exe (see Launcher.EnsureForThisCopyAsync).
+        await Launcher.EnsureForThisCopyAsync();
         var exe = AppUpdater.InstalledExe;
+        // The mark is in the data folder, which any program of the user can change: a task that still starts the exe
+        // while the start helper is in place is moved whatever the mark says.
+        if (!force && InstallChecks.IsDone(LaunchTaskCheck) && !await SkipsStartHelperAsync(exe)) return;
         var done = true;
         if (LaunchTaskNeedsRegistering(await ScheduledTasks.QueryXmlAsync(ScheduledTasks.LaunchTaskName), exe))
             done &= await RegisterIfIdleAsync(ScheduledTasks.LaunchTaskName, () => ScheduledTasks.RegisterLaunchTaskAsync(exe));
         done &= await UpdateStartupTaskAsync(exe);
         done &= await MigrateSharedTasksAsync(exe);
         if (done) InstallChecks.MarkDone(LaunchTaskCheck);
+    }
+
+    /// <summary>
+    /// Whether this user's launch task, or turned-on startup task, starts <paramref name="exe"/> directly although the start
+    /// helper beside it is in place. Reads no task while the start helper is not in place.
+    /// </summary>
+    internal static async Task<bool> SkipsStartHelperAsync(string exe)
+    {
+        if (!Launcher.IsInPlace(Path.GetDirectoryName(exe)!)) return false;
+        bool StartsExe(string xml) => ScheduledTasks.CommandOfOwnElevatedTask(xml) is { } command
+                                      && string.Equals(command, exe, StringComparison.OrdinalIgnoreCase);
+        if (StartsExe(await ScheduledTasks.QueryXmlAsync(ScheduledTasks.LaunchTaskName))) return true;
+        var startup = await ScheduledTasks.QueryXmlAsync(ScheduledTasks.DashboardTaskName);
+        return startup.Length > 0 && ScheduledTasks.IsEnabled(startup) && StartsExe(startup);
     }
 
     /// <summary>
@@ -316,19 +342,32 @@ public static class Installer
         return true;
     }
 
-    /// <summary>Whether the launch task must be registered: it is missing, cannot start <paramref name="exe"/>, or runs below normal priority.</summary>
+    /// <summary>
+    /// Whether the launch task must be registered: it is missing, cannot start <paramref name="exe"/>, runs below normal
+    /// priority, or does not run what <see cref="Launcher.CommandFor"/> gives for <paramref name="exe"/> (it moves to the
+    /// start helper once that is in place, and back to the exe when this PC runs without it).
+    /// </summary>
     internal static bool LaunchTaskNeedsRegistering(string xml, string exe)
-        => xml.Length == 0 || !Elevation.IsUsableLaunchTask(xml, exe) || !ScheduledTasks.HasCurrentPriority(xml);
+        => xml.Length == 0 || !Elevation.IsUsableLaunchTask(xml, exe) || !ScheduledTasks.HasCurrentPriority(xml)
+           || !RunsCommandFor(xml, exe);
 
     /// <summary>
-    /// Whether this user's "start with Windows" task must be registered again: it is turned on but starts another exe or
-    /// runs below normal priority. A missing or turned-off task is left as the user chose, and so is a task under the name
-    /// that is not this user's own with the highest rights (see <see cref="ScheduledTasks.IsOwnElevatedTask"/>): any program
-    /// of the user can create one, and it must not make Runner Manager register its startup task.
+    /// Whether this user's "start with Windows" task must be registered again: it is turned on but starts another exe,
+    /// runs below normal priority, or does not run what <see cref="Launcher.CommandFor"/> gives for <paramref name="exe"/>
+    /// (the start helper beside it, or the exe). A task that runs the start helper beside <paramref name="exe"/> starts
+    /// that exe. A missing or turned-off task is left as the user chose, and so is a task under the name that is not this
+    /// user's own with the highest rights (see <see cref="ScheduledTasks.IsOwnElevatedTask"/>): any program of the user
+    /// can create one, and it must not make Runner Manager register its startup task.
     /// </summary>
     internal static bool StartupTaskNeedsRegistering(string xml, string exe)
-        => xml.Length > 0 && ScheduledTasks.IsEnabled(xml) && ScheduledTasks.ExeOfOwnElevatedTask(xml) is { } command
-           && (!ScheduledTasks.HasCurrentPriority(xml) || !string.Equals(command, exe, StringComparison.OrdinalIgnoreCase));
+        => xml.Length > 0 && ScheduledTasks.IsEnabled(xml) && ScheduledTasks.ExeOfOwnElevatedTask(xml) is { } started
+           && (!ScheduledTasks.HasCurrentPriority(xml) || !string.Equals(started, exe, StringComparison.OrdinalIgnoreCase)
+               || !RunsCommandFor(xml, exe));
+
+    /// <summary>Whether a task runs exactly what <see cref="Launcher.CommandFor"/> gives for <paramref name="exe"/>.</summary>
+    private static bool RunsCommandFor(string xml, string exe)
+        => ScheduledTasks.CommandOfOwnElevatedTask(xml) is { } command
+           && string.Equals(command, Launcher.CommandFor(exe), StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// 2.3 and earlier named the launch and startup tasks the same for every Windows user, so a second user's setup took
@@ -643,7 +682,8 @@ public static class Installer
     /// then empty: the default of earlier versions is in the user's profile, where a program without administrator rights
     /// could put a link in it that a recursive delete would follow, and a folder chosen in setup may hold other files.
     /// Runner Manager's own download folders there (see <see cref="AppUpdater.StagingFolder"/>) go too, when they hold
-    /// only files and are no link themselves.
+    /// only files and are no link themselves, and so do the start helper with its files and what a self-contained exe
+    /// unpacked through it (.net\RunnerManager, without going into links; .net itself only when it is then empty).
     /// </summary>
     internal static string RemoveProgramFilesScript(string folder)
     {
@@ -651,19 +691,43 @@ public static class Installer
         // still hold it for a moment.
         var remove = AppUpdater.IsDefaultInstallDir(folder)
             ? "Remove-Item -LiteralPath $f -Recurse -Force -ErrorAction SilentlyContinue"
-            : "foreach ($p in 'RunnerManager.exe', 'RunnerManager.exe.new', 'RunnerManager.exe.new.partial', 'RunnerManager.exe.previous', 'RunnerManager.exe.swapping', 'RunnerManager.exe.pending', 'RunnerManager.*.old.exe') " +
-              "{ Get-ChildItem -LiteralPath $f -Filter $p -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue }; " +
+            : "foreach ($p in " + string.Join(", ", OwnFilePatterns.Select(p => $"'{p}'")) + ") " +
+              "{ Get-ChildItem -LiteralPath $f -Filter $p -File -Force -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue }; " +
+              // What a self-contained exe unpacked through the start helper: removed without going into links.
+              "function Remove-Tree($p) { Get-ChildItem -LiteralPath $p -Force -ErrorAction SilentlyContinue | ForEach-Object { $e = $_; " +
+              "if ($e.Attributes -band [IO.FileAttributes]::ReparsePoint) { try { if ($e.PSIsContainer) { [System.IO.Directory]::Delete($e.FullName) } else { [System.IO.File]::Delete($e.FullName) } } catch { } } " +
+              "elseif ($e.PSIsContainer) { Remove-Tree $e.FullName; try { [System.IO.Directory]::Delete($e.FullName) } catch { } } " +
+              "else { Remove-Item -LiteralPath $e.FullName -Force -ErrorAction SilentlyContinue } } }; " +
+              "$n = Join-Path $f '" + Launcher.ExtractionFolderName + "'; $ni = Get-Item -LiteralPath $n -Force -ErrorAction SilentlyContinue; " +
+              "if ($ni -and ($ni.Attributes -band [IO.FileAttributes]::ReparsePoint)) { try { [System.IO.Directory]::Delete($n) } catch { } } " +
+              "elseif ($ni) { $a = Join-Path $n 'RunnerManager'; $ai = Get-Item -LiteralPath $a -Force -ErrorAction SilentlyContinue; " +
+              "if ($ai -and ($ai.Attributes -band [IO.FileAttributes]::ReparsePoint)) { try { [System.IO.Directory]::Delete($a) } catch { } } " +
+              "elseif ($ai) { Remove-Tree $a; try { [System.IO.Directory]::Delete($a) } catch { } }; " +
+              "if (-not (Get-ChildItem -LiteralPath $n -Force -ErrorAction SilentlyContinue)) { try { [System.IO.Directory]::Delete($n) } catch { } } }; " +
               "Get-ChildItem -LiteralPath $f -Directory -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^RunnerManager\\.update-\\d+$' -and -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) } | " +
               "ForEach-Object { $u = $_; $c = @(Get-ChildItem -LiteralPath $u.FullName -Force -ErrorAction SilentlyContinue); " +
               "if (-not ($c | Where-Object { $_.PSIsContainer -or ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) })) " +
               "{ $c | Remove-Item -Force -ErrorAction SilentlyContinue; Remove-Item -LiteralPath $u.FullName -Force -ErrorAction SilentlyContinue } }; " +
               "$left = @(Get-ChildItem -LiteralPath $f -Force -ErrorAction SilentlyContinue); " +
               "if ($left.Count -eq 0) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue } " +
-              // Only other files are left: the folder stays, and there is nothing more to wait for.
-              "elseif (-not ($left | Where-Object { $_.Name -like 'RunnerManager*' })) { break }";
+              // Only other files are left: the folder stays, and there is nothing more to wait for. The start helper
+              // (RunnerManagerLauncher.exe) and what an exe unpacked (.net\RunnerManager) can still be in use for a moment.
+              "elseif (-not ($left | Where-Object { $_.Name -like 'RunnerManager*' }) -and -not ($ai -and (Test-Path -LiteralPath $a))) { break }";
         return $"$f = $env:{FolderVariable}; if ($f) {{ for ($i = 0; $i -lt 10 -and (Test-Path -LiteralPath $f); $i++) " +
                $"{{ {remove}; if (Test-Path -LiteralPath $f) {{ Start-Sleep -Seconds 2 }} }} }}";
     }
+
+    /// <summary>
+    /// Runner Manager's own files in an install folder, as file name patterns: the exe and the files beside it named after
+    /// it, the start helper and its files, and the files that swaps renamed out of the way.
+    /// </summary>
+    internal static readonly string[] OwnFilePatterns =
+    {
+        "RunnerManager.exe", "RunnerManager.exe.new", "RunnerManager.exe.new.partial", "RunnerManager.exe.previous",
+        "RunnerManager.exe.swapping", "RunnerManager.exe.pending", "RunnerManager.*.old.exe",
+        Launcher.FileName, Launcher.FileName + ".new", Launcher.FileName + ".new.partial", Launcher.FileName + ".off",
+        "RunnerManagerLauncher.*.old.exe"
+    };
 
     /// <summary>Creates or updates a shortcut to <paramref name="target"/>. The paths reach PowerShell as environment variables (see <see cref="FolderEnvironment"/>).</summary>
     internal static async Task CreateShortcutAsync(string shortcut, string target)

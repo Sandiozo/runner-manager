@@ -393,7 +393,8 @@ public static class MachineInstall
             // Any program can create a task with one of these names; Runner Manager registers its own with the highest rights.
             if (!ScheduledTasks.RunsWithHighestRights(xml)) continue;
             var principal = ScheduledTasks.PrincipalOf(xml);
-            var command = ScheduledTasks.CommandOf(xml);
+            // A task that runs the start helper uses the RunnerManager.exe beside it.
+            var command = ScheduledTasks.CommandOf(xml) is { Length: > 0 } raw ? Launcher.ExeOf(raw) : string.Empty;
             if (principal.Length == 0 || command.Length == 0) continue;
             uses.Add(new TaskUse(principal, ScheduledTasks.IsCurrentUser(principal), command));
         }
