@@ -1502,11 +1502,11 @@ public static partial class RunnerService
     /// The repository's URL under its current name. The GitHub API follows a renamed repository, but config.cmd does
     /// not, so registering with the old name fails with "Not Found".
     /// </summary>
-    private static async Task<string> CurrentRepositoryUrlAsync(string registrationUrl)
+    internal static async Task<string> CurrentRepositoryUrlAsync(string registrationUrl)
     {
         var path = RepositoryPath(registrationUrl);
-        if (string.IsNullOrWhiteSpace(path)) return registrationUrl;
-        var result = await GitHubCli.RunAsync($"api repos/{path} --jq .html_url");
+        if (!GitHubNames.IsRepositoryPath(path)) return registrationUrl;
+        var result = await GitHubCli.ApiAsync($"repos/{path}", "--jq", ".html_url");
         var current = result.ExitCode == 0 ? result.Output.Trim() : string.Empty;
         return RegistrationUrlProblem(current) == null && !current.Equals(registrationUrl.TrimEnd('/'), StringComparison.OrdinalIgnoreCase)
             ? current : registrationUrl;

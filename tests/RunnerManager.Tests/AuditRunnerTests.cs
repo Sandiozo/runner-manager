@@ -697,6 +697,36 @@ public class AuditRunnerTests
     }
 }
 
+/// <summary>The gh calls of runner setup, with gh replaced (see <see cref="FakeGh"/>).</summary>
+[Collection(GitHubCliCollection.Name)]
+public class RunnerGitHubCallTests
+{
+    [Fact]
+    public async Task RenamedRepository_IsAskedFor_WithEachArgumentOnItsOwn()
+    {
+        using var gh = new FakeGh(_ => new CommandResult(0, "https://github.com/octo/new-name\n", string.Empty));
+
+        var url = await RunnerService.CurrentRepositoryUrlAsync("https://github.com/octo/old-name");
+
+        Assert.Equal("https://github.com/octo/new-name", url);
+        Assert.Equal(new[] { "api", "repos/octo/old-name", "--jq", ".html_url" }, Assert.Single(gh.Calls));
+        Assert.Empty(gh.CommandLines);
+    }
+
+    [Theory]
+    [InlineData("https://github.com/orgs/octo")]
+    [InlineData("https://example.com/octo/app")]
+    [InlineData("https://github.com/octo/app%20--jq")]
+    [InlineData("")]
+    public async Task RegistrationUrl_WithoutARepository_IsNotAskedFor(string registrationUrl)
+    {
+        using var gh = new FakeGh(_ => new CommandResult(0, "https://github.com/octo/other\n", string.Empty));
+
+        Assert.Equal(registrationUrl, await RunnerService.CurrentRepositoryUrlAsync(registrationUrl));
+        Assert.Empty(gh.Calls);
+    }
+}
+
 /// <summary>
 /// The runner lists of the health checks. <see cref="GitHubCli.ForgetProblems"/> clears them, and the GitHub CLI tests
 /// call it, so these tests do not run at the same time as those.
