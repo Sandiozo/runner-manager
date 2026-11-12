@@ -411,7 +411,25 @@ internal sealed class SchedulerTaskReader : ITaskReader
         {
             using var root = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64);
             using var tree = root.OpenSubKey(@"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Schedule\TaskCache\Tree");
-            return tree?.GetSubKeyNames();
+            return tree == null ? null : TaskNamesOf(tree.GetSubKeyNames().Select(name => (name, HasId(tree, name))));
+        }
+        catch (Exception ex) when (ex is SecurityException or UnauthorizedAccessException or IOException) { return null; }
+    }
+
+    /// <summary>
+    /// The task names among the subkeys of Task Scheduler's list. A task has an Id value. A task folder has none, so it is
+    /// left out: it cannot be read as a task, and a folder named "Runner Manager…" would make every scan unreadable and
+    /// keep the program files for ever. A subkey that cannot be opened (<c>null</c>) counts as a task.
+    /// </summary>
+    internal static List<string> TaskNamesOf(IEnumerable<(string Name, bool? HasId)> subkeys)
+        => subkeys.Where(k => k.HasId != false).Select(k => k.Name).ToList();
+
+    private static bool? HasId(RegistryKey tree, string name)
+    {
+        try
+        {
+            using var key = tree.OpenSubKey(name);
+            return key == null ? null : key.GetValue("Id") != null;
         }
         catch (Exception ex) when (ex is SecurityException or UnauthorizedAccessException or IOException) { return null; }
     }

@@ -838,6 +838,18 @@ public class InstallEvidenceTests
     }
 
     [Fact]
+    public void ATaskFolder_IsNoTask()
+    {
+        // Task Scheduler's list in the registry holds folders too, which have no Id value. A folder named "Runner Manager…"
+        // cannot be read as a task, so it would make every scan unreadable and keep the program files for ever.
+        var names = SchedulerTaskReader.TaskNamesOf(new (string, bool?)[]
+        {
+            ("Runner Manager (bob)", true), ("Runner Manager tools", false), ("Runner Manager (eve)", null)
+        });
+        Assert.Equal(new[] { "Runner Manager (bob)", "Runner Manager (eve)" }, names);
+    }
+
+    [Fact]
     public async Task TheTasksOfARemovedAccount_DoNotCount()
     {
         // The account had installed (a record and its launch task) and was removed; its task can stay.
