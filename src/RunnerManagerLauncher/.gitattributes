@@ -1,0 +1,3 @@
+# The manifest is copied into the exe byte for byte, and the exe is compared by hash: the same line endings on every
+# checkout, whatever core.autocrlf says.
+launcher.manifest text eol=crlf
