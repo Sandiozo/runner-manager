@@ -142,7 +142,12 @@ jobs:
             "- RunnerManagerSetup-standalone.exe: ``$(Hash publish/RunnerManagerSetup-standalone.exe)``",
             "- RunnerManagerSetup.exe and RunnerManager.exe: ``$(Hash publish/RunnerManager.exe)``"
           ) -join "`n"
+          # The notes go through a file, not the command line: they hold quotes and line breaks, which passing them as an
+          # argument can change, and a long section could pass the length a command line may have. UTF-8 without a BOM,
+          # so the notes do not start with one.
+          $notesFile = Join-Path $env:RUNNER_TEMP 'release-notes.md'
+          [System.IO.File]::WriteAllText($notesFile, $notes, [System.Text.UTF8Encoding]::new($false))
           $flags = @("--latest=$(if ($latest) { 'true' } else { 'false' })")
           if ($env:PRERELEASE -eq 'true') { $flags += '--prerelease' }
           gh release create $tag publish/RunnerManagerSetup-standalone.exe publish/RunnerManagerSetup.exe publish/RunnerManager.exe `
-            --title "Runner Manager $tag" --notes $notes --target $env:GITHUB_SHA @flags
+            --title "Runner Manager $tag" --notes-file $notesFile --target $env:GITHUB_SHA @flags

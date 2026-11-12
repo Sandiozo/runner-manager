@@ -413,3 +413,39 @@ public class PortZeroTests
         host.Dispose();
     }
 }
+
+/// <summary>The release workflow gives gh the release notes in a file, so their quotes and line breaks reach GitHub as written.</summary>
+public class ReleaseNotesTests
+{
+    private static string RepoFile(string name)
+    {
+        for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir != null; dir = dir.Parent)
+            if (File.Exists(Path.Combine(dir.FullName, "RunnerManager.sln"))) return File.ReadAllText(Path.Combine(dir.FullName, name));
+        throw new DirectoryNotFoundException("The repository folder was not found.");
+    }
+
+    [Fact]
+    public void TheReleaseStep_PassesTheNotesInAFile_WithoutABom()
+    {
+        var workflow = RepoFile(Path.Combine(".github", "workflows", "release.yml"));
+        var create = System.Text.RegularExpressions.Regex.Match(workflow, @"gh release create [^\n]*`\r?\n[^\n]*");
+        Assert.True(create.Success);
+        Assert.Contains("--notes-file $notesFile", create.Value);
+        Assert.DoesNotMatch(@"--notes\s+\$notes\b", workflow);
+        Assert.Contains("[System.IO.File]::WriteAllText($notesFile, $notes, [System.Text.UTF8Encoding]::new($false))", workflow);
+        Assert.Contains("Join-Path $env:RUNNER_TEMP", workflow);
+    }
+
+    [Fact]
+    public void TheChangelog_HasASectionForThisVersion_ThatTheWorkflowFinds()
+    {
+        var changelog = RepoFile("CHANGELOG.md");
+        var version = System.Text.RegularExpressions.Regex.Match(RepoFile(Path.Combine("src", "RunnerManager", "RunnerManager.csproj")),
+            @"<Version>([^<]+)</Version>").Groups[1].Value;
+        // The pattern of the workflow's notes step.
+        var section = System.Text.RegularExpressions.Regex.Match(changelog,
+            $@"(?ms)^## {System.Text.RegularExpressions.Regex.Escape(version)}\s*\r?\n(.*?)(?=^## |\z)");
+        Assert.True(section.Success, version);
+        Assert.NotEmpty(section.Groups[1].Value.Trim());
+    }
+}
