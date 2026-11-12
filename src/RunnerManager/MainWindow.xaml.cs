@@ -1528,6 +1528,10 @@ public partial class MainWindow : Window
         StateChanged += (_, _) =>
         {
             if (WindowState != WindowState.Minimized) _shownState = WindowState;
+            // A window saved as maximized opens on a screen that is there; its normal place may be on a screen that
+            // is gone. Windows moves it there when it is restored, so it is fitted then, once the move is done.
+            if (WindowState == WindowState.Normal)
+                Dispatcher.BeginInvoke(DispatcherPriority.Background, () => WindowPlacement.EnsureOnScreen(this));
         };
         SizeChanged += (_, _) => NoteNormalBounds();
         LocationChanged += (_, _) => NoteNormalBounds();
