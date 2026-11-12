@@ -961,10 +961,11 @@ public class AuditAssistantTests
         var path = $"octocat/lookup-{Guid.NewGuid():N}";
         var calls = 0;
         var result = new CommandResult(-1, string.Empty, "GitHub CLI timed out (gh api repos).\nCheck the internet connection and try again.");
-        Task<CommandResult> Run(string arguments)
+        Task<CommandResult> Run(string endpoint, string[] options)
         {
             calls++;
-            Assert.Contains(path, arguments);
+            Assert.Equal($"repos/{path}", endpoint);
+            Assert.Equal(new[] { "--jq", ".full_name" }, options);
             return Task.FromResult(result);
         }
 
