@@ -661,8 +661,9 @@ public class AuditAssistantTests
     {
         var port = TestPorts.FreeRange(1);
         var url = $"http://localhost:{port}/mcp";
-        // Long enough for the first request below when other tests keep this PC busy.
-        using var server = new AssistantHttpServer(port, "localhost") { UnusedSignInLifetime = TimeSpan.FromSeconds(1.5) };
+        // The endpoint's own clock, so that a busy PC cannot make the first request below look late.
+        var now = DateTime.UtcNow;
+        using var server = new AssistantHttpServer(port, "localhost") { UtcNow = () => now };
         _ = server.RunAsync();
         using var http = new HttpClient();
 
@@ -670,10 +671,12 @@ public class AuditAssistantTests
         Assert.Equal(HttpStatusCode.OK, (await PostMcpAsync(http, url, used.Token, Ping)).StatusCode);
         var unused = await SignInByHandAsync(http, url, port);
         Assert.Equal(HttpStatusCode.OK, unused.Status);
-        await Task.Delay(2200);
+        now += server.UnusedSignInLifetime + TimeSpan.FromSeconds(1);
 
         // The one that sent no request is gone. The one that works stays, as before, for half a day without a request.
         Assert.Equal(HttpStatusCode.Unauthorized, (await PostMcpAsync(http, url, unused.Token, Ping)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await PostMcpAsync(http, url, used.Token, Ping)).StatusCode);
+        now += TimeSpan.FromHours(11);
         Assert.Equal(HttpStatusCode.OK, (await PostMcpAsync(http, url, used.Token, Ping)).StatusCode);
 
         // A client sends its first request right after it signed in, so the limit does not get in its way.
@@ -868,23 +871,27 @@ public class AuditAssistantTests
     {
         var stale = new List<MachineInfo>();
 
-        // A fleet whose one PC reported 28 seconds ago, and a health read that takes until that is too old.
+        // A fleet whose one PC has just reported, and a health read that takes until that report is too old. The PC's
+        // report is made old at once (Touch), so a slow machine cannot make it old before the tools read the fleet.
         AssistantTools.FleetReads Slow()
         {
             MachineInfo? pc = null;
             return new AssistantTools.FleetReads(
                 () =>
                 {
-                    pc = MachineInfo.FromPayload("BUILD", Status("BUILD", new[] { OrganizationRunner("a", "octocat") }, DateTime.UtcNow - TimeSpan.FromSeconds(28)));
+                    pc = MachineInfo.FromPayload("BUILD", Status("BUILD", new[] { OrganizationRunner("a", "octocat") }));
                     return Task.FromResult(new List<MachineInfo> { pc });
                 },
-                async _ =>
+                _ =>
                 {
-                    while (pc!.IsReachable) await Task.Delay(50);
-                    lock (stale) stale.Add(pc);
-                    return new FleetHealth();
+                    MakeOld(pc!);
+                    lock (stale) stale.Add(pc!);
+                    return Task.FromResult(new FleetHealth());
                 });
         }
+
+        static void MakeOld(MachineInfo pc)
+            => pc.Touch(MachineInfo.FromPayload("BUILD", Status("BUILD", new[] { OrganizationRunner("a", "octocat") }, DateTime.UtcNow - TimeSpan.FromMinutes(5))));
 
         static async Task<JsonNode> Run(Func<AssistantCall, AssistantTools.FleetReads, Task<object>> tool, string arguments, AssistantTools.FleetReads reads)
         {
@@ -922,9 +929,10 @@ public class AuditAssistantTests
 
         // create_runner's refusal goes by the same early answer, so it still points to the runner that is there.
         var target = new AssistantTools.Target("octocat", true);
-        var early = MachineInfo.FromPayload("BUILD", Status("BUILD", new[] { OrganizationRunner("a", "octocat") }, DateTime.UtcNow - TimeSpan.FromSeconds(28)));
+        var early = MachineInfo.FromPayload("BUILD", Status("BUILD", new[] { OrganizationRunner("a", "octocat") }));
         var online = AssistantTools.ReachableNow(new[] { early });
-        while (early.IsReachable) await Task.Delay(50);
+        MakeOld(early);
+        Assert.False(early.IsReachable);
         var existing = new List<(MachineInfo, MachineRunnerStatus)> { (early, early.Runners[0]) };
         Assert.Contains("already has a runner: a on BUILD. Use it", AssistantTools.AlreadyHasRunner(target, existing, online).Message);
         // Asked only now, the same PC is offline: this is what the tools said before.
