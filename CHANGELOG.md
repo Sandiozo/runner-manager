@@ -37,6 +37,11 @@ Runner Manager no longer starts a runner's service next to its console window.
 - The signature check of the .NET runtime download, the scripts that setup and uninstall run, and the check whether a
   scheduled task runs take folder, file and task names from the environment instead of from the script text, so a name
   with quotes cannot run commands. PowerShell is always started from the Windows folder.
+- The other Windows tools that Runner Manager runs, such as sc.exe, schtasks.exe, netsh.exe, shutdown.exe, cmd.exe
+  (also for config.cmd) and explorer.exe, are now started by their full path in the Windows folder too. By their bare
+  name, Windows looks for them in Runner Manager's folder and the current folder first. When GitHub CLI is not in
+  `C:\Program Files\GitHub CLI`, Runner Manager looks for gh.exe in the PATH folders itself, leaving out its own
+  folder, the current folder and folders without a full path, and starts it by the full path it found.
 - The release build no longer loads the assemblies that `DOTNET_STARTUP_HOOKS` names, which any program of the user
   can set.
 - Uninstall and a move to another folder remove the whole folder only in Program Files. From any other folder, also
@@ -63,6 +68,12 @@ Runner Manager no longer starts a runner's service next to its console window.
   folder of the console window's user. Such a runner now shows **Runs twice**, and its details say why jobs fail or wait
   and what to do. It counts under **Needs attention**, gives one alert when it begins (with **Stuck and waiting jobs**
   turned on), and the other PCs and AI assistants see it too.
+- A runner that two console windows run, for example one in each of two Windows sessions on a PC, now shows **Two
+  console windows**. Both use one registration, so only one of them gets jobs. Its details say to close one of the
+  console windows or to sign out of the other Windows session. It counts under **Needs attention**, gives one alert
+  (with **Stuck and waiting jobs** turned on), and the other PCs and AI assistants see it too. Only console windows that
+  have both run for 2 minutes count, so a runner that restarts is not reported. Start, Stop, Restart and auto-recovery
+  work as before.
 - Start and Restart of a runner's service are refused while a console window runs the runner, or while a startup entry
   that is turned on opens it in one when you sign in, also when no console window runs now. This holds for the
   dashboard, commands from other PCs, AI assistants, auto-recovery, and the restart after an edit or **Clean work
@@ -87,6 +98,12 @@ Runner Manager no longer starts a runner's service next to its console window.
   is now disabled again after the edit, also when a failed edit registers the runner again with its old name and
   labels. While the console window runs such a runner, an edit is refused, and nothing is changed. The old copy of a
   moved runner is handled as before.
+- Fix: when a move to another PC failed, the runner's Windows service on its PC was set to start with Windows and
+  started, also when it was disabled because the runner runs in a console window, so that the runner could run twice.
+  The runner is now set up as it was before the move: a disabled service stays disabled and is not started, and a
+  service that started manually or with Windows does so again and is started, unless a console window ran the runner.
+  Such a runner is no longer left looking like the old copy of a moved runner, and its console window, which the move
+  closed, opens again at the next sign-in. This needs 2.10.0 on the runner's PC.
 - Fix: when the processes on a PC could not be read, the live output of a step that printed nothing for 5 minutes was
   no longer shown. It is shown now when Runner Manager saw earlier, while it could read the processes, that it is the
   running job's output. Otherwise the output says that the processes could not be read.
@@ -132,6 +149,13 @@ Runner Manager no longer starts a runner's service next to its console window.
 - The job, the repository and the current job in a runner's details are now buttons, so Tab and screen readers reach
   them. A job or a run without an address on GitHub, there and in the queue and the recent runs, is plain text and not a
   button, and so is **Repository unknown**.
+- Fix: screen readers left an underscore out of a runner's or a PC's name on some buttons, so that **More actions** for
+  `GPT_CP` was read as "More actions for GPTCP". This was so for the action buttons of PCs and runners, **Add runner**,
+  **Forget** and **Remove** in Settings and the PC choices in **Add runner**. **Move to** in **Move runner** and the PCs
+  in **Change fleet code** also showed the name without its underscore. Such names are now read and shown as they are.
+- Screen readers now read the rows of a PC's runners, of the queue and the recent runs, of a job's steps and
+  processes, and the PCs to join in **Set up a fleet** by what they show, such as a runner's name and state, instead of
+  the name of a class.
 
 ## 2.9.0
 
