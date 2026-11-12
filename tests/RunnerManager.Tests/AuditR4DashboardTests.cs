@@ -51,4 +51,15 @@ public class AuditR4DashboardTests
         // A runner that stopped without Stop does.
         Assert.True(FleetAttention.RunnerNeedsAttention(crashed));
     }
+
+    // ----- 2: adding a runner on another PC does not freeze this PC's view -----
+
+    [Theory]
+    [InlineData(false, false, false)]
+    // Delete, Move, Join fleet, Add runner on this PC, ...: this PC is read again when it ends.
+    [InlineData(true, false, true)]
+    // Add runner on another PC: it waits for that PC, maybe for many minutes, and changes nothing here.
+    [InlineData(true, true, false)]
+    public void Refreshes_ReadThisPc_WhileOnlyAnotherPcIsWorkedOn(bool operationRunning, bool onOtherPcOnly, bool holdsBack)
+        => Assert.Equal(holdsBack, MainWindow.HoldsThisPcBack(operationRunning, onOtherPcOnly));
 }

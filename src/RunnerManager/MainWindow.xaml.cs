@@ -42,6 +42,8 @@ public partial class MainWindow : Window
     private bool _refreshQueuedForceAuth;
     private bool _operationRunning;
     private string _operationTitle = string.Empty;
+    /// <summary>The running operation works only on another PC (Add runner there), so it changes nothing on this PC.</summary>
+    private bool _operationOnOtherPcOnly;
     private bool _githubAuthenticated;
     /// <summary>gh has been asked once; until then the dashboard does not say that GitHub is not connected.</summary>
     private bool _githubChecked;
@@ -129,6 +131,17 @@ public partial class MainWindow : Window
     /// <summary>Whether the fleet is read while the operation with this title runs on this PC.</summary>
     internal static bool ReadsFleetDuring(string operationTitle) => operationTitle is not (JoinFleetTitle or LeaveFleetTitle);
 
+    /// <summary>An operation that changes this PC runs (see <see cref="HoldsThisPcBack"/>).</summary>
+    private bool ThisPcOperationRunning => HoldsThisPcBack(_operationRunning, _operationOnOtherPcOnly);
+
+    /// <summary>
+    /// Whether refreshes leave this PC alone while an operation runs: they do not read this PC's runners, change its card
+    /// or start the checks after a refresh, and Refresh (F5) waits. Operations change this PC's runners, fleet agent and
+    /// fleet membership, and everything is refreshed when they end. An Add runner on another PC changes nothing here, so
+    /// refreshes go on as usual while it waits for that PC, which can take many minutes. Other operations still wait for it.
+    /// </summary>
+    internal static bool HoldsThisPcBack(bool operationRunning, bool onOtherPcOnly) => operationRunning && !onOtherPcOnly;
+
     /// <summary>Waits until a fleet read that is still running has ended (it never throws).</summary>
     private Task WaitForFleetReadAsync()
         => _fleetRead is { IsCompleted: false } read ? read.ContinueWith(_ => { }, TaskScheduler.Default) : Task.CompletedTask;
@@ -158,9 +171,8 @@ public partial class MainWindow : Window
             var machinesTask = MachineRelay.ReadFleetAsync(_forceDiscovery);
             _fleetRead = machinesTask;
             _forceDiscovery = false;
-            // While an operation runs on this PC, only the other PCs are refreshed: this PC's runners, fleet agent and
-            // fleet membership are what operations change, and everything is refreshed when the operation ends.
-            if (_operationRunning)
+            // While an operation that changes this PC runs, only the other PCs are refreshed (see HoldsThisPcBack).
+            if (ThisPcOperationRunning)
             {
                 ApplyFleet(await machinesTask, Runners.ToList(), localRunnersRead: false);
                 LastUpdatedText.Text = $"Updated {TimeFormat.WithSeconds(DateTime.Now)}  ·  Refreshes every {_settings.RefreshSeconds}s";
@@ -191,8 +203,8 @@ public partial class MainWindow : Window
                 ApplyFleet(await machinesTask, Runners.ToList(), localRunnersRead: false);
             var runners = await runnersTask;
             var machines = await machinesTask;
-            // An operation may have started while this refresh waited.
-            if (_operationRunning)
+            // An operation that changes this PC may have started while this refresh waited.
+            if (ThisPcOperationRunning)
             {
                 ApplyFleet(machines, Runners.ToList(), localRunnersRead: false);
                 return;
@@ -304,8 +316,8 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Shows a reading of the fleet, with <paramref name="runners"/> as this PC's runners. While an operation runs on this
-    /// PC, nothing on this PC is started or changed, and cards that show a pending action are kept as they are.
+    /// Shows a reading of the fleet, with <paramref name="runners"/> as this PC's runners. While an operation that changes
+    /// this PC runs, nothing on this PC is started or changed, and cards that show a pending action are kept as they are.
     /// </summary>
     private void ApplyFleet(List<MachineInfo> machines, List<RunnerInfo> runners, bool localRunnersRead)
     {
@@ -313,7 +325,7 @@ public partial class MainWindow : Window
         machines = machines.ToList();
         var localIndex = machines.FindIndex(m => m.IsLocal);
         if (localIndex >= 0) machines[localIndex] = machines[localIndex].WithLocalRunners(runners);
-        var duringOperation = _operationRunning;
+        var duringOperation = ThisPcOperationRunning;
         if (localRunnersRead)
         {
             _lastLocalRunnerRefresh = DateTime.Now;
@@ -1004,7 +1016,7 @@ public partial class MainWindow : Window
             log("Checking repository workflows…");
             try { await WorkflowManager.CheckAndUpdateAsync(path, setup.Labels, log); }
             catch (Exception ex) { log($"Warning: the workflow check failed: {ex.Message.Split('\n')[0].Trim()} The runner was created."); }
-        });
+        }, onOtherPcOnly: true);
     }
 
     /// <summary>
@@ -1025,10 +1037,17 @@ public partial class MainWindow : Window
     /// Returns true when it ran and succeeded; false when it was skipped or failed. Set pending states inside
     /// <paramref name="operation"/>, so nothing shows as pending when the operation is skipped.
     /// </summary>
-    private async Task<bool> RunOperationAsync(string title, Func<Action<string>, Task> operation)
+    private Task<bool> RunOperationAsync(string title, Func<Action<string>, Task> operation)
+        => RunOperationAsync(title, operation, onOtherPcOnly: false);
+
+    /// <param name="onOtherPcOnly">
+    /// The operation changes nothing on this PC, so refreshes go on as usual while it runs (see <see cref="HoldsThisPcBack"/>).
+    /// </param>
+    private async Task<bool> RunOperationAsync(string title, Func<Action<string>, Task> operation, bool onOtherPcOnly)
     {
         if (IsOperationRunning(title)) return false;
         _operationRunning = true;
+        _operationOnOtherPcOnly = onOtherPcOnly;
         _operationTitle = title;
         var operationId = ++_operationId;
         SetStatus($"{title}…", StatusKind.Busy);
@@ -1050,6 +1069,7 @@ public partial class MainWindow : Window
         finally
         {
             _operationRunning = false;
+            _operationOnOtherPcOnly = false;
             await RefreshAsync(forceAuthCheck: true);
         }
         return succeeded;
@@ -1528,10 +1548,11 @@ public partial class MainWindow : Window
 
     private async Task ManualRefreshAsync()
     {
-        if (_operationRunning || !RefreshButton.IsEnabled) return;
+        if (ThisPcOperationRunning || !RefreshButton.IsEnabled) return;
         RefreshButton.IsEnabled = false;
         _noticeUntilUtc = DateTime.MinValue;
-        SetStatus("Refreshing…", StatusKind.Busy);
+        // The status bar keeps the progress of an operation on another PC.
+        if (!_operationRunning) SetStatus("Refreshing…", StatusKind.Busy);
         try
         {
             // GitHub is asked again at once, so the user does not wait out a pause after fixing its cause.
