@@ -1174,9 +1174,8 @@ public static class MachineRelay
                     Recovery.Forget(command.TargetKey);
                     return "Runner stopped for the move";
                 case "Start" when command.Value == "enable":
-                    // The move failed: this copy keeps the runner.
-                    await FleetActions.StartAfterFailedMoveAsync(command.TargetKey);
-                    return "Runner start completed";
+                    // The move failed: this copy keeps the runner, as it was before the move.
+                    return await FleetActions.StartAfterFailedMoveAsync(command.TargetKey);
                 case "StopJob":
                     var stopped = await RunnerActivity.StopJobProcessesAsync(command.TargetKey);
                     return stopped.Count == 0 ? "The job had no processes to stop" : $"Stopped the job's processes: {string.Join(", ", stopped)}";

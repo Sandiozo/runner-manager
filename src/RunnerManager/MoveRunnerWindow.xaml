@@ -53,7 +53,7 @@
 
             <Border Background="{DynamicResource Bg0Brush}" BorderBrush="{DynamicResource BorderSubtleBrush}" BorderThickness="1" CornerRadius="6" Padding="12,9" Margin="0,16,0,0">
                 <TextBlock TextWrapping="Wrap" FontSize="12" Foreground="{DynamicResource TextMutedBrush}" LineHeight="18"
-                           Text="1. The runner stops on its current PC.&#x0a;2. The target PC downloads the latest runner and registers it with the same name and labels. This replaces the old registration.&#x0a;3. The Windows service on the old PC is removed, and its files if selected above.&#x0a;If step 2 fails, the runner starts again on its current PC."/>
+                           Text="1. The runner stops on its current PC.&#x0a;2. The target PC downloads the latest runner and registers it with the same name and labels. This replaces the old registration.&#x0a;3. The Windows service on the old PC is removed, and its files if selected above.&#x0a;If step 2 fails, the runner is set up on its current PC as it was before. Its Windows service starts again, unless it was disabled or a console window ran the runner."/>
             </Border>
         </StackPanel>
         <Border Grid.Row="1" Background="{DynamicResource Bg0Brush}" BorderBrush="{DynamicResource BorderSubtleBrush}" BorderThickness="0,1,0,0" Padding="28,14">

@@ -110,8 +110,9 @@ public sealed class FleetActions
 
     /// <summary>
     /// Moves a runner: stops and disables it, registers it on the target PC with the same name and labels (replacing
-    /// the old registration), then removes the old copy. If the target reports that registering failed, the old copy
-    /// is enabled and started again.
+    /// the old registration), then removes the old copy. If the target reports that registering failed, the old copy's
+    /// service starts again as it did before the move, and is started again unless it was disabled or a console window
+    /// ran the runner (<see cref="StartAfterFailedMoveAsync"/>).
     /// </summary>
     public async Task MoveRunnerAsync(MachineInfo source, MachineRunnerStatus runner, MachineInfo target, bool deleteOldFiles,
         string[]? knownLabels, Action<string> log)
@@ -155,15 +156,15 @@ public sealed class FleetActions
         }
         catch (Exception ex)
         {
-            if (!runner.IsInteractive)
+            if (UndoesFailedMove(runner, source, RunsHere(source)))
             {
-                log($"Move failed. Starting the runner on {source.MachineName} again…");
+                log($"Move failed. Setting up the runner on {source.MachineName} as it was before…");
                 try
                 {
                     await RunOnMachineAsync(source, "runner", runner.CommandKey, "Start", log,
-                        () => StartAfterFailedMoveAsync(runner.CommandKey), TimeSpan.FromMinutes(2), value: "enable");
+                        async () => log(await StartAfterFailedMoveAsync(runner.CommandKey)), TimeSpan.FromMinutes(2), value: "enable");
                 }
-                catch (Exception restartError) { log($"Could not start the runner again: {restartError.Message}"); }
+                catch (Exception restartError) { log($"Could not set up the runner as it was before: {restartError.Message}"); }
             }
             // config.cmd on the target replaced the registration before the install failed. The old copy is still enabled
             // and started, so it can be edited, but GitHub no longer accepts it.
@@ -218,38 +219,86 @@ public sealed class FleetActions
     /// <summary>
     /// Step 1 of a move, on the PC the runner leaves: stops it when idle, keeps auto-recovery away, disables its service so
     /// it doesn't start at the next restart, and marks it as the old copy (so deleting it later doesn't unregister the
-    /// moved runner). Undone when any part fails.
+    /// moved runner). The marker says how the service started and whether a console window ran the runner, for a failed
+    /// move to put back (<see cref="BeforeMove"/>). Undone when any part fails: the service starts as it did before.
     /// </summary>
     internal static async Task StopForMoveAsync(string key)
     {
         var wasStopped = FleetConfig.Current.ManuallyStopped.Contains(key, StringComparer.OrdinalIgnoreCase);
-        // Also when an earlier move left it disabled: the marker remembers that it started manually before.
-        var manualStart = (await RunnerService.FindRunnerAsync(key))?.RegistrationOptions.ManualStart == true;
+        var runner = await RunnerService.FindRunnerAsync(key);
+        var before = BeforeMove(runner);
         FleetConfig.SetManuallyStopped(key, true);
         try
         {
             await RunnerService.StopIfIdleAsync(key);
             await SetServiceEnabledAsync(key, false);
-            await RunnerService.MarkMovedAwayAsync(key, true, manualStart);
+            await RunnerService.MarkMovedAwayAsync(key, true, before.ManualStart, before.ServiceStart, before.Console);
         }
         catch
         {
-            try { await SetServiceEnabledAsync(key, true, manualStart); } catch { }
+            // As the service was when this step began: an earlier move may have disabled it already.
+            if (runner?.ServiceStart is { } start) try { await SetServiceStartAsync(key, start); } catch { }
             FleetConfig.SetManuallyStopped(key, wasStopped);
             throw;
         }
     }
 
-    /// <summary>Undoes <see cref="StopForMoveAsync"/> after a move failed, and starts the runner again.</summary>
-    internal static async Task StartAfterFailedMoveAsync(string key)
+    /// <summary>
+    /// What the marker of a move records (<see cref="RunnerService.MovedAwayText"/>): whether the runner was set not to
+    /// start with Windows, as before, how its Windows service started, and whether a console window ran it or a startup
+    /// entry opens it in one. A runner that an earlier move left disabled keeps what that move recorded, not that it is
+    /// disabled now.
+    /// </summary>
+    internal static (bool ManualStart, string? ServiceStart, bool Console) BeforeMove(RunnerInfo? runner)
+        => runner == null ? (false, null, false)
+            : (runner.RegistrationOptions.ManualStart, runner.ServiceStartBeforeMove ?? runner.ServiceStart,
+               runner.ConsoleBeforeMove || runner.HasConsoleCopy);
+
+    /// <summary>
+    /// Undoes <see cref="StopForMoveAsync"/> after a move failed: the service starts as it did before the move, with
+    /// Windows, manually or not at all (disabled), and is started again only when that is how the runner ran
+    /// (<see cref="AfterFailedMove"/>). Returns what was done.
+    /// </summary>
+    internal static async Task<string> StartAfterFailedMoveAsync(string key)
     {
-        var manualStart = (await RunnerService.FindRunnerAsync(key))?.ManualStartBeforeMove == true;
+        var undo = AfterFailedMove(await RunnerService.FindRunnerAsync(key));
         FleetConfig.SetManuallyStopped(key, false);
-        await SetServiceEnabledAsync(key, true, manualStart);
-        // Removed after the service is enabled, so a retry still knows how it started.
+        await SetServiceStartAsync(key, undo.ServiceStart);
+        // Removed after the service is set, so a retry still knows how it started.
         await RunnerService.MarkMovedAwayAsync(key, false);
-        await RunnerService.ControlServiceAsync(key, "Start");
+        if (undo.Start) await RunnerService.ControlServiceAsync(key, "Start");
+        return undo.Text;
     }
+
+    /// <summary>
+    /// How a failed move leaves the old copy (as its marker says): how its service starts, whether the service is started
+    /// again, and what to say. It is not started when it was disabled before the move, and not when a console window ran
+    /// the runner or a startup entry opens it in one: the move closed that window, and starting the service would run the
+    /// runner as a service instead, or twice. Without a marker, the service starts with Windows and is started, as before.
+    /// </summary>
+    internal static (string ServiceStart, bool Start, string Text) AfterFailedMove(RunnerInfo? runner)
+    {
+        var service = runner?.ServiceStartBeforeMove ?? RunnerStart.WithWindows;
+        // A runner without a service runs in a console window only.
+        if (runner?.ConsoleBeforeMove == true || runner is { ServiceInstalled: false })
+            return (service, false, "The runner is as it was before the move. Its Windows service was not started, because the runner runs in a console window. " +
+                                    "Open the console window again if the move closed it.");
+        return service == RunnerStart.Disabled
+            ? (service, false, "The runner is as it was before the move. Its Windows service is disabled, as before, and was not started.")
+            : (service, true, "The runner was started again.");
+    }
+
+    /// <summary>
+    /// Whether the dashboard undoes a failed move on the runner's PC. For a runner that a console window ran, only a PC
+    /// with 2.10.0 or later is asked: earlier versions start the service when they undo a move, which would run the
+    /// runner twice, so the runner is left as the move left it there. From 2.10.0 the PC sets the service back as it was
+    /// and does not start it (<see cref="AfterFailedMove"/>).
+    /// </summary>
+    /// <param name="runsHere">The dashboard undoes it itself, with this version.</param>
+    internal static bool UndoesFailedMove(MachineRunnerStatus runner, MachineInfo source, bool runsHere)
+        => !runner.IsInteractive || runsHere || AppUpdater.CompareVersions(source.AppVersion, ConsoleMoveUndoSince) >= 0;
+
+    private const string ConsoleMoveUndoSince = "2.10.0";
 
     /// <summary>
     /// Disables a runner's Windows service (so it can't start, also not at the next restart), or sets it back to
@@ -267,4 +316,15 @@ public sealed class FleetActions
     /// </summary>
     internal static string StartMode(bool enabled, bool manualStart)
         => !enabled ? ServiceStart.Disabled : manualStart ? ServiceStart.Manual : ServiceStart.Automatic;
+
+    /// <summary>Sets a runner's Windows service to start as a <see cref="RunnerStart"/> value says (see <see cref="StartMode(string)"/>).</summary>
+    private static async Task SetServiceStartAsync(string key, string start)
+    {
+        if (!key.StartsWith("actions.runner.", StringComparison.OrdinalIgnoreCase)) return;
+        await RunnerService.SetServiceStartModeAsync(key, StartMode(start));
+    }
+
+    /// <summary>The sc.exe start= value for a <see cref="RunnerStart"/> value: disabled, manually, or else with Windows.</summary>
+    internal static string StartMode(string start)
+        => start == RunnerStart.Disabled ? ServiceStart.Disabled : StartMode(enabled: true, manualStart: start == RunnerStart.Off);
 }

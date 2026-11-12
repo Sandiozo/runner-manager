@@ -426,6 +426,92 @@ public class RunsTwiceTests : IDisposable
         Assert.Null(RunnerService.DisabledServiceEditProblem(manual));
     }
 
+    // ----- A failed move puts the Windows service back as it was -----
+
+    [Theory]
+    // The owner's console runners: the service disabled by hand, and the console window open, closed (a startup entry
+    // opens it at sign-in), or not used at all.
+    [InlineData("Disabled", "open", ServiceStart.Disabled, false)]
+    [InlineData("Disabled", "at sign-in", ServiceStart.Disabled, false)]
+    [InlineData("Disabled", "none", ServiceStart.Disabled, false)]
+    // A service runner that starts manually or with Windows.
+    [InlineData("Manual", "none", ServiceStart.Manual, true)]
+    [InlineData("Auto", "none", ServiceStart.Automatic, true)]
+    // A console runner whose service is installed, stopped and not disabled.
+    [InlineData("Manual", "open", ServiceStart.Manual, false)]
+    [InlineData("Auto", "at sign-in", ServiceStart.Automatic, false)]
+    public async Task AFailedMove_PutsTheServiceBackAsItWas_AndStartsItOnlyWhereItRanTheRunner(string startMode, string console, string putBack, bool started)
+    {
+        var root = MakeRunner("project-Livonia-3");
+        var startup = console == "none" ? new List<string>() : StartupShortcut(root);
+        var processes = console == "open" ? new List<ProcessInfo> { Listener(root, 9100, 1) } : new List<ProcessInfo>();
+        var state = startMode != "Disabled" && console == "none" ? "Running" : "Stopped";
+        var before = await Read(root, new List<RunnerServiceRecord> { Service(root, state, startMode, name: CoreService) }, processes, startup);
+        Assert.False(before.RunsTwice);
+
+        // Step 1 records how the runner ran in the marker, closes the console window and disables the service.
+        var recorded = FleetActions.BeforeMove(before);
+        var marker = Path.Combine(root, RunnerService.MovedAwayMarker);
+        File.WriteAllText(marker, RunnerService.MovedAwayText(DateTime.UtcNow, recorded.ManualStart, recorded.ServiceStart, recorded.Console));
+        var moving = await Read(root, new List<RunnerServiceRecord> { Service(root, "Stopped", "Disabled", name: CoreService) }, new List<ProcessInfo>(), startup);
+        Assert.True(moving.MovedAway);
+        // A second try (after a move that got no answer) records the same, not that the move disabled the service.
+        Assert.Equal(recorded, FleetActions.BeforeMove(moving));
+        // The new copy on the other PC is registered as on the first try.
+        Assert.Equal(before.RegistrationOptions, moving.RegistrationOptions);
+
+        // The move fails: the service starts as it did before, and is started only where it ran the runner.
+        var undo = FleetActions.AfterFailedMove(moving);
+        Assert.Equal(putBack, FleetActions.StartMode(undo.ServiceStart));
+        Assert.Equal(started, undo.Start);
+        Assert.StartsWith(started ? "The runner was started again." : "The runner is as it was before the move.", undo.Text);
+        if (console != "none") Assert.Contains("console window", undo.Text);
+        else if (!started) Assert.Contains("disabled, as before, and was not started", undo.Text);
+    }
+
+    [Fact]
+    public void TheMoveMarker_IsStillReadBy290_AndMarkersOf290AreReadAsBefore()
+    {
+        // 2.9.0 reads only whether a line is "start=manual": the service then starts manually after a failed move, and
+        // with Windows otherwise. That line is written as before.
+        static bool ManualFor290(string text) => text.Split('\n').Any(l => l.Trim() == "start=manual");
+        var now = DateTime.UtcNow;
+        var manual = RunnerService.MovedAwayText(now, manualStart: true, RunnerStart.Off, console: false);
+        Assert.StartsWith("Moved to another PC on ", manual);
+        Assert.True(ManualFor290(manual));
+        Assert.False(ManualFor290(RunnerService.MovedAwayText(now, manualStart: false, RunnerStart.WithWindows, console: false)));
+        Assert.False(ManualFor290(RunnerService.MovedAwayText(now, manualStart: false, RunnerStart.Disabled, console: true)));
+
+        // What this version writes, it reads back.
+        foreach (var start in new[] { RunnerStart.WithWindows, RunnerStart.Off, RunnerStart.Disabled })
+        foreach (var console in new[] { false, true })
+            Assert.Equal((start == RunnerStart.Off, start, console),
+                RunnerService.ParseMovedAway(RunnerService.MovedAwayText(now, start == RunnerStart.Off, start, console).Split(Environment.NewLine)));
+        // A marker of 2.9.0 has no service line: the service is put back as 2.9.0 put it back.
+        Assert.Equal((true, RunnerStart.Off, false), RunnerService.ParseMovedAway(new[] { "Moved to another PC on 2026-11-01T10:00:00Z.", "start=manual" }));
+        Assert.Equal((false, RunnerStart.WithWindows, false), RunnerService.ParseMovedAway(new[] { "Moved to another PC on 2026-11-01T10:00:00Z." }));
+        // Without a marker (none could be read), as before: with Windows, and started.
+        Assert.Equal((RunnerStart.WithWindows, true), (FleetActions.AfterFailedMove(null).ServiceStart, FleetActions.AfterFailedMove(null).Start));
+        Assert.Equal(ServiceStart.Disabled, FleetActions.StartMode(RunnerStart.Disabled));
+        Assert.Equal(ServiceStart.Manual, FleetActions.StartMode(RunnerStart.Off));
+        Assert.Equal(ServiceStart.Automatic, FleetActions.StartMode(RunnerStart.WithWindows));
+    }
+
+    [Fact]
+    public void AFailedMoveOfARunnerInAConsoleWindow_IsUndoneOnlyByAPcThatDoesNotStartItsService()
+    {
+        var console = new MachineRunnerStatus { ServiceName = CoreService, ServiceInstalled = true, IsInteractive = true };
+        var service = new MachineRunnerStatus { ServiceName = CoreService, ServiceInstalled = true, IsRunning = true };
+        MachineInfo Source(string version) => MachineInfo.FromPayload("sandis", new MachineStatusPayload { MachineName = "SANDIS", AppVersion = version });
+
+        Assert.True(FleetActions.UndoesFailedMove(service, Source("2.9.0"), runsHere: false));
+        Assert.False(FleetActions.UndoesFailedMove(console, Source("2.9.0"), runsHere: false));
+        Assert.False(FleetActions.UndoesFailedMove(console, Source(""), runsHere: false));
+        Assert.True(FleetActions.UndoesFailedMove(console, Source("2.10.0"), runsHere: false));
+        Assert.True(FleetActions.UndoesFailedMove(console, Source("2.11.1"), runsHere: false));
+        Assert.True(FleetActions.UndoesFailedMove(console, Source("2.9.0"), runsHere: true));
+    }
+
     // ----- Which concern a runner shows -----
 
     private static RunnerHealth StuckJob(string subject = "job-1")
