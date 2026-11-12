@@ -32,7 +32,12 @@ public static class AssistantHost
         => args.Length > 0 && (args[0].Equals(McpArgument, StringComparison.OrdinalIgnoreCase) || args[0].Equals(CliArgument, StringComparison.OrdinalIgnoreCase));
 
     public static Task<int> RunAsync(string[] args)
-        => args[0].Equals(McpArgument, StringComparison.OrdinalIgnoreCase) ? RunStdioAsync() : RunCliAsync(args.Skip(1).ToArray());
+    {
+        // The AI tool starts this process, and may give it administrator rights. The fleet agent alone decides what
+        // the AI assistant switches allow, so this process never reads them, and never moves or writes them.
+        AssistantSwitches.LeaveToFleetAgent();
+        return args[0].Equals(McpArgument, StringComparison.OrdinalIgnoreCase) ? RunStdioAsync() : RunCliAsync(args.Skip(1).ToArray());
+    }
 
     /// <summary>Asks the user in a Runner Manager window in front of other windows, after any approval asked before.</summary>
     /// <param name="client">How to name the client (see <see cref="McpServer.ClientLabel"/>).</param>

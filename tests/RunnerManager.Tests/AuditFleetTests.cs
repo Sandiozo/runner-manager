@@ -986,18 +986,23 @@ public class AssistantSwitchTests
     private static readonly string ConfigPath = Path.Combine(FleetConfig.StateDir, "fleet.json");
 
     /// <summary>Runs a test with its own switch store, a file that stands in for the registry, and puts back the one before it.</summary>
-    private static Task WithStoreAsync(bool administrator, Action<string> test) => AuditFleetConfig.WithConfigAsync(() =>
+    private static Task WithStoreAsync(bool administrator, Action<string> test) => WithStoreAsync(administrator, path =>
+    {
+        test(path);
+        return Task.CompletedTask;
+    });
+
+    private static Task WithStoreAsync(bool administrator, Func<string, Task> test) => AuditFleetConfig.WithConfigAsync(async () =>
     {
         var path = Path.Combine(FleetConfig.StateDir, $"assistant-switches-{Guid.NewGuid():N}.json");
         var before = AssistantSwitches.Store;
         AssistantSwitches.Store = new FileSwitchStore(path) { CanWrite = administrator };
-        try { test(path); }
+        try { await test(path); }
         finally
         {
             AssistantSwitches.Store = before;
             File.Delete(path);
         }
-        return Task.CompletedTask;
     });
 
     private static void WriteFleetJson(string json)
@@ -1018,6 +1023,59 @@ public class AssistantSwitchTests
     {
         var store = Assert.IsType<FileSwitchStore>(AssistantSwitches.Store);
         Assert.Equal(Path.Combine(FleetConfig.StateDir, "assistant-switches.json"), store.Where);
+    }
+
+    [Fact]
+    public void RunnerManager_KeepsTheSwitchesInTheRegistry_WhateverTheStateFolderVariableSays()
+    {
+        // The tests set the variable, as a program without administrator rights can in HKCU\Environment.
+        Assert.False(string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("RUNNER_MANAGER_STATE_DIR")));
+        var store = Assert.IsType<RegistrySwitchStore>(AssistantSwitches.ShippedStore());
+        Assert.Equal(@"HKEY_LOCAL_MACHINE\SOFTWARE\RunnerManager", store.Where);
+
+        // And Runner Manager has no store that keeps them anywhere a program without those rights could change.
+        var stores = typeof(AssistantSwitches).Assembly.GetTypes()
+            .Where(t => !t.IsInterface && typeof(IAssistantSwitchStore).IsAssignableFrom(t)).ToList();
+        Assert.Equal(new[] { typeof(FleetAgentSwitchStore), typeof(RegistrySwitchStore) }, stores.OrderBy(t => t.Name));
+    }
+
+    [Fact]
+    public async Task AnAssistantLaunch_NeitherReadsNorChangesTheSwitches_EvenWithAdministratorRights()
+    {
+        await WithStoreAsync(administrator: true, async path =>
+        {
+            new FileSwitchStore(path).Write(new AssistantSwitchValues(true, false));
+            WriteFleetJson("{\"Assistant\":{\"Enabled\":true,\"AskBeforeChanges\":false}}");
+            // What RunnerManager.exe ai and --mcp do first.
+            Assert.Equal(0, await AssistantHost.RunAsync(new[] { AssistantHost.CliArgument, "help" }));
+            Assert.IsType<FleetAgentSwitchStore>(AssistantSwitches.Store);
+
+            // The fleet agent decides; this process sees only the defaults, and moves and writes nothing.
+            Assert.False(FleetConfig.Current.Assistant.Enabled);
+            Assert.True(FleetConfig.Current.Assistant.AskBeforeChanges);
+            var refused = Assert.Throws<UnauthorizedAccessException>(() => FleetConfig.Update(c => c.Assistant.AskBeforeChanges = false));
+            Assert.Equal(AssistantSwitches.NotAdministratorText, refused.Message);
+            Assert.Throws<UnauthorizedAccessException>(() => AssistantSwitches.Set(enabled: false));
+            Assert.Equal(new AssistantSwitchValues(true, false), new FileSwitchStore(path).Read());
+        });
+    }
+
+    [Fact]
+    public async Task RemovedForUninstall_TheSwitchesAreNotMovedFromFleetJsonAgain()
+    {
+        await WithStoreAsync(administrator: true, path =>
+        {
+            WriteFleetJson("{\"Assistant\":{\"Enabled\":true,\"AskBeforeChanges\":false}}");
+            Assert.True(FleetConfig.Current.Assistant.Enabled);
+            Assert.True(File.Exists(path));
+
+            AssistantSwitches.Remove();
+            Assert.False(File.Exists(path));
+            WriteFleetJson("{\"Assistant\":{\"Enabled\":true,\"AskBeforeChanges\":false}}");
+            Assert.False(FleetConfig.Current.Assistant.Enabled);
+            Assert.True(FleetConfig.Current.Assistant.AskBeforeChanges);
+            Assert.False(File.Exists(path));
+        });
     }
 
     [Fact]

@@ -25,8 +25,9 @@ internal interface IAssistantSwitchStore
 /// <summary>
 /// The AI assistant switches, kept where only an administrator can change them and everyone can read them, so that a
 /// program running as the user without administrator rights cannot turn assistants on or approvals off. The dashboard and
-/// the fleet agent run as administrator and change them; <c>--mcp</c> and <c>ai</c> only read them. Earlier versions kept
-/// them in fleet.json, which every program of the user can change: they are moved from there once.
+/// the fleet agent run as administrator and change them. <c>--mcp</c> and <c>ai</c> neither read nor change them: they
+/// forward every call to the fleet agent, which decides. Earlier versions kept them in fleet.json, which every program of
+/// the user can change: they are moved from there once.
 /// </summary>
 internal static class AssistantSwitches
 {
@@ -38,13 +39,23 @@ internal static class AssistantSwitches
     private static readonly object Gate = new();
     private static IAssistantSwitchStore? _checked;
 
-    /// <summary>The registry, or a file in the state folder when RUNNER_MANAGER_STATE_DIR is set (tests).</summary>
-    internal static IAssistantSwitchStore Store { get; set; } = CreateStore();
+    /// <summary>
+    /// Where this process keeps the switches: <see cref="ShippedStore"/>, or <see cref="FleetAgentSwitchStore"/> in
+    /// <c>--mcp</c> and <c>ai</c>. Tests set a store of their own here, in code.
+    /// </summary>
+    internal static IAssistantSwitchStore Store { get; set; } = ShippedStore();
 
-    private static IAssistantSwitchStore CreateStore()
-        => string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("RUNNER_MANAGER_STATE_DIR"))
-            ? new RegistrySwitchStore()
-            : new FileSwitchStore(Path.Combine(AppPaths.StateDir, "assistant-switches.json"));
+    /// <summary>
+    /// The registry, always. No environment variable, file or argument chooses another place: a program without
+    /// administrator rights can set those for the elevated fleet agent and dashboard, and so would choose the switches.
+    /// </summary>
+    internal static IAssistantSwitchStore ShippedStore() => new RegistrySwitchStore();
+
+    /// <summary>
+    /// For <c>--mcp</c> and <c>ai</c>, which forward every call to the fleet agent. From here on this process neither
+    /// reads nor changes the switches, also when it runs with administrator rights: the fleet agent alone decides.
+    /// </summary>
+    internal static void LeaveToFleetAgent() => Store = new FleetAgentSwitchStore();
 
     /// <summary>The switches. Nothing stored yet, or nothing readable, means the defaults: off, and asking.</summary>
     public static AssistantSwitchValues Current
@@ -107,8 +118,19 @@ internal static class AssistantSwitches
         }
     }
 
-    /// <summary>Removes the stored switches from this PC, for uninstall. Needs administrator rights.</summary>
-    internal static void Remove() => Store.Remove();
+    /// <summary>
+    /// Removes the stored switches from this PC, for uninstall. Needs administrator rights. This process does not move
+    /// them from fleet.json again afterwards.
+    /// </summary>
+    internal static void Remove()
+    {
+        var store = Store;
+        lock (Gate)
+        {
+            store.Remove();
+            _checked = store;
+        }
+    }
 
     private static void Write(IAssistantSwitchStore store, AssistantSwitchValues values)
     {
@@ -184,26 +206,18 @@ internal sealed class RegistrySwitchStore : IAssistantSwitchStore
 }
 
 /// <summary>
-/// The switches in a file, in place of the registry when RUNNER_MANAGER_STATE_DIR is set, so tests never touch the real
-/// registry. <see cref="CanWrite"/> stands in for administrator rights.
+/// The store of a process that forwards every call to the fleet agent (<c>--mcp</c>, <c>ai</c>): it holds nothing and
+/// changes nothing, so the defaults (off, asking) are all such a process could see.
 /// </summary>
-internal sealed class FileSwitchStore(string path) : IAssistantSwitchStore
+internal sealed class FleetAgentSwitchStore : IAssistantSwitchStore
 {
-    public string Where => path;
+    public string Where => "the fleet agent";
 
-    public bool CanWrite { get; init; } = true;
+    public bool CanWrite => false;
 
-    public AssistantSwitchValues? Read()
-        => File.Exists(path) ? JsonSerializer.Deserialize<AssistantSwitchValues>(File.ReadAllText(path)) : null;
+    public AssistantSwitchValues? Read() => null;
 
-    public void Write(AssistantSwitchValues values)
-    {
-        if (!CanWrite) throw new UnauthorizedAccessException($"Access to {path} is denied.");
-        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        var temp = $"{path}.{Environment.ProcessId}.tmp";
-        File.WriteAllText(temp, JsonSerializer.Serialize(values));
-        File.Move(temp, path, overwrite: true);
-    }
+    public void Write(AssistantSwitchValues values) => throw new UnauthorizedAccessException(AssistantSwitches.NotAdministratorText);
 
-    public void Remove() => File.Delete(path);
+    public void Remove() => throw new UnauthorizedAccessException(AssistantSwitches.NotAdministratorText);
 }
