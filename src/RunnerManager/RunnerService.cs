@@ -125,7 +125,7 @@ public static partial class RunnerService
             remote = await GitHubCli.GetRunnerStateAsync(scope, config.AgentId);
             // Job and queue details come from a repository's workflow runs, so they only exist for repository runners.
             if (!string.IsNullOrWhiteSpace(repoPath))
-                work = await GitHubApi.GetRunnerWorkAsync(repoPath, config.AgentId, remote?.Labels ?? Array.Empty<string>());
+                work = await GitHubApi.GetRunnerWorkAsync(repoPath, config.AgentId, remote?.Labels ?? Array.Empty<string>(), config.AgentName);
         }
         var workFolder = ResolveWorkFolder(root, config.WorkFolder);
 
@@ -421,7 +421,12 @@ public static partial class RunnerService
         log("Runner service repaired.");
     }
 
-    public static async Task EditRunnerAsync(string key, string newName, string[] requestedLabels, Action<string> log)
+    /// <param name="requestedLabels">The custom labels the runner gets. Empty keeps the ones it has, unless <paramref name="clearLabels"/> is set.</param>
+    /// <param name="clearLabels">
+    /// An empty <paramref name="requestedLabels"/> removes every custom label. Without it an empty list keeps the
+    /// runner's labels, because the dashboard also has an empty list when GitHub did not answer.
+    /// </param>
+    public static async Task EditRunnerAsync(string key, string newName, string[] requestedLabels, Action<string> log, bool clearLabels = false)
     {
         await EnsureAuthenticatedAsync("GitHub is not connected on the target PC. Connect GitHub on that PC and try again.");
         if (string.IsNullOrWhiteSpace(newName))
@@ -436,14 +441,21 @@ public static partial class RunnerService
         var labels = (requestedLabels ?? Array.Empty<string>()).Where(x => !string.IsNullOrWhiteSpace(x))
             .Select(x => x.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         // The current name, labels and settings are read before config remove: blank labels mean "keep the current
-        // ones", and a failed registration is rolled back to them.
+        // ones" (unless clearLabels), and a failed registration is rolled back to them.
         var current = await ReadRegistrationBeforeRemovalAsync(local);
-        var wanted = current with { Name = newName.Trim(), Labels = labels.Length == 0 ? current.Labels : labels };
+        var wanted = current with { Name = newName.Trim(), Labels = LabelsAfterEdit(current.Labels, labels, clearLabels) };
         EnsureValidConfigInput(wanted.Url, wanted.Name, wanted.Labels);
         await EnsureNameIsFreeAsync(local, wanted.Name);
         var wasRunning = local.IsRunning;
         var wasMarked = IsMarkedStopped(local.Name);
-        var restoreRecovery = HoldAutoRecovery(local.Name);
+        var restoreOldName = HoldAutoRecovery(local.Name);
+        // config.cmd gives a renamed runner a new service name and starts it, so that name is held as well.
+        var restoreNewName = HoldAutoRecovery(ServiceNameAfterRename(local.Name, wanted.Name));
+        void restoreRecovery()
+        {
+            restoreNewName();
+            restoreOldName();
+        }
         try
         {
             // A job may have started while GitHub was read.
@@ -454,42 +466,76 @@ public static partial class RunnerService
         }
         catch
         {
-            restoreRecovery();
             // Registering again with the old values (the rollback) also starts the service.
-            try { await KeepRunStateAsync(local, wasRunning, wasMarked, log); }
+            try { await KeepRunStateAsync(local, wasRunning, wasMarked, restoreRecovery, log); }
             catch (Exception ex) { log($"Could not leave the runner running or stopped as it was: {ex.Message}"); }
             throw;
         }
-        restoreRecovery();
-        await KeepRunStateAsync(local, wasRunning, wasMarked, log);
+        await KeepRunStateAsync(local, wasRunning, wasMarked, restoreRecovery, log);
         log("Runner settings updated.");
+    }
+
+    /// <summary>
+    /// The custom labels a runner gets from an edit: the requested ones, or its current ones when none are requested.
+    /// No labels at all only with <paramref name="clearLabels"/>: the dashboard also has an empty list when GitHub did
+    /// not answer, and that must not remove the runner's labels.
+    /// </summary>
+    internal static string[] LabelsAfterEdit(string[] current, string[] requested, bool clearLabels)
+        => requested.Length > 0 || clearLabels ? requested : current;
+
+    /// <summary>
+    /// The service name config.cmd gives a runner that is renamed: actions.runner.{owner-repo}.{name}. Empty when the
+    /// name does not change, and when config.cmd would shorten the name (over 80 characters, with a random ending).
+    /// Only used to hold auto-recovery, so a guess that is wrong does no harm.
+    /// </summary>
+    internal static string ServiceNameAfterRename(string serviceName, string newName)
+    {
+        var dot = serviceName.LastIndexOf('.');
+        if (!serviceName.StartsWith("actions.runner.", StringComparison.OrdinalIgnoreCase) || dot < "actions.runner.".Length) return string.Empty;
+        if (serviceName[(dot + 1)..].Equals(newName, StringComparison.OrdinalIgnoreCase)) return string.Empty;
+        var renamed = serviceName[..(dot + 1)] + newName;
+        return renamed.Length <= 80 ? renamed : string.Empty;
     }
 
     /// <summary>
     /// After a runner was registered again: config.cmd starts the service it installs, and a new runner name gives the
     /// service a new name. The runner is left running or stopped as it was, and the stopped mark moves to the new name.
+    /// Auto-recovery stays held (under the new name too) until the runner is as it was, and only then
+    /// <paramref name="restoreRecovery"/> runs: a runner the watchdog sees running while it is not held counts as one
+    /// to keep running, and the watchdog would start it again after the stop below.
     /// </summary>
-    private static async Task KeepRunStateAsync(RunnerInfo before, bool wasRunning, bool wasMarked, Action<string> log)
+    private static async Task KeepRunStateAsync(RunnerInfo before, bool wasRunning, bool wasMarked, Action restoreRecovery, Action<string> log)
     {
-        var updated = (await ReadSnapshotAsync(queryGitHub: false))
-            .FirstOrDefault(r => r.InstallPath.Equals(before.InstallPath, StringComparison.OrdinalIgnoreCase));
-        if (updated == null || !updated.ServiceInstalled) return;
-        if (!string.IsNullOrEmpty(before.Name) && !updated.Name.Equals(before.Name, StringComparison.OrdinalIgnoreCase))
+        RunnerInfo? updated = null;
+        var renamed = false;
+        try
         {
-            MarkStopped(before.Name, false);
-            if (wasMarked) MarkStopped(updated.Name, true);
-        }
-        if (wasRunning && !updated.IsRunning) await ControlServiceAsync(updated.Name, "Start");
-        else if (!wasRunning && updated.IsRunning)
-        {
-            if (HasWorkerNow(updated))
+            updated = (await ReadSnapshotAsync(queryGitHub: false))
+                .FirstOrDefault(r => r.InstallPath.Equals(before.InstallPath, StringComparison.OrdinalIgnoreCase));
+            if (updated == null || !updated.ServiceInstalled) return;
+            renamed = !string.IsNullOrEmpty(before.Name) && !updated.Name.Equals(before.Name, StringComparison.OrdinalIgnoreCase);
+            if (renamed) MarkStopped(updated.Name, true);
+            if (wasRunning && !updated.IsRunning) await ControlServiceAsync(updated.Name, "Start");
+            else if (!wasRunning && updated.IsRunning)
             {
-                log("The runner took a job right after it was registered again, so it keeps running. Stop it when the job is done.");
-                return;
+                if (HasWorkerNow(updated))
+                {
+                    log("The runner took a job right after it was registered again, so it keeps running. Stop it when the job is done.");
+                    return;
+                }
+                // No mark is added: a runner that stopped without one (after a crash) stays under auto-recovery.
+                log("Stopping the runner again, as it was stopped before…");
+                await ControlServiceAsync(updated.Name, "Stop");
             }
-            // No mark is added: a runner that stopped without one (after a crash) stays under auto-recovery.
-            log("Stopping the runner again, as it was stopped before…");
-            await ControlServiceAsync(updated.Name, "Stop");
+        }
+        finally
+        {
+            restoreRecovery();
+            if (renamed)
+            {
+                MarkStopped(before.Name, false);
+                MarkStopped(updated!.Name, wasMarked);
+            }
         }
     }
 
@@ -1489,11 +1535,11 @@ public static partial class RunnerService
     /// The repository's URL under its current name. The GitHub API follows a renamed repository, but config.cmd does
     /// not, so registering with the old name fails with "Not Found".
     /// </summary>
-    private static async Task<string> CurrentRepositoryUrlAsync(string registrationUrl)
+    internal static async Task<string> CurrentRepositoryUrlAsync(string registrationUrl)
     {
         var path = RepositoryPath(registrationUrl);
-        if (string.IsNullOrWhiteSpace(path)) return registrationUrl;
-        var result = await GitHubCli.RunAsync($"api repos/{path} --jq .html_url");
+        if (!GitHubNames.IsRepositoryPath(path)) return registrationUrl;
+        var result = await GitHubCli.ApiAsync($"repos/{path}", "--jq", ".html_url");
         var current = result.ExitCode == 0 ? result.Output.Trim() : string.Empty;
         return RegistrationUrlProblem(current) == null && !current.Equals(registrationUrl.TrimEnd('/'), StringComparison.OrdinalIgnoreCase)
             ? current : registrationUrl;

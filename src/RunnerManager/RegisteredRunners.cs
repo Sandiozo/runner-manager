@@ -24,6 +24,8 @@ internal static class RegisteredRunners
     private static readonly Dictionary<string, (string ETag, IReadOnlyList<RegisteredRunner> Runners)> Known = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<string, DateTime> NotFound = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Task<IReadOnlyList<RegisteredRunner>?> NoList = Task.FromResult<IReadOnlyList<RegisteredRunner>?>(null);
+    /// <summary>Counts the calls of <see cref="Forget"/>, so a read that was sent before one does not store its 404 after it.</summary>
+    private static int _generation;
 
     /// <param name="scope">"repos/owner/repo" or "orgs/name".</param>
     /// <returns>The first 100 runners, or null when GitHub has not been read for this scope.</returns>
@@ -33,17 +35,36 @@ internal static class RegisteredRunners
     /// <param name="get">Reads an endpoint with an ETag; tests replace it.</param>
     internal static Task<IReadOnlyList<RegisteredRunner>?> GetAsync(string scope, Func<string, string?, Task<ConditionalResult>> get, DateTime nowUtc)
     {
+        // The scope comes from what a PC reports, so it is checked before it becomes part of a request.
+        if (!GitHubNames.IsScope(scope)) return NoList;
         lock (Gate)
         {
             if (NotFound.TryGetValue(scope, out var since) && nowUtc - since < NotFoundLifetime) return NoList;
             if (Reads.TryGetValue(scope, out var cached) && nowUtc - cached.Time < Lifetime) return cached.List;
-            var task = Task.Run(() => ReadAsync(scope, get, nowUtc));
+            var generation = _generation;
+            var task = Task.Run(() => ReadAsync(scope, get, nowUtc, generation));
             Reads[scope] = (nowUtc, task);
             return task;
         }
     }
 
-    private static async Task<IReadOnlyList<RegisteredRunner>?> ReadAsync(string scope, Func<string, string?, Task<ConditionalResult>> get, DateTime nowUtc)
+    /// <summary>
+    /// Forgets the 404 answers and the reads of the last minute, so every scope is asked again at the next check: after
+    /// the user connects GitHub (another account may see more) or asks for a refresh. Called by
+    /// <see cref="GitHubCli.ForgetProblems"/>. The last lists stay, for their ETags and for when GitHub cannot be read.
+    /// </summary>
+    internal static void Forget()
+    {
+        lock (Gate)
+        {
+            _generation++;
+            NotFound.Clear();
+            Reads.Clear();
+        }
+    }
+
+    private static async Task<IReadOnlyList<RegisteredRunner>?> ReadAsync(string scope, Func<string, string?, Task<ConditionalResult>> get,
+        DateTime nowUtc, int generation)
     {
         (string ETag, IReadOnlyList<RegisteredRunner> Runners)? known;
         lock (Gate) known = Known.TryGetValue(scope, out var entry) ? entry : null;
@@ -54,7 +75,7 @@ internal static class RegisteredRunners
             {
                 lock (Gate)
                 {
-                    NotFound[scope] = nowUtc;
+                    if (generation == _generation) NotFound[scope] = nowUtc;
                     Known.Remove(scope);
                 }
                 return null;

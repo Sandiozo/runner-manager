@@ -1,8 +1,8 @@
 namespace RunnerManager;
 
 /// <summary>
-/// What auto-recovery remembers about each runner service: whether the agent has seen it running, and when it last
-/// restarted it. A runner is restarted when it is seen stopped at two checks in a row, at most
+/// What auto-recovery remembers about each runner service: whether the agent has seen it running while it was not
+/// held, and when it last restarted it. A runner is restarted when it is seen stopped at two checks in a row, at most
 /// <see cref="MaxAttempts"/> times in <see cref="Window"/>; older attempts expire, so recovery resumes after that.
 /// A service that stays starting or stopping for <see cref="PendingLimit"/> is stuck, and counts as stopped.
 /// </summary>
@@ -43,8 +43,21 @@ internal sealed class RunnerRecovery
 
     /// <param name="interactive">It runs from a console window, so starting its service would run it twice.</param>
     /// <param name="pending">Its service is starting or stopping: something is acting on it right now.</param>
-    /// <param name="mayRecover">Auto-recovery is on, and the user did not stop the runner.</param>
+    /// <param name="mayRecover">
+    /// Auto-recovery is on, and the runner is not marked as stopped (by the user, or for the time a change such as an
+    /// edit holds auto-recovery). A runner is remembered as one to keep running only when it is seen running while
+    /// this is true; the overload with <c>held</c> keeps "auto-recovery is off" apart from the mark.
+    /// </param>
     public Step Check(string key, bool interactive, bool running, bool pending, bool mayRecover, DateTime nowUtc)
+        => Check(key, interactive, running, pending, watchdogOn: true, held: !mayRecover, nowUtc);
+
+    /// <param name="watchdogOn">Auto-recovery is on. A runner seen running while it is off is still remembered.</param>
+    /// <param name="held">
+    /// The runner is marked as stopped: the user stopped it, or a change holds auto-recovery for it. An edit holds it
+    /// while config.cmd registers the runner again, which starts it, and then stops it again when it was stopped. That
+    /// start is not the runner's own state: remembered, it would make the watchdog start the runner after the stop.
+    /// </param>
+    public Step Check(string key, bool interactive, bool running, bool pending, bool watchdogOn, bool held, DateTime nowUtc)
     {
         lock (_gate)
         {
@@ -55,7 +68,7 @@ internal sealed class RunnerRecovery
             }
             if (running)
             {
-                _wantRunning.Add(key);
+                if (!held) _wantRunning.Add(key);
                 _seenStopped.Remove(key);
                 _pendingSince.Remove(key);
                 // A later give-up is reported again. The attempts stay until they expire: a runner that stops soon
@@ -73,7 +86,7 @@ internal sealed class RunnerRecovery
                 }
             }
             else _pendingSince.Remove(key);
-            if (!mayRecover || !_wantRunning.Contains(key))
+            if (!watchdogOn || held || !_wantRunning.Contains(key))
             {
                 _seenStopped.Remove(key);
                 return Step.None;

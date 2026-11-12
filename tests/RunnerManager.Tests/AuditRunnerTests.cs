@@ -258,6 +258,78 @@ public class AuditRunnerTests
     public void ProcessArguments_LeaveOutCommonPasswordForms(string commandLine, string expected)
         => Assert.Equal(expected, RunnerActivity.ShortArguments(commandLine));
 
+    [Theory]
+    // -pw is PuTTY's password option, and it is a password for every program.
+    [InlineData(@"pscp.exe -pw Secret file.txt host:/tmp", "")]
+    [InlineData(@"plink -ssh -pw Secret host", "-ssh")]
+    [InlineData(@"psftp.exe -pw Secret host", "")]
+    [InlineData(@"""C:\Program Files\PuTTY\pscp.exe"" -pw Secret a b", "")]
+    [InlineData(@"C:\Program Files\PuTTY\plink.exe -batch -pw Secret host", "plink.exe -batch")]
+    [InlineData(@"tool.exe -pw=Secret run", "")]
+    [InlineData(@"tool.exe -pw:Secret run", "")]
+    [InlineData(@"tool.exe -pwSecret run", "")]
+    [InlineData(@"tool.exe -PW Secret run", "")]
+    [InlineData(@"tool.exe --pw Secret run", "")]
+    [InlineData(@"tool.exe /pw:Secret run", "")]
+    [InlineData("pscp.exe\t-pw\tSecret file.txt", "")]
+    [InlineData(@"tool.exe '-pw' 'Secret'", "")]
+    // -p and -P of docker, podman, helm, az, oc, psexec, PuTTY and twine, with or without .exe, a path or quotes.
+    [InlineData(@"docker login -p Secret ghcr.io", "login")]
+    [InlineData(@"docker.exe login -pSecret", "login")]
+    [InlineData(@"DOCKER.EXE login -p=Secret", "login")]
+    [InlineData(@"""C:\Program Files\Docker\Docker\resources\bin\docker.exe"" login -P Secret", "login")]
+    [InlineData(@"C:\Program Files\Docker\docker.exe login -p Secret", "docker.exe login")]
+    [InlineData(@"docker login --password Secret", "login")]
+    [InlineData(@"docker login --password=Secret", "login")]
+    [InlineData(@"podman.exe login -p Secret quay.io", "login")]
+    [InlineData(@"helm registry login -p Secret", "registry login")]
+    [InlineData(@"helm.exe repo add --password=Secret", "repo add")]
+    [InlineData(@"az.cmd login -p Secret", "login")]
+    [InlineData(@"oc login -p Secret", "login")]
+    [InlineData(@"C:\Tools\PsExec64.exe -accepteula -p Secret \\host cmd", "-accepteula")]
+    [InlineData(@"psexec -p Secret", "")]
+    [InlineData(@"""C:\Tools\PSEXEC.EXE"" -pSecret", "")]
+    [InlineData(@"plink.exe -P 22 host", "")]
+    [InlineData(@"twine upload -p Secret dist", "upload")]
+    // A program started through another one, or the rest of a path with spaces that is not in quotes.
+    [InlineData(@"cmd.exe /c mysql -pSecret", "c mysql")]
+    [InlineData(@"C:\Program Files\MySQL\bin\mysql.exe -pSecret db", "mysql.exe")]
+    // Other forms.
+    [InlineData(@"curl.exe -U proxyuser:Secret https://example.com", "")]
+    [InlineData(@"curl.exe --proxy-user=proxyuser:Secret https://example.com", "")]
+    [InlineData(@"curl.exe --proxy-user proxyuser:Secret https://example.com", "")]
+    [InlineData(@"nuget.exe push App.1.0.0.nupkg Secret -Source https://example.com", "push App.1.0.0.nupkg")]
+    [InlineData(@"tool.exe publish npm_abcdefgh123", "publish")]
+    [InlineData(@"vault.exe login hvs.CAESIabc", "login")]
+    [InlineData(@"tool.exe upload pypi-AgEIcHlwaS5vcmc", "upload")]
+    [InlineData(@"tool.exe login dckr_pat_abc123", "login")]
+    [InlineData(@"tool.exe call sk-ant-api03-abc", "call")]
+    [InlineData(@"tool.exe run --header=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig", "run")]
+    [InlineData(@"tool.exe send Endpoint=sb://bus.example.net/;SharedAccessKey=abc", "send")]
+    [InlineData(@"curl.exe https://maps.example.com/api?key=abc", "")]
+    // Ordinary arguments stay.
+    [InlineData(@"docker.exe build -t app .", "build -t app")]
+    [InlineData(@"pwsh.exe -NoProfile -File build.ps1", "-NoProfile -File build.ps1")]
+    [InlineData(@"psql.exe -U postgres -d app", "-U postgres -d")]
+    [InlineData(@"cmd.exe /c dotnet build -p:Configuration=Release", "c dotnet build")]
+    public void ProcessArguments_LeaveOutPasswordsAfterPw_AndOfMorePrograms(string commandLine, string expected)
+        => Assert.Equal(expected, RunnerActivity.ShortArguments(commandLine));
+
+    [Fact]
+    public void JobLog_ShowsTheNewestPage_WhenTheProcessListCannotBeRead()
+    {
+        var root = NewRunnerRoot();
+        try
+        {
+            WritePage(root, "a_1.log", "2026-10-19T12:00:00.0000000Z Compiling…\n", DateTime.UtcNow.AddHours(-2));
+
+            var lines = RunnerActivity.ReadOutput(root, 10, () => throw new System.Runtime.InteropServices.COMException("WMI is not available."));
+
+            Assert.Equal(new[] { "Compiling…", "" }, lines);
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
     /// <summary>
     /// A web server on this PC that answers one request with headers for a large file and then sends a byte every
     /// <paramref name="byteEvery"/>, or nothing more when it is null.
@@ -352,9 +424,10 @@ public class AuditRunnerTests
     private static GitHubJobState Queued(long id, DateTime nowUtc, params string[] labels)
         => new() { Id = id, Name = $"job{id}", WorkflowName = "CI", Status = "queued", CreatedUtc = nowUtc.AddMinutes(-10), Labels = labels };
 
+    /// <param name="usual">The usual duration read: Read is false when GitHub could not be read. Without it, the jobs have no history.</param>
     private static JobHealth.GitHubReads Reads(Func<string, RepositoryWorkState?> jobs, Func<string, IReadOnlyList<RegisteredRunner>?> runners,
-        Func<TimeSpan?>? usual = null)
-        => new(repository => Task.FromResult(jobs(repository)), (_, _, _) => Task.FromResult(usual?.Invoke()),
+        Func<(bool Read, TimeSpan? Usual)>? usual = null)
+        => new(repository => Task.FromResult(jobs(repository)), (_, _, _) => Task.FromResult(usual?.Invoke() ?? (true, null)),
             scope => Task.FromResult(runners(scope)));
 
     private static RepositoryWorkState Work(params GitHubJobState[] jobs)
@@ -372,7 +445,7 @@ public class AuditRunnerTests
         var machine = Pc("PC-LONG", Runner("audit/long", 11, busy: true, workerStarted: worker));
         var job = new GitHubJobState { Id = 501, Name = "build", WorkflowName = "CI", Status = "in_progress", RunnerId = 11, StartedUtc = worker, Labels = new[] { "self-hosted" } };
         var github = true;
-        var reads = Reads(_ => github ? Work(job) : null, _ => null, () => github ? TimeSpan.FromMinutes(90) : null);
+        var reads = Reads(_ => github ? Work(job) : null, _ => null, () => (github, github ? TimeSpan.FromMinutes(90) : (TimeSpan?)null));
         var key = JobHealth.Key(machine.Runners[0]);
 
         // GitHub knows it usually takes 90 minutes, so 130 minutes is fine.
@@ -394,7 +467,7 @@ public class AuditRunnerTests
         var machine = Pc("PC-SUBJECT", Runner("audit/subject", 12, busy: true, workerStarted: worker));
         var job = new GitHubJobState { Id = 502, Name = "build", WorkflowName = "CI", Status = "in_progress", RunnerId = 12, StartedUtc = worker, Labels = new[] { "self-hosted" } };
         var github = true;
-        var reads = Reads(_ => github ? Work(job) : null, _ => null, () => TimeSpan.FromMinutes(10));
+        var reads = Reads(_ => github ? Work(job) : null, _ => null, () => (true, TimeSpan.FromMinutes(10)));
         var key = JobHealth.Key(machine.Runners[0]);
 
         var first = (await JobHealth.EvaluateAsync(new[] { machine }, Quiet, null, reads, now)).Runners[key];
@@ -404,6 +477,115 @@ public class AuditRunnerTests
         Assert.Equal(RunnerConcern.RunningLong, first.Concern);
         Assert.Equal(first.Subject, second.Subject);
         Assert.Contains("usually takes 10 min", second.Detail);
+    }
+
+    [Fact]
+    public async Task FailedReadOfTheUsualDuration_IsNotTakenAsNoHistory()
+    {
+        var now = DateTime.UtcNow;
+        var worker = now.AddMinutes(-130);
+        var machine = Pc("PC-USUAL", Runner("audit/usual", 13, busy: true, workerStarted: worker));
+        var job = new GitHubJobState { Id = 503, Name = "build", WorkflowName = "CI", Status = "in_progress", RunnerId = 13, StartedUtc = worker, Labels = new[] { "self-hosted" } };
+        (bool Read, TimeSpan? Usual) usual = (false, null);
+        var reads = Reads(_ => Work(job), _ => null, () => usual);
+        var key = JobHealth.Key(machine.Runners[0]);
+
+        // The job is listed, but its earlier runs cannot be read: 130 minutes is not judged by the 2-hour limit.
+        Assert.False((await JobHealth.EvaluateAsync(new[] { machine }, Quiet, null, reads, now)).Runners[key].IsProblem);
+        Assert.False((await JobHealth.EvaluateAsync(new[] { machine }, Quiet, null, Reads(_ => null, _ => null), now)).Runners[key].IsProblem);
+
+        // GitHub answers that the job has no history: then the 2-hour limit is the right one.
+        usual = (true, null);
+        var health = (await JobHealth.EvaluateAsync(new[] { machine }, Quiet, null, reads, now)).Runners[key];
+        Assert.Equal(RunnerConcern.RunningLong, health.Concern);
+        Assert.Contains("longer than 2 h", health.Detail);
+    }
+
+    [Fact]
+    public async Task BusyRunner_IsNotGivenTheJob_OfAnotherRunnerWithTheSameId_OrAJobItGaveUp()
+    {
+        var now = DateTime.UtcNow;
+        var worker = now.AddMinutes(-30);
+        var machine = Pc("PC-MATCH", Runner("audit/match", 14, busy: true, workerStarted: worker));
+        var key = JobHealth.Key(machine.Runners[0]);
+        // An organization runner with the same ID, and a job this runner gave up when its PC restarted, both started 5 hours ago.
+        var organizationJob = new GitHubJobState
+        {
+            Id = 504, Name = "nightly", WorkflowName = "Nightly", Status = "in_progress", RunnerId = 14, RunnerName = "org-gpu",
+            StartedUtc = now.AddHours(-5), Labels = new[] { "self-hosted" }
+        };
+        var givenUp = new GitHubJobState
+        {
+            Id = 505, Name = "nightly", WorkflowName = "Nightly", Status = "in_progress", RunnerId = 14, RunnerName = "r14",
+            StartedUtc = now.AddHours(-5), Labels = new[] { "self-hosted" }
+        };
+        var current = new GitHubJobState
+        {
+            Id = 506, Name = "build", WorkflowName = "CI", Status = "in_progress", RunnerId = 14, RunnerName = "r14",
+            StartedUtc = worker, Labels = new[] { "self-hosted" }
+        };
+
+        // Only the organization runner's job is listed: it is not this runner's, whose own job is not listed yet.
+        var onlyOther = await JobHealth.EvaluateAsync(new[] { machine }, Quiet, null, Reads(_ => Work(organizationJob), _ => null), now);
+        Assert.False(onlyOther.Runners[key].IsProblem);
+
+        var all = await JobHealth.EvaluateAsync(new[] { machine }, Quiet, null,
+            Reads(_ => Work(organizationJob, givenUp, current), _ => null, () => (true, TimeSpan.FromMinutes(5))), now);
+        var health = all.Runners[key];
+        Assert.Equal(RunnerConcern.RunningLong, health.Concern);
+        Assert.Contains("usually takes 5 min", health.Detail);
+        Assert.Contains("run for 30 min", health.Detail);
+    }
+
+    [Theory]
+    [InlineData(null, 506L)]
+    [InlineData(-30, 506L)]
+    [InlineData(-300, 505L)]
+    public void RunningJob_IsTheOneThatStartedClosestToTheWorker_OrTheNewest(int? workerMinutes, long expected)
+    {
+        var now = DateTime.UtcNow;
+        var jobs = new[]
+        {
+            new GitHubJobState { Id = 505, Status = "in_progress", RunnerId = 14, RunnerName = "r14", StartedUtc = now.AddHours(-5) },
+            new GitHubJobState { Id = 506, Status = "in_progress", RunnerId = 14, RunnerName = "r14", StartedUtc = now.AddMinutes(-30) },
+            new GitHubJobState { Id = 507, Status = "in_progress", RunnerId = 14, RunnerName = "org-gpu", StartedUtc = now.AddMinutes(-1) },
+            new GitHubJobState { Id = 508, Status = "queued", RunnerId = 0 }
+        };
+
+        var job = GitHubApi.RunningJobOf(jobs, 14, "R14", workerMinutes is { } minutes ? now.AddMinutes(minutes) : null);
+
+        Assert.Equal(expected, job!.Id);
+        // Without a name to compare (an older caller, or GitHub gives none), the ID alone counts.
+        Assert.Equal(507, GitHubApi.RunningJobOf(jobs, 14)!.Id);
+        Assert.Null(GitHubApi.RunningJobOf(jobs, 0));
+    }
+
+    [Fact]
+    public async Task IdleRunner_CountsAsOnline_AsItWasBeforeGitHubWasRead_HoweverLongThatTakes()
+    {
+        var now = DateTime.UtcNow;
+        var machine = Pc("PC-SLOW", Runner("audit/slow", 15));
+        var key = JobHealth.Key(machine.Runners[0]);
+        var stale = MachineInfo.FromPayload("PC-SLOW", new MachineStatusPayload
+        {
+            MachineName = "PC-SLOW", UpdatedUtc = now.AddMinutes(-5), FleetAgentRunning = true, Runners = machine.Runners
+        });
+        Assert.True(machine.IsReachable);
+        // GitHub takes so long that, by the clock, the PC's last report is too old when the answer comes.
+        var reads = new JobHealth.GitHubReads(
+            _ =>
+            {
+                machine.Touch(stale);
+                return Task.FromResult<RepositoryWorkState?>(Work(Queued(901, now, "self-hosted")));
+            },
+            (_, _, _) => Task.FromResult<(bool, TimeSpan?)>((true, null)),
+            _ => Task.FromResult<IReadOnlyList<RegisteredRunner>?>(new[] { Registered(15, "self-hosted", "Windows", "X64") }));
+
+        var health = await JobHealth.EvaluateAsync(new[] { machine }, Quiet, null, reads, now);
+
+        Assert.False(machine.IsReachable);
+        Assert.Equal(RunnerConcern.IdleWithWaitingJobs, health.Runners[key].Concern);
+        Assert.Empty(health.Unserved);
     }
 
     [Fact]
@@ -438,26 +620,6 @@ public class AuditRunnerTests
             scope => scope == "repos/audit/ids-b" ? new[] { Registered(5, "self-hosted", "Windows", "X64"), Registered(21, "self-hosted", "gpu") } : null);
 
         Assert.Empty((await JobHealth.EvaluateAsync(new[] { machine }, Quiet, null, reads, now)).Unserved);
-    }
-
-    [Fact]
-    public async Task OrganizationRunnerList_OfAPersonalAccount_IsNotAskedAgainSoon()
-    {
-        var scope = $"orgs/audit-personal-{Guid.NewGuid():N}";
-        var asked = 0;
-        Task<ConditionalResult> Get(string endpoint, string? etag)
-        {
-            asked++;
-            return Task.FromResult(new ConditionalResult(404, string.Empty, """{"message":"Not Found"}"""));
-        }
-        var now = DateTime.UtcNow;
-
-        Assert.Null(await RegisteredRunners.GetAsync(scope, Get, now));
-        // Past the one-minute cache, the 404 is still remembered.
-        Assert.Null(await RegisteredRunners.GetAsync(scope, Get, now.AddMinutes(30)));
-        Assert.Equal(1, asked);
-        Assert.Null(await RegisteredRunners.GetAsync(scope, Get, now.AddHours(7)));
-        Assert.Equal(2, asked);
     }
 
     [Fact]
@@ -518,5 +680,193 @@ public class AuditRunnerTests
         Assert.Equal("delayed-auto", ServiceStart.Automatic);
         // WMI reports a delayed automatic start as Auto.
         Assert.Equal(RunnerStart.WithWindows, RunnerService.ServiceStartsAt("Auto"));
+    }
+
+    // ----- Editing a runner -----
+
+    [Fact]
+    public void EditedLabels_AreClearedOnlyWhenAskedFor()
+    {
+        var current = new[] { "gpu", "unity" };
+
+        Assert.Equal(new[] { "big" }, RunnerService.LabelsAfterEdit(current, new[] { "big" }, clearLabels: false));
+        Assert.Equal(new[] { "big" }, RunnerService.LabelsAfterEdit(current, new[] { "big" }, clearLabels: true));
+        // An empty list is also what the dashboard has when GitHub did not answer: the labels stay.
+        Assert.Equal(current, RunnerService.LabelsAfterEdit(current, Array.Empty<string>(), clearLabels: false));
+        Assert.Empty(RunnerService.LabelsAfterEdit(current, Array.Empty<string>(), clearLabels: true));
+    }
+
+    [Theory]
+    [InlineData("actions.runner.octo-app.build-01", "build-02", "actions.runner.octo-app.build-02")]
+    [InlineData("actions.runner.octo.build-01", "gpu", "actions.runner.octo.gpu")]
+    [InlineData("actions.runner.octo-app.build-01", "BUILD-01", "")]
+    [InlineData("actions.runner.octo-app.build-01", "a-name-long-enough-for-config-cmd-to-shorten-the-service-name", "")]
+    [InlineData(@"C:\GitHub-Runners\app", "build-02", "")]
+    [InlineData("", "build-02", "")]
+    public void RenamedRunner_GetsTheServiceNameThatConfigCmdGives(string serviceName, string newName, string expected)
+        => Assert.Equal(expected, RunnerService.ServiceNameAfterRename(serviceName, newName));
+
+    private static readonly DateTime Watch = new(2026, 11, 12, 9, 0, 0, DateTimeKind.Utc);
+
+    [Fact]
+    public void Runner_SeenRunningWhileAutoRecoveryIsHeld_IsNotStartedAfterItIsStoppedAgain()
+    {
+        const string key = "actions.runner.octo-app.edited";
+        var recovery = new RunnerRecovery();
+
+        // An edit of a stopped runner holds auto-recovery (the runner is marked), config.cmd starts the runner, and
+        // the edit stops it again. Then the mark is taken away.
+        recovery.Check(key, interactive: false, running: true, pending: false, mayRecover: false, Watch);
+        recovery.Check(key, interactive: false, running: false, pending: false, mayRecover: false, Watch.AddSeconds(10));
+        var after = Enumerable.Range(2, 4)
+            .Select(i => recovery.Check(key, interactive: false, running: false, pending: false, mayRecover: true, Watch.AddSeconds(10 * i)))
+            .ToList();
+
+        Assert.All(after, step => Assert.Equal(RunnerRecovery.Step.None, step));
+    }
+
+    [Fact]
+    public void Runner_SeenRunningWhileAutoRecoveryWasOff_IsStillRecoveredWhenItIsTurnedOn()
+    {
+        const string key = "actions.runner.octo-app.off";
+        var recovery = new RunnerRecovery();
+
+        recovery.Check(key, interactive: false, running: true, pending: false, watchdogOn: false, held: false, Watch);
+        Assert.Equal(RunnerRecovery.Step.None, recovery.Check(key, false, running: false, pending: false, watchdogOn: false, held: false, Watch.AddSeconds(10)));
+        Assert.Equal(RunnerRecovery.Step.None, recovery.Check(key, false, running: false, pending: false, watchdogOn: true, held: false, Watch.AddSeconds(20)));
+        Assert.Equal(RunnerRecovery.Step.Start, recovery.Check(key, false, running: false, pending: false, watchdogOn: true, held: false, Watch.AddSeconds(30)));
+
+        // Held while it was seen running: not remembered.
+        var held = new RunnerRecovery();
+        held.Check(key, interactive: false, running: true, pending: false, watchdogOn: true, held: true, Watch);
+        Assert.Equal(RunnerRecovery.Step.None, held.Check(key, false, running: false, pending: false, watchdogOn: true, held: false, Watch.AddSeconds(10)));
+        Assert.Equal(RunnerRecovery.Step.None, held.Check(key, false, running: false, pending: false, watchdogOn: true, held: false, Watch.AddSeconds(20)));
+    }
+}
+
+/// <summary>The gh calls of runner setup, with gh replaced (see <see cref="FakeGh"/>).</summary>
+[Collection(GitHubCliCollection.Name)]
+public class RunnerGitHubCallTests
+{
+    [Fact]
+    public async Task RenamedRepository_IsAskedFor_WithEachArgumentOnItsOwn()
+    {
+        using var gh = new FakeGh(_ => new CommandResult(0, "https://github.com/octo/new-name\n", string.Empty));
+
+        var url = await RunnerService.CurrentRepositoryUrlAsync("https://github.com/octo/old-name");
+
+        Assert.Equal("https://github.com/octo/new-name", url);
+        Assert.Equal(new[] { "api", "repos/octo/old-name", "--jq", ".html_url" }, Assert.Single(gh.Calls));
+        Assert.Empty(gh.CommandLines);
+    }
+
+    [Theory]
+    [InlineData("https://github.com/orgs/octo")]
+    [InlineData("https://example.com/octo/app")]
+    [InlineData("https://github.com/octo/app%20--jq")]
+    [InlineData("")]
+    public async Task RegistrationUrl_WithoutARepository_IsNotAskedFor(string registrationUrl)
+    {
+        using var gh = new FakeGh(_ => new CommandResult(0, "https://github.com/octo/other\n", string.Empty));
+
+        Assert.Equal(registrationUrl, await RunnerService.CurrentRepositoryUrlAsync(registrationUrl));
+        Assert.Empty(gh.Calls);
+    }
+}
+
+/// <summary>
+/// The runner lists of the health checks. <see cref="GitHubCli.ForgetProblems"/> clears them, and the GitHub CLI tests
+/// call it, so these tests do not run at the same time as those.
+/// </summary>
+[Collection(GitHubCliCollection.Name)]
+public class RegisteredRunnerTests
+{
+    /// <summary>A scope no other test uses: "orgs/" and at most 39 characters, as GitHub allows for a name.</summary>
+    private static string NewOrganization() => $"orgs/rr-{Guid.NewGuid():N}";
+
+    private static Task<ConditionalResult> NotFound() => Task.FromResult(new ConditionalResult(404, string.Empty, """{"message":"Not Found"}"""));
+
+    [Fact]
+    public async Task OrganizationRunnerList_OfAPersonalAccount_IsNotAskedAgainSoon()
+    {
+        var scope = NewOrganization();
+        var asked = 0;
+        Task<ConditionalResult> Get(string endpoint, string? etag)
+        {
+            asked++;
+            return NotFound();
+        }
+        var now = DateTime.UtcNow;
+
+        Assert.Null(await RegisteredRunners.GetAsync(scope, Get, now));
+        // Past the one-minute cache, the 404 is still remembered.
+        Assert.Null(await RegisteredRunners.GetAsync(scope, Get, now.AddMinutes(30)));
+        Assert.Equal(1, asked);
+        Assert.Null(await RegisteredRunners.GetAsync(scope, Get, now.AddHours(7)));
+        Assert.Equal(2, asked);
+    }
+
+    [Fact]
+    public async Task RunnerList_ThatWasNotFound_IsAskedAgain_AfterForgetProblems()
+    {
+        var scope = NewOrganization();
+        var answers = new Queue<Func<Task<ConditionalResult>>>(new Func<Task<ConditionalResult>>[]
+        {
+            NotFound,
+            () => Task.FromResult(new ConditionalResult(200, "W/\"a\"", """{"total_count":1,"runners":[{"id":3,"name":"gpu","labels":[{"name":"gpu"}]}]}"""))
+        });
+        var asked = 0;
+        Task<ConditionalResult> Get(string endpoint, string? etag)
+        {
+            asked++;
+            return answers.Dequeue()();
+        }
+        var now = DateTime.UtcNow;
+
+        Assert.Null(await RegisteredRunners.GetAsync(scope, Get, now));
+        // After "Connect GitHub" or a refresh by hand, the 404 and the read of the last minute are forgotten.
+        GitHubCli.ForgetProblems();
+        var list = await RegisteredRunners.GetAsync(scope, Get, now.AddSeconds(10));
+
+        Assert.Equal(2, asked);
+        Assert.Equal(3, Assert.Single(list!).Id);
+    }
+
+    [Fact]
+    public async Task NotFound_OfAReadSentBeforeForgetProblems_IsNotRemembered()
+    {
+        var scope = NewOrganization();
+        var first = new TaskCompletionSource<ConditionalResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var asked = 0;
+        Task<ConditionalResult> Get(string endpoint, string? etag) => ++asked == 1 ? first.Task : NotFound();
+        var now = DateTime.UtcNow;
+
+        var sent = RegisteredRunners.GetAsync(scope, Get, now);
+        while (asked == 0) await Task.Delay(10);
+        GitHubCli.ForgetProblems();
+        first.SetResult(new ConditionalResult(404, string.Empty, string.Empty));
+        Assert.Null(await sent);
+
+        // The answer came after the reset, so it is not kept for 6 hours.
+        Assert.Null(await RegisteredRunners.GetAsync(scope, Get, now.AddMinutes(2)));
+        Assert.Equal(2, asked);
+    }
+
+    [Theory]
+    [InlineData("orgs/octo --method DELETE")]
+    [InlineData("repos/octo/app/actions")]
+    [InlineData("users/octo")]
+    [InlineData("")]
+    public async Task RunnerList_OfAScopeThatIsNotAGitHubName_IsNotAsked(string scope)
+    {
+        var asked = 0;
+        Task<ConditionalResult> Get(string endpoint, string? etag)
+        {
+            asked++;
+            return NotFound();
+        }
+
+        Assert.Null(await RegisteredRunners.GetAsync(scope, Get, DateTime.UtcNow));
+        Assert.Equal(0, asked);
     }
 }

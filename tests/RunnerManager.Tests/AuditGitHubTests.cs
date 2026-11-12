@@ -173,6 +173,7 @@ internal sealed class FakeGh : IDisposable
         foreach (var name in TokenVariables) Environment.SetEnvironmentVariable(name, null);
         GitHubCli.ForgetGhFeatures();
         GitHubCli.ForgetProblems();
+        GitHubCli.ForgetSignIn();
         GitHubFailures.UtcNow = () => Now;
         GitHubCli.StartProcess = (startInfo, _, input) =>
         {
@@ -204,6 +205,7 @@ internal sealed class FakeGh : IDisposable
         GitHubCli.StartProcess = _previous;
         GitHubCli.ForgetGhFeatures();
         GitHubCli.ForgetProblems();
+        GitHubCli.ForgetSignIn();
         GitHubFailures.UtcNow = () => DateTime.UtcNow;
         for (var i = 0; i < TokenVariables.Length; i++) Environment.SetEnvironmentVariable(TokenVariables[i], _tokens[i]);
     }
@@ -234,11 +236,135 @@ public class GitHubActiveAccountTests
     [Fact]
     public async Task ActiveAccountWithAProblem_IsNotConnected()
     {
-        using var gh = new FakeGh(_ => new CommandResult(1, string.Empty, "github.com\n  X Failed to log in to github.com account octo (keyring)\n"));
+        using var gh = new FakeGh(arguments => arguments[0] == "auth" ? FailedToLogIn : BadCredentials);
 
         Assert.False(await GitHubCli.IsAuthenticatedAsync());
 
+        Assert.False(GitHubCli.SignInUnconfirmed);
+        Assert.Equal(new[] { ActiveStatus, SignedInUser }, gh.Calls);
+    }
+
+    // ----- No answer from GitHub -----
+
+    /// <summary>What gh 2.40 and later print for an account whose check failed, also when there is no network.</summary>
+    private static readonly CommandResult FailedToLogIn = new(1, string.Empty,
+        "github.com\n  X Failed to log in to github.com account octo (keyring)\n  - Active account: true\n  - The token in keyring is invalid.\n"
+        + "  - To re-authenticate, run: gh auth login -h github.com\n");
+    private static readonly CommandResult BadCredentials = new(1, string.Empty, "gh: Bad credentials (HTTP 401)\n");
+    private static readonly CommandResult NoConnection = new(1, string.Empty,
+        "error connecting to api.github.com\ncheck your internet connection or https://githubstatus.com\n");
+
+    [Fact]
+    public async Task NoNetwork_KeepsTheSignIn_ThatGitHubLastConfirmed()
+    {
+        var online = true;
+        using var gh = new FakeGh(arguments => online ? Works : arguments[0] == "auth" ? FailedToLogIn : NoConnection);
+        Assert.True(await GitHubCli.IsAuthenticatedAsync());
+        Assert.False(GitHubCli.SignInUnconfirmed);
+
+        online = false;
+        Assert.True(await GitHubCli.IsAuthenticatedAsync());
+
+        Assert.True(GitHubCli.SignInUnconfirmed);
+        Assert.Equal(new[] { ActiveStatus, ActiveStatus, SignedInUser }, gh.Calls);
+
+        online = true;
+        Assert.True(await GitHubCli.IsAuthenticatedAsync());
+        Assert.False(GitHubCli.SignInUnconfirmed);
+    }
+
+    [Fact]
+    public async Task NoNetwork_KeepsASignInThatGitHubRefused_AsRefused()
+    {
+        var online = true;
+        using var gh = new FakeGh(arguments => arguments[0] == "auth" ? FailedToLogIn : online ? BadCredentials : NoConnection);
+        Assert.False(await GitHubCli.IsAuthenticatedAsync());
+
+        online = false;
+        Assert.False(await GitHubCli.IsAuthenticatedAsync());
+
+        Assert.True(GitHubCli.SignInUnconfirmed);
+    }
+
+    [Fact]
+    public async Task NoNetwork_BeforeGitHubEverAnswered_CountsTheStoredSignInAsWorking()
+    {
+        using var gh = new FakeGh(arguments => arguments[0] == "auth" ? FailedToLogIn : NoConnection);
+
+        Assert.True(await GitHubCli.IsAuthenticatedAsync());
+
+        Assert.True(GitHubCli.SignInUnconfirmed);
+    }
+
+    [Fact]
+    public async Task NoNetwork_WithoutAStoredSignIn_IsNotConnected()
+    {
+        // gh answers this itself, without GitHub.
+        using var gh = new FakeGh(_ => new CommandResult(1, string.Empty, "You are not logged into any GitHub hosts. To log in, run: gh auth login\n"));
+
+        Assert.False(await GitHubCli.IsAuthenticatedAsync());
+
+        Assert.False(GitHubCli.SignInUnconfirmed);
         Assert.Equal(ActiveStatus, Assert.Single(gh.Calls));
+    }
+
+    [Fact]
+    public async Task SignInCheck_ThatDoesNotFinish_IsNotASignOut()
+    {
+        var online = true;
+        using var gh = new FakeGh(_ => online ? Works : null);
+        Assert.True(await GitHubCli.IsAuthenticatedAsync());
+
+        online = false;
+        Assert.True(await GitHubCli.IsAuthenticatedAsync());
+
+        Assert.True(GitHubCli.SignInUnconfirmed);
+        // gh waited for GitHub until the time limit, so it is not asked again for the same answer.
+        Assert.Equal(new[] { ActiveStatus, ActiveStatus }, gh.Calls);
+    }
+
+    [Theory]
+    [InlineData(1, "gh: API rate limit exceeded for user ID 1. (HTTP 403)\n")]
+    [InlineData(1, "gh: HTTP 502\n")]
+    [InlineData(1, "Get \"https://api.github.com/user\": dial tcp: lookup api.github.com: no such host\n")]
+    [InlineData(1, "")]
+    public async Task AnswerThatSaysNothingAboutTheSignIn_KeepsTheLastState(int exitCode, string error)
+    {
+        var online = true;
+        using var gh = new FakeGh(arguments => online ? Works : arguments[0] == "auth" ? FailedToLogIn : new CommandResult(exitCode, string.Empty, error));
+        Assert.True(await GitHubCli.IsAuthenticatedAsync());
+
+        online = false;
+        Assert.True(await GitHubCli.IsAuthenticatedAsync());
+
+        Assert.True(GitHubCli.SignInUnconfirmed);
+    }
+
+    [Theory]
+    [InlineData(1, "gh: HTTP 401\n")]
+    [InlineData(4, "To get started with GitHub CLI, please run:  gh auth login\n")]
+    public async Task SignInThatGitHubRefuses_IsNotConnected_AlsoAfterItWorked(int exitCode, string error)
+    {
+        var revoked = false;
+        using var gh = new FakeGh(arguments => !revoked ? Works : arguments[0] == "auth" ? FailedToLogIn : new CommandResult(exitCode, string.Empty, error));
+        Assert.True(await GitHubCli.IsAuthenticatedAsync());
+
+        revoked = true;
+        Assert.False(await GitHubCli.IsAuthenticatedAsync());
+
+        Assert.False(GitHubCli.SignInUnconfirmed);
+    }
+
+    [Fact]
+    public async Task NoNetwork_DoesNotTryTheTokenVariables()
+    {
+        using var gh = new FakeGh(arguments => arguments[0] == "auth" ? FailedToLogIn : NoConnection);
+        Environment.SetEnvironmentVariable("GH_TOKEN", "test-token-not-real");
+
+        Assert.True(await GitHubCli.IsAuthenticatedAsync());
+
+        // The stored sign-in was asked about (auth status, then who is signed in), the token variable was not.
+        Assert.Equal(new[] { ActiveStatus, SignedInUser }, gh.Calls);
     }
 
     [Fact]
@@ -955,6 +1081,66 @@ public class GitHubBackOffTests
         {
             $"{scope}/actions/runners?per_page=100", $"{scope}/actions/runners/1", $"{scope}/actions/runners/2", $"{scope}/actions/runners/3"
         }, gh.Endpoints);
+    }
+
+    [Fact]
+    public async Task JobView_WithAnAnswerThatCannotBeRead_IsPausedLikeAFailedRead()
+    {
+        var repository = NewRepository();
+        using var gh = new FakeGh(arguments => arguments[1].Contains("/jobs?", StringComparison.Ordinal)
+            ? FakeGh.Http(200, "<html>Unicorn</html>")
+            : arguments[1].Contains("status=in_progress", StringComparison.Ordinal)
+                ? FakeGh.Http(200, """{"total_count":1,"workflow_runs":[{"id":11,"name":"CI","run_number":3}]}""")
+                : FakeGh.Http(200, """{"total_count":0,"workflow_runs":[]}"""));
+
+        for (var tick = 0; tick < 5; tick++)
+        {
+            Assert.False((await GitHubApi.GetCurrentJobAsync(repository, 7)).Read);
+            gh.Now += TimeSpan.FromSeconds(3);
+        }
+        Assert.Equal(3, gh.Calls.Length);
+        Assert.Equal("GitHub's answer could not be read.", GitHubApi.ProblemFor(repository)!.Reason);
+
+        gh.Now = Noon.AddSeconds(46);
+        await GitHubApi.GetCurrentJobAsync(repository, 7);
+        Assert.Equal(6, gh.Calls.Length);
+        // The answer that could not be read was not kept, so its ETag is not sent: a 304 would only bring it back.
+        var jobRequest = gh.Calls.Last(c => c[1].Contains("/jobs?", StringComparison.Ordinal));
+        Assert.DoesNotContain("-H", jobRequest);
+    }
+
+    [Fact]
+    public async Task UsualDuration_WithARunThatCouldNotBeRead_IsNotNoHistory()
+    {
+        var repository = NewRepository();
+        var failing = true;
+        using var gh = new FakeGh(arguments => arguments[1].Contains("/runs/93002/jobs", StringComparison.Ordinal) && failing
+            ? FakeGh.Http(502, error: "gh: Bad Gateway (HTTP 502)")
+            : arguments[1].Contains("/jobs?", StringComparison.Ordinal)
+                ? FakeGh.Http(200, """{"total_count":1,"jobs":[{"id":1,"name":"build","status":"completed","conclusion":"success","started_at":"2026-11-09T10:00:00Z","completed_at":"2026-11-09T10:20:00Z"}]}""")
+                : FakeGh.Http(200, """{"total_count":3,"workflow_runs":[{"id":93001,"name":"CI"},{"id":93002,"name":"CI"},{"id":93003,"name":"CI"}]}"""));
+
+        // Two of the three runs give too few durations, but only because the third could not be read.
+        Assert.Equal((false, (TimeSpan?)null), await GitHubApi.ReadUsualJobDurationAsync(repository, "CI", "build"));
+        Assert.Null(await GitHubApi.GetUsualJobDurationAsync(repository, "CI", "build"));
+
+        // Not remembered: once the run can be read, the usual duration is there.
+        failing = false;
+        gh.Now += TimeSpan.FromSeconds(46);
+        Assert.Equal((true, (TimeSpan?)TimeSpan.FromMinutes(20)), await GitHubApi.ReadUsualJobDurationAsync(repository, "CI", "build"));
+    }
+
+    [Fact]
+    public async Task RunnerList_ThatCannotBeRead_IsAskedOncePerRunner_NotOnEveryRefresh()
+    {
+        var scope = $"repos/{NewRepository()}";
+        using var gh = new FakeGh(_ => FakeGh.Http(200, "Service temporarily unavailable"));
+
+        for (var refresh = 0; refresh < 4; refresh++)
+            foreach (var runner in new long[] { 1, 2 })
+                Assert.Null(await GitHubCli.GetRunnerStateAsync(scope, runner));
+
+        Assert.Equal(new[] { $"{scope}/actions/runners?per_page=100", $"{scope}/actions/runners/1", $"{scope}/actions/runners/2" }, gh.Endpoints);
     }
 
     [Fact]
