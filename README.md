@@ -15,14 +15,17 @@ A Windows dashboard for GitHub Actions self-hosted runners, on one PC or several
 
 ## Features
 
-- **Runners.** Add repository or organization runners, then start, stop, restart, edit, move and remove them. Runner
-  Manager downloads the official runner, verifies its SHA-256 checksum and installs it as a Windows service, in a
-  runner folder you choose for each PC. Choose for each runner whether it starts with Windows.
+- **Runners.** Add repository or organization runners, on this PC or on another PC of the fleet, then start, stop,
+  restart, edit, move and remove them. Runner Manager downloads the official runner, verifies its SHA-256 checksum and
+  installs it as a Windows service, in a runner folder you choose for each PC. Choose for each runner whether it
+  starts with Windows.
 - **Live jobs.** A busy runner shows its job and every step with its state and duration, and the processes the job
   runs with their CPU and memory. Its latest output opens in a tab next to Activity, where you can select and copy
   it. This works for runners on every PC; steps are shown for repository runners.
 - **Status at a glance.** Each runner shows its state, recent workflow runs, version and work folder size. Each PC
-  shows CPU, memory, disk space, uptime and pending restarts. Click a PC's name to collapse its card.
+  shows CPU, memory, disk space, uptime and pending restarts. Click a PC's name to collapse its card. A **Needs
+  attention** tile counts the PCs that are offline and the runners that are stopped or whose job looks stuck; click it
+  to show only those.
 - **Several PCs.** PCs connect directly over the local network, encrypted. Control the runners on every PC from any
   of them. A single PC works without any fleet setup.
 - **AI assistants.** Claude, Codex, Copilot, Cursor, Gemini and other AI tools that support MCP can list your runners,
