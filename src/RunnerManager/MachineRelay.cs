@@ -1579,7 +1579,7 @@ public static class MachineRelay
     /// Replaces a running (possibly older) agent: waits for its work to finish, stops it, re-registers the task for
     /// exe, and starts it.
     /// </summary>
-    private static async Task ReplaceAndStartAgentTaskAsync(string exe, Action<string>? log = null)
+    internal static async Task ReplaceAndStartAgentTaskAsync(string exe, Action<string>? log = null)
     {
         // Never stop another Windows user's agent.
         await AgentOwnership.EnsureOursAsync();

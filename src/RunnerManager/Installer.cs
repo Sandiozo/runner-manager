@@ -179,8 +179,9 @@ public static class Installer
 
     /// <summary>
     /// Puts back the exe that setup replaced (kept as RunnerManager.exe.previous) and this user's record of the install
-    /// folder. When setup was moving the install, the shortcuts, Settings → Apps entry and launch task point at the old
-    /// folder again, and the new copy is removed, unless other Windows users use it (<paramref name="keepNewCopy"/>).
+    /// folder. When setup was moving the install, the shortcuts, Settings → Apps entry, launch task, startup task and fleet
+    /// agent task point at the old folder again (see <see cref="PointTasksBackAsync"/>), and the new copy is removed,
+    /// unless other Windows users use it (<paramref name="keepNewCopy"/>).
     /// </summary>
     private static async Task UndoInstallAsync(bool replaced, string? previousFolder, string? recordBefore, bool keepNewCopy, Action<string> log)
     {
@@ -202,12 +203,27 @@ public static class Installer
             AppUpdater.UseInstallDir(previousFolder);
             await RefreshShortcutsAsync(oldExe);
             await ScheduledTasks.RegisterLaunchTaskAsync(oldExe);
+            await PointTasksBackAsync(oldExe, newFolder, exe => MachineRelay.ReplaceAndStartAgentTaskAsync(exe, log));
             // Kept when setup is tried again and installs there after all.
             if (!keepNewCopy)
                 AppUpdater.RunAfterExit(UnlessInstalledIn(RemoveProgramFilesScript(newFolder)), TimeSpan.FromMinutes(5), TimeSpan.FromSeconds(3),
                     FolderEnvironment(newFolder));
         }
         catch (Exception ex) { log($"Could not point Runner Manager back to {previousFolder}: {ex.Message}"); }
+    }
+
+    /// <summary>
+    /// After a failed move: this user's startup task and fleet agent task start the old copy (<paramref name="oldExe"/>)
+    /// again when setup had already pointed them at <paramref name="newFolder"/>, which is then removed. Only this user's
+    /// own tasks with the highest rights (see <see cref="ScheduledTasks.ExeOfOwnElevatedTask"/>). The fleet agent is
+    /// switched by <paramref name="pointAgent"/>, which also restarts it.
+    /// </summary>
+    internal static async Task PointTasksBackAsync(string oldExe, string newFolder, Func<string, Task> pointAgent)
+    {
+        bool InNewFolder(string xml) => ScheduledTasks.ExeOfOwnElevatedTask(xml) is { } exe
+                                        && Path.GetDirectoryName(exe) is { Length: > 0 } dir && AppUpdater.SameFolder(dir, newFolder);
+        if (InNewFolder(await ScheduledTasks.QueryXmlAsync(ScheduledTasks.DashboardTaskName))) await RegisterStartupTaskAsync(oldExe);
+        if (InNewFolder(await ScheduledTasks.QueryXmlAsync(ScheduledTasks.AgentTaskName))) await pointAgent(oldExe);
     }
 
     /// <summary>The environment variable that gives the helper scripts below the program folder.</summary>

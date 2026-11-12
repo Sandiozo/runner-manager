@@ -223,6 +223,33 @@ public class OwnTaskTests
     }
 
     [Fact]
+    public async Task AFailedMove_PointsTheStartupAndAgentTasksBackAtTheOldCopy()
+    {
+        // Setup had pointed both tasks at the new folder before the move failed; the new copy is then removed.
+        using var state = new TestInstallState();
+        using var old = new Folder();
+        const string newFolder = @"C:\Program Files\RunnerManager";
+        var newExe = Path.Combine(newFolder, AppPaths.ExeName);
+        state.Tasks.Definitions[ScheduledTasks.DashboardTaskName] = TaskOf(Me, newExe);
+        state.Tasks.Definitions[ScheduledTasks.AgentTaskName] = TaskOf(Me, newExe);
+        var agentPointedAt = new List<string>();
+
+        await Installer.PointTasksBackAsync(old.Exe, newFolder, exe => { agentPointedAt.Add(exe); return Task.CompletedTask; });
+
+        Assert.Equal(old.Exe, ScheduledTasks.ExeOfOwnElevatedTask(state.Tasks.Definitions[ScheduledTasks.DashboardTaskName]!));
+        Assert.Equal(new[] { old.Exe }, agentPointedAt);
+
+        // Tasks that start another copy, and tasks that are not this user's own with the highest rights, stay as they are.
+        state.Tasks.Calls.Clear();
+        agentPointedAt.Clear();
+        state.Tasks.Definitions[ScheduledTasks.DashboardTaskName] = TaskOf(Me, newExe, highest: false);
+        state.Tasks.Definitions[ScheduledTasks.AgentTaskName] = TaskOf(Me, @"D:\Other\RunnerManager.exe");
+        await Installer.PointTasksBackAsync(old.Exe, newFolder, exe => { agentPointedAt.Add(exe); return Task.CompletedTask; });
+        Assert.Empty(state.Tasks.Calls);
+        Assert.Empty(agentPointedAt);
+    }
+
+    [Fact]
     public void ALaunchTaskWithoutTheHighestRights_IsNotUsed_AndIsRegisteredAgain()
     {
         // It would start the dashboard without administrator rights.
