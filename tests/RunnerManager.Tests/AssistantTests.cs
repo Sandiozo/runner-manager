@@ -431,19 +431,25 @@ public class AssistantTests
     }
 
     [Fact]
-    public async Task LocalSignIn_AcceptsOnlyAChallengeEncryptedForThisUser()
+    public async Task LocalSignIn_AcceptsOnlyAProgramThatOpenedTheAgentsSecret()
     {
         using var server = StartEndpoint(out var url);
         using var link = new AgentLink(url);
         var answer = await WithRetry(() => link.SendAsync("""{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"Test"}}}"""));
         Assert.Equal("runner-manager", JsonNode.Parse(answer!)!["result"]!["serverInfo"]!["name"]!.GetValue<string>());
 
+        // A caller that did not open the secret has nothing to show for it.
         using var http = new HttpClient();
         var challenge = JsonNode.Parse(await (await http.PostAsync($"{url}/local/challenge", null)).Content.ReadAsStringAsync())!["nonce"]!.GetValue<string>();
-        var forged = new JsonObject { ["nonce"] = challenge, ["proof"] = Convert.ToBase64String(new byte[64]) }.ToJsonString();
+        var forged = new JsonObject
+        {
+            ["nonce"] = challenge,
+            ["client_nonce"] = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)),
+            ["client_challenge"] = Convert.ToBase64String(new byte[64]),
+            ["proof"] = Convert.ToBase64String(new byte[32])
+        }.ToJsonString();
         var refused = await http.PostAsync($"{url}/local/session", new StringContent(forged, Encoding.UTF8, "application/json"));
         Assert.Equal(HttpStatusCode.Forbidden, refused.StatusCode);
-        Assert.False(AssistantHttpServer.ProofMatches(challenge, Convert.ToBase64String(new byte[64])));
     }
 
     [Fact]
@@ -458,25 +464,14 @@ public class AssistantTests
         Assert.NotNull(await link.SendAsync("""{"jsonrpc":"2.0","id":1,"method":"ping"}"""));
     }
 
-    [Fact]
-    public void AgentProof_OnlyMatchesTheClientsOwnValue()
-    {
-        var nonce = RandomNumberGenerator.GetBytes(32);
-        Assert.True(AgentLink.AgentProofMatches(nonce, AssistantHttpServer.AgentProof(nonce)));
-        Assert.False(AgentLink.AgentProofMatches(RandomNumberGenerator.GetBytes(32), AssistantHttpServer.AgentProof(nonce)));
-        // The client's own kind of proof never stands in for the agent's.
-        var clientProof = Convert.ToBase64String(ProtectedData.Protect(AssistantHttpServer.AgentProofText(nonce), AssistantHttpServer.ProofEntropy,
-            DataProtectionScope.CurrentUser));
-        Assert.False(AgentLink.AgentProofMatches(nonce, clientProof));
-        Assert.False(AgentLink.AgentProofMatches(nonce, "not base64"));
-    }
-
     [Theory]
-    [InlineData(null, "older Runner Manager")]
-    [InlineData("AAAA", "could not prove")]
-    public async Task AgentLink_RefusesAnAgentThatCannotProveItself(string? agentProof, string expected)
+    [InlineData(false, null, "older Runner Manager")]
+    [InlineData(true, null, "could not prove")]
+    [InlineData(true, "AAAA", "could not prove")]
+    public async Task AgentLink_RefusesAnAgentThatCannotProveItself(bool sealsASecret, string? agentProof, string expected)
     {
-        // A stand-in that answers the sign-in like the agent, without the agent's DPAPI proof.
+        // A stand-in that answers the sign-in like the agent, but cannot show that it opened the client's secret.
+        // Without a sealed secret of its own it answers like an agent from before the sign-in changed.
         var port = TestPorts.FreeRange(1);
         using var fake = new HttpListener();
         fake.Prefixes.Add($"http://localhost:{port}/mcp/");
@@ -490,7 +485,9 @@ public class AssistantTests
                 try { context = await fake.GetContextAsync(); }
                 catch { return; }
                 var path = context.Request.Url!.AbsolutePath;
-                var body = path.EndsWith("/challenge") ? new JsonObject { ["nonce"] = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)) }
+                var challenge = new JsonObject { ["nonce"] = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)) };
+                if (sealsASecret) challenge["challenge"] = Convert.ToBase64String(LocalSignIn.Seal(RandomNumberGenerator.GetBytes(32), LocalSignIn.AgentChallenge));
+                var body = path.EndsWith("/challenge") ? challenge
                     : path.EndsWith("/session") ? new JsonObject { ["token"] = "t", ["agent_proof"] = agentProof }
                     : new JsonObject { ["jsonrpc"] = "2.0", ["id"] = 1, ["result"] = new JsonObject() };
                 if (!path.Contains("/local/")) Interlocked.Increment(ref posts);
@@ -545,7 +542,8 @@ public class AssistantTests
         server.ForgetSessions();
         Assert.False(IsError(await link.SendAsync(ToolCall(3))));
         Assert.Equal(2, initializes);
-        lock (clients) Assert.Equal(new[] { "Test", "Test" }, clients);
+        // The client's name, in the frame every approval shows it in.
+        lock (clients) Assert.Equal(new[] { "An AI assistant (\"Test\")", "An AI assistant (\"Test\")" }, clients);
     }
 
     [Fact]

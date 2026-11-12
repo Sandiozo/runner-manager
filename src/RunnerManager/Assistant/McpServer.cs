@@ -1,4 +1,6 @@
 using System.Collections.Concurrent;
+using System.Globalization;
+using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -46,7 +48,11 @@ public sealed class McpServer
     private readonly McpToolRunner _runTool;
     /// <summary>Requests still being answered, by their JSON-RPC id, so notifications/cancelled can stop them.</summary>
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _inFlight = new();
-    private string _client = "An AI assistant";
+    private string _client = UnnamedClient;
+
+    /// <summary>How approvals and the action log name a client that gave no name.</summary>
+    internal const string UnnamedClient = "An AI assistant";
+    private const int MaxClientNameLength = 80;
 
     /// <summary>When set, tool calls answer with this error instead of running (the fleet agent cannot be reached).</summary>
     public string? ToolsUnavailable { get; set; }
@@ -183,9 +189,8 @@ public sealed class McpServer
         var requested = parameters.ValueKind == JsonValueKind.Object && parameters.TryGetProperty("protocolVersion", out var v)
                         && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
         if (parameters.ValueKind == JsonValueKind.Object && parameters.TryGetProperty("clientInfo", out var info)
-            && info.ValueKind == JsonValueKind.Object && info.TryGetProperty("name", out var name) && name.ValueKind == JsonValueKind.String
-            && name.GetString()!.Trim() is { Length: > 0 } clientName)
-            _client = clientName.Length > 80 ? clientName[..80] : clientName;
+            && info.ValueKind == JsonValueKind.Object && info.TryGetProperty("name", out var name) && name.ValueKind == JsonValueKind.String)
+            _client = ClientLabel(name.GetString());
         return new JsonObject
         {
             ["protocolVersion"] = SupportedVersions.Contains(requested) ? requested : SupportedVersions[0],
@@ -193,6 +198,49 @@ public sealed class McpServer
             ["serverInfo"] = new JsonObject { ["name"] = "runner-manager", ["title"] = "Runner Manager", ["version"] = AppUpdater.CurrentVersion },
             ["instructions"] = Instructions
         };
+    }
+
+    /// <summary>
+    /// How approvals and the action log name the client: <c>An AI assistant ("name")</c>. The client chooses its
+    /// name, so it is shown as a quoted name in a fixed frame and never as text of its own: it is one line of plain
+    /// characters (<see cref="PlainName"/>), none of which can end the quotation or look as if it did.
+    /// </summary>
+    internal static string ClientLabel(string? name)
+    {
+        var clean = AssistantLog.OneLine(PlainName(name), MaxClientNameLength);
+        return clean.Length == 0 ? UnnamedClient : $"{UnnamedClient} (\"{clean}\")";
+    }
+
+    /// <summary>The marks a client's name may have, besides letters, digits and spaces.</summary>
+    private const string NameMarks = "-_./+@#&,:";
+
+    /// <summary>How much of a name is looked at. What is shown is cut to <see cref="MaxClientNameLength"/>.</summary>
+    private const int MaxClientNameInput = 400;
+
+    /// <summary>
+    /// A client's name with nothing but Latin letters, digits, spaces and a few plain marks. Every other character
+    /// becomes a space. A list of characters to take out would not do: many look like a quotation mark (low,
+    /// full-width and prime marks, letters of some scripts), and some turn the reading order around, so that the name
+    /// seems to end where it does not.
+    /// </summary>
+    private static string PlainName(string? name)
+    {
+        if (string.IsNullOrEmpty(name)) return string.Empty;
+        var text = name.Length > MaxClientNameInput ? name[..MaxClientNameInput] : name;
+        if (char.IsHighSurrogate(text[^1])) text = text[..^1];
+        // Other forms of a character become the plain one (full-width letters, ligatures), and a letter with a
+        // separate accent becomes one letter.
+        try { text = text.Normalize(NormalizationForm.FormKC); }
+        catch (ArgumentException) { } // Text that is not valid Unicode. What is wrong with it is not in the list below.
+        var plain = new StringBuilder(text.Length);
+        foreach (var c in text)
+        {
+            var keep = char.IsAsciiLetterOrDigit(c) || NameMarks.Contains(c)
+                       // Latin letters with accents (À to ɏ), without the signs and click letters among them.
+                       || (c is >= '\u00C0' and <= '\u024F' && char.GetUnicodeCategory(c) is UnicodeCategory.UppercaseLetter or UnicodeCategory.LowercaseLetter);
+            plain.Append(keep ? c : ' ');
+        }
+        return plain.ToString();
     }
 
     private static JsonObject ListTools()
