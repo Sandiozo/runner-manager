@@ -19,7 +19,57 @@ internal static class TestSetup
         Environment.SetEnvironmentVariable("RUNNER_MANAGER_STATE_DIR", StateDir);
         AssistantSwitches.Store = new FileSwitchStore(Path.Combine(StateDir, "assistant-switches.json"));
         MachineInstall.Records = new MemoryInstallRecords();
+        MachineInstall.Tasks = new MemoryTasks();
     }
+}
+
+/// <summary>Scheduled tasks in memory, in place of Task Scheduler. Only in the tests.</summary>
+internal sealed class MemoryTasks : ITaskReader
+{
+    /// <summary>The tasks by name. A null definition stands for a task that exists but cannot be read.</summary>
+    public Dictionary<string, string?> Definitions { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>False stands for a list of tasks that cannot be read.</summary>
+    public bool NamesReadable { get; set; } = true;
+
+    public IReadOnlyList<string>? Names() => NamesReadable ? Definitions.Keys.ToList() : null;
+
+    public Task<string?> ReadAsync(string name) => Task.FromResult(Definitions.TryGetValue(name, out var xml) ? xml : string.Empty);
+}
+
+/// <summary>
+/// Gives a test install records and scheduled tasks of its own, in memory, and puts back the ones before it when
+/// disposed. For tests in <see cref="InstallStateCollection"/>, which run one at a time.
+/// </summary>
+internal sealed class TestInstallState : IDisposable
+{
+    private readonly IInstallRecordStore _records = MachineInstall.Records;
+    private readonly ITaskReader _tasks = MachineInstall.Tasks;
+
+    public TestInstallState()
+    {
+        MachineInstall.Records = Records;
+        MachineInstall.Tasks = Tasks;
+        MachineInstall.Forget();
+    }
+
+    public MemoryInstallRecords Records { get; } = new();
+
+    public MemoryTasks Tasks { get; } = new();
+
+    public void Dispose()
+    {
+        MachineInstall.Records = _records;
+        MachineInstall.Tasks = _tasks;
+        MachineInstall.Forget();
+    }
+}
+
+/// <summary>The install records and scheduled tasks are process-wide, so tests that set their own run on their own.</summary>
+[CollectionDefinition(Name, DisableParallelization = true)]
+public class InstallStateCollection
+{
+    public const string Name = "Install state";
 }
 
 /// <summary>Install records in memory, in place of HKLM\SOFTWARE\RunnerManager\Installs. Only in the tests.</summary>

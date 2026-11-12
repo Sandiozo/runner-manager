@@ -306,8 +306,12 @@ public static class ScheduledTasks
         var xml = await QueryXmlAsync(AgentTaskName);
         if (string.IsNullOrWhiteSpace(xml) || IsCurrentAgentDefinition(xml)) return false;
         if (await OtherOwnerAsync(AgentTaskName) != null) return false;
-        var exe = CommandOf(xml);
-        if (string.IsNullOrWhiteSpace(exe) || !File.Exists(exe) || !exe.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) return false;
+        if (ExeOfOwnElevatedTask(xml) is not { } exe)
+        {
+            MachineRelay.AppendAgentLog(NotRegisteredElevatedText(AgentTaskName));
+            return false;
+        }
+        if (!File.Exists(exe) || !exe.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) return false;
         if (fromAgent) AppUpdater.ScheduleAgentTaskRestart(AgentTaskName);
         await MachineRelay.RegisterAgentTaskAsync(exe);
         if (!fromAgent) await RunTaskAsync(AgentTaskName);
@@ -396,6 +400,30 @@ public static class ScheduledTasks
         var ns = task.Name.Namespace;
         return task.Element(ns + "Principals")?.Element(ns + "Principal")?.Element(ns + "UserId")?.Value.Trim() ?? string.Empty;
     }
+
+    /// <summary>
+    /// Whether the task runs with the highest rights of its account (RunLevel HighestAvailable), as every Runner Manager
+    /// task is registered. Only a program with administrator rights can register such a task for an administrator.
+    /// </summary>
+    internal static bool RunsWithHighestRights(string xml)
+    {
+        if (ParseTask(xml) is not { } task) return false;
+        var ns = task.Name.Namespace;
+        return task.Element(ns + "Principals")?.Element(ns + "Principal")?.Element(ns + "RunLevel")?.Value.Trim() == "HighestAvailable";
+    }
+
+    /// <summary>
+    /// The exe that a task starts, when it is this user's task and runs with the highest rights; otherwise null. Any
+    /// program of the user can create a task under a name that does not exist yet, such as the fleet agent's on a PC
+    /// without one, but not one that runs with the highest rights. So only such a task tells which exe is the install,
+    /// and only its exe is ever registered again with administrator rights.
+    /// </summary>
+    internal static string? ExeOfOwnElevatedTask(string xml)
+        => RunsWithHighestRights(xml) && IsCurrentUser(PrincipalOf(xml)) && CommandOf(xml) is { Length: > 0 } exe ? exe : null;
+
+    /// <summary>The log line for a task that <see cref="ExeOfOwnElevatedTask"/> does not trust, so it is left as it is.</summary>
+    internal static string NotRegisteredElevatedText(string name)
+        => $"The scheduled task \"{name}\" was not registered with administrator rights for {Elevation.CurrentUserName}, so Runner Manager left it as it is.";
 
     /// <summary>Whether the task is turned on (Settings → Enabled is not false).</summary>
     internal static bool IsEnabled(string xml)

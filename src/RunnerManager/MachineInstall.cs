@@ -144,16 +144,17 @@ public static class MachineInstall
         }
     }
 
-    /// <summary>The exes that this user's launch, startup and fleet agent tasks start.</summary>
+    /// <summary>
+    /// The exes that this user's launch, startup and fleet agent tasks start. Only tasks that run with the highest rights
+    /// count (see <see cref="ScheduledTasks.ExeOfOwnElevatedTask"/>).
+    /// </summary>
     internal static async Task<List<string>> OwnTaskExesAsync()
     {
         var exes = new List<string>();
         foreach (var name in new[] { ScheduledTasks.LaunchTaskName, ScheduledTasks.DashboardTaskName, ScheduledTasks.AgentTaskName })
         {
-            var xml = await ScheduledTasks.QueryXmlAsync(name);
-            if (xml.Length == 0 || !ScheduledTasks.IsCurrentUser(ScheduledTasks.PrincipalOf(xml))) continue;
-            var command = ScheduledTasks.CommandOf(xml);
-            if (Path.IsPathFullyQualified(command)) exes.Add(command);
+            if (await Tasks.ReadAsync(name) is not { Length: > 0 } xml) continue;
+            if (ScheduledTasks.ExeOfOwnElevatedTask(xml) is { } command && Path.IsPathFullyQualified(command)) exes.Add(command);
         }
         return exes;
     }
@@ -279,9 +280,11 @@ public static class MachineInstall
     internal static async Task<List<TaskUse>> RunnerManagerTasksAsync()
     {
         var uses = new List<TaskUse>();
-        foreach (var name in TaskNames().Where(IsRunnerManagerTaskName))
+        foreach (var name in (Tasks.Names() ?? Array.Empty<string>()).Where(IsRunnerManagerTaskName))
         {
-            var xml = await ScheduledTasks.QueryXmlAsync(name);
+            var xml = await Tasks.ReadAsync(name) ?? string.Empty;
+            // Any program can create a task with one of these names; Runner Manager registers its own with the highest rights.
+            if (!ScheduledTasks.RunsWithHighestRights(xml)) continue;
             var principal = ScheduledTasks.PrincipalOf(xml);
             var command = ScheduledTasks.CommandOf(xml);
             if (principal.Length == 0 || command.Length == 0) continue;
@@ -294,15 +297,42 @@ public static class MachineInstall
     internal static bool IsRunnerManagerTaskName(string name)
         => name.StartsWith("Runner Manager", StringComparison.OrdinalIgnoreCase) || name.StartsWith("RunnerWidget", StringComparison.OrdinalIgnoreCase);
 
-    private static string[] TaskNames()
+    /// <summary>Where the scheduled tasks are read from: Task Scheduler, except in tests.</summary>
+    internal static ITaskReader Tasks { get; set; } = new SchedulerTaskReader();
+}
+
+/// <summary>Reads scheduled tasks for <see cref="MachineInstall"/>.</summary>
+internal interface ITaskReader
+{
+    /// <summary>The names of the tasks in Task Scheduler's root folder, or null when they cannot be read.</summary>
+    IReadOnlyList<string>? Names();
+
+    /// <summary>A task's XML definition: empty when there is no such task, null when it exists but could not be read.</summary>
+    Task<string?> ReadAsync(string name);
+}
+
+/// <summary>
+/// Task Scheduler: the names come from its list in the registry (readable by administrators), the definitions from
+/// schtasks.exe.
+/// </summary>
+internal sealed class SchedulerTaskReader : ITaskReader
+{
+    public IReadOnlyList<string>? Names()
     {
         try
         {
             using var root = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64);
             using var tree = root.OpenSubKey(@"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Schedule\TaskCache\Tree");
-            return tree?.GetSubKeyNames() ?? Array.Empty<string>();
+            return tree?.GetSubKeyNames();
         }
-        catch (Exception ex) when (ex is SecurityException or UnauthorizedAccessException or IOException) { return Array.Empty<string>(); }
+        catch (Exception ex) when (ex is SecurityException or UnauthorizedAccessException or IOException) { return null; }
+    }
+
+    public async Task<string?> ReadAsync(string name)
+    {
+        var xml = await ScheduledTasks.QueryXmlAsync(name);
+        if (xml.Length > 0) return xml;
+        return ScheduledTasks.IsRegistered(name) == false ? string.Empty : null;
     }
 }
 

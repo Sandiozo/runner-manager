@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.IO;
+using System.Security.Principal;
 
 namespace RunnerManager.Tests;
 
@@ -478,5 +479,86 @@ public class ProgramFilesInstallTests
             Assert.True(snippet.Contains($"\"{exe}\"") || snippet.Contains($"\"{exe.Replace(@"\", @"\\")}\"") || snippet.Contains($"'{exe}'"),
                 $"{client.Name}: {snippet}");
         }
+    }
+}
+
+/// <summary>
+/// What counts as evidence of the install: this user's scheduled tasks with the highest rights, and the records. These
+/// tests set their own records and tasks in memory (see <see cref="TestInstallState"/>), never the real ones.
+/// </summary>
+[Collection(InstallStateCollection.Name)]
+public class InstallEvidenceTests
+{
+    private static readonly string Me = WindowsIdentity.GetCurrent().Name;
+    private const string OtherSid = "S-1-5-21-1-2-3-1002";
+    private const string ProgramFilesExe = @"C:\Program Files\RunnerManager\RunnerManager.exe";
+    private const string ChosenExe = @"D:\Apps\RunnerManager\RunnerManager.exe";
+
+    /// <summary>A task as Runner Manager registers it, or (<paramref name="highest"/> false) as any program of the user can.</summary>
+    internal static string TaskOf(string user, string exe, bool highest = true)
+    {
+        var xml = ScheduledTasks.TaskXml(user, exe, "--agent", "Test task", alwaysOn: false, atLogon: true, parallel: false);
+        return highest ? xml : xml.Replace("<RunLevel>HighestAvailable</RunLevel>", "<RunLevel>LeastPrivilege</RunLevel>");
+    }
+
+    /// <summary>The app's source folder.</summary>
+    internal static string SourceDir
+    {
+        get
+        {
+            for (var dir = new DirectoryInfo(AppContext.BaseDirectory); dir != null; dir = dir.Parent)
+                if (File.Exists(Path.Combine(dir.FullName, "RunnerManager.sln"))) return Path.Combine(dir.FullName, "src", "RunnerManager");
+            throw new DirectoryNotFoundException("The repository folder was not found.");
+        }
+    }
+
+    // ================= 1. Tasks as evidence =================
+
+    [Fact]
+    public void OnlyThisUsersTaskWithTheHighestRights_GivesItsExe()
+    {
+        Assert.Equal(ChosenExe, ScheduledTasks.ExeOfOwnElevatedTask(TaskOf(Me, ChosenExe)));
+        // The same task as any program of the user can create it: without the highest rights, or without a run level.
+        Assert.Null(ScheduledTasks.ExeOfOwnElevatedTask(TaskOf(Me, ChosenExe, highest: false)));
+        Assert.Null(ScheduledTasks.ExeOfOwnElevatedTask(TaskOf(Me, ChosenExe).Replace("<RunLevel>HighestAvailable</RunLevel>", string.Empty)));
+        // Another Windows user's task, and no task.
+        Assert.Null(ScheduledTasks.ExeOfOwnElevatedTask(TaskOf(OtherSid, ChosenExe)));
+        Assert.Null(ScheduledTasks.ExeOfOwnElevatedTask(string.Empty));
+        Assert.DoesNotContain("n't", ScheduledTasks.NotRegisteredElevatedText(ScheduledTasks.AgentTaskName));
+    }
+
+    [Theory]
+    [InlineData("MachineRelay.cs", "public static async Task<bool> RepairAgentTaskSettingsAsync()")]
+    [InlineData("ScheduledTasks.cs", "public static async Task<bool> UpdateAgentTaskIfOutdatedAsync(bool fromAgent)")]
+    public void TheAgentTaskIsRegisteredAgain_OnlyWithTheExeOfATaskWithTheHighestRights(string file, string signature)
+    {
+        var code = File.ReadAllText(Path.Combine(SourceDir, file));
+        var start = code.IndexOf(signature, StringComparison.Ordinal);
+        Assert.True(start >= 0, signature);
+        var body = code[start..code.IndexOf("RegisterAgentTaskAsync(exe)", start, StringComparison.Ordinal)];
+        Assert.Contains("ExeOfOwnElevatedTask(xml)", body);
+        Assert.DoesNotContain("CommandOf(", body);
+    }
+
+    [Fact]
+    public async Task OwnTaskExes_LeaveOutTasksWithoutTheHighestRights()
+    {
+        using var state = new TestInstallState();
+        state.Tasks.Definitions[ScheduledTasks.LaunchTaskName] = TaskOf(Me, ChosenExe);
+        // A fleet agent task on a PC without one, created by a program without administrator rights.
+        state.Tasks.Definitions[ScheduledTasks.AgentTaskName] = TaskOf(Me, @"C:\Users\me\Downloads\RunnerManager.exe", highest: false);
+        state.Tasks.Definitions[ScheduledTasks.DashboardTaskName] = TaskOf(OtherSid, ProgramFilesExe);
+        Assert.Equal(new[] { ChosenExe }, await MachineInstall.OwnTaskExesAsync());
+    }
+
+    [Fact]
+    public async Task OtherUsersTasks_CountOnlyWithTheHighestRights()
+    {
+        using var state = new TestInstallState();
+        state.Tasks.Definitions["Runner Manager (bob)"] = TaskOf(OtherSid, ProgramFilesExe);
+        state.Tasks.Definitions["Runner Manager (eve)"] = TaskOf("S-1-5-21-1-2-3-1005", ProgramFilesExe, highest: false);
+        state.Tasks.Definitions["OneDrive Standalone Update Task"] = TaskOf("S-1-5-21-1-2-3-1006", ProgramFilesExe);
+        var uses = await MachineInstall.RunnerManagerTasksAsync();
+        Assert.Equal(new[] { OtherSid }, uses.Select(u => u.Account));
     }
 }

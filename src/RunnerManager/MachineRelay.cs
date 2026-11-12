@@ -1476,8 +1476,13 @@ public static class MachineRelay
             && xml.Contains("<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>", StringComparison.OrdinalIgnoreCase);
         if (healthy) return false;
 
-        var exe = ScheduledTasks.CommandOf(xml);
-        if (string.IsNullOrWhiteSpace(exe) || !File.Exists(exe)) exe = Environment.ProcessPath ?? string.Empty;
+        // Only this user's task with the highest rights keeps its exe; see ExeOfOwnElevatedTask.
+        if (ScheduledTasks.ExeOfOwnElevatedTask(xml) is not { } exe)
+        {
+            AppendAgentLog(ScheduledTasks.NotRegisteredElevatedText(ScheduledTasks.AgentTaskName));
+            return false;
+        }
+        if (!File.Exists(exe)) exe = Environment.ProcessPath ?? string.Empty;
         if (!exe.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) return false;
 
         await RegisterAgentTaskAsync(exe);
