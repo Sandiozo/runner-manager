@@ -947,6 +947,60 @@ public class AuditDashboardTests
         Assert.Empty(finished);
     }
 
+    // ----- 5: JSON null in another PC's status -----
+
+    [Fact]
+    public void PcStatus_WithJsonNulls_IsShownWithoutFailing()
+    {
+        const string json = """
+            {
+              "MachineName": "BUILD-10", "AgentProtocolVersion": 14, "FleetAgentRunning": true,
+              "MachineId": null, "AppVersion": null, "LastCommandId": null, "LastCommandResult": null, "SigningKeyId": null,
+              "RecentCommands": [null, { "Id": null, "Result": null }], "PendingCommandIds": null,
+              "Disks": [null], "RecentEvents": [null],
+              "Runners": [
+                null,
+                { "ServiceName": null, "InstallPath": "C:\\runners\\api", "DisplayName": null, "RepositoryPath": null,
+                  "Scope": null, "AgentName": null, "CustomLabels": null, "ActivityText": null, "StartsAt": null,
+                  "RunnerVersion": null, "IsRunning": true },
+                { "ServiceName": "actions.runner.web", "CustomLabels": ["gpu", null] }
+              ]
+            }
+            """;
+        var payload = System.Text.Json.JsonSerializer.Deserialize<MachineStatusPayload>(json,
+            new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true })!;
+        var pc = MachineInfo.FromPayload("build-10", payload with { UpdatedUtc = DateTime.UtcNow });
+
+        Assert.Equal(2, pc.Runners.Length);
+        Assert.Empty(pc.PendingCommandIds);
+        Assert.Empty(pc.Disks);
+        Assert.Empty(pc.RecentEvents);
+        Assert.False(pc.IsRunningCommand("c1"));
+        Assert.Null(pc.CommandResult("c1"));
+        Assert.Equal(string.Empty, pc.LastResultText);
+        Assert.Equal("fleet agent protocol 14", pc.VersionText);
+        Assert.Equal("1/2 runners running", pc.SidebarSubtitle);
+
+        var first = pc.Runners[0];
+        Assert.Equal(string.Empty, first.Scope);
+        Assert.Equal(string.Empty, first.AgentName);
+        Assert.Equal(string.Empty, first.RepositoryPath);
+        Assert.Empty(first.CustomLabels);
+        Assert.False(first.IsBusy);
+        Assert.Equal(RunnerStart.Unknown, first.StartsAt);
+        Assert.Equal("C:\\runners\\api", first.CommandKey);
+        Assert.Equal("Repository unknown", first.RepositoryText);
+        Assert.False(first.Matches("gpu"));
+        Assert.Equal(Visibility.Collapsed, first.LabelsVisibility);
+        Assert.NotNull(first.StatusText);
+        Assert.NotNull(first.RunnerVersionText);
+
+        var second = pc.Runners[1];
+        Assert.Equal(new[] { "gpu" }, second.CustomLabels);
+        Assert.True(second.Matches("GPU"));
+        Assert.All(pc.Runners, r => Assert.Equal("BUILD-10", r.MachineName));
+    }
+
     // ----- 6: no fleet read while this PC joins or leaves the fleet -----
 
     [Theory]

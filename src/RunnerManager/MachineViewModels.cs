@@ -29,28 +29,45 @@ public sealed class MachineRunnerStatus : INotifyPropertyChanged
     [JsonIgnore] public int AgentProtocolVersion { get; set; }
     [JsonIgnore] public bool IsLocalMachine { get; set; }
     [JsonIgnore] public bool MachineOnline { get; set; }
-    public string ServiceName { get; init; } = string.Empty;
-    public string InstallPath { get; init; } = string.Empty;
+
+    // Read from other PCs' status, where a value can be JSON null: the text and lists are never null here.
+    private readonly string _serviceName = string.Empty;
+    private readonly string _installPath = string.Empty;
+    private readonly string _displayName = string.Empty;
+    private readonly string _repositoryPath = string.Empty;
+    private readonly string _scope = string.Empty;
+    private readonly string _agentName = string.Empty;
+    private readonly string[] _customLabels = Array.Empty<string>();
+    private readonly string _activityText = string.Empty;
+    private readonly string _startsAt = RunnerStart.Unknown;
+    private readonly string _runnerVersion = string.Empty;
+
+    public string ServiceName { get => _serviceName; init => _serviceName = value ?? string.Empty; }
+    public string InstallPath { get => _installPath; init => _installPath = value ?? string.Empty; }
     /// <summary>Running from a console window (run.cmd) rather than as a Windows service.</summary>
     public bool IsInteractive { get; init; }
-    public string DisplayName { get; init; } = string.Empty;
-    public string RepositoryPath { get; init; } = string.Empty;
+    public string DisplayName { get => _displayName; init => _displayName = value ?? string.Empty; }
+    public string RepositoryPath { get => _repositoryPath; init => _repositoryPath = value ?? string.Empty; }
     /// <summary>"repos/owner/repo" or "orgs/name".</summary>
-    public string Scope { get; init; } = string.Empty;
-    public string AgentName { get; init; } = string.Empty;
+    public string Scope { get => _scope; init => _scope = value ?? string.Empty; }
+    public string AgentName { get => _agentName; init => _agentName = value ?? string.Empty; }
     public long AgentId { get; init; }
     /// <summary>Labels besides self-hosted, Windows and X64 (empty from older agents, or when GitHub could not be read).</summary>
-    public string[] CustomLabels { get; init; } = Array.Empty<string>();
+    public string[] CustomLabels
+    {
+        get => _customLabels;
+        init => _customLabels = value?.Where(label => label != null).ToArray() ?? Array.Empty<string>();
+    }
     /// <summary>Runner group, ephemeral and the other registration settings, kept when the runner moves (null from older agents).</summary>
     public RunnerRegistrationOptions? RegistrationOptions { get; init; }
     public bool IsRunning { get; init; }
-    public string ActivityText { get; init; } = string.Empty;
+    public string ActivityText { get => _activityText; init => _activityText = value ?? string.Empty; }
     public bool ServiceInstalled { get; init; }
     /// <summary>The old copy of a runner that was moved to another PC (false from agents before protocol 13).</summary>
     public bool MovedAway { get; init; }
     /// <summary>What starts the runner after a restart (a <see cref="RunnerStart"/> value; empty from agents before protocol 13).</summary>
-    public string StartsAt { get; init; } = RunnerStart.Unknown;
-    public string RunnerVersion { get; init; } = string.Empty;
+    public string StartsAt { get => _startsAt; init => _startsAt = value ?? RunnerStart.Unknown; }
+    public string RunnerVersion { get => _runnerVersion; init => _runnerVersion = value ?? string.Empty; }
     public long? WorkFolderBytes { get; init; }
     public bool ManuallyStopped { get; init; }
     /// <summary>When the running job started on its PC (protocol 14; null while idle and from older agents).</summary>
@@ -380,8 +397,9 @@ public sealed class MachineInfo : INotifyPropertyChanged
     public string? CommandResult(string commandId)
     {
         if (string.IsNullOrEmpty(commandId)) return null;
-        if (RecentCommands.FirstOrDefault(r => r.Id.Equals(commandId, StringComparison.OrdinalIgnoreCase)) is { } recent) return recent.Result;
-        return LastCommandId.Equals(commandId, StringComparison.OrdinalIgnoreCase) ? LastCommandResult : null;
+        if (RecentCommands.FirstOrDefault(r => string.Equals(r.Id, commandId, StringComparison.OrdinalIgnoreCase)) is { } recent)
+            return recent.Result ?? string.Empty;
+        return string.Equals(LastCommandId, commandId, StringComparison.OrdinalIgnoreCase) ? LastCommandResult : null;
     }
 
     /// <summary>The agent has the command queued or is running it (protocol 12).</summary>
@@ -688,31 +706,35 @@ public sealed class MachineInfo : INotifyPropertyChanged
     public static MachineInfo FromPayload(string key, MachineStatusPayload payload, bool localOnly = false,
         string address = "", string problem = "", bool localAgentOutdated = false, bool managed = false)
     {
-        var isLocal = payload.MachineName.Equals(Environment.MachineName, StringComparison.OrdinalIgnoreCase);
+        // Another PC's status can have JSON null where a list or text is expected. Its fleet agent's status is checked
+        // when it arrives as well; this keeps the cards from failing if something gets through.
+        var name = payload.MachineName ?? string.Empty;
+        var isLocal = name.Equals(Environment.MachineName, StringComparison.OrdinalIgnoreCase);
+        var runners = WithoutNulls(payload.Runners);
         var machine = new MachineInfo
         {
             MachineKey = key,
-            MachineName = payload.MachineName,
-            MachineId = payload.MachineId,
+            MachineName = name,
+            MachineId = payload.MachineId ?? string.Empty,
             AgentProtocolVersion = payload.AgentProtocolVersion,
-            AppVersion = payload.AppVersion,
+            AppVersion = payload.AppVersion ?? string.Empty,
             UpdatedUtc = payload.UpdatedUtc,
             FleetAgentRunning = payload.FleetAgentRunning,
-            LastCommandId = payload.LastCommandId,
-            LastCommandResult = payload.LastCommandResult,
-            RecentCommands = payload.RecentCommands,
-            PendingCommandIds = payload.PendingCommandIds,
+            LastCommandId = payload.LastCommandId ?? string.Empty,
+            LastCommandResult = payload.LastCommandResult ?? string.Empty,
+            RecentCommands = WithoutNulls(payload.RecentCommands),
+            PendingCommandIds = WithoutNulls(payload.PendingCommandIds),
             Busy = payload.Busy,
             CpuPercent = payload.CpuPercent,
             MemoryPercent = payload.MemoryPercent,
             MemoryTotalGb = payload.MemoryTotalGb,
             BootUtc = payload.BootUtc,
             RebootPending = payload.RebootPending,
-            Disks = payload.Disks,
+            Disks = WithoutNulls(payload.Disks),
             WatchdogEnabled = payload.WatchdogEnabled,
-            SigningKeyId = payload.SigningKeyId,
-            RecentEvents = payload.RecentEvents,
-            Runners = payload.Runners,
+            SigningKeyId = payload.SigningKeyId ?? string.Empty,
+            RecentEvents = WithoutNulls(payload.RecentEvents),
+            Runners = runners,
             IsLocalOnly = localOnly,
             Address = address,
             ConnectionProblem = problem,
@@ -720,16 +742,21 @@ public sealed class MachineInfo : INotifyPropertyChanged
             IsManaged = managed,
             Fingerprint = $"{(localOnly ? "local" : managed ? "managed" : "peer")}|{address}|{problem}|{localAgentOutdated}|" + payload.Fingerprint()
         };
-        foreach (var runner in payload.Runners)
+        foreach (var runner in runners)
         {
             runner.MachineKey = key;
-            runner.MachineName = payload.MachineName;
+            runner.MachineName = name;
             runner.AgentProtocolVersion = payload.AgentProtocolVersion;
             runner.IsLocalMachine = isLocal;
             runner.MachineOnline = machine.IsReachable;
         }
         return machine;
     }
+
+    /// <summary>A list from another PC's status without null entries, or an empty one when the list itself is null.</summary>
+    private static T[] WithoutNulls<T>(T[]? items) where T : class
+        // Declared without nulls, but JSON can put them there.
+        => items == null ? Array.Empty<T>() : Array.IndexOf(items, null) >= 0 ? items.Where(item => item != null).ToArray() : items;
 }
 
 /// <summary>What a busy runner is doing: its job and steps from GitHub, and its output and processes from its PC.</summary>
