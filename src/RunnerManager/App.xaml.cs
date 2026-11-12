@@ -449,7 +449,7 @@ public partial class App : Application
         try
         {
             var note = await Installer.UninstallAsync(removeData, message => MachineRelay.AppendAgentLog($"Uninstall: {message}"));
-            if (!quiet) DialogWindow.Info(null, "Runner Manager is uninstalled", $"Your runners continue to run as Windows services.{note}");
+            if (!quiet) DialogWindow.Info(null, "Runner Manager is uninstalled", $"Your runners keep running.{note}");
         }
         catch (Exception ex)
         {
