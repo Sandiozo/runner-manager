@@ -89,8 +89,9 @@ Runner Manager no longer starts a runner's service next to its console window.
   cmd.exe, which any program of the user can set in the registry.
 - Runner Manager now starts through a start helper, `RunnerManagerLauncher.exe`, beside RunnerManager.exe. Its
   scheduled tasks (the launch task, the startup task and the fleet agent's task) run the start helper, and so do the
-  UAC prompt, the start after setup, **Restart now** after an update and **Settings → Updates → Uninstall…**. The
-  uninstall entry in Windows **Settings → Apps** still starts RunnerManager.exe itself. The start helper ignores the
+  UAC prompt, the start after setup and **Settings → Updates → Uninstall…**. **Restart now** after an update starts
+  the new RunnerManager.exe from the dashboard that is open, with the environment that the start helper gave that
+  dashboard. The uninstall entry in Windows **Settings → Apps** still starts RunnerManager.exe itself. The start helper ignores the
   environment it is started with and starts RunnerManager.exe with a new one: the PC's variables, the user's name and
   folders as Windows gives them, and only the proxy and GitHub token variables (`HTTP_PROXY`, `HTTPS_PROXY`,
   `ALL_PROXY`, `NO_PROXY`, `GH_TOKEN`, `GITHUB_TOKEN`) from the environment it was given. Variables that any program of
