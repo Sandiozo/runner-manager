@@ -1655,6 +1655,35 @@ public class InstallFolderSafetyTests
         Assert.Contains("start helper", InstallFolderSafety.WithoutStartHelperActivityText);
         Assert.Contains(Launcher.FileName, InstallFolderSafety.WithoutStartHelperActivityText);
     }
+
+    [Fact]
+    public void AnOpenDashboard_SaysOnce_WhenThisPcBeginsToRunWithoutTheStartHelper()
+    {
+        var told = false;
+        // One check: at the start, or after the check of the start helper every 5 minutes.
+        bool Check(bool runsWithout)
+        {
+            bool tell;
+            (tell, told) = InstallFolderSafety.WithoutStartHelperNotice(runsWithout, told);
+            return tell;
+        }
+
+        // Started with the start helper in use: nothing to say.
+        Assert.False(Check(false));
+        // The fleet agent gave it up while the dashboard was open: said at the next check, and not at the ones after.
+        Assert.True(Check(true));
+        Assert.False(Check(true));
+        Assert.False(Check(true));
+        // Setup or an update brought it back, and it was given up again later: said once more.
+        Assert.False(Check(false));
+        Assert.True(Check(true));
+        Assert.False(Check(true));
+
+        // Started on a PC that runs without it: said at the start only.
+        told = false;
+        Assert.True(Check(true));
+        Assert.False(Check(true));
+    }
 }
 
 /// <summary>The build: the start helper in the app, and the release's requirement that it be there.</summary>

@@ -153,4 +153,14 @@ internal static class InstallFolderSafety
 
     /// <summary>Whether the installed copy that runs runs without the start helper (see <see cref="Launcher.RunsWithout"/>).</summary>
     internal static bool RunsWithoutStartHelper => AppUpdater.IsRunningInstalledCopy && Launcher.RunsWithout(AppUpdater.InstallDir);
+
+    /// <summary>
+    /// Whether the dashboard adds <see cref="WithoutStartHelperActivityText"/> to Activity now (<c>Tell</c>), at its start
+    /// and after each check of the start helper while it runs, and whether it has said so while this PC runs without the
+    /// start helper (<c>Told</c>, passed to the next check as <paramref name="told"/>). So it is said once when the
+    /// dashboard starts on such a PC, or once when the fleet agent or the dashboard gives up the start helper while the
+    /// dashboard is open. When the start helper is in use again (setup or an update removed the marker) and is given up
+    /// again later, it is said once more.
+    /// </summary>
+    internal static (bool Tell, bool Told) WithoutStartHelperNotice(bool runsWithout, bool told) => (runsWithout && !told, runsWithout);
 }

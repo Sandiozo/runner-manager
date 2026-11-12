@@ -101,9 +101,10 @@ Runner Manager no longer starts a runner's service next to its console window.
   looks after it: it puts it back when it is missing and checks it in the same way before a task or a start depends on
   it. An earlier copy that still runs after an update leaves it alone. When antivirus software removes or blocks it, it
   cannot be written, or it does not start Runner Manager, Runner Manager runs without it and its tasks start
-  RunnerManager.exe as before, until the next update or setup. The fleet agent's log says so, and so do Activity on
-  every start and **Settings → Updates**. When the UAC prompt cannot start the start helper, or the launch task started
-  it but no dashboard appeared, Runner Manager asks with UAC for RunnerManager.exe itself.
+  RunnerManager.exe as before, until the next update or setup. The fleet agent's log says so, and so does **Settings →
+  Updates**. Activity says so on every start, and within 5 minutes when it happens while the dashboard is open. When
+  the UAC prompt cannot start the start helper, or the launch task started it but no dashboard appeared, Runner
+  Manager asks with UAC for RunnerManager.exe itself.
 - The framework-dependent RunnerManager.exe looks for the .NET runtime only where it is installed for the whole PC, no
   longer in a folder that `DOTNET_ROOT` names.
 - Runner Manager with administrator rights no longer takes its data folder from `RUNNER_MANAGER_STATE_DIR`, which any
