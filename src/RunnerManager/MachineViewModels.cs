@@ -172,6 +172,10 @@ public sealed class MachineRunnerStatus : INotifyPropertyChanged
         : string.IsNullOrWhiteSpace(RepositoryPath) ? "Repository unknown" : RepositoryPath;
     [JsonIgnore] public string RepositoryUrl => IsOrgRunner ? $"https://github.com/{OrgName}"
         : string.IsNullOrWhiteSpace(RepositoryPath) ? string.Empty : $"https://github.com/{RepositoryPath}";
+    /// <summary>The repository in the details is a link (a button) when its address is known.</summary>
+    [JsonIgnore] public Visibility RepositoryLinkVisibility => RepositoryUrl.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+    /// <summary>Otherwise ("Repository unknown") it is plain text, which Tab does not stop at.</summary>
+    [JsonIgnore] public Visibility RepositoryTextVisibility => RepositoryUrl.Length > 0 ? Visibility.Collapsed : Visibility.Visible;
     [JsonIgnore] public string RunnersSettingsUrl => IsOrgRunner ? $"https://github.com/organizations/{OrgName}/settings/actions/runners"
         : string.IsNullOrWhiteSpace(RepositoryPath) ? string.Empty : $"{RepositoryUrl}/settings/actions/runners";
     [JsonIgnore] public string ActionsUrl => string.IsNullOrWhiteSpace(RepositoryPath) ? string.Empty : $"{RepositoryUrl}/actions";
@@ -812,6 +816,10 @@ public sealed class LiveJobView
     public string ActivityNote { get; init; } = string.Empty;
     public string Output { get; init; } = string.Empty;
 
+    /// <summary>The title is a link (a button) when GitHub gave the job's address.</summary>
+    public Visibility TitleLinkVisibility => string.IsNullOrWhiteSpace(Url) ? Visibility.Collapsed : Visibility.Visible;
+    /// <summary>Otherwise it is plain text, which Tab does not stop at.</summary>
+    public Visibility TitleTextVisibility => string.IsNullOrWhiteSpace(Url) ? Visibility.Visible : Visibility.Collapsed;
     public Visibility NoteVisibility => Note.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
     public Visibility StepsVisibility => Steps.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
     public Visibility ProcessesVisibility => Processes.Count > 0 ? Visibility.Visible : Visibility.Collapsed;

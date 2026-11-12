@@ -224,6 +224,98 @@ public class DetailLinkTests
     }
 
     [Fact]
+    public void TheJobTitleAndTheRepository_AreLinksOnlyWithAnAddress()
+    {
+        var unknown = LiveJobView.Build(null, string.Empty, null, string.Empty, DateTime.UtcNow);
+        Assert.Equal(string.Empty, unknown.Url);
+        Assert.Equal(Visibility.Collapsed, unknown.TitleLinkVisibility);
+        Assert.Equal(Visibility.Visible, unknown.TitleTextVisibility);
+        var known = new LiveJobView { Title = "CI → build", Url = "https://github.com/octocat/web/actions/runs/1/job/2" };
+        Assert.Equal(Visibility.Visible, known.TitleLinkVisibility);
+        Assert.Equal(Visibility.Collapsed, known.TitleTextVisibility);
+
+        var noRepository = new MachineRunnerStatus { AgentName = "web" };
+        Assert.Equal("Repository unknown", noRepository.RepositoryText);
+        Assert.Equal(Visibility.Collapsed, noRepository.RepositoryLinkVisibility);
+        Assert.Equal(Visibility.Visible, noRepository.RepositoryTextVisibility);
+        var repository = new MachineRunnerStatus { AgentName = "web", RepositoryPath = "octocat/web" };
+        Assert.Equal(Visibility.Visible, repository.RepositoryLinkVisibility);
+        Assert.Equal(Visibility.Collapsed, repository.RepositoryTextVisibility);
+    }
+
+    [Fact]
+    public void AnOpenBusyRunner_ShowsNoLinkWithoutAnAddress_AndTheTextInstead()
+    {
+        var runner = Busy(repositoryPath: string.Empty, LiveJobView.Build(null, string.Empty, null, string.Empty, DateTime.UtcNow));
+        WithCard(runner, host =>
+        {
+            // No button that would do nothing is shown, and none is announced as a link to GitHub.
+            var links = LinksOf(runner, host);
+            Assert.Contains(links, b => System.Windows.Automation.AutomationProperties.GetHelpText(b) == "Open the repository on GitHub");
+            Assert.Contains(links, b => System.Windows.Automation.AutomationProperties.GetHelpText(b) == "Open the job on GitHub");
+            Assert.All(links, b => Assert.False(b.ActualWidth > 0, $"{System.Windows.Automation.AutomationProperties.GetHelpText(b)} is shown"));
+            Assert.True(ShownAsText(runner, host, "Running a job"));
+            Assert.True(ShownAsText(runner, host, "Repository unknown"));
+        });
+
+        var linked = Busy(repositoryPath: "octocat/web", new LiveJobView { Title = "CI → build", Url = "https://github.com/octocat/web/actions/runs/1/job/2" });
+        WithCard(linked, host =>
+        {
+            var shown = LinksOf(linked, host).Where(b => b.ActualWidth > 0).ToList();
+            Assert.Equal(new[] { "https://github.com/octocat/web", "https://github.com/octocat/web/actions/runs/1/job/2" },
+                shown.Select(b => (string)b.Tag).Order());
+            Assert.False(ShownAsText(linked, host, "CI → build"));
+            Assert.False(ShownAsText(linked, host, "octocat/web"));
+        });
+    }
+
+    private static MachineRunnerStatus Busy(string repositoryPath, LiveJobView job) => new()
+    {
+        ServiceName = "actions.runner.web", DisplayName = "web", ServiceInstalled = true, IsRunning = true, ActivityText = "Busy",
+        RepositoryPath = repositoryPath, LiveJob = job
+    };
+
+    private static void WithCard(MachineRunnerStatus runner, Action<FrameworkElement> check)
+    {
+        var pc = MachineInfo.FromPayload("build-60", new MachineStatusPayload
+        {
+            MachineName = "BUILD-60", AgentProtocolVersion = 14, UpdatedUtc = DateTime.UtcNow, FleetAgentRunning = true, Runners = new[] { runner }
+        });
+        var window = WpfTestApp.Run(() => new MainWindow());
+        WpfTestApp.Run(() =>
+        {
+            runner.IsExpanded = true;
+            window.Machines.Add(pc);
+            var content = (UIElement)window.Content;
+            window.Content = null;
+            var host = new Border { Child = content, DataContext = window };
+            host.Measure(new Size(1200, 900));
+            host.Arrange(new Rect(0, 0, 1200, 900));
+            host.UpdateLayout();
+            Assert.Equal(Visibility.Visible, runner.LiveJobVisibility);
+            check(host);
+        });
+    }
+
+    /// <summary>The link buttons in the runner's details: the job title, the repository and the current job of a runner on this PC.</summary>
+    private static List<Button> LinksOf(MachineRunnerStatus runner, FrameworkElement host)
+        => WpfTestApp.Descendants<Button>(host)
+            .Where(b => ReferenceEquals(b.DataContext, runner)
+                        && System.Windows.Automation.AutomationProperties.GetHelpText(b) is "Open the job on GitHub" or "Open the repository on GitHub")
+            .ToList();
+
+    /// <summary>The text is laid out outside any button.</summary>
+    private static bool ShownAsText(MachineRunnerStatus runner, FrameworkElement host, string text)
+        => WpfTestApp.Descendants<TextBlock>(host).Any(t => t.Text == text && t.ActualWidth > 0 && ReferenceEquals(t.DataContext, runner) && !InAButton(t));
+
+    private static bool InAButton(DependencyObject element)
+    {
+        for (var parent = System.Windows.Media.VisualTreeHelper.GetParent(element); parent != null; parent = System.Windows.Media.VisualTreeHelper.GetParent(parent))
+            if (parent is Button) return true;
+        return false;
+    }
+
+    [Fact]
     public void ALinkButton_IsReachedByTabAndNamedForScreenReaders()
         => WpfTestApp.Run(() =>
         {

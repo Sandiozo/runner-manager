@@ -663,8 +663,11 @@
                                                                                         <TextBlock DockPanel.Dock="Right" Text="{Binding LiveJob.ElapsedText}" Style="{StaticResource Caption}" FontSize="11" VerticalAlignment="Center"/>
                                                                                         <TextBlock Text="CURRENT JOB" Style="{StaticResource SectionLabel}" VerticalAlignment="Center"/>
                                                                                     </DockPanel>
-                                                                                    <!-- A link: Tab reaches it and screen readers name it. -->
+                                                                                    <!-- A link when GitHub gave the job's address: Tab reaches it and screen readers name it. Plain text otherwise. -->
+                                                                                    <TextBlock Text="{Binding LiveJob.Title}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" Margin="0,4,0,0"
+                                                                                               Visibility="{Binding LiveJob.TitleTextVisibility}" local:TrimmedText.ToolTip="True"/>
                                                                                     <Button Style="{StaticResource FlatButton}" Tag="{Binding LiveJob.Url}" Click="LinkButton_Click" Margin="0,4,0,0"
+                                                                                            Visibility="{Binding LiveJob.TitleLinkVisibility}"
                                                                                             AutomationProperties.Name="{Binding LiveJob.Title}" AutomationProperties.HelpText="Open the job on GitHub">
                                                                                         <Button.ToolTip>
                                                                                             <StackPanel>
@@ -862,10 +865,16 @@
                                                                             <StackPanel>
                                                                             <DockPanel Style="{StaticResource KeyRow}">
                                                                                 <TextBlock Text="Repository" Style="{StaticResource KeyText}"/>
-                                                                                <Button Style="{StaticResource FlatButton}" HorizontalAlignment="Left" Tag="{Binding RepositoryUrl}" Click="LinkButton_Click"
-                                                                                        AutomationProperties.Name="{Binding RepositoryText}" AutomationProperties.HelpText="Open the repository on GitHub">
-                                                                                    <TextBlock Text="{Binding RepositoryText}" Style="{StaticResource Hyperlink}" FontSize="12"/>
-                                                                                </Button>
+                                                                                <!-- A link when the repository's address is known, plain text otherwise. -->
+                                                                                <Grid>
+                                                                                    <TextBlock Text="{Binding RepositoryText}" Style="{StaticResource ValueText}" HorizontalAlignment="Left"
+                                                                                               Visibility="{Binding RepositoryTextVisibility}"/>
+                                                                                    <Button Style="{StaticResource FlatButton}" HorizontalAlignment="Left" Tag="{Binding RepositoryUrl}" Click="LinkButton_Click"
+                                                                                            Visibility="{Binding RepositoryLinkVisibility}"
+                                                                                            AutomationProperties.Name="{Binding RepositoryText}" AutomationProperties.HelpText="Open the repository on GitHub">
+                                                                                        <TextBlock Text="{Binding RepositoryText}" Style="{StaticResource Hyperlink}" FontSize="12"/>
+                                                                                    </Button>
+                                                                                </Grid>
                                                                             </DockPanel>
                                                                             <DockPanel Style="{StaticResource KeyRow}">
                                                                                 <TextBlock Text="Windows service" Style="{StaticResource KeyText}"/>
