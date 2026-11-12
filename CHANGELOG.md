@@ -5,14 +5,14 @@ Runner Manager updates itself from [Releases](https://github.com/Sandiozo/runner
 
 ## 2.10.0
 
-New installs go to Program Files, where only administrators can change Runner Manager's files.
+New installs go to Program Files. There, Runner Manager's program files cannot be changed without administrator rights.
 
 ### After updating
 
 - An install in `%LOCALAPPDATA%\Programs\RunnerManager` or in a folder chosen in setup stays where it is, and updates
   keep it there. To move it to Program Files, run the setup again, click **Change…** and choose `C:\Program Files`.
-- On its first start as administrator, Runner Manager records the folder it is installed in, and the fleet agent's log
-  says so (see **Security**).
+- On its first start with administrator rights, also in setup, Runner Manager records the folder that its own
+  scheduled tasks start it from, and the fleet agent's log says so (see **Security**).
 - The setup of AI tools does not change. Copy it again from **Settings → AI assistants** only after a move to another
   folder.
 
@@ -21,13 +21,19 @@ New installs go to Program Files, where only administrators can change Runner Ma
 - The folder Runner Manager is installed in is now recorded for each Windows user where only an administrator can
   change it. The parts that run with administrator rights, such as updates and the fleet agent's task, take the folder
   from there or from the folder the installed copy runs in, never from the Settings → Apps entry alone, which another
-  program of the user can change. An install of an earlier version is recorded once, from the folder it runs in.
-- Updates are prepared in the install folder instead of the user's data folder. In Program Files, no program without
-  administrator rights can change the new files between the checksum check and the copy, or place files next to them.
-  A missing or half-written RunnerManager.exe is still put back, and rollback still works.
-- The signature check of the .NET runtime download, and the scripts that setup and uninstall run, take folder and file
-  names from the environment instead of from the script text, so a name with quotes cannot run commands. PowerShell is
-  started from the Windows folder.
+  program of the user can change. An install of an earlier version is recorded once, from the scheduled tasks of the
+  Windows user that run with administrator rights. A program without administrator rights cannot register such a task.
+- Runner Manager uses, registers again or repairs only the scheduled tasks of the Windows user that run with
+  administrator rights. It leaves any other task as it is, and the fleet agent's log says so.
+- Updates are prepared in a `RunnerManager.update-<number>` folder in the install folder instead of in the user's data
+  folder. In Program Files, the new files cannot be changed between the checksum check and the copy without
+  administrator rights. Old update folders are removed only when they hold nothing but files, and never through a link
+  to another folder. A missing or half-written RunnerManager.exe is still put back, and rollback still works.
+- The signature check of the .NET runtime download, the scripts that setup and uninstall run, and the check whether a
+  scheduled task runs take folder, file and task names from the environment instead of from the script text, so a name
+  with quotes cannot run commands. PowerShell is always started from the Windows folder.
+- The release build no longer loads the assemblies that `DOTNET_STARTUP_HOOKS` names, which any program of the user
+  can set.
 - Uninstall and a move to another folder remove the whole folder only in Program Files. From any other folder, also
   the default of earlier versions, they remove only Runner Manager's own files.
 
@@ -35,10 +41,16 @@ New installs go to Program Files, where only administrators can change Runner Ma
 
 - On a PC without Runner Manager, setup installs it to `C:\Program Files\RunnerManager`. On a PC with an install,
   setup shows the folder it is in, and **Default** or **Current folder** goes back to that folder.
+- When setup finds an install only from the Settings → Apps entry or in the default folder of earlier versions, it
+  offers that folder but says that it could not confirm the install. A move to another folder then leaves that copy
+  where it is.
 - For a folder outside Program Files, setup says to check that only administrators can change the files in it.
+- The first page says what setup does with a copy that is already in the chosen folder, also after **Change…**.
 - Several Windows users on one PC share one install. When a second user runs the setup, it offers the folder that is
   already there. Setup never puts an older version in place of one that another user runs, and keeps the installed
-  version instead. Uninstall and a move to another folder keep the program files while another user still uses them.
+  version instead. Uninstall and a move to another folder keep the program files while another user still uses them,
+  and also when setup cannot read the scheduled tasks that show who uses them. The record of a Windows user whose
+  account was removed no longer counts.
 - Setup and uninstall close only the dashboards of the Windows user who runs them.
 
 ## 2.9.0

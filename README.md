@@ -80,8 +80,8 @@ Runner Manager is for the PCs you already have.
 Windows may show "Windows protected your PC", because the setup is not code-signed. Click **More info → Run anyway**.
 You can check the file against the SHA-256 checksum in the release notes.
 
-On a PC without Runner Manager, the setup installs it to `C:\Program Files\RunnerManager`, where only administrators
-can change its files. This matters because Runner Manager runs with administrator rights. To install it somewhere else,
+On a PC without Runner Manager, the setup installs it to `C:\Program Files\RunnerManager`, where its files cannot be
+changed without administrator rights. This matters because Runner Manager runs with administrator rights. To install it somewhere else,
 click **Change…** on the first page of the setup; it gets its own `RunnerManager` folder there. Outside Program Files,
 check that only administrators can change the files in that folder.
 
