@@ -1,0 +1,94 @@
+using System.IO;
+
+namespace RunnerManager.Tests;
+
+/// <summary>Runner jobs, GitHub reads and the job view: the fixes from the fourth review round of 2.9.0.</summary>
+public class AuditR4RunnerTests
+{
+    // ----- Secrets in the job view's process list -----
+
+    [Theory]
+    // The command lines of the review, and the secret each one holds.
+    [InlineData(@"curl.exe -H ""x-functions-key: abc123"" https://example.azurewebsites.net/api/f", "abc123", "-H")]
+    [InlineData(@"curl.exe -H ""Ocp-Apim-Subscription-Key: abc123"" https://example.azure-api.net/api", "abc123", "-H")]
+    [InlineData(@"redis-cli -a Secret ping", "Secret", "")]
+    [InlineData(@"ldapsearch -x -w Secret -b dc=example,dc=com", "Secret", "-x")]
+    [InlineData(@"choco push --key KEY", "KEY", "push")]
+    [InlineData(@"choco push -k KEY pkg", "KEY", "push")]
+    [InlineData(@"rabbitmqctl add_user ci Secret", "Secret", "add_user")]
+    [InlineData(@"ssh-keygen -N Secret -f k", "Secret", "")]
+    [InlineData(@"smbclient //srv/share -U ci%Secret", "Secret", "")]
+    [InlineData(@"vault login s.AbCdEfGhIjKlMnOpQrStUvWx", "s.AbCdEfGhIjKlMnOpQrStUvWx", "login")]
+    [InlineData(@"tool call sk-proj-AbCdEfGhIjKlMnOpQrStUvWx0123", "sk-proj-AbCdEfGhIjKlMnOpQrStUvWx0123", "call")]
+    public void ProcessArguments_LeaveOutTheSecretsTheReviewFound(string commandLine, string secret, string expected)
+    {
+        var shown = RunnerActivity.ShortArguments(commandLine);
+
+        Assert.DoesNotContain(secret, shown);
+        Assert.Equal(expected, shown);
+    }
+
+    [Theory]
+    // API key headers, also as one quoted argument without a space, and with single quotes.
+    [InlineData(@"curl.exe -H ""x-functions-key:abc123"" https://example.azurewebsites.net/api/f", "abc123", "-H")]
+    [InlineData(@"curl.exe -H 'Ocp-Apim-Subscription-Key: abc123' https://example.azure-api.net/api", "abc123", "-H")]
+    [InlineData(@"curl.exe --header=x-functions-key:abc123 https://example.azurewebsites.net/api/f", "abc123", "")]
+    // The options of the table: with or without .exe, a path or quotes, any letter case, the value attached.
+    [InlineData(@"REDIS-CLI.EXE -h cache -a Secret ping", "Secret", "-h cache")]
+    [InlineData(@"""C:\Program Files\Redis\redis-cli.exe"" --pass Secret ping", "Secret", "")]
+    [InlineData(@"redis-cli.exe -h cache -aSecret", "Secret", "-h cache")]
+    [InlineData(@"cmd.exe /c redis-cli -a Secret ping", "Secret", "c redis-cli")]
+    [InlineData(@"ldapsearch.exe -x -wSecret", "Secret", "-x")]
+    [InlineData(@"ldapsearch -xw Secret -b dc=example", "Secret", "")]
+    [InlineData(@"ldapmodify -x -w Secret -f change.ldif", "Secret", "-x")]
+    [InlineData(@"ldapadd -x -w Secret -f add.ldif", "Secret", "-x")]
+    [InlineData(@"ldapdelete -x -w Secret cn=old", "Secret", "-x")]
+    [InlineData(@"LdapWhoAmI -x -w Secret", "Secret", "-x")]
+    [InlineData(@"ldappasswd -x -w Secret -s NewSecret uid=ci", "Secret", "-x")]
+    [InlineData(@"ssh-keygen.exe -p -P OldSecret -N NewSecret -f k", "Secret", "-p")]
+    [InlineData(@"ssh-keygen -t ed25519 -NSecret", "Secret", "-t ed25519")]
+    [InlineData(@"chocolatey.exe push pkg.nupkg -k=KEY", "KEY", "push pkg.nupkg")]
+    [InlineData(@"choco push pkg.nupkg --api-key KEY -s https://push.example.org", "KEY", "push pkg.nupkg")]
+    [InlineData(@"choco push --key=KEY", "KEY", "push")]
+    [InlineData(@"tool.exe upload --key KEY", "KEY", "upload")]
+    [InlineData(@"sshpass -p Secret ssh ci@host", "Secret", "")]
+    // User and password with %, as Samba's tools take them.
+    [InlineData(@"smbclient.exe -L //srv -Uci%Secret", "Secret", "-L")]
+    [InlineData(@"rpcclient -U ci%Secret srv", "Secret", "")]
+    [InlineData(@"rpcclient --user=ci%Secret srv", "Secret", "")]
+    [InlineData(@"tool.exe sync -U ci%Secret", "Secret", "sync")]
+    [InlineData(@"tool.exe sync -Uci%Secret", "Secret", "sync")]
+    // smbclient takes the password as a plain argument after the share. (A share is a path root, so it has no file name to show.)
+    [InlineData(@"smbclient //srv/share Secret -U ci", "Secret", "")]
+    [InlineData(@"smbclient //srv/share/folder Secret -U ci", "Secret", "folder")]
+    // rabbitmqctl: everything after the commands that take a password (two of them are also left out for their names).
+    [InlineData(@"rabbitmqctl.bat -n rabbit@host add_user ci Secret", "Secret", "-n rabbit@host add_user")]
+    [InlineData(@"rabbitmqctl.bat -n rabbit@host change_password ci Secret", "Secret", "-n rabbit@host")]
+    [InlineData(@"RabbitMQCtl authenticate_user ci Secret", "Secret", "")]
+    [InlineData(@"cmd.exe /c rabbitmqctl add_user ci Secret", "Secret", "c rabbitmqctl add_user")]
+    // Raw tokens.
+    [InlineData(@"vault.exe login hvb.AAAAAQJabc", "hvb.AAAAAQJabc", "login")]
+    [InlineData(@"vault.exe operator generate-root -otp=hvr.AbC", "hvr.AbC", "operator generate-root")]
+    [InlineData(@"vault.exe write -address=x value=s.AbCdEfGhIjKlMnOpQrStUvWx", "s.AbCdEfGhIjKlMnOpQrStUvWx", "write -address=x")]
+    [InlineData(@"tool.exe call --value=sk-AbCdEfGhIjKlMnOpQrStUvWx", "sk-AbCdEfGhIjKlMnOpQrStUvWx", "call")]
+    public void ProcessArguments_LeaveOutMoreForms(string commandLine, string secret, string expected)
+    {
+        var shown = RunnerActivity.ShortArguments(commandLine);
+
+        Assert.DoesNotContain(secret, shown);
+        Assert.Equal(expected, shown);
+    }
+
+    [Theory]
+    // Ordinary arguments of the same programs stay.
+    [InlineData(@"redis-cli.exe -h cache -p 6379 ping", "-h cache -p")]
+    [InlineData(@"ldapsearch -x -W -b dc=example", "-x -W -b")]
+    [InlineData(@"ssh-keygen -t ed25519 -f key", "-t ed25519 -f")]
+    [InlineData(@"choco install git -y", "install git -y")]
+    [InlineData(@"rabbitmqctl list_users", "list_users")]
+    [InlineData(@"pip.exe install sk-video", "install sk-video")]
+    [InlineData(@"tool.exe build s.version", "build s.version")]
+    [InlineData(@"psql.exe -U postgres -d app", "-U postgres -d")]
+    public void ProcessArguments_KeepOrdinaryArguments(string commandLine, string expected)
+        => Assert.Equal(expected, RunnerActivity.ShortArguments(commandLine));
+}
