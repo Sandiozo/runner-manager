@@ -18,15 +18,15 @@ public partial class EditRunnerWindow : Window
     {
         InitializeComponent();
         WindowTheme.Apply(this);
-        _currentName = runner.AgentName;
+        // Another PC can send null for the name and the labels.
+        _currentName = runner.AgentName ?? string.Empty;
         _canClearLabels = canClearLabels;
         // Runners on other PCs report their labels in their status; for runners on this PC they are read from GitHub.
-        // A PC can send null for the list.
-        _currentLabels = runner.CustomLabels is { Length: > 0 } reported ? reported : runner.LocalRunner?.CustomLabels ?? Array.Empty<string>();
+        _currentLabels = EditRunnerForm.CurrentLabels(runner.CustomLabels, runner.LocalRunner?.CustomLabels);
         _alwaysAdded = runner.IsLocalMachine
             ? $"The labels self-hosted, Windows and {RunnerService.ArchitectureLabel} are always added."
             : "The labels self-hosted, Windows and X64 or ARM64 are always added.";
-        RunnerNameBox.Text = runner.AgentName;
+        RunnerNameBox.Text = _currentName;
         LabelsBox.Text = string.Join(", ", _currentLabels);
         SubtitleText.Text = $"{runner.RepositoryText}  ·  {runner.MachineName}";
         RunnerNameBox.TextChanged += (_, _) => Check();

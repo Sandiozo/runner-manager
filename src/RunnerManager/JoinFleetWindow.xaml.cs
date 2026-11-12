@@ -25,7 +25,7 @@ public partial class JoinFleetWindow : Window
     public byte[]? PairingKey { get; private set; }
     public string HostName { get; private set; } = string.Empty;
     public string HostAddress { get; private set; } = string.Empty;
-    /// <summary>The host allowed this PC one way: <see cref="PairingKey"/> is its own code, not the fleet's.</summary>
+    /// <summary>The host allowed this PC one way: <see cref="PairingKey"/> is its access code, not the fleet code.</summary>
     public bool Managed { get; private set; }
 
     public JoinFleetWindow(bool openJoinPage = false)

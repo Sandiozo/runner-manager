@@ -182,18 +182,35 @@ public class AuditDialogTests
     }
 
     [Fact]
-    public void TypedRunnerName_LongerThanGitHubAllows_IsRefused()
+    public void TypedRunnerName_LongerThan64Characters_IsRefused()
     {
         var longest = new string('r', AddRunnerForm.MaxNameLength);
         Assert.Null(AddRunnerForm.NameProblem(longest, "repos/owner/repo", Array.Empty<(string, string)>()));
-        Assert.Equal("The name is too long. GitHub allows at most 64 characters.",
+        // It is Runner Manager's limit, not one that GitHub documents.
+        Assert.Equal("The name is too long. Use at most 64 characters.",
             AddRunnerForm.NameProblem(longest + "r", "repos/owner/repo", Array.Empty<(string, string)>()));
         Assert.Null(AddRunnerForm.NameProblem($"  {longest}  ", "repos/owner/repo", Array.Empty<(string, string)>()));
 
         var edit = EditRunnerForm.Check("pc-app", Array.Empty<string>(), longest + "r", "", false);
-        Assert.Equal("The name is too long. GitHub allows at most 64 characters.", edit.NameProblem);
+        Assert.Equal("The name is too long. Use at most 64 characters.", edit.NameProblem);
         Assert.False(edit.CanSave);
         Assert.True(EditRunnerForm.Check("pc-app", Array.Empty<string>(), longest, "", false).CanSave);
+    }
+
+    [Fact]
+    public void EditRunner_WithALongerNameThatIsKept_CanSaveNewLabels()
+    {
+        var registered = new string('r', AddRunnerForm.MaxNameLength + 10);
+        var relabelled = EditRunnerForm.Check(registered, new[] { "gpu" }, $" {registered} ", "gpu, big", canClearLabels: false);
+        Assert.Null(relabelled.NameProblem);
+        Assert.True(relabelled.CanSave);
+        Assert.Equal(registered, relabelled.Request!.RunnerName);
+
+        // A new name keeps to the limit, and so does one that changes only the case.
+        Assert.NotNull(EditRunnerForm.Check(registered, new[] { "gpu" }, registered + "2", "gpu", false).NameProblem);
+        Assert.NotNull(EditRunnerForm.Check(registered, new[] { "gpu" }, registered.ToUpperInvariant(), "gpu", false).NameProblem);
+        // The kept name still needs characters that the runner accepts.
+        Assert.NotNull(EditRunnerForm.Check("pc app", new[] { "gpu" }, "pc app", "gpu, big", false).NameProblem);
     }
 
     [Theory]
@@ -250,6 +267,23 @@ public class AuditDialogTests
     {
         Assert.Equal(($"{Environment.MachineName} (this PC)", $"{Environment.MachineName}, this PC"), AddRunnerForm.PcLabel(Pc(Environment.MachineName)));
         Assert.Equal(("OFFICE", "OFFICE"), AddRunnerForm.PcLabel(Pc("OFFICE")));
+    }
+
+    [Fact]
+    public void PcPicker_SaysWhyTheDashboardsPcIsMissing_AlsoWhenOnlyThisPcCanBeChosen()
+    {
+        var thisPc = Pc(Environment.MachineName);
+        var offline = Pc("OFFICE", online: false);
+        Assert.Equal("OFFICE is not in the list: it is offline, or its Runner Manager is too old to add runners from here.",
+            AddRunnerForm.MissingPcHint(offline, AddRunnerForm.TargetPcs(new[] { thisPc, offline, Pc("LAB") })));
+        // No picker: the window adds the runner on this PC, and says so.
+        Assert.Equal("OFFICE cannot be chosen: it is offline, or its Runner Manager is too old to add runners from here. The runner is added on this PC.",
+            AddRunnerForm.MissingPcHint(offline, AddRunnerForm.TargetPcs(new[] { thisPc, offline })));
+        Assert.EndsWith("The runner is added on this PC.", AddRunnerForm.MissingPcHint(Pc("OLD", protocol: 8), Array.Empty<MachineInfo>()));
+
+        Assert.Null(AddRunnerForm.MissingPcHint(null, new[] { thisPc }));
+        Assert.Null(AddRunnerForm.MissingPcHint(thisPc, new[] { thisPc }));
+        Assert.Null(AddRunnerForm.MissingPcHint(Pc("LAB"), AddRunnerForm.TargetPcs(new[] { thisPc, Pc("LAB") })));
     }
 
     [Theory]
@@ -326,11 +360,150 @@ public class AuditDialogTests
         Assert.False(badLabel.CanSave);
     }
 
+    // ----- Runners and PCs as another PC reports them -----
+
+    [Fact]
+    public void RunnerForms_AcceptNullStringsAndListsFromAnotherPc()
+    {
+        // "Scope": null and "AgentName": null in another PC's status override the empty defaults.
+        var existing = new (string, string)[] { (null!, "BUILD-PC-repo"), ("repos/owner/repo", null!), (null!, null!) };
+        Assert.Null(AddRunnerForm.NameProblem("BUILD-PC-repo", "repos/owner/repo", existing));
+        Assert.Null(AddRunnerForm.NameProblem("BUILD-PC-repo", "repos/owner/repo", null));
+        Assert.Null(AddRunnerForm.NameProblem("BUILD-PC-repo", null, existing));
+        Assert.NotNull(AddRunnerForm.NameProblem(null, "repos/owner/repo", existing));
+        Assert.NotNull(AddRunnerForm.NameProblem("build-pc-repo", "repos/owner/repo", new[] { ("REPOS/owner/repo", "BUILD-PC-repo") }));
+
+        Assert.Equal("runner", AddRunnerForm.DefaultRunnerName(null, AddRunnerForm.CheckRepository(""), _ => false));
+        Assert.Equal("app", AddRunnerForm.DefaultRunnerName(null, AddRunnerForm.CheckRepository("owner/app"), _ => false));
+        Assert.Empty(AddRunnerForm.ParseLabels(null));
+        Assert.Equal(new[] { Environment.MachineName },
+            AddRunnerForm.TargetPcs(new MachineInfo?[] { null, Pc(Environment.MachineName), new() { MachineKey = "NONAME", MachineName = null!, FleetAgentRunning = true } })
+                .Select(m => m.MachineName));
+        Assert.Empty(AddRunnerForm.TargetPcs(null));
+
+        // Edit runner on a runner without a reported name or labels.
+        var edit = EditRunnerForm.Check(null, null, "pc-app", "gpu", canClearLabels: false);
+        Assert.True(edit.CanSave);
+        Assert.Equal(new[] { "gpu" }, edit.Request!.Labels);
+        Assert.False(EditRunnerForm.Check(null, new string?[] { null, " " }, null, null, canClearLabels: false).CanSave);
+        Assert.Equal(new[] { "gpu" }, EditRunnerForm.CurrentLabels(new string?[] { null, " gpu ", "GPU" }, new[] { "local" }));
+        Assert.Equal(new[] { "local" }, EditRunnerForm.CurrentLabels(new string?[] { null }, new[] { "local" }));
+        Assert.Empty(EditRunnerForm.CurrentLabels(null, null));
+    }
+
     [Fact]
     public void ForgetWording_MatchesTheDashboard()
     {
         Assert.Equal("Forget OFFICE?", ForgetPc.Heading("OFFICE"));
         Assert.Contains("still has the fleet code", ForgetPc.Message("OFFICE", online: true));
         Assert.Contains("appears again when it is found", ForgetPc.Message("OFFICE", online: false));
+    }
+
+    // ----- Add a PC: what is checked before Allow -----
+
+    private const string OfficeId = "0123456789abcdef0123456789abcdef";
+    private const string HostId = "fedcba9876543210fedcba9876543210";
+
+    private static FleetConfig PairingFleet() => new()
+    {
+        KnownPeers = { new PeerRecord { Name = "OFFICE-PC", MachineId = OfficeId }, new PeerRecord { Name = "OLD-PC" } },
+        ManagedPcs = { new ManagedPcRecord { Name = "GUEST-PC", MachineId = "aaaa1111" } }
+    };
+
+    private static PairingHostWindow.RequestCheck CheckJoin(string name, string? machineId, params (string Name, string? MachineId)[] allowed)
+        => PairingHostWindow.CheckRequest(PairingFleet(), name, machineId, allowed, "HOST-PC", HostId);
+
+    [Fact]
+    public void AddAPc_Warns_WhenAPcOfThatNameWasAllowedAMomentAgo()
+    {
+        const string warning = "A PC named LAPTOP was allowed a moment ago and is not added yet. Allow only if this is the same PC.";
+        Assert.Equal(new PairingHostWindow.RequestCheck(warning, CanAllow: true), CheckJoin("LAPTOP", "1111", ("LAPTOP", "2222")));
+        // Older PCs send no ID, so they cannot be told apart.
+        Assert.Equal(warning, CheckJoin("LAPTOP", null, ("laptop", null)).Warning);
+        Assert.Equal(warning, CheckJoin("LAPTOP", "1111", ("LAPTOP", null)).Warning);
+        // The same PC asking again, and another name.
+        Assert.Null(CheckJoin("LAPTOP", "1111", ("LAPTOP", "1111")).Warning);
+        Assert.Null(CheckJoin("LAPTOP", "1111", ("DESKTOP", "2222")).Warning);
+        Assert.Null(CheckJoin("LAPTOP", null).Warning);
+    }
+
+    [Fact]
+    public void AddAPc_CannotAllowAPcWithTheNameOfThisPc()
+    {
+        var check = CheckJoin("HOST-PC", OfficeId);
+        Assert.False(check.CanAllow);
+        Assert.StartsWith("This PC is also named HOST-PC.", check.Warning);
+        Assert.False(CheckJoin("host_pc", null).CanAllow);
+        Assert.True(CheckJoin("LAPTOP", null).CanAllow);
+    }
+
+    [Fact]
+    public void AddAPc_CannotAllowAPcThatSendsTheMachineIdOfThisPc()
+    {
+        var check = CheckJoin("LAPTOP", HostId.ToUpperInvariant());
+        Assert.False(check.CanAllow);
+        Assert.Equal("LAPTOP sends the machine ID of this PC, so the fleet cannot tell the two PCs apart, and LAPTOP cannot be added. " +
+                     "This happens when a PC is set up from a copy of the other PC's disk.", check.Warning);
+        // This PC's ID is not known: nothing to compare.
+        Assert.True(PairingHostWindow.CheckRequest(PairingFleet(), "LAPTOP", HostId, [], "HOST-PC", "").CanAllow);
+    }
+
+    [Fact]
+    public void AddAPc_Warns_WhenTheMachineIdIsSavedUnderAnotherName_AndNamesThePcItReplaces()
+    {
+        Assert.Equal(new PairingHostWindow.RequestCheck(
+                "LAPTOP says it is OFFICE-PC, a PC in this fleet, with a new name. If you allow it, it takes the place of OFFICE-PC. " +
+                "Allow only if OFFICE-PC was renamed to LAPTOP.", CanAllow: true),
+            CheckJoin("LAPTOP", OfficeId.ToUpperInvariant()));
+        Assert.StartsWith("LAPTOP says it is GUEST-PC, a PC that this fleet manages one way, with a new name.", CheckJoin("LAPTOP", "AAAA1111").Warning);
+        Assert.StartsWith("LAPTOP says it is DESKTOP, which was allowed a moment ago, with a new name.", CheckJoin("LAPTOP", "3333", ("DESKTOP", "3333")).Warning);
+        // The PC that has the name and the ID, joining again.
+        Assert.Null(CheckJoin("OFFICE-PC", OfficeId).Warning);
+        Assert.Null(CheckJoin("office_pc", OfficeId).Warning);
+        // No ID, or one that no saved PC has.
+        Assert.Null(CheckJoin("LAPTOP", null).Warning);
+        Assert.Null(CheckJoin("LAPTOP", "4444").Warning);
+        Assert.Null(PairingHostWindow.SameIdWarning(PairingFleet(), "LAPTOP", ""));
+    }
+
+    [Fact]
+    public void AddAPc_ShowsBothWarnings_WhenTheNameAndTheMachineIdBelongToTwoOtherPcs()
+        => Assert.Equal(
+            "This fleet already manages a PC named GUEST-PC. Allow only if this is the same PC.\n\n" +
+            "GUEST-PC says it is OFFICE-PC, a PC in this fleet, with a new name. If you allow it, it takes the place of OFFICE-PC. Allow only if OFFICE-PC was renamed to GUEST-PC.",
+            CheckJoin("GUEST-PC", OfficeId).Warning);
+
+    // ----- Settings → Fleet: the code row -----
+
+    [Fact]
+    public void CodeRow_OnAPcManagedOneWay_NamesTheAccessCode()
+    {
+        Assert.Equal("Access code", CodeRowText.Title("BUILD-PC"));
+        Assert.Equal("Copy access code", CodeRowText.CopyName("BUILD-PC"));
+        Assert.Equal("Access code copied", CodeRowText.CopiedHeading("BUILD-PC"));
+        Assert.Equal("Could not copy the access code", CodeRowText.CopyFailed("BUILD-PC"));
+        Assert.Equal("Remove access code…", CodeRowText.RemoveItem("BUILD-PC"));
+        Assert.Equal("Remove the access code?", CodeRowText.RemoveHeading("BUILD-PC"));
+        Assert.Contains("BUILD-PC's fleet", CodeRowText.ManagedStatus("BUILD-PC", "ab12"));
+        Assert.Contains("access code", CodeRowText.ManagedCannotChange("BUILD-PC"));
+        Assert.Contains("access code", CodeRowText.NewCodeMessage("BUILD-PC"));
+        // A managed PC's code gives full control of that PC only: it is not entered on another PC as a fleet code.
+        Assert.DoesNotContain("Enter fleet code", CodeRowText.CopiedMessage("BUILD-PC"));
+        foreach (var text in new[] { CodeRowText.CopiedMessage("BUILD-PC"), CodeRowText.RemoveMessage("BUILD-PC"), CodeRowText.ManagedStatus("BUILD-PC", "ab12") })
+            Assert.DoesNotContain("fleet code", text);
+    }
+
+    [Fact]
+    public void CodeRow_OnAFleetMember_NamesTheFleetCode()
+    {
+        Assert.Equal("Fleet code", CodeRowText.Title(""));
+        Assert.Equal("Copy fleet code", CodeRowText.CopyName(""));
+        Assert.Equal("Fleet code copied", CodeRowText.CopiedHeading(""));
+        Assert.Equal("Could not copy the fleet code", CodeRowText.CopyFailed(""));
+        Assert.Equal("Remove fleet code…", CodeRowText.RemoveItem(""));
+        Assert.Equal("Remove the fleet code?", CodeRowText.RemoveHeading(""));
+        Assert.Contains("Enter fleet code", CodeRowText.CopiedMessage(""));
+        Assert.Contains("Change the fleet code on every PC", CodeRowText.NewCodeMessage(""));
+        Assert.DoesNotContain("access code", CodeRowText.RemoveMessage("") + CodeRowText.NewCodeMessage("") + CodeRowText.CopiedMessage(""));
     }
 }

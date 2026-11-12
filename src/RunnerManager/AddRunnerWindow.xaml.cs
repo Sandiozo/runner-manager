@@ -46,15 +46,23 @@ public partial class AddRunnerWindow : Window
     {
         InitializeComponent();
         WindowTheme.Apply(this);
-        var fleet = pcs?.ToList() ?? new List<MachineInfo>();
+        var fleet = pcs?.OfType<MachineInfo>().ToList() ?? new List<MachineInfo>();
+        // Runners that other PCs report can have a null scope or name, which AddRunnerForm.NameProblem allows for.
         _existing = (existingRunners ?? fleet.SelectMany(m => m.Runners ?? Array.Empty<MachineRunnerStatus>()))
-            .Select(r => (r.Scope, r.AgentName)).ToList();
+            .OfType<MachineRunnerStatus>().Select(r => (r.Scope, r.AgentName)).ToList();
         _canChooseFolder = canChooseFolder ?? (_ => false);
 
         var targets = AddRunnerForm.TargetPcs(fleet);
         _target = targets.FirstOrDefault(m => selectedPc != null && m.MachineKey == selectedPc.MachineKey)
                   ?? targets.FirstOrDefault(m => m.IsLocal) ?? targets.FirstOrDefault();
-        if (targets.Count > 1) ShowPcChoices(targets, selectedPc);
+        if (targets.Count > 1) ShowPcChoices(targets);
+        else PcFieldLabel.Visibility = PcChoicesHost.Visibility = Visibility.Collapsed;
+        // The PC selected on the dashboard is missing when it is offline or its fleet agent cannot create runners.
+        if (AddRunnerForm.MissingPcHint(selectedPc, targets) is { } missing)
+        {
+            PcHint.Text = missing;
+            PcHint.Visibility = PcPanel.Visibility = Visibility.Visible;
+        }
 
         // Typing in a box keeps what was typed; until then, the name and folder follow the repository and the PC.
         RunnerNameBox.TextChanged += (_, _) =>
@@ -78,7 +86,7 @@ public partial class AddRunnerWindow : Window
     /// <summary>Whether the folder box is used: always on this PC, on another PC only when the folder reaches it.</summary>
     private bool UsesFolderBox => !IsRemote || _canChooseFolder(_target!);
 
-    private void ShowPcChoices(List<MachineInfo> targets, MachineInfo? selectedPc)
+    private void ShowPcChoices(List<MachineInfo> targets)
     {
         foreach (var pc in targets)
         {
@@ -94,12 +102,6 @@ public partial class AddRunnerWindow : Window
             PcChoices.Children.Add(choice);
         }
         PcPanel.Visibility = Visibility.Visible;
-        // The PC selected on the dashboard is missing when it is offline or its fleet agent cannot create runners.
-        if (selectedPc is { IsLocal: false } && targets.All(m => m.MachineKey != selectedPc.MachineKey))
-        {
-            PcHint.Text = $"{selectedPc.MachineName} is not in the list: it is offline, or its Runner Manager is too old to add runners from here.";
-            PcHint.Visibility = Visibility.Visible;
-        }
     }
 
     /// <summary>Names the chosen PC in the title and texts, and sets the default name and folder for it.</summary>

@@ -26,10 +26,10 @@
             <TextBlock x:Name="DescriptionText" Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,6,0,20"
                        Text="Downloads the latest GitHub Actions runner, verifies its checksum, registers it with GitHub and installs it as a Windows service on this PC."/>
 
-            <!-- Shown when the runner can be added on more than one PC. -->
+            <!-- Shown when the runner can be added on more than one PC; only the hint when the dashboard's PC cannot be chosen. -->
             <StackPanel x:Name="PcPanel" Visibility="Collapsed" Margin="0,0,0,16">
-                <TextBlock Text="PC" Style="{StaticResource FieldLabel}"/>
-                <Border Style="{StaticResource SegmentHost}">
+                <TextBlock x:Name="PcFieldLabel" Text="PC" Style="{StaticResource FieldLabel}"/>
+                <Border x:Name="PcChoicesHost" Style="{StaticResource SegmentHost}">
                     <WrapPanel x:Name="PcChoices" AutomationProperties.Name="PC"/>
                 </Border>
                 <TextBlock x:Name="PcHint" Style="{StaticResource FieldHint}" Visibility="Collapsed"/>
