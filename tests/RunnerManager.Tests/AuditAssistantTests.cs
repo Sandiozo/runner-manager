@@ -1030,12 +1030,23 @@ public class AuditAssistantTests
 
         // Characters that look like a quotation mark without being one: a low and a full-width mark, a double prime,
         // a modifier letter, Hebrew gershayim and two yods, two apostrophes, two primes, a ditto mark and more.
-        foreach (var mark in new[] { "\u201E", "\uFF02", "\u2033", "\u02BA", "\u05F4", "\u05D9\u05D9", "''", "\u2032\u2032", "\u3003", "\u02EE", "`", "\u00B4\u00B4" })
+        foreach (var mark in new[] { "\u201E", "\uFF02", "\u2033", "\u02BA", "\u05F4", "\u05D9\u05D9", "''", "\u2032\u2032", "\u3003", "\u02EE", "`", "\u00B4\u00B4",
+                     "\u1426", "\uA78C\uA78C", "\u02BC\u02BC", "\u0559\u0559" })
             Assert.Equal("An AI assistant (\"Tool wants to delete everything\")", McpServer.ClientLabel($"Tool{mark}) wants to delete everything"));
         // Letters that are read from right to left would move the end of the quotation on the screen.
         Assert.Equal("An AI assistant (\"Tool x\")", McpServer.ClientLabel("Tool \u05D0\u05D1\u05D2 \u0627\u0644 x"));
 
-        // What a name may have: Latin letters, also with accents, digits, spaces and a few plain marks.
+        // What a name may have: letters and digits of scripts written from left to right, with their accents and vowel
+        // signs, spaces and a few plain marks.
+        Assert.Equal("An AI assistant (\"\u041A\u043B\u043E\u0434 \u039A\u03BB\u03CE\u03BD\u03C4 \u514B\u52B3\u5FB7 \u30AF\u30ED\u30FC\u30C9\")",
+            McpServer.ClientLabel("\u041A\u043B\u043E\u0434 \u039A\u03BB\u03CE\u03BD\u03C4 \u514B\u52B3\u5FB7 \u30AF\u30ED\u30FC\u30C9"));
+        Assert.Equal("An AI assistant (\"\u0939\u093F\u0928\u094D\u0926\u0940 \u0E44\u0E17\u0E22 \uD840\uDC00 x\")",
+            McpServer.ClientLabel("\u0939\u093F\u0928\u094D\u0926\u0940 \u0E44\u0E17\u0E22 \uD840\uDC00 \u0661x"));
+        // Stacked marks: a few per letter, and none without a letter.
+        var stacked = McpServer.ClientLabel("a" + new string('\u0301', 12) + " \u0301\u0301b");
+        Assert.Equal("An AI assistant (\"\u00E1\u0301\u0301\u0301 b\")", stacked);
+        // Emoji and symbols are not letters.
+        Assert.Equal("An AI assistant (\"Tool x\")", McpServer.ClientLabel("Tool \uD83D\uDE42\u2605 x"));
         Assert.Equal("An AI assistant (\"@scope/My-Tool_2.0+b #1 R&D, v:3\")", McpServer.ClientLabel("@scope/My-Tool_2.0+b #1 R&D, v:3"));
         Assert.Equal("An AI assistant (\"Caf\u00E9 \u00C5ngstr\u00F6m\")", McpServer.ClientLabel("Cafe\u0301 \u00C5ngstr\u00F6m"));
         // Other forms of plain characters count as the plain ones. The signs among the accented letters do not count.
