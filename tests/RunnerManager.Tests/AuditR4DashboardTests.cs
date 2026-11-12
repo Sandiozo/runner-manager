@@ -96,6 +96,31 @@ public class AuditR4DashboardTests
         Assert.True(MainWindow.SignInToShow(wasAuthenticated: false, answer: true, changedMeanwhile: false));
     }
 
+    // ----- 5: job alerts are those the cards show -----
+
+    private static MachineRunnerStatus ServiceRunner(string name, bool busy) => new()
+    {
+        ServiceName = $"actions.runner.{name}", DisplayName = name, ServiceInstalled = true, IsRunning = true, ActivityText = busy ? "Busy" : "Idle"
+    };
+
+    [Fact]
+    public void JobAlerts_LeaveOutAJobThatEndedWhileTheCheckAskedGitHub()
+    {
+        var stuck = new RunnerHealth(RunnerConcern.Stuck, "Stuck", "The job has used no CPU and printed no output for 30 min.", "job-7");
+        // The check found both jobs stuck. A newer reading came while it asked GitHub: the api job has ended.
+        var ended = ServiceRunner("api", busy: false);
+        var running = ServiceRunner("build", busy: true);
+        ended.Health = MainWindow.StillApplies(stuck, ended);
+        running.Health = MainWindow.StillApplies(stuck, running);
+        var pc = PcWith("BUILD-52", ended, running);
+        var reported = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        Assert.Equal(new[] { "BUILD-52: build — Stuck. The job has used no CPU and printed no output for 30 min." },
+            MainWindow.NewProblemAlerts(new[] { pc }, reported));
+        // Each concern is reported once.
+        Assert.Empty(MainWindow.NewProblemAlerts(new[] { pc }, reported));
+    }
+
     // ----- 10: a sign-in check that failed -----
 
     [Fact]

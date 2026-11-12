@@ -49,21 +49,31 @@ public partial class MainWindow
             UpdateAttentionTile(Machines.ToList());
 
             if (!_settings.NotifyOnJobProblems) return;
-            foreach (var machine in Machines)
-            {
-                foreach (var runner in machine.Runners)
-                {
-                    if (!_runnerHealth.TryGetValue(JobHealth.Key(runner), out var problem) || !problem.IsProblem) continue;
-                    if (_reportedProblems.Add($"{JobHealth.Key(runner)}|{problem.Subject}"))
-                        RaiseAlert($"{machine.MachineName}: {runner.TitleText} — {problem.Label}. {problem.Detail}", warning: true);
-                }
-            }
+            foreach (var alert in NewProblemAlerts(Machines, _reportedProblems)) RaiseAlert(alert, warning: true);
             foreach (var job in health.Unserved)
                 if (_reportedProblems.Add($"unserved|{job.JobId}")) RaiseAlert(job.Text, warning: true);
             if (_reportedProblems.Count > 2000) _reportedProblems.Clear();
         }
         catch (Exception ex) { AddActivity($"Could not check the runners' jobs: {ex.Message}"); }
         finally { _healthChecking = false; }
+    }
+
+    /// <summary>
+    /// The alerts for concerns that were not reported before, as the cards show them (<see cref="ApplyHealth"/>): the
+    /// check runs beside the refreshes, so a job that ended while it asked GitHub is no longer stuck and is not reported.
+    /// Each concern reported is added to <paramref name="reported"/>, so it is reported once.
+    /// </summary>
+    internal static List<string> NewProblemAlerts(IEnumerable<MachineInfo> machines, ISet<string> reported)
+    {
+        var alerts = new List<string>();
+        foreach (var machine in machines)
+        foreach (var runner in machine.Runners)
+        {
+            var problem = runner.Health;
+            if (problem.IsProblem && reported.Add($"{JobHealth.Key(runner)}|{problem.Subject}"))
+                alerts.Add($"{machine.MachineName}: {runner.TitleText} — {problem.Label}. {problem.Detail}");
+        }
+        return alerts;
     }
 
     private void ApplyHealth(MachineRunnerStatus runner)
