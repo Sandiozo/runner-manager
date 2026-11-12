@@ -138,3 +138,45 @@ public class AgentTaskSwitchTests
         Assert.Equal(1, helper);
     }
 }
+
+/// <summary>
+/// "Add a PC": a PC that joined with the fleet code but could not be saved here. The error is shown, and the state stays
+/// one the window knows: a newer PC is told it was not added, and an older one, which kept the code, still counts.
+/// </summary>
+public class JoinNotSavedTests
+{
+    [Fact]
+    public void APcThatConfirms_IsToldItWasNotAdded()
+    {
+        var failure = PairingHostWindow.JoinNotSaved("LAPTOP", confirms: true, "The file is in use.");
+        Assert.True(failure.TellThePc);
+        Assert.Equal("LAPTOP was not added. This PC could not save it.", failure.Result);
+        Assert.Contains("The file is in use.", failure.Message);
+        Assert.Contains("Try again.", failure.Message);
+    }
+
+    [Fact]
+    public void AnOlderPc_ThatKeptTheCode_IsInTheFleet_AndTheUserIsTold()
+    {
+        var failure = PairingHostWindow.JoinNotSaved("LAPTOP", confirms: false, "Access is denied.");
+        Assert.False(failure.TellThePc);
+        Assert.Equal("✓  LAPTOP joined the fleet, but this PC could not save it.", failure.Result);
+        Assert.Contains("has the fleet code and is in the fleet", failure.Message);
+        Assert.Contains("Access is denied.", failure.Message);
+        Assert.Contains("Settings → Fleet", failure.Message);
+        foreach (var text in new[] { failure.Message, failure.Result, PairingHostWindow.JoinNotSaved("X", true, "e").Message })
+        {
+            Assert.DoesNotContain("'", text);
+            Assert.DoesNotContain("pairing code", text, StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    [Fact]
+    public void ANextRequestWithItsName_IsStillWarnedAbout()
+    {
+        // The window checks a request also against the PCs that joined but were not saved.
+        var check = PairingHostWindow.CheckRequest(new FleetConfig(), "LAPTOP", "2222", [("LAPTOP", "1111")], "HOST-PC", "9999");
+        Assert.True(check.CanAllow);
+        Assert.Contains("A PC named LAPTOP was allowed a moment ago", check.Warning);
+    }
+}

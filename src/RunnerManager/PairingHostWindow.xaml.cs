@@ -36,6 +36,9 @@ public partial class PairingHostWindow : Window
     private readonly List<string> _managed = new();
     private readonly List<string> _added = new();
     private readonly List<string> _notAdded = new();
+    // PCs that joined with the fleet code but could not be saved here: a next request with the name or the machine ID
+    // of one of them is still warned about, as if it was allowed a moment ago.
+    private readonly List<(string Name, string? MachineId)> _notSaved = new();
 
     /// <summary>Names of the PCs that joined while the window was open.</summary>
     public IReadOnlyList<string> JoinedPcs => _joined;
@@ -156,7 +159,7 @@ public partial class PairingHostWindow : Window
     /// <summary>The request checked against this PC, the PCs saved here and the PCs allowed but not added yet.</summary>
     private RequestCheck Check(Pairing.JoinRequest request)
     {
-        var allowed = _sending.Keys.Where(r => r != request).Select(r => (r.Name, r.MachineId)).ToList();
+        var allowed = _sending.Keys.Where(r => r != request).Select(r => (r.Name, r.MachineId)).Concat(_notSaved).ToList();
         return CheckRequest(FleetConfig.Current, request.Name, request.MachineId, allowed, Environment.MachineName, _thisPcId);
     }
 
@@ -437,15 +440,52 @@ public partial class PairingHostWindow : Window
         }
         else
         {
-            _joined.Add(request.Name);
             // Discovery finds it only on the local network, so remember where it joined from (over Tailscale, for example).
             // With its machine ID, a one-way pairing of the same PC ends here.
             try { MachineRelay.AddKnownPeer(request.Name, request.Address, request.MachineId); }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+            catch (Exception ex)
+            {
+                var failure = JoinNotSaved(request.Name, request.Confirms, ex.Message);
+                if (failure.TellThePc)
+                {
+                    // The PC is told, and drops the fleet code: it is neither in the fleet nor saved here. The dialog comes
+                    // after that, so that the PC does not wait for it.
+                    Dispatcher.BeginInvoke(() =>
+                    {
+                        if (!_closed) DialogWindow.Error(this, "Could not save the PC", failure.Message);
+                    });
+                    _notAdded.Add(failure.Result);
+                    ShowResults();
+                    throw;
+                }
+                // An older PC has kept the fleet code already, so it is in the fleet.
+                _joined.Add(request.Name);
+                _notSaved.Add((request.Name, request.MachineId));
+                _added.Add(failure.Result);
+                ShowResults();
+                DialogWindow.Error(this, "Could not save the PC", failure.Message);
+                return;
+            }
+            _joined.Add(request.Name);
             _added.Add($"✓  {request.Name} joined the fleet.");
         }
         ShowResults();
     }
+
+    /// <summary>What the window does when a PC joined with the fleet code and saving it here failed.</summary>
+    /// <param name="TellThePc">Throw, so that the PC (one that confirms) is told that it was not added and drops the code.</param>
+    /// <param name="Result">The line in the window's results.</param>
+    /// <param name="Message">The error shown.</param>
+    internal sealed record JoinFailure(bool TellThePc, string Result, string Message);
+
+    /// <param name="confirms">The PC waits for this PC's answer (<see cref="Pairing.JoinRequest.Confirms"/>); an older one has kept the code.</param>
+    internal static JoinFailure JoinNotSaved(string name, bool confirms, string error) => confirms
+        ? new JoinFailure(true, $"{name} was not added. This PC could not save it.",
+            $"This PC could not save {name}, so it was not added.\n\n{error}\n\nTry again.")
+        : new JoinFailure(false, $"✓  {name} joined the fleet, but this PC could not save it.",
+            $"{name} has the fleet code and is in the fleet, but this PC could not save it.\n\n{error}\n\n" +
+            $"On the local network, the fleet finds {name} by itself. On another network, for example over Tailscale, add its address " +
+            "in Settings → Fleet → “Look for a paired PC at an address”.");
 
     private void ShowResults()
     {
