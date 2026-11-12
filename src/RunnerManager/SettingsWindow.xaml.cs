@@ -50,7 +50,7 @@ public partial class SettingsWindow : Window
         NavVersionText.Text = $"Runner Manager {AppUpdater.CurrentVersion}";
         VersionRow.Title = $"Runner Manager {AppUpdater.CurrentVersion}";
         DataRow.Description = FleetConfig.StateDir;
-        ProgramRow.Description = $"{AppUpdater.InstallDir}. To move it, run the setup again and choose another folder.";
+        ProgramRow.Description = ProgramDescription(unsafeFolder: false);
         UpdateRunnerFolder();
         UpdateKeyStatus();
         RefreshPeers();
@@ -62,9 +62,26 @@ public partial class SettingsWindow : Window
         StartupToggle.IsEnabled = false;
         Loaded += async (_, _) =>
         {
-            await Task.WhenAll(ReadStartupTaskAsync(), ReadAgentStateAsync(), CheckAddressesAsync(again: false));
+            await Task.WhenAll(ReadStartupTaskAsync(), ReadAgentStateAsync(), CheckAddressesAsync(again: false), ShowInstallNotesAsync());
             await CheckForUpdatesAsync(force: false);
         };
+    }
+
+    /// <summary>
+    /// The install folder in Settings → Updates, with what the user should know about it: that programs without
+    /// administrator rights can change it (<paramref name="unsafeFolder"/>), and that this PC runs without the start helper.
+    /// </summary>
+    private static string ProgramDescription(bool unsafeFolder)
+    {
+        var text = $"{AppUpdater.InstallDir}. " + (unsafeFolder ? InstallFolderSafety.UnsafeNoteText : "To move it, run the setup again and choose another folder.");
+        return InstallFolderSafety.RunsWithoutStartHelper ? $"{text} {InstallFolderSafety.WithoutStartHelperNoteText}" : text;
+    }
+
+    /// <summary>Adds the notes about the install folder once its rights are read (in the background, see <see cref="InstallFolderSafety.CurrentAsync"/>).</summary>
+    private async Task ShowInstallNotesAsync()
+    {
+        try { ProgramRow.Description = ProgramDescription(unsafeFolder: await InstallFolderSafety.CurrentAsync() != null); }
+        catch (Exception ex) { MachineRelay.AppendAgentLog($"Could not read the rights of the install folder: {ex.Message}"); }
     }
 
     /// <summary>A fleet code alone does not join a fleet: the fleet agent is what other PCs reach, and it runs auto-recovery.</summary>

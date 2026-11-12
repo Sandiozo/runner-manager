@@ -47,6 +47,8 @@ public partial class MainWindow
                     AddActivity($"Repaired the scheduled task \"{name}\". Windows could not start it.");
         }
         catch (Exception ex) { AddActivity($"Could not update the install: {ex.Message}"); }
+        if (InstallFolderSafety.RunsWithoutStartHelper) AddActivity(InstallFolderSafety.WithoutStartHelperActivityText, ActivityKind.Warning);
+        _ = TellUnsafeInstallFolderAsync();
         if (UpdateGuard.TakeRollbackNotice() is { } notice) RaiseAlert(notice, warning: true);
         if (AppSettings.LoadProblem is { } settingsProblem) AddActivity($"Settings: {settingsProblem}");
         await RefreshAsync(forceAuthCheck: true);
@@ -54,6 +56,22 @@ public partial class MainWindow
         _refreshTimer.Start();
         StartLiveJobs();
         await RunPostSetupStepsAsync();
+    }
+
+    /// <summary>
+    /// Says once per version, in Activity, that programs without administrator rights can change the install folder
+    /// (see <see cref="InstallFolderSafety"/>). The rights are read in the background, so the start does not wait for them.
+    /// </summary>
+    private async Task TellUnsafeInstallFolderAsync()
+    {
+        try
+        {
+            if (InstallChecks.IsDone(InstallFolderSafety.ToldCheck) || await InstallFolderSafety.CurrentAsync() is not { } problem) return;
+            MachineRelay.AppendAgentLog($"The install folder {AppUpdater.InstallDir} is not protected: {problem}.");
+            AddActivity(InstallFolderSafety.UnsafeActivityText, ActivityKind.Warning);
+            InstallChecks.MarkDone(InstallFolderSafety.ToldCheck);
+        }
+        catch (Exception ex) { MachineRelay.AppendAgentLog($"Could not read the rights of the install folder: {ex.Message}"); }
     }
 
     /// <summary>Follow-up step chosen in the setup wizard (passed as --fleet=new|join).</summary>
