@@ -36,21 +36,72 @@ public static class GitHubCli
     /// Whether gh can use a github.com sign-in, checked the way the app's own gh calls then run. The stored sign-in
     /// (made with "Connect GitHub") is used when it works: GH_TOKEN or GITHUB_TOKEN would otherwise override it, often
     /// with a token made for something else. They are used only when there is no working stored sign-in.
+    /// When GitHub did not answer the check (no network, a timeout, a rate limit, an error at GitHub), the answer is
+    /// the last one GitHub gave, and <see cref="SignInUnconfirmed"/> is true: a PC without a network is not signed out.
     /// </summary>
     public static async Task<bool> IsAuthenticatedAsync()
     {
         lock (TokenChoiceGate) _tokenChoice ??= Task.CompletedTask;
-        var stored = await HasWorkingSignInAsync(environmentToken: false);
-        if (stored || EnvironmentTokenName() == null)
+        var stored = await CheckSignInAsync(environmentToken: false);
+        // Without an answer for the stored sign-in, the token variables would not be answered either, and which
+        // sign-in the gh calls use stays as it was.
+        if (stored == SignIn.Unconfirmed) return LastKnownSignIn();
+        if (stored == SignIn.Works || EnvironmentTokenName() == null)
         {
             _useEnvironmentToken = false;
-            if (stored) GitHubFailures.SignInWorks();
-            return stored;
+            return SignInAnswered(stored == SignIn.Works);
         }
-        var token = await HasWorkingSignInAsync(environmentToken: true);
-        _useEnvironmentToken = token;
-        if (token) GitHubFailures.SignInWorks();
-        return token;
+        var token = await CheckSignInAsync(environmentToken: true);
+        if (token == SignIn.Unconfirmed) return LastKnownSignIn();
+        _useEnvironmentToken = token == SignIn.Works;
+        return SignInAnswered(token == SignIn.Works);
+    }
+
+    /// <summary>
+    /// True when the last <see cref="IsAuthenticatedAsync"/> could not get an answer from GitHub, so what it returned
+    /// is the last known state, not a new answer. The polls then fail as well, and say why
+    /// (<see cref="CurrentProblem"/>).
+    /// </summary>
+    public static bool SignInUnconfirmed => _signInUnconfirmed;
+
+    private enum SignIn
+    {
+        Works,
+        /// <summary>gh has no sign-in, or GitHub refused it (HTTP 401).</summary>
+        Refused,
+        /// <summary>gh has a sign-in, but GitHub did not answer whether it works.</summary>
+        Unconfirmed
+    }
+
+    private static readonly object SignInGate = new();
+    /// <summary>What GitHub last answered about the sign-in; null before any answer.</summary>
+    private static bool? _lastSignIn;
+    private static volatile bool _signInUnconfirmed;
+
+    private static bool SignInAnswered(bool works)
+    {
+        lock (SignInGate) (_lastSignIn, _signInUnconfirmed) = (works, false);
+        if (works) GitHubFailures.SignInWorks();
+        return works;
+    }
+
+    /// <summary>
+    /// The sign-in GitHub could not be asked about. Before any answer, it counts as working: gh has an account for
+    /// github.com, and what fails is the connection, which the polls report as such.
+    /// </summary>
+    private static bool LastKnownSignIn()
+    {
+        lock (SignInGate)
+        {
+            _signInUnconfirmed = true;
+            return _lastSignIn ?? true;
+        }
+    }
+
+    /// <summary>For tests, and after a disconnect: forgets what GitHub last answered about the sign-in.</summary>
+    internal static void ForgetSignIn()
+    {
+        lock (SignInGate) (_lastSignIn, _signInUnconfirmed) = (null, false);
     }
 
     /// <summary>
@@ -100,19 +151,36 @@ public static class GitHubCli
         return await RunAsync(AuthStatus, environmentToken);
     }
 
+    private static readonly string[] SignedInUser = { "api", "user", "--jq", ".login" };
+
     /// <summary>Whether the active github.com account works, with the stored sign-in or with the token variables.</summary>
-    private static async Task<bool> HasWorkingSignInAsync(bool environmentToken)
+    private static async Task<SignIn> CheckSignInAsync(bool environmentToken)
     {
         var status = await AuthStatusAsync(environmentToken);
-        if (status.ExitCode == 0) return true;
-        // Only a gh without --active can fail here because of another account. Not when gh is missing or did not
-        // finish (-1), or says that no account is signed in.
-        if (!_noActiveFlag || status.ExitCode == -1
-            || status.Error.Contains("not logged in", StringComparison.OrdinalIgnoreCase)) return false;
-        // Asking GitHub who is signed in uses the active account alone.
-        var user = await RunAsync(new[] { "api", "user", "--jq", ".login" }, environmentToken);
-        return user.ExitCode == 0 && !string.IsNullOrWhiteSpace(user.Output);
+        if (status.ExitCode == 0) return SignIn.Works;
+        // gh is missing, or says that no account is signed in: nothing to ask GitHub about.
+        if (status.Error.StartsWith(GitHubFailures.GhMissingMessage, StringComparison.Ordinal)
+            || (status.Error + status.Output).Contains("not logged in", StringComparison.OrdinalIgnoreCase)) return SignIn.Refused;
+        // gh did not finish: it waited for GitHub.
+        if (status.Error.StartsWith(GitHubFailures.TimedOutStart, StringComparison.Ordinal)) return SignIn.Unconfirmed;
+        // The check failed for an account gh has. gh says the same ("Failed to log in", "the token is invalid") when it
+        // could not reach GitHub as when GitHub refused the token, and a gh without --active also fails because of
+        // another account. Asking GitHub who is signed in uses the active account alone, and tells these apart.
+        var user = await RunAsync(SignedInUser, environmentToken);
+        if (user.ExitCode == 0) return string.IsNullOrWhiteSpace(user.Output) ? SignIn.Refused : SignIn.Works;
+        return SignInRefused(user) ? SignIn.Refused : SignIn.Unconfirmed;
     }
+
+    /// <summary>
+    /// GitHub refused the sign-in ("gh: Bad credentials (HTTP 401)", or "gh: HTTP 401"), or gh has none to use (it
+    /// exits with 4 and names its login command). No connection, a timeout, a rate limit (403) or an error at GitHub
+    /// (5xx) say nothing about the sign-in.
+    /// </summary>
+    private static bool SignInRefused(CommandResult result)
+        => result.ExitCode == 4
+           || result.Error.Contains("HTTP 401", StringComparison.Ordinal)
+           || result.Error.Contains("gh auth login", StringComparison.OrdinalIgnoreCase)
+           || result.Error.StartsWith(GitHubFailures.GhMissingMessage, StringComparison.Ordinal);
 
     /// <summary>GH_TOKEN or GITHUB_TOKEN when one is set, otherwise null.</summary>
     public static string? EnvironmentTokenName()
@@ -178,8 +246,9 @@ public static class GitHubCli
         if (logout.ExitCode != 0)
             throw new InvalidOperationException(string.IsNullOrWhiteSpace(logout.Error)
                 ? "Could not disconnect the GitHub account." : logout.Error.Trim());
-        // The remembered failures were that account's: its rate limit, what it may read.
+        // The remembered failures were that account's: its rate limit, what it may read. So was its sign-in state.
         ForgetProblems();
+        ForgetSignIn();
     }
 
     /// <summary>What a request says when its repository or organization name failed <see cref="GitHubNames"/>.</summary>
