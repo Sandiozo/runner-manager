@@ -197,13 +197,7 @@ public static class UpdateGuard
     internal static InstallFacts ReadInstallFacts(string exe)
     {
         var marker = ReadMark(exe)?.Pending ?? string.Empty;
-        var previous = string.Empty;
-        try
-        {
-            if (File.Exists(exe + ".previous"))
-                previous = AppUpdater.Normalize(FileVersionInfo.GetVersionInfo(exe + ".previous").ProductVersion ?? string.Empty);
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        var previous = AppUpdater.VersionOfFile(exe + ".previous") ?? string.Empty;
         DateTime? written = null;
         try { if (File.Exists(exe)) written = File.GetLastWriteTimeUtc(exe); }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
@@ -318,7 +312,11 @@ public static class UpdateGuard
 
     /// <summary>
     /// What a dashboard does about a pending update: forget it when another version was installed since, mark it healthy
-    /// on a PC without a fleet agent, or undo it when the new agent never got going.
+    /// on a PC without a fleet agent, or undo it when the new agent never got going. A dashboard of the version before the
+    /// update, which was open while the update was installed, decides the same way with the version of the installed file
+    /// (see <see cref="AppUpdater.InstalledVersion"/>): it keeps the update and undoes it when its fleet agent does not
+    /// work. Only a dashboard of the new version marks it healthy on a PC without a fleet agent, because only that one has
+    /// run it.
     /// </summary>
     internal static DashboardUpdateDecision DecideForDashboard(PendingUpdate? pending, string runningVersion, string? installedVersion,
         bool agentInstalled, TimeSpan agentDownFor, DateTime nowUtc, TimeSpan uptime)
@@ -679,9 +677,8 @@ public static class UpdateGuard
             DeletePendingMarker(AppUpdater.InstalledExe, bad);
             return false;
         }
-        string previousVersion;
-        try { previousVersion = AppUpdater.Normalize(FileVersionInfo.GetVersionInfo(PreviousExe).ProductVersion ?? string.Empty); }
-        catch { previousVersion = state.Pending?.PreviousVersion ?? string.Empty; }
+        // The version of the file that goes back; when it has none or cannot be read, the one the update state recorded.
+        var previousVersion = AppUpdater.VersionOfFile(PreviousExe) ?? state.Pending?.PreviousVersion ?? string.Empty;
         try
         {
             AppUpdater.RestorePrevious(new SwapMarker(SwapKind.Rollback, bad, previousVersion));

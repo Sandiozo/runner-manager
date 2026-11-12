@@ -51,7 +51,7 @@ public partial class MainWindow
                     AddActivity($"Repaired the scheduled task \"{name}\". Windows could not start it.");
         }
         catch (Exception ex) { AddActivity($"Could not update the install: {ex.Message}"); }
-        if (InstallFolderSafety.RunsWithoutStartHelper) AddActivity(InstallFolderSafety.WithoutStartHelperActivityText, ActivityKind.Warning);
+        TellWithoutStartHelper();
         _ = TellUnsafeInstallFolderAsync();
         if (UpdateGuard.TakeRollbackNotice() is { } notice) RaiseAlert(notice, warning: true);
         if (AppSettings.LoadProblem is { } settingsProblem) AddActivity($"Settings: {settingsProblem}");
@@ -76,6 +76,20 @@ public partial class MainWindow
             InstallChecks.MarkDone(InstallFolderSafety.ToldCheck);
         }
         catch (Exception ex) { MachineRelay.AppendAgentLog($"Could not read the rights of the install folder: {ex.Message}"); }
+    }
+
+    /// <summary>Whether Activity says that this PC runs without the start helper (see <see cref="TellWithoutStartHelper"/>).</summary>
+    private bool _withoutStartHelperTold;
+
+    /// <summary>
+    /// Says in Activity that this PC runs without the start helper: at the start, and when the fleet agent or this
+    /// dashboard gave it up since the last check, once each time (see <see cref="InstallFolderSafety.WithoutStartHelperNotice"/>).
+    /// </summary>
+    private void TellWithoutStartHelper()
+    {
+        bool tell;
+        (tell, _withoutStartHelperTold) = InstallFolderSafety.WithoutStartHelperNotice(InstallFolderSafety.RunsWithoutStartHelper, _withoutStartHelperTold);
+        if (tell) AddActivity(InstallFolderSafety.WithoutStartHelperActivityText, ActivityKind.Warning);
     }
 
     /// <summary>Follow-up step chosen in the setup wizard (passed as --fleet=new|join).</summary>
@@ -120,11 +134,13 @@ public partial class MainWindow
             }
 
             // Antivirus software may remove the start helper while the dashboard runs; a task must not name it then (on a
-            // PC with a fleet agent, the agent checks too).
+            // PC with a fleet agent, the agent checks too). When this dashboard or the fleet agent gave it up, Activity
+            // says so, as at the start.
             if (DateTime.UtcNow - _lastStartHelperCheck >= StartHelperCheckInterval)
             {
                 _lastStartHelperCheck = DateTime.UtcNow;
                 await Launcher.EnsureForThisCopyAsync();
+                TellWithoutStartHelper();
             }
 
             if (!_githubAuthenticated) return;
@@ -399,9 +415,16 @@ public partial class MainWindow
         UpdateBannerButton.Content = installed != null ? "Restart now" : "Install update";
     }
 
-    /// <summary>The installed version when it is newer than this dashboard, which then only needs a restart; otherwise null.</summary>
-    private static string? InstalledUpdate()
-        => AppUpdater.InstalledVersion is { } installed && AppUpdater.IsNewer(installed, AppUpdater.CurrentVersion) ? installed : null;
+    /// <summary>
+    /// The installed version when it is newer than this dashboard, which then only needs a restart; otherwise null. Read
+    /// from the installed file (see <see cref="AppUpdater.VersionOfFile"/>), so an update that the fleet agent installed
+    /// while this dashboard was open is seen too.
+    /// </summary>
+    private static string? InstalledUpdate() => InstalledUpdate(AppUpdater.InstalledVersion, AppUpdater.CurrentVersion);
+
+    /// <summary><paramref name="installedVersion"/> when it is newer than <paramref name="runningVersion"/>, otherwise null.</summary>
+    internal static string? InstalledUpdate(string? installedVersion, string runningVersion)
+        => installedVersion is { } installed && AppUpdater.IsNewer(installed, runningVersion) ? installed : null;
 
     private async void InstallUpdate_Click(object sender, RoutedEventArgs e)
     {

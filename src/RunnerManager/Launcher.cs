@@ -194,10 +194,14 @@ internal static class Launcher
     /// updater replaces the exe. A link in the way (a junction or symbolic link) is removed itself, never followed; a
     /// folder in the way is left, and the start helper is then not kept. After <paramref name="settle"/> the file is
     /// checked again: gone or changed means that something removes it, and it is not kept either. The write runs inside
-    /// <paramref name="exclusive"/> (the update lock), which returns null when it cannot run now.
+    /// <paramref name="exclusive"/> (the update lock), which returns null when it cannot run now. Inside it, when the file
+    /// is still missing (or a link is in its place), <paramref name="whenMissing"/> decides whether it is written: null to
+    /// write it, otherwise why not.
+    /// Another process that wrote it meanwhile (the fleet agent and the dashboard check at the same moment) leaves the
+    /// file there, so it is kept without that decision.
     /// </summary>
     internal static async Task<EnsureResult> EnsureFileAsync(string folder, byte[] bytes, Func<Task> settle,
-        Func<Func<EnsureResult?>, EnsureResult?>? exclusive = null)
+        Func<Func<EnsureResult?>, EnsureResult?>? exclusive = null, Func<string?>? whenMissing = null)
     {
         if (!Path.IsPathFullyQualified(folder)) return new EnsureResult(false, false, "the install folder is not a full path");
         try
@@ -221,6 +225,7 @@ internal static class Launcher
             var state = Inspect(target, bytes);
             if (state == FileState.Same) return EnsureResult.Kept;
             if (state == FileState.Folder) return new EnsureResult(false, false, $"a folder named {FileName} is in its place");
+            if (state is FileState.Missing or FileState.Link && whenMissing?.Invoke() is { } refused) return new EnsureResult(false, false, refused);
             try { Replace(target, bytes, state); }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
@@ -423,17 +428,22 @@ internal static class Launcher
                 LogOnce(log, "This build of Runner Manager has no start helper, so its scheduled tasks start RunnerManager.exe directly.");
                 return IsInPlace(folder) && IsProven(folder);
             }
-            if (!afterInstall && !IsRegularFile(PathIn(folder)) && await OwnTaskNamesAsync(folder))
+            // A start helper that one of this user's tasks starts but that is gone is put back once per version. Decided under
+            // the update lock, when the file is still missing there: the fleet agent and the dashboard may check at the same
+            // moment, and the one that waits for the lock then finds it put back by the other, so it neither logs that it
+            // puts it back nor takes it for a second removal.
+            var namedByTask = !afterInstall && !IsRegularFile(PathIn(folder)) && await OwnTaskNamesAsync(folder);
+            string? PutBackOnce()
             {
-                if (InstallChecks.IsDone(RepairedCheck))
-                    return GiveUp(folder, version, $"{FileName} was removed again after it was put back", log);
+                if (InstallChecks.IsDone(RepairedCheck)) return $"{FileName} was removed again after it was put back";
                 InstallChecks.MarkDone(RepairedCheck);
                 log($"{FileName} was missing from {folder}, although a scheduled task starts it. Runner Manager puts it back.");
+                return null;
             }
             // Under the update lock, so an update in another process never swaps files there at the same moment. A start
             // waits for it only briefly and leaves the write for a later check; setup waits longer.
             var lockWait = TimeSpan.FromSeconds(afterInstall ? 30 : 2);
-            var result = await EnsureFileAsync(folder, bytes, Settle, write => UnderUpdateLock(lockWait, write));
+            var result = await EnsureFileAsync(folder, bytes, Settle, write => UnderUpdateLock(lockWait, write), namedByTask ? PutBackOnce : null);
             if (result.Problem != null) return GiveUp(folder, version, result.Problem, log);
             if (!result.InPlace) return false;
             if (result.Wrote) log($"Wrote the start helper {PathIn(folder)}.");

@@ -166,6 +166,7 @@ public sealed class FleetActions
                 }
                 catch (Exception restartError) { log($"Could not set up the runner as it was before: {restartError.Message}"); }
             }
+            else log(NotUndoneText(source.MachineName));
             // config.cmd on the target replaced the registration before the install failed. The old copy is set up again as
             // before the move, so it can be edited, but GitHub no longer accepts it.
             if (ex.Message.Contains(RunnerService.ReplacedRegistrationNote, StringComparison.Ordinal))
@@ -310,16 +311,25 @@ public sealed class FleetActions
     }
 
     /// <summary>
-    /// Whether the dashboard undoes a failed move on the runner's PC. For a runner that a console window ran, only a PC
-    /// with 2.10.0 or later is asked: earlier versions start the service when they undo a move, which would run the
-    /// runner twice, so the runner is left as the move left it there. From 2.10.0 the PC sets the service back as it was
-    /// and does not start it (<see cref="AfterFailedMove"/>).
+    /// Whether the dashboard undoes a failed move on the runner's PC. A PC with a version before 2.10.0 sets the service
+    /// to start with Windows (or manually) and starts it when it undoes a move, so it is not asked for a runner that a
+    /// console window ran, which would then run twice, nor for a runner whose Windows service was disabled before the
+    /// move (<paramref name="runner"/> is its status from before), such as a runner that runs in a console window that is
+    /// not open now: its disabled service would start. Such a runner is left as the move left it there, stopped and with
+    /// its service disabled. From 2.10.0 the PC sets the service back as it was and does not start it in those cases
+    /// (<see cref="AfterFailedMove"/>).
     /// </summary>
     /// <param name="runsHere">The dashboard undoes it itself, with this version.</param>
     internal static bool UndoesFailedMove(MachineRunnerStatus runner, MachineInfo source, bool runsHere)
-        => !runner.IsInteractive || runsHere || AppUpdater.CompareVersions(source.AppVersion, ConsoleMoveUndoSince) >= 0;
+        => runsHere || AppUpdater.CompareVersions(source.AppVersion, ConsoleMoveUndoSince) >= 0
+           || !runner.IsInteractive && runner.StartsAt != RunnerStart.Disabled;
 
     private const string ConsoleMoveUndoSince = "2.10.0";
+
+    /// <summary>What the dashboard says when it does not ask the runner's PC to undo a failed move (see <see cref="UndoesFailedMove"/>).</summary>
+    internal static string NotUndoneText(string source)
+        => $"Move failed. The runner on {source} stays stopped, as the move left it: {source} runs a version of Runner Manager before " +
+           $"{ConsoleMoveUndoSince}, which would start its Windows service. Update Runner Manager on {source}, then start the runner there as before.";
 
     /// <summary>
     /// Disables a runner's Windows service (so it can't start, also not at the next restart), or sets it back to

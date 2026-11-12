@@ -270,18 +270,21 @@ public partial class SetupWindow : Window
     }
 
     /// <summary>
-    /// A note under the folder. For any folder outside Program Files, which Windows does not protect by itself (also the
-    /// offered one): that only administrators should be able to change its files. And when setup could not confirm the
-    /// install in the offered folder: that it could not, and that setup leaves that folder as it is when another is chosen.
+    /// A note under the folder. For any folder outside Program Files and Program Files (x86)
+    /// (<paramref name="programFilesFolders"/>), which Windows does not protect by itself (also the offered one): that only
+    /// administrators should be able to change its files. A folder inside one of them is protected by the rights it gets
+    /// from there; once installed, the dashboard reads the real rights (see <see cref="InstallFolderSafety"/>). And when
+    /// setup could not confirm the install in the offered folder: that it could not, and that setup leaves that folder as
+    /// it is when another is chosen.
     /// </summary>
-    internal static string? FolderNote(string folder, SetupOffer offer, string programFilesDir)
+    internal static string? FolderNote(string folder, SetupOffer offer, IEnumerable<string> programFilesFolders)
     {
         var notes = new List<string>();
         if (offer.Unconfirmed)
             notes.Add(AppUpdater.SameFolder(folder, offer.Folder)
                 ? "Setup could not confirm that Runner Manager is installed in this folder."
                 : $"Setup found {offer.Folder}, but could not confirm that Runner Manager is installed there. Setup leaves that folder as it is.");
-        if (!AppUpdater.SameFolder(folder, programFilesDir))
+        if (!MachineInstall.IsInsideProgramFiles(folder, programFilesFolders))
             notes.Add("Runner Manager runs with administrator rights. Outside Program Files, check that only administrators can change the files in this folder.");
         return notes.Count == 0 ? null : string.Join(" ", notes);
     }
@@ -296,7 +299,7 @@ public partial class SetupWindow : Window
         DefaultInstallFolderButton.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
         DefaultInstallFolderButton.Content = label;
         DefaultInstallFolderButton.ToolTip = target;
-        var note = FolderNote(_installFolder, _offer, MachineInstall.ProgramFilesDir);
+        var note = FolderNote(_installFolder, _offer, MachineInstall.ProgramFilesFolders);
         FolderNoteText.Text = note ?? string.Empty;
         FolderNoteText.Visibility = note == null ? Visibility.Collapsed : Visibility.Visible;
     }

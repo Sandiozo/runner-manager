@@ -76,22 +76,42 @@ public class ProcessImageTests
     }
 
     /// <summary>
-    /// The path that <paramref name="process"/> was started by, from its list of modules. Right after the start, Windows
-    /// may not have filled in that list yet on a busy PC, so it is read again for a few seconds.
+    /// Waits until Windows has loaded <paramref name="process"/> and lists <paramref name="exe"/> first among its modules,
+    /// for up to 10 seconds. Right after the start, the list can be empty, so that <see cref="Process.MainModule"/> is
+    /// null, or begin with ntdll.dll, which MainModule then gives: of 1500 starts of ping, read at once, 466 gave null and
+    /// 2 gave ntdll.dll. Its output cannot tell when it is loaded: a copy of ping under another name prints nothing.
+    /// </summary>
+    private static void WaitUntilLoaded(Process process, string exe)
+    {
+        var waited = Stopwatch.StartNew();
+        string first;
+        while (!string.Equals(first = StartedBy(process), exe, StringComparison.OrdinalIgnoreCase))
+        {
+            if (waited.Elapsed >= TimeSpan.FromSeconds(10))
+                throw new TimeoutException($"Windows listed {first} first among the modules of process {process.Id}, not {exe}, after 10 seconds.");
+            Thread.Sleep(100);
+        }
+    }
+
+    /// <summary>
+    /// The path that <paramref name="process"/> was started by, from its list of modules, once it is loaded (see
+    /// <see cref="WaitUntilLoaded"/>). Reading the list fails (Win32Exception) while Windows changes it, or finds it
+    /// empty right after the start, so it is read again for up to 10 seconds.
     /// </summary>
     private static string StartedBy(Process process)
     {
-        for (var attempt = 1; ; attempt++)
+        var deadline = Stopwatch.StartNew();
+        while (true)
         {
             try
             {
                 process.Refresh();
-                return process.MainModule!.FileName;
+                if (process.MainModule?.FileName is { Length: > 0 } path) return path;
             }
-            catch (Win32Exception) when (attempt < 50)
-            {
-                Thread.Sleep(100);
-            }
+            catch (Win32Exception) when (deadline.Elapsed < TimeSpan.FromSeconds(10)) { }
+            if (deadline.Elapsed >= TimeSpan.FromSeconds(10))
+                throw new TimeoutException($"Windows listed no modules of process {process.Id} within 10 seconds.");
+            Thread.Sleep(100);
         }
     }
 
@@ -99,7 +119,7 @@ public class ProcessImageTests
     /// A change of a file that was just written, tried again for a few seconds: antivirus software opens a new exe to scan
     /// it, and while it has it open, the file cannot be moved or deleted.
     /// </summary>
-    private static void Retried(Action change)
+    internal static void Retried(Action change)
     {
         for (var attempt = 1; ; attempt++)
         {
@@ -124,6 +144,7 @@ public class ProcessImageTests
         var running = StartPing(installed);
         try
         {
+            WaitUntilLoaded(running, installed);
             Assert.True(ProcessImage.RunsFrom(running.SafeHandle, installed));
 
             // An update renames the running exe out of the way and puts another at its path: here a build with the same

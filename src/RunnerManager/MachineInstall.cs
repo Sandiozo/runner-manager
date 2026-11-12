@@ -282,6 +282,21 @@ public static class MachineInstall
     internal static bool IsShareable(string folder, string? profilesRoot)
         => !string.IsNullOrEmpty(profilesRoot) && !IsInside(folder, profilesRoot);
 
+    /// <summary>
+    /// Program Files and Program Files (x86): the folders whose files only administrators can change, unless an installer
+    /// changed the rights of a folder inside. Empty values (a Windows without one of them) are left out.
+    /// </summary>
+    internal static IReadOnlyList<string> ProgramFilesFolders
+        => new[] { Environment.SpecialFolder.ProgramFiles, Environment.SpecialFolder.ProgramFilesX86 }
+            .Select(Environment.GetFolderPath).Where(f => f.Length > 0).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+
+    /// <summary>
+    /// Whether <paramref name="folder"/> is one of <paramref name="programFilesFolders"/> or inside one, compared by whole
+    /// folder names (see <see cref="IsInside"/>): C:\Program Files Extra is not inside C:\Program Files.
+    /// </summary>
+    internal static bool IsInsideProgramFiles(string folder, IEnumerable<string> programFilesFolders)
+        => Path.IsPathFullyQualified(folder) && programFilesFolders.Any(root => Path.IsPathFullyQualified(root) && IsInside(folder, root));
+
     /// <summary>Whether <paramref name="folder"/> is <paramref name="parent"/> or inside it.</summary>
     internal static bool IsInside(string folder, string parent)
         => (Path.TrimEndingDirectorySeparator(Path.GetFullPath(folder)) + Path.DirectorySeparatorChar)

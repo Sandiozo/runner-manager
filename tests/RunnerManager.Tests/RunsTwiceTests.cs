@@ -618,6 +618,33 @@ public class RunsTwiceTests : IDisposable
         Assert.True(FleetActions.UndoesFailedMove(console, Source("2.9.0"), runsHere: true));
     }
 
+    [Fact]
+    public void AFailedMoveOfARunnerWithADisabledService_IsUndoneOnlyByAPcThatKeepsItDisabled()
+    {
+        // A console runner with an unused service that is disabled on purpose, and no console window open now: a version
+        // before 2.10.0 would set the service to start with Windows and start it.
+        var disabled = new MachineRunnerStatus { ServiceName = CoreService, ServiceInstalled = true, StartsAt = RunnerStart.Disabled };
+        var manual = new MachineRunnerStatus { ServiceName = CoreService, ServiceInstalled = true, StartsAt = RunnerStart.Off };
+        MachineInfo Source(string version) => MachineInfo.FromPayload("sandis", new MachineStatusPayload { MachineName = "SANDIS", AppVersion = version });
+
+        Assert.False(FleetActions.UndoesFailedMove(disabled, Source("2.9.0"), runsHere: false));
+        Assert.False(FleetActions.UndoesFailedMove(disabled, Source("2.9.1-beta.1"), runsHere: false));
+        Assert.False(FleetActions.UndoesFailedMove(disabled, Source(""), runsHere: false));
+        // 2.10.0 and later keep it disabled and do not start it, and so does this dashboard for a runner on this PC.
+        Assert.True(FleetActions.UndoesFailedMove(disabled, Source("2.10.0"), runsHere: false));
+        Assert.True(FleetActions.UndoesFailedMove(disabled, Source("2.11.1"), runsHere: false));
+        Assert.True(FleetActions.UndoesFailedMove(disabled, Source("2.9.0"), runsHere: true));
+        // A service that starts manually or with Windows is put back by any version, as before.
+        Assert.True(FleetActions.UndoesFailedMove(manual, Source("2.9.0"), runsHere: false));
+        Assert.True(FleetActions.UndoesFailedMove(new MachineRunnerStatus { ServiceName = CoreService, ServiceInstalled = true }, Source("2.9.0"), runsHere: false));
+
+        // The dashboard says why the runner stays stopped.
+        var text = FleetActions.NotUndoneText("SANDIS");
+        Assert.Equal("Move failed. The runner on SANDIS stays stopped, as the move left it: SANDIS runs a version of Runner Manager before 2.10.0, " +
+                     "which would start its Windows service. Update Runner Manager on SANDIS, then start the runner there as before.", text);
+        Assert.DoesNotContain("n't", text);
+    }
+
     // ----- Which concern a runner shows -----
 
     private static RunnerHealth StuckJob(string subject = "job-1")

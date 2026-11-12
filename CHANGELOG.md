@@ -89,8 +89,9 @@ Runner Manager no longer starts a runner's service next to its console window.
   cmd.exe, which any program of the user can set in the registry.
 - Runner Manager now starts through a start helper, `RunnerManagerLauncher.exe`, beside RunnerManager.exe. Its
   scheduled tasks (the launch task, the startup task and the fleet agent's task) run the start helper, and so do the
-  UAC prompt, the start after setup, **Restart now** after an update and **Settings → Updates → Uninstall…**. The
-  uninstall entry in Windows **Settings → Apps** still starts RunnerManager.exe itself. The start helper ignores the
+  UAC prompt, the start after setup and **Settings → Updates → Uninstall…**. **Restart now** after an update starts
+  the new RunnerManager.exe from the dashboard that is open, with the environment that the start helper gave that
+  dashboard. The uninstall entry in Windows **Settings → Apps** still starts RunnerManager.exe itself. The start helper ignores the
   environment it is started with and starts RunnerManager.exe with a new one: the PC's variables, the user's name and
   folders as Windows gives them, and only the proxy and GitHub token variables (`HTTP_PROXY`, `HTTPS_PROXY`,
   `ALL_PROXY`, `NO_PROXY`, `GH_TOKEN`, `GITHUB_TOKEN`) from the environment it was given. Variables that any program of
@@ -101,9 +102,10 @@ Runner Manager no longer starts a runner's service next to its console window.
   looks after it: it puts it back when it is missing and checks it in the same way before a task or a start depends on
   it. An earlier copy that still runs after an update leaves it alone. When antivirus software removes or blocks it, it
   cannot be written, or it does not start Runner Manager, Runner Manager runs without it and its tasks start
-  RunnerManager.exe as before, until the next update or setup. The fleet agent's log says so, and so do Activity on
-  every start and **Settings → Updates**. When the UAC prompt cannot start the start helper, or the launch task started
-  it but no dashboard appeared, Runner Manager asks with UAC for RunnerManager.exe itself.
+  RunnerManager.exe as before, until the next update or setup. The fleet agent's log says so, and so does **Settings →
+  Updates**. Activity says so on every start, and within 5 minutes when it happens while the dashboard is open. When
+  the UAC prompt cannot start the start helper, or the launch task started it but no dashboard appeared, Runner
+  Manager asks with UAC for RunnerManager.exe itself.
 - The framework-dependent RunnerManager.exe looks for the .NET runtime only where it is installed for the whole PC, no
   longer in a folder that `DOTNET_ROOT` names.
 - Runner Manager with administrator rights no longer takes its data folder from `RUNNER_MANAGER_STATE_DIR`, which any
@@ -180,6 +182,9 @@ Runner Manager no longer starts a runner's service next to its console window.
   stays stopped. A runner in a console window is no longer left looking like the old copy of a moved runner, and its
   console window, which the move closed, opens again at the next sign-in. Its disabled service also stays disabled
   after another failed move when an earlier move failed with 2.9.0. This needs 2.10.0 on the runner's PC.
+- When a move fails and the runner's PC runs a version before 2.10.0, a runner that a console window ran or whose
+  Windows service was disabled stays stopped there, and its service is not started. Runner Manager now says so, and to
+  update Runner Manager on that PC and then start the runner there as before.
 - A move to another PC still sets the runner up there as a Windows service, also when a console window ran it on the
   old PC or its Windows service was disabled there. The service starts with Windows, or manually when the runner was
   set not to start automatically. The Move window now says so. To keep such a runner in a console window, turn off its
@@ -204,6 +209,8 @@ Runner Manager no longer starts a runner's service next to its console window.
   folder.
 - For a folder outside Program Files, also one that setup offers, setup says to check that only administrators can
   change the files in it.
+- A folder in Program Files or Program Files (x86), such as `C:\Program Files (x86)\RunnerManager`, gets its rights
+  from there, so setup shows no such note for it.
 - The first page says what setup does with a copy that is already in the chosen folder, also after **Change…**.
 - Several Windows users on one PC can share one install outside the user profiles, such as in Program Files: when a
   second user runs the setup, it offers such an install folder that Runner Manager recorded for another user. An
@@ -229,6 +236,12 @@ Runner Manager no longer starts a runner's service next to its console window.
   shows the error as the result of the update.
 - When the fleet agent cannot restart to finish an update, for example because PowerShell cannot be started, it keeps
   running the version it has, takes commands again, and the PC's card says why.
+- Fix: a dashboard that stayed open after an update was installed, such as one that the fleet agent installed in the
+  background, took its own version for the installed one. It did not offer **Restart now**, and it ended the watch of
+  the new update, so Runner Manager did not go back to the previous version when the new fleet agent did not work. An
+  open dashboard now reads the version from the installed file, offers **Restart now** and keeps watching the update.
+  Still open: when a PC updates from 2.9.0 or older while its dashboard is open, that dashboard still ends the watch of
+  this one update.
 
 ### Dashboard and windows
 

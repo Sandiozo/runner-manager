@@ -11,6 +11,8 @@ namespace RunnerManager.Tests;
 public class ProgramFilesInstallTests
 {
     private const string ProgramFiles = @"C:\Program Files\RunnerManager";
+    /// <summary>Program Files and Program Files (x86), as <see cref="MachineInstall.ProgramFilesFolders"/> gives them.</summary>
+    private static readonly string[] ProgramFilesRoots = { @"C:\Program Files", @"C:\Program Files (x86)" };
     private const string OldDefault = @"C:\Users\me\AppData\Local\Programs\RunnerManager";
     private const string Chosen = @"D:\Apps\RunnerManager";
     private const string Profiles = @"C:\Users";
@@ -85,12 +87,12 @@ public class ProgramFilesInstallTests
         // A confirmed offer is where setup starts.
         Assert.Equal(Chosen, SetupWindow.InitialFolder(new SetupOffer(Chosen, Unconfirmed: false), ProgramFiles));
 
-        var note = SetupWindow.FolderNote(OldDefault, offer, ProgramFiles);
+        var note = SetupWindow.FolderNote(OldDefault, offer, ProgramFilesRoots);
         Assert.NotNull(note);
         Assert.StartsWith("Setup could not confirm that Runner Manager is installed in this folder.", note);
         Assert.Contains("only administrators", note);
         // With Program Files selected, the page says that the found folder is left as it is.
-        var left = SetupWindow.FolderNote(ProgramFiles, offer, ProgramFiles);
+        var left = SetupWindow.FolderNote(ProgramFiles, offer, ProgramFilesRoots);
         Assert.Equal($"Setup found {OldDefault}, but could not confirm that Runner Manager is installed there. Setup leaves that folder as it is.", left);
         Assert.DoesNotContain("n't", left);
     }
@@ -137,20 +139,52 @@ public class ProgramFilesInstallTests
     {
         var programFiles = new SetupOffer(ProgramFiles, Unconfirmed: false);
         // Program Files: no note.
-        Assert.Null(SetupWindow.FolderNote(ProgramFiles, programFiles, ProgramFiles));
+        Assert.Null(SetupWindow.FolderNote(ProgramFiles, programFiles, ProgramFilesRoots));
         // A folder the user chose outside Program Files.
-        var note = SetupWindow.FolderNote(Chosen, programFiles, ProgramFiles);
+        var note = SetupWindow.FolderNote(Chosen, programFiles, ProgramFilesRoots);
         Assert.Equal("Runner Manager runs with administrator rights. Outside Program Files, check that only administrators can change the files in this folder.", note);
         // Also the offered folder when setup confirmed the install in it: a recorded install in the old default, or
         // another Windows user's install that a second user is offered.
-        Assert.Equal(note, SetupWindow.FolderNote(OldDefault, new SetupOffer(OldDefault, Unconfirmed: false), ProgramFiles));
-        Assert.Equal(note, SetupWindow.FolderNote(Chosen, new SetupOffer(Chosen, Unconfirmed: false), ProgramFiles));
+        Assert.Equal(note, SetupWindow.FolderNote(OldDefault, new SetupOffer(OldDefault, Unconfirmed: false), ProgramFilesRoots));
+        Assert.Equal(note, SetupWindow.FolderNote(Chosen, new SetupOffer(Chosen, Unconfirmed: false), ProgramFilesRoots));
         // The offered folder when setup could not confirm the install in it.
-        var unconfirmed = SetupWindow.FolderNote(Chosen, new SetupOffer(Chosen, Unconfirmed: true), ProgramFiles)!;
+        var unconfirmed = SetupWindow.FolderNote(Chosen, new SetupOffer(Chosen, Unconfirmed: true), ProgramFilesRoots)!;
         Assert.Contains("could not confirm", unconfirmed);
         Assert.Contains("only administrators", unconfirmed);
         foreach (var text in new[] { note!, unconfirmed })
             Assert.DoesNotContain("n't", text);
+    }
+
+    [Theory]
+    [InlineData(@"C:\Program Files (x86)\RunnerManager")]
+    [InlineData(@"C:\Program Files\Tools\RunnerManager")]
+    [InlineData(@"c:\program files\RunnerManager\")]
+    [InlineData(@"C:\Program Files")]
+    public void Setup_FolderNote_NotForAFolderInsideProgramFilesOrProgramFilesX86(string folder)
+    {
+        Assert.Null(SetupWindow.FolderNote(folder, new SetupOffer(ProgramFiles, Unconfirmed: false), ProgramFilesRoots));
+        // An unconfirmed offer is still named.
+        Assert.DoesNotContain("only administrators", SetupWindow.FolderNote(folder, new SetupOffer(Chosen, Unconfirmed: true), ProgramFilesRoots));
+    }
+
+    [Theory]
+    [InlineData(@"C:\Program Files Extra\RunnerManager")]
+    [InlineData(@"C:\Program Files (x86) Old\RunnerManager")]
+    [InlineData(@"C:\Program Files\..\Apps\RunnerManager")]
+    [InlineData(@"D:\Program Files\RunnerManager")]
+    [InlineData(@"C:\ProgramData\RunnerManager")]
+    public void Setup_FolderNote_ForAFolderThatOnlyStartsLikeProgramFiles(string folder)
+        => Assert.Equal("Runner Manager runs with administrator rights. Outside Program Files, check that only administrators can change the files in this folder.",
+            SetupWindow.FolderNote(folder, new SetupOffer(ProgramFiles, Unconfirmed: false), ProgramFilesRoots));
+
+    [Fact]
+    public void ProgramFilesFolders_AreThe64BitAndThe32BitFolderOfThisPc()
+    {
+        Assert.Contains(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), MachineInstall.ProgramFilesFolders);
+        Assert.Contains(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), MachineInstall.ProgramFilesFolders);
+        Assert.True(MachineInstall.IsInsideProgramFiles(MachineInstall.ProgramFilesDir, MachineInstall.ProgramFilesFolders));
+        Assert.False(MachineInstall.IsInsideProgramFiles(MachineInstall.OldDefaultDir, MachineInstall.ProgramFilesFolders));
+        Assert.False(MachineInstall.IsInsideProgramFiles(@"Apps\RunnerManager", MachineInstall.ProgramFilesFolders));
     }
 
     [Fact]
