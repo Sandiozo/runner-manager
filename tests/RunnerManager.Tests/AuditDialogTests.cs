@@ -182,18 +182,35 @@ public class AuditDialogTests
     }
 
     [Fact]
-    public void TypedRunnerName_LongerThanGitHubAllows_IsRefused()
+    public void TypedRunnerName_LongerThan64Characters_IsRefused()
     {
         var longest = new string('r', AddRunnerForm.MaxNameLength);
         Assert.Null(AddRunnerForm.NameProblem(longest, "repos/owner/repo", Array.Empty<(string, string)>()));
-        Assert.Equal("The name is too long. GitHub allows at most 64 characters.",
+        // It is Runner Manager's limit, not one that GitHub documents.
+        Assert.Equal("The name is too long. Use at most 64 characters.",
             AddRunnerForm.NameProblem(longest + "r", "repos/owner/repo", Array.Empty<(string, string)>()));
         Assert.Null(AddRunnerForm.NameProblem($"  {longest}  ", "repos/owner/repo", Array.Empty<(string, string)>()));
 
         var edit = EditRunnerForm.Check("pc-app", Array.Empty<string>(), longest + "r", "", false);
-        Assert.Equal("The name is too long. GitHub allows at most 64 characters.", edit.NameProblem);
+        Assert.Equal("The name is too long. Use at most 64 characters.", edit.NameProblem);
         Assert.False(edit.CanSave);
         Assert.True(EditRunnerForm.Check("pc-app", Array.Empty<string>(), longest, "", false).CanSave);
+    }
+
+    [Fact]
+    public void EditRunner_WithALongerNameThatIsKept_CanSaveNewLabels()
+    {
+        var registered = new string('r', AddRunnerForm.MaxNameLength + 10);
+        var relabelled = EditRunnerForm.Check(registered, new[] { "gpu" }, $" {registered} ", "gpu, big", canClearLabels: false);
+        Assert.Null(relabelled.NameProblem);
+        Assert.True(relabelled.CanSave);
+        Assert.Equal(registered, relabelled.Request!.RunnerName);
+
+        // A new name keeps to the limit, and so does one that changes only the case.
+        Assert.NotNull(EditRunnerForm.Check(registered, new[] { "gpu" }, registered + "2", "gpu", false).NameProblem);
+        Assert.NotNull(EditRunnerForm.Check(registered, new[] { "gpu" }, registered.ToUpperInvariant(), "gpu", false).NameProblem);
+        // The kept name still needs characters that the runner accepts.
+        Assert.NotNull(EditRunnerForm.Check("pc app", new[] { "gpu" }, "pc app", "gpu, big", false).NameProblem);
     }
 
     [Theory]

@@ -6,7 +6,10 @@ namespace RunnerManager;
 internal static class AddRunnerForm
 {
     internal const string RepositoryHint = "Enter a repository URL or owner/repo. For an organization runner, enter the organization URL.";
-    /// <summary>GitHub refuses longer runner names.</summary>
+    /// <summary>
+    /// Runner Manager's limit for a name typed in Add runner and Edit runner. It is not a documented GitHub limit, so a
+    /// runner that already has a longer name keeps it: Edit runner checks the length only of a new name.
+    /// </summary>
     internal const int MaxNameLength = 64;
 
     /// <param name="Url">The registration URL to use (https://github.com/owner/repo or https://github.com/org).</param>
@@ -70,10 +73,12 @@ internal static class AddRunnerForm
     private static string Clean(string value)
         => new string(value.Select(c => char.IsAsciiLetterOrDigit(c) || c is '-' or '_' or '.' ? c : '-').ToArray()).Trim('-', '.');
 
-    /// <summary>Null when the name has only allowed characters and is not too long for GitHub.</summary>
-    internal static string? NameRuleProblem(string name)
-        => RunnerService.RunnerNameProblem(name)
-           ?? (name.Trim().Length > MaxNameLength ? $"The name is too long. GitHub allows at most {MaxNameLength} characters." : null);
+    /// <summary>Null when the name has only allowed characters and is not longer than <see cref="MaxNameLength"/>.</summary>
+    internal static string? NameRuleProblem(string name) => RunnerService.RunnerNameProblem(name) ?? LengthProblem(name);
+
+    /// <summary>Null when the name is not longer than <see cref="MaxNameLength"/>.</summary>
+    internal static string? LengthProblem(string name)
+        => name.Trim().Length > MaxNameLength ? $"The name is too long. Use at most {MaxNameLength} characters." : null;
 
     /// <summary>Null when the name can be registered for this repository or organization.</summary>
     internal static string? NameProblem(string name, string scope, IEnumerable<(string Scope, string Name)> existing)
@@ -167,9 +172,11 @@ internal static class EditRunnerForm
         var current = currentLabels.Where(l => !string.IsNullOrWhiteSpace(l)).Select(l => l.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         var clears = labels.Length == 0 && current.Length > 0;
         var labelsChanged = !new HashSet<string>(labels, StringComparer.Ordinal).SetEquals(current);
-        var changed = !newName.Equals(currentName.Trim(), StringComparison.Ordinal) || labelsChanged;
+        var nameChanged = !newName.Equals(currentName.Trim(), StringComparison.Ordinal);
+        var changed = nameChanged || labelsChanged;
 
-        var nameProblem = AddRunnerForm.NameRuleProblem(newName);
+        // The name a runner has stays allowed, whatever its length: only a new name must keep to the limit.
+        var nameProblem = RunnerService.RunnerNameProblem(newName) ?? (nameChanged ? AddRunnerForm.LengthProblem(newName) : null);
         var labelsProblem = RunnerService.LabelsProblem(labels) ?? (clears && !canClearLabels ? ClearNotPossible : null);
         var request = changed && nameProblem == null && labelsProblem == null
             ? new RunnerEditRequest(newName, labels, ClearLabels: clears)
