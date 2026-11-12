@@ -227,6 +227,69 @@ public class AuditR4DashboardTests
         }
     }
 
+    // ----- 14: back-to-back jobs do not show the last job's output as live -----
+
+    private static readonly DateTime JobA = new(2026, 11, 12, 9, 0, 0, DateTimeKind.Utc);
+    private static readonly DateTime JobB = JobA.AddMinutes(12);
+
+    private static MachineRunnerStatus OpenRunner(string output, DateTime? workerStarted, bool busy = true, string url = "") => new()
+    {
+        ServiceName = "actions.runner.api", DisplayName = "api", MachineKey = "BUILD-56", MachineName = "BUILD-56",
+        ServiceInstalled = true, IsRunning = true, ActivityText = busy ? "Busy" : "Idle", IsExpanded = true,
+        JobStartedUtc = busy ? workerStarted : null, LiveJob = busy ? new LiveJobView { Output = output, Url = url } : null
+    };
+
+    private static (Dictionary<string, MainWindow.OutputCopy> Live, Dictionary<string, MainWindow.OutputCopy> Finished) Outputs()
+        => (new(StringComparer.OrdinalIgnoreCase), new(StringComparer.OrdinalIgnoreCase));
+
+    [Fact]
+    public void JobOutput_OfTheLastJob_IsNotShownAsLive_WhenTheNextJobStartsRightAfterIt()
+    {
+        var (live, finished) = Outputs();
+        MainWindow.KeepFinishedOutput(new[] { OpenRunner("error CS1002: ; expected", JobA) }, live, finished);
+        Assert.Single(live);
+
+        // No reading showed the runner idle in between: job B has started and has no output yet.
+        MainWindow.KeepFinishedOutput(new[] { OpenRunner("", JobB) }, live, finished);
+        Assert.Empty(live);
+        Assert.Empty(finished);
+
+        // Job B's output, when it comes, is live.
+        MainWindow.KeepFinishedOutput(new[] { OpenRunner("Restoring packages", JobB) }, live, finished);
+        Assert.Equal("Restoring packages", Assert.Single(live).Value.Text);
+    }
+
+    [Fact]
+    public void JobOutput_StaysLive_WhileTheSameJobStillShows()
+    {
+        var (live, finished) = Outputs();
+        MainWindow.KeepFinishedOutput(new[] { OpenRunner("error MSB3073: exited with code 1", JobA) }, live, finished);
+        // Its worker has ended, so there is no output, but the runner still shows the same job.
+        MainWindow.KeepFinishedOutput(new[] { OpenRunner("", JobA) }, live, finished);
+        Assert.Equal("error MSB3073: exited with code 1", Assert.Single(live).Value.Text);
+        // A reading that does not tell which job it is changes nothing.
+        MainWindow.KeepFinishedOutput(new[] { OpenRunner("", null) }, live, finished);
+        Assert.Single(live);
+        // Then the runner is idle: the output is that of a job that has finished.
+        MainWindow.KeepFinishedOutput(new[] { OpenRunner("", null, busy: false) }, live, finished);
+        Assert.Empty(live);
+        Assert.Equal("error MSB3073: exited with code 1", Assert.Single(finished).Value.Text);
+    }
+
+    [Fact]
+    public void JobOutput_FromAnOlderAgent_TellsTheJobByItsPageOnGitHub()
+    {
+        const string first = "https://github.com/octo/api/actions/runs/7/job/70";
+        const string next = "https://github.com/octo/api/actions/runs/8/job/80";
+        var (live, finished) = Outputs();
+        MainWindow.KeepFinishedOutput(new[] { OpenRunner("Build failed", null, url: first) }, live, finished);
+        MainWindow.KeepFinishedOutput(new[] { OpenRunner("", null, url: first) }, live, finished);
+        Assert.Single(live);
+        MainWindow.KeepFinishedOutput(new[] { OpenRunner("", null, url: next) }, live, finished);
+        Assert.Empty(live);
+        Assert.Empty(finished);
+    }
+
     // ----- 10: a sign-in check that failed -----
 
     [Fact]

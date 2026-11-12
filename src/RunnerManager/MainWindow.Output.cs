@@ -10,8 +10,22 @@ namespace RunnerManager;
 /// </summary>
 public partial class MainWindow
 {
-    /// <summary>A job's output, with what its tab says.</summary>
-    internal sealed record OutputCopy(string Title, string MachineName, string Text);
+    /// <summary>A job's output, with what its tab says and which job it is from.</summary>
+    internal sealed record OutputCopy(string Title, string MachineName, string Text, JobIdentity Job = default);
+
+    /// <summary>
+    /// Which job a busy runner runs, as far as it is known: when its worker started on its PC (from protocol 14 agents
+    /// and on this PC), and GitHub's page of the job once GitHub reported it.
+    /// </summary>
+    internal readonly record struct JobIdentity(DateTime? WorkerStartedUtc, string? Url)
+    {
+        public static JobIdentity Of(MachineRunnerStatus runner) => new(runner.JobStartedUtc, runner.LiveJob?.Url);
+
+        /// <summary>Another job, as far as both readings tell; a reading that does not tell counts as the same job.</summary>
+        public bool IsOtherJobThan(JobIdentity other)
+            => WorkerStartedUtc is { } started && other.WorkerStartedUtc is { } otherStarted ? started != otherStarted
+                : Url is { Length: > 0 } url && other.Url is { Length: > 0 } otherUrl && !url.Equals(otherUrl, StringComparison.OrdinalIgnoreCase);
+    }
 
     /// <summary>The runner whose output tab is selected (its <see cref="RunnerKey"/>), or null for Activity.</summary>
     private string? _outputTabKey;
@@ -44,7 +58,8 @@ public partial class MainWindow
     /// </summary>
     /// <remarks>
     /// The output ends when the job's worker process exits, often a moment before the runner stops showing the job. Until
-    /// then the last output stays in its live tab, so it is not lost.
+    /// then the last output stays in its live tab, so it is not lost. Not once the runner runs another job: when a job
+    /// starts right after the last one, the last one's output goes, as when a job starts after the runner was idle.
     /// </remarks>
     internal static void KeepFinishedOutput(IReadOnlyCollection<MachineRunnerStatus> runners,
         Dictionary<string, OutputCopy> live, Dictionary<string, OutputCopy> finished)
@@ -54,7 +69,8 @@ public partial class MainWindow
         foreach (var (key, copy) in live.ToList())
         {
             byKey.TryGetValue(key, out var runner);
-            if (runner is { OutputText.Length: > 0 } or { IsBusy: true, IsExpanded: true }) continue;
+            if (runner is { OutputText.Length: > 0 }) continue;
+            if (runner is { IsBusy: true, IsExpanded: true } && !copy.Job.IsOtherJobThan(JobIdentity.Of(runner))) continue;
             live.Remove(key);
             if (runner is { IsBusy: false }) finished[key] = copy;
         }
@@ -63,7 +79,8 @@ public partial class MainWindow
         {
             var key = RunnerKey(runner);
             if (runner.IsBusy) finished.Remove(key);
-            if (runner.OutputText.Length > 0) live[key] = new OutputCopy(runner.TitleText, runner.MachineName, runner.OutputText);
+            if (runner.OutputText.Length > 0)
+                live[key] = new OutputCopy(runner.TitleText, runner.MachineName, runner.OutputText, JobIdentity.Of(runner));
         }
     }
 
