@@ -275,7 +275,8 @@ public static class MachineRelay
 
     /// <summary>
     /// Whether the agent task runs this exact build (used before a fleet code exists): the version of the exe it starts,
-    /// also when it starts it through the start helper (see <see cref="AgentTaskExecutableAsync"/>).
+    /// also when it starts it through the start helper (see <see cref="AgentTaskExecutableAsync"/>), read from the file
+    /// that is there now (see <see cref="AppUpdater.VersionOfFile"/>), also when it is this dashboard's own path.
     /// </summary>
     internal static async Task<bool> LocalAgentIsCurrentAsync()
     {
@@ -283,7 +284,7 @@ public static class MachineRelay
         return await Task.Run(() =>
         {
             if (string.IsNullOrEmpty(exe) || !File.Exists(exe)) return false;
-            var version = FileVersionInfo.GetVersionInfo(exe).ProductVersion ?? string.Empty;
+            var version = AppUpdater.VersionOfFile(exe) ?? string.Empty;
             return !AppUpdater.IsNewer(AppUpdater.CurrentVersion, version);
         });
     }

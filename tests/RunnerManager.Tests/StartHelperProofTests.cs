@@ -99,7 +99,7 @@ public class ProcessImageTests
     /// A change of a file that was just written, tried again for a few seconds: antivirus software opens a new exe to scan
     /// it, and while it has it open, the file cannot be moved or deleted.
     /// </summary>
-    private static void Retried(Action change)
+    internal static void Retried(Action change)
     {
         for (var attempt = 1; ; attempt++)
         {

@@ -399,9 +399,16 @@ public partial class MainWindow
         UpdateBannerButton.Content = installed != null ? "Restart now" : "Install update";
     }
 
-    /// <summary>The installed version when it is newer than this dashboard, which then only needs a restart; otherwise null.</summary>
-    private static string? InstalledUpdate()
-        => AppUpdater.InstalledVersion is { } installed && AppUpdater.IsNewer(installed, AppUpdater.CurrentVersion) ? installed : null;
+    /// <summary>
+    /// The installed version when it is newer than this dashboard, which then only needs a restart; otherwise null. Read
+    /// from the installed file (see <see cref="AppUpdater.VersionOfFile"/>), so an update that the fleet agent installed
+    /// while this dashboard was open is seen too.
+    /// </summary>
+    private static string? InstalledUpdate() => InstalledUpdate(AppUpdater.InstalledVersion, AppUpdater.CurrentVersion);
+
+    /// <summary><paramref name="installedVersion"/> when it is newer than <paramref name="runningVersion"/>, otherwise null.</summary>
+    internal static string? InstalledUpdate(string? installedVersion, string runningVersion)
+        => installedVersion is { } installed && AppUpdater.IsNewer(installed, runningVersion) ? installed : null;
 
     private async void InstallUpdate_Click(object sender, RoutedEventArgs e)
     {

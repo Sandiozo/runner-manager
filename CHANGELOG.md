@@ -229,6 +229,12 @@ Runner Manager no longer starts a runner's service next to its console window.
   shows the error as the result of the update.
 - When the fleet agent cannot restart to finish an update, for example because PowerShell cannot be started, it keeps
   running the version it has, takes commands again, and the PC's card says why.
+- Fix: a dashboard that stayed open after an update was installed, such as one that the fleet agent installed in the
+  background, took its own version for the installed one. It did not offer **Restart now**, and it ended the watch of
+  the new update, so Runner Manager did not go back to the previous version when the new fleet agent did not work. An
+  open dashboard now reads the version from the installed file, offers **Restart now** and keeps watching the update.
+  Still open: when a PC updates from 2.9.0 or older while its dashboard is open, that dashboard still ends the watch of
+  this one update.
 
 ### Dashboard and windows
 

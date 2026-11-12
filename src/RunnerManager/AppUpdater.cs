@@ -148,18 +148,54 @@ public static class AppUpdater
         return Version.TryParse(dash > 0 ? text[..dash] : text, out core!);
     }
 
-    /// <summary>The version of the installed copy, or null when there is none.</summary>
-    public static string? InstalledVersion
+    /// <summary>
+    /// The version of the installed copy, or null when there is none. Read from the file that is there now (see
+    /// <see cref="VersionOfFile"/>), also in a dashboard or fleet agent whose own file an update or a rollback replaced.
+    /// </summary>
+    public static string? InstalledVersion => VersionOfFile(InstalledExe);
+
+    /// <summary>
+    /// The product version of the file at <paramref name="path"/> (see <see cref="Normalize"/>), or null when there is no
+    /// file there, it has no version, or it cannot be read. Read from the file itself: for a path that a module of this
+    /// process was loaded from, <see cref="FileVersionInfo.GetVersionInfo"/> answers with that module's version, also after
+    /// the file was renamed away and another one was put at the path (measured on Windows 11), so a dashboard that was open
+    /// while an update replaced RunnerManager.exe read its own version as the installed one. Windows does not look up a
+    /// path in its \\?\ form among the loaded modules (see <see cref="UnlistedPathForm"/>), so that form is read first, and
+    /// the path as it is when that form gives nothing.
+    /// </summary>
+    internal static string? VersionOfFile(string path)
     {
-        get
+        try
         {
+            if (!File.Exists(path)) return null;
+        }
+        catch { return null; }
+        foreach (var form in new[] { UnlistedPathForm(path), path })
+        {
+            if (form == null) continue;
             try
             {
-                return File.Exists(InstalledExe) && FileVersionInfo.GetVersionInfo(InstalledExe).ProductVersion is { Length: > 0 } version
-                    ? Normalize(version) : null;
+                if (FileVersionInfo.GetVersionInfo(form).ProductVersion is { Length: > 0 } version && Normalize(version) is { Length: > 0 } normalized)
+                    return normalized;
             }
-            catch { return null; }
+            catch { }
         }
+        return null;
+    }
+
+    /// <summary>
+    /// <paramref name="path"/> as a full path in the \\?\ form (\\?\UNC\server\share\… for a network path), which Windows
+    /// does not match against the modules loaded in this process. Null for a path that already starts with a device prefix
+    /// (\\?\ or \\.\), which is read as it is, and for one that cannot be made a full path.
+    /// </summary>
+    internal static string? UnlistedPathForm(string path)
+    {
+        string full;
+        try { full = Path.GetFullPath(path); }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException or System.Security.SecurityException) { return null; }
+        if (full.StartsWith(@"\\?\", StringComparison.Ordinal) || full.StartsWith(@"\\.\", StringComparison.Ordinal)
+            || full.StartsWith(@"\??\", StringComparison.Ordinal)) return null;
+        return full.StartsWith(@"\\", StringComparison.Ordinal) ? @"\\?\UNC\" + full[2..] : @"\\?\" + full;
     }
 
     /// <summary>

@@ -160,6 +160,111 @@ public class UpdateRollbackTests
         Assert.Equal(DashboardUpdateDecision.Forget, Dashboard(Pending(), installed: "2.5.0"));
         Assert.Equal(DashboardUpdateDecision.Nothing, Dashboard(null));
     }
+
+    [Fact]
+    public void Dashboard_OfTheVersionBeforeTheUpdate_KeepsWatchingIt()
+    {
+        // Open while the fleet agent installed 2.4.0: it reads 2.4.0 from the installed file, so it does not forget the
+        // update, and undoes it as a dashboard of 2.4.0 would when the new fleet agent does not work.
+        Assert.Equal(DashboardUpdateDecision.RollBack, Dashboard(Pending(), running: "2.3.2"));
+        Assert.Equal(DashboardUpdateDecision.Nothing, Dashboard(Pending(), running: "2.3.2", agentDownMinutes: 0));
+        Assert.Equal(DashboardUpdateDecision.Nothing, Dashboard(Pending(), running: "2.3.2", minutesSinceInstall: 5));
+        Assert.Equal(DashboardUpdateDecision.Nothing, Dashboard(Pending(), running: "2.3.2", uptimeMinutes: 1));
+        // Without a fleet agent it never marks the update healthy: it has not run 2.4.0. The dashboard of 2.4.0 does.
+        Assert.Equal(DashboardUpdateDecision.Nothing, Dashboard(Pending(), agentInstalled: false, running: "2.3.2", uptimeMinutes: 60));
+        // Only another version installed since makes it forget.
+        Assert.Equal(DashboardUpdateDecision.Forget, Dashboard(Pending(), installed: "2.5.0", running: "2.3.2"));
+        Assert.Equal(DashboardUpdateDecision.Forget, Dashboard(Pending(), installed: "2.3.2", running: "2.3.2"));
+    }
+
+    [Fact]
+    public void TheBanner_OffersARestart_WhenTheInstalledFileIsNewerThanThisDashboard()
+    {
+        Assert.Equal("2.4.0", MainWindow.InstalledUpdate("2.4.0", "2.3.2"));
+        Assert.Null(MainWindow.InstalledUpdate("2.3.2", "2.3.2"));
+        Assert.Null(MainWindow.InstalledUpdate("2.3.0", "2.3.2"));
+        Assert.Null(MainWindow.InstalledUpdate(null, "2.3.2"));
+    }
+}
+
+/// <summary>
+/// The version of an exe is read from the file at its path now (see <see cref="AppUpdater.VersionOfFile"/>), also when a
+/// module of this process was loaded from that path and the file there was replaced since, as an update replaces
+/// RunnerManager.exe under a dashboard that is open. Nothing outside a temporary folder is touched.
+/// </summary>
+public class FileVersionTests
+{
+    [Fact]
+    public void TheVersion_IsThatOfTheFileThereNow_AlsoAfterTheFileThatThisProcessLoadedFromThatPathWasReplaced()
+    {
+        var folder = InstallEvidenceTests.NewFolder("version");
+        var path = Path.Combine(folder, "loaded.dll");
+        var aside = Path.Combine(folder, "loaded.638000000000000000.old.dll");
+        var other = Path.Combine(folder, "other.dll");
+        // A system DLL with a version resource, which this process loads as a running program has its own exe loaded, and
+        // a file with another version.
+        File.Copy(Path.Combine(Environment.SystemDirectory, "version.dll"), path);
+        File.Copy(typeof(AppUpdater).Assembly.Location, other);
+        var loadedVersion = AppUpdater.VersionOfFile(path);
+        var otherVersion = AppUpdater.VersionOfFile(other);
+        Assert.NotNull(loadedVersion);
+        Assert.NotNull(otherVersion);
+        Assert.NotEqual(loadedVersion, otherVersion);
+        var module = IntPtr.Zero;
+        try
+        {
+            module = System.Runtime.InteropServices.NativeLibrary.Load(path);
+            Assert.Equal(loadedVersion, AppUpdater.VersionOfFile(path));
+
+            // An update renames the loaded file out of the way and puts another file at its path.
+            ProcessImageTests.Retried(() => File.Move(path, aside));
+            ProcessImageTests.Retried(() => File.Copy(other, path));
+            // On Windows 11, FileVersionInfo.GetVersionInfo(path) still gives loadedVersion here: Windows answers from the
+            // module loaded from that path. That is not asserted, so the test does not depend on it.
+            Assert.Equal(otherVersion, AppUpdater.VersionOfFile(path));
+            Assert.Equal(loadedVersion, AppUpdater.VersionOfFile(aside));
+            // A relative path is read as the full path it names.
+            Assert.Equal(otherVersion, AppUpdater.VersionOfFile(Path.GetRelativePath(Environment.CurrentDirectory, path)));
+            Assert.Null(AppUpdater.VersionOfFile(Path.Combine(folder, "missing.dll")));
+        }
+        finally
+        {
+            if (module != IntPtr.Zero) System.Runtime.InteropServices.NativeLibrary.Free(module);
+            ProcessImageTests.Retried(() => Directory.Delete(folder, recursive: true));
+        }
+    }
+
+    [Fact]
+    public void AFileWithoutAVersion_HasNone()
+    {
+        var folder = InstallEvidenceTests.NewFolder("version-none");
+        try
+        {
+            var file = Path.Combine(folder, AppPaths.ExeName);
+            File.WriteAllText(file, "not a program");
+            Assert.Null(AppUpdater.VersionOfFile(file));
+        }
+        finally { ProcessImageTests.Retried(() => Directory.Delete(folder, recursive: true)); }
+    }
+
+    [Theory]
+    [InlineData(@"C:\Program Files\RunnerManager\RunnerManager.exe", @"\\?\C:\Program Files\RunnerManager\RunnerManager.exe")]
+    [InlineData(@"C:\Program Files\RunnerManager\..\RunnerManager\.\RunnerManager.exe", @"\\?\C:\Program Files\RunnerManager\RunnerManager.exe")]
+    [InlineData("C:/Program Files/RunnerManager/RunnerManager.exe", @"\\?\C:\Program Files\RunnerManager\RunnerManager.exe")]
+    [InlineData(@"\\server\share\RunnerManager\RunnerManager.exe", @"\\?\UNC\server\share\RunnerManager\RunnerManager.exe")]
+    public void TheFormThatIsReadFirst_IsTheFullPathWithTheLongPrefix(string path, string expected)
+        => Assert.Equal(expected, AppUpdater.UnlistedPathForm(path));
+
+    [Fact]
+    public void APathWithAPrefixAlready_OrNoPath_IsReadOnlyAsItIs()
+    {
+        Assert.Null(AppUpdater.UnlistedPathForm(@"\\?\C:\Program Files\RunnerManager\RunnerManager.exe"));
+        Assert.Null(AppUpdater.UnlistedPathForm(@"\\?\UNC\server\share\RunnerManager\RunnerManager.exe"));
+        Assert.Null(AppUpdater.UnlistedPathForm(@"\\.\C:\Program Files\RunnerManager\RunnerManager.exe"));
+        Assert.Null(AppUpdater.UnlistedPathForm(string.Empty));
+        // A relative path is made full first.
+        Assert.Equal(@"\\?\" + Path.GetFullPath(AppPaths.ExeName), AppUpdater.UnlistedPathForm(AppPaths.ExeName));
+    }
 }
 
 /// <summary>
