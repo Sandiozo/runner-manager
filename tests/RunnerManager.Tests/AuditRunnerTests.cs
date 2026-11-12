@@ -681,6 +681,20 @@ public class AuditRunnerTests
         // WMI reports a delayed automatic start as Auto.
         Assert.Equal(RunnerStart.WithWindows, RunnerService.ServiceStartsAt("Auto"));
     }
+
+    // ----- Editing a runner -----
+
+    [Fact]
+    public void EditedLabels_AreClearedOnlyWhenAskedFor()
+    {
+        var current = new[] { "gpu", "unity" };
+
+        Assert.Equal(new[] { "big" }, RunnerService.LabelsAfterEdit(current, new[] { "big" }, clearLabels: false));
+        Assert.Equal(new[] { "big" }, RunnerService.LabelsAfterEdit(current, new[] { "big" }, clearLabels: true));
+        // An empty list is also what the dashboard has when GitHub did not answer: the labels stay.
+        Assert.Equal(current, RunnerService.LabelsAfterEdit(current, Array.Empty<string>(), clearLabels: false));
+        Assert.Empty(RunnerService.LabelsAfterEdit(current, Array.Empty<string>(), clearLabels: true));
+    }
 }
 
 /// <summary>

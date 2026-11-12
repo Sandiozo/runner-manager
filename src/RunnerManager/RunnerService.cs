@@ -421,7 +421,12 @@ public static partial class RunnerService
         log("Runner service repaired.");
     }
 
-    public static async Task EditRunnerAsync(string key, string newName, string[] requestedLabels, Action<string> log)
+    /// <param name="requestedLabels">The custom labels the runner gets. Empty keeps the ones it has, unless <paramref name="clearLabels"/> is set.</param>
+    /// <param name="clearLabels">
+    /// An empty <paramref name="requestedLabels"/> removes every custom label. Without it an empty list keeps the
+    /// runner's labels, because the dashboard also has an empty list when GitHub did not answer.
+    /// </param>
+    public static async Task EditRunnerAsync(string key, string newName, string[] requestedLabels, Action<string> log, bool clearLabels = false)
     {
         await EnsureAuthenticatedAsync("GitHub is not connected on the target PC. Connect GitHub on that PC and try again.");
         if (string.IsNullOrWhiteSpace(newName))
@@ -436,9 +441,9 @@ public static partial class RunnerService
         var labels = (requestedLabels ?? Array.Empty<string>()).Where(x => !string.IsNullOrWhiteSpace(x))
             .Select(x => x.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
         // The current name, labels and settings are read before config remove: blank labels mean "keep the current
-        // ones", and a failed registration is rolled back to them.
+        // ones" (unless clearLabels), and a failed registration is rolled back to them.
         var current = await ReadRegistrationBeforeRemovalAsync(local);
-        var wanted = current with { Name = newName.Trim(), Labels = labels.Length == 0 ? current.Labels : labels };
+        var wanted = current with { Name = newName.Trim(), Labels = LabelsAfterEdit(current.Labels, labels, clearLabels) };
         EnsureValidConfigInput(wanted.Url, wanted.Name, wanted.Labels);
         await EnsureNameIsFreeAsync(local, wanted.Name);
         var wasRunning = local.IsRunning;
@@ -464,6 +469,14 @@ public static partial class RunnerService
         await KeepRunStateAsync(local, wasRunning, wasMarked, log);
         log("Runner settings updated.");
     }
+
+    /// <summary>
+    /// The custom labels a runner gets from an edit: the requested ones, or its current ones when none are requested.
+    /// No labels at all only with <paramref name="clearLabels"/>: the dashboard also has an empty list when GitHub did
+    /// not answer, and that must not remove the runner's labels.
+    /// </summary>
+    internal static string[] LabelsAfterEdit(string[] current, string[] requested, bool clearLabels)
+        => requested.Length > 0 || clearLabels ? requested : current;
 
     /// <summary>
     /// After a runner was registered again: config.cmd starts the service it installs, and a new runner name gives the
