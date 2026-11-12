@@ -3,6 +3,32 @@
 Runner Manager updates itself from [Releases](https://github.com/Sandiozo/runner-manager/releases): open
 **Settings → Updates**, or click **Update** on a PC's card.
 
+## 2.9.1
+
+- Fix: an update could cut off work that started while it waited for the fleet agent's work to end, such as an AI
+  assistant's change or a runner that another PC creates behind a long queue. While an update waits to restart the
+  fleet agent, AI assistants' changes on that PC are refused with a message that says to try again in a few minutes,
+  and a restart from the dashboard also waits for work that starts meanwhile. A request that arrives in the seconds
+  while the agent restarts is refused with a message.
+- Fix: an update switched the fleet agent's task to the new version before the agent's work was done, which could stop
+  that work. The task is now switched when the agent restarts.
+- Fix: **Add a PC** said nothing when a PC joined the fleet but this PC could not save it. It now says so and how to
+  add the PC again, and a PC that confirms the 6-digit codes is told that it was not added.
+- **Add a PC** warns about a name whose letters only look like the letters of another PC's name or of this PC's name,
+  such as a Cyrillic А in place of a Latin A, or full-width letters. It also warns about a name that mixes Latin,
+  Greek or Cyrillic letters. A name written in one other alphabet only is not warned about.
+- Fix: when the processes on a PC could not be read, the live output of a step that printed nothing for 5 minutes was
+  no longer shown. It is shown now, and an empty output says that the processes could not be read.
+- Fix: a GitHub answer that could not be read paused its request again when it arrived after **Refresh** or
+  **Connect GitHub** had cleared the pauses.
+- Fix: while this PC joined or left the fleet, **Change fleet code** and the address check in Settings still read the
+  other PCs, and could add back a PC that leaving had just removed. They now say to try again when it is done, and a PC
+  that is not in a fleet does not save other PCs.
+- Fix: a click on a PC card header, a runner header or a row could scroll the card list. The list now stays where it
+  is; Tab still scrolls to what it selects.
+- The job, the repository and the current job in a runner's details are now buttons, so Tab and screen readers reach
+  them.
+
 ## 2.9.0
 
 A large release with many fixes from a review of 2.8.2, most of them for security and for the fleet.
