@@ -70,25 +70,25 @@
             <TextBlock x:Name="NavVersionText" DockPanel.Dock="Bottom" Style="{StaticResource Caption}" FontSize="11" Margin="8,0,0,0"/>
             <ListBox x:Name="Nav" ItemContainerStyle="{StaticResource NavItem}" Background="Transparent" BorderThickness="0" Padding="0"
                      ScrollViewer.HorizontalScrollBarVisibility="Disabled" SelectionChanged="Nav_SelectionChanged">
-                <ListBoxItem Tag="General">
+                <ListBoxItem Tag="General" AutomationProperties.Name="General">
                     <StackPanel Orientation="Horizontal">
                         <TextBlock Text="&#xE713;" Style="{StaticResource Icon}" Width="26"/>
                         <TextBlock Text="General"/>
                     </StackPanel>
                 </ListBoxItem>
-                <ListBoxItem Tag="Fleet">
+                <ListBoxItem Tag="Fleet" AutomationProperties.Name="Fleet">
                     <StackPanel Orientation="Horizontal">
                         <TextBlock Text="&#xE7F8;" Style="{StaticResource Icon}" Width="26"/>
                         <TextBlock Text="Fleet"/>
                     </StackPanel>
                 </ListBoxItem>
-                <ListBoxItem Tag="Assistants">
+                <ListBoxItem Tag="Assistants" AutomationProperties.Name="AI assistants">
                     <StackPanel Orientation="Horizontal">
                         <TextBlock Text="&#xE99A;" Style="{StaticResource Icon}" Width="26"/>
                         <TextBlock Text="AI assistants"/>
                     </StackPanel>
                 </ListBoxItem>
-                <ListBoxItem Tag="Updates">
+                <ListBoxItem Tag="Updates" AutomationProperties.Name="Updates">
                     <StackPanel Orientation="Horizontal">
                         <TextBlock Text="&#xE895;" Style="{StaticResource Icon}" Width="26"/>
                         <TextBlock Text="Updates"/>
@@ -132,8 +132,9 @@
                     <Border Style="{StaticResource Group}">
                         <local:SettingRow x:Name="RunnerFolderRow" Glyph="&#xE8B7;" Title="Folder for new runners">
                             <StackPanel Orientation="Horizontal">
-                                <Button x:Name="RunnerFolderResetButton" Content="Use default" Style="{StaticResource GhostButton}" Margin="0,0,6,0" Click="RunnerFolderReset_Click"/>
-                                <Button Content="Change…" Click="RunnerFolderChange_Click"/>
+                                <Button x:Name="RunnerFolderResetButton" Content="Use default" Style="{StaticResource GhostButton}" Margin="0,0,6,0" Click="RunnerFolderReset_Click"
+                                        AutomationProperties.Name="Use the default folder for new runners"/>
+                                <Button Content="Change…" Click="RunnerFolderChange_Click" AutomationProperties.Name="Change the folder for new runners"/>
                             </StackPanel>
                         </local:SettingRow>
                     </Border>
@@ -141,7 +142,7 @@
                     <TextBlock Text="STARTUP" Style="{StaticResource GroupLabel}"/>
                     <Border Style="{StaticResource Group}">
                         <StackPanel>
-                            <local:SettingRow Glyph="&#xE7E8;" Title="Start with Windows" Description="Opens in the notification area when you sign in.">
+                            <local:SettingRow x:Name="StartupRow" Glyph="&#xE7E8;" Title="Start with Windows" Description="Opens in the notification area when you sign in.">
                                 <CheckBox x:Name="StartupToggle" Style="{StaticResource ToggleSwitch}" AutomationProperties.Name="Start with Windows" Click="StartupToggle_Click"/>
                             </local:SettingRow>
                             <Border Style="{StaticResource Divider}"/>
@@ -191,16 +192,18 @@
                     </Border>
                     <Border Style="{StaticResource Group}">
                         <StackPanel>
-                            <local:SettingRow x:Name="KeyRow" Glyph="&#xE8D7;" Title="Pairing code">
+                            <local:SettingRow x:Name="KeyRow" Glyph="&#xE8D7;" Title="Fleet code">
                                 <StackPanel Orientation="Horizontal">
                                     <Button x:Name="GenerateKeyButton" Content="Start a new fleet" Style="{StaticResource PrimaryButton}" Click="GenerateKey_Click" Margin="0,0,6,0"/>
-                                    <Button x:Name="CopyKeyButton" Content="Copy" Click="CopyKey_Click" Margin="0,0,6,0"/>
-                                    <Button Style="{StaticResource IconButton}" Content="&#xE712;" ToolTip="More pairing code actions" Click="OpenMenu_Click">
+                                    <Button x:Name="FinishJoiningButton" Content="Finish joining" Style="{StaticResource PrimaryButton}" Click="FinishJoining_Click" Margin="0,0,6,0"
+                                            Visibility="Collapsed" AutomationProperties.HelpText="Installs and starts the fleet agent, so other PCs can reach this PC"/>
+                                    <Button x:Name="CopyKeyButton" Content="Copy" Click="CopyKey_Click" Margin="0,0,6,0" AutomationProperties.Name="Copy fleet code"/>
+                                    <Button Style="{StaticResource IconButton}" Content="&#xE712;" ToolTip="More fleet code actions" Click="OpenMenu_Click">
                                         <Button.ContextMenu>
                                             <ContextMenu>
-                                                <MenuItem Header="Enter pairing code…" Tag="&#xE70F;" Click="PasteKey_Click"/>
-                                                <MenuItem x:Name="ReplaceKeyItem" Header="Replace pairing code…" Tag="&#xE72C;" Click="GenerateKey_Click"/>
-                                                <MenuItem x:Name="RemoveKeyItem" Header="Remove pairing code…" Tag="&#xE74D;" Style="{StaticResource DangerMenuItem}" Click="RemoveKey_Click"/>
+                                                <MenuItem Header="Enter fleet code…" Tag="&#xE70F;" Click="PasteKey_Click"/>
+                                                <MenuItem x:Name="ReplaceKeyItem" Header="New fleet code for this PC only…" Tag="&#xE72C;" Click="GenerateKey_Click"/>
+                                                <MenuItem x:Name="RemoveKeyItem" Header="Remove fleet code…" Tag="&#xE74D;" Style="{StaticResource DangerMenuItem}" Click="RemoveKey_Click"/>
                                             </ContextMenu>
                                         </Button.ContextMenu>
                                     </Button>
@@ -212,12 +215,13 @@
                                     <ColumnDefinition Width="Auto"/>
                                     <ColumnDefinition Width="Auto"/>
                                 </Grid.ColumnDefinitions>
-                                <TextBox x:Name="PasteKeyBox" Tag="rwk_…" FontFamily="{StaticResource MonoFont}"/>
-                                <Button Grid.Column="1" Content="Save" Style="{StaticResource PrimaryButton}" Margin="8,0,0,0" Click="SaveKey_Click"/>
+                                <TextBox x:Name="PasteKeyBox" Tag="rwk_…" FontFamily="{StaticResource MonoFont}" KeyDown="PasteKeyBox_KeyDown"
+                                         AutomationProperties.Name="Fleet code" AutomationProperties.HelpText="The code copied from another PC. It starts with rwk_"/>
+                                <Button Grid.Column="1" Content="Save" Style="{StaticResource PrimaryButton}" Margin="8,0,0,0" Click="SaveKey_Click" AutomationProperties.Name="Save fleet code"/>
                                 <Button Grid.Column="2" Content="Cancel" Style="{StaticResource GhostButton}" Margin="6,0,0,0" Click="CancelPasteKey_Click"/>
                             </Grid>
                             <Border Style="{StaticResource Divider}"/>
-                            <local:SettingRow Glyph="&#xE83D;" Title="Auto-recovery on this PC"
+                            <local:SettingRow x:Name="WatchdogRow" Glyph="&#xE83D;" Title="Auto-recovery on this PC"
                                               Description="Restarts runners that stop unexpectedly, up to 3 times an hour.">
                                 <CheckBox x:Name="WatchdogToggle" Style="{StaticResource ToggleSwitch}" AutomationProperties.Name="Auto-recovery on this PC" Click="WatchdogToggle_Click"/>
                             </local:SettingRow>
@@ -241,18 +245,19 @@
                                         <StackPanel>
                                             <local:SettingRow Glyph="&#xE7F8;" Title="{Binding Name}" Description="{Binding Detail}">
                                                 <Button Content="{Binding Action}" Style="{StaticResource GhostButton}" Padding="8,2" FontSize="12"
-                                                        Tag="{Binding}" Click="ForgetPeer_Click"/>
+                                                        AutomationProperties.Name="{Binding ActionName}" Tag="{Binding}" Click="ForgetPeer_Click"/>
                                             </local:SettingRow>
                                             <Border Style="{StaticResource Divider}"/>
                                         </StackPanel>
                                     </DataTemplate>
                                 </ItemsControl.ItemTemplate>
                             </ItemsControl>
-                            <local:SettingRow Glyph="&#xE774;" Title="Add a PC by address"
-                                              Description="For PCs on another network.">
+                            <local:SettingRow Glyph="&#xE774;" Title="Look for a paired PC at an address"
+                                              Description="For a PC in this fleet on another network, for example over Tailscale. This does not pair a PC: to add a new one, use “Add a PC” on the dashboard.">
                                 <StackPanel Orientation="Horizontal">
-                                    <TextBox x:Name="AddressBox" Tag="Tailscale name or IP" Width="180"/>
-                                    <Button Content="Add" Margin="6,0,0,0" Click="AddAddress_Click"/>
+                                    <TextBox x:Name="AddressBox" Tag="Tailscale name or IPv4" Width="180" KeyDown="AddressBox_KeyDown"
+                                             AutomationProperties.Name="Address of a paired PC" AutomationProperties.HelpText="Tailscale name or IPv4 address, with an optional :port"/>
+                                    <Button Content="Add" Margin="6,0,0,0" Click="AddAddress_Click" AutomationProperties.Name="Add address"/>
                                 </StackPanel>
                             </local:SettingRow>
                             <ItemsControl x:Name="AddressList" Margin="46,0,14,0">
@@ -260,8 +265,11 @@
                                     <DataTemplate>
                                         <DockPanel Margin="0,0,0,8">
                                             <Button DockPanel.Dock="Right" Content="Remove" Style="{StaticResource GhostButton}" Padding="8,2" FontSize="12"
-                                                    Tag="{Binding}" Click="RemoveAddress_Click"/>
-                                            <TextBlock Text="{Binding}" FontFamily="{StaticResource MonoFont}" FontSize="12" VerticalAlignment="Center"/>
+                                                    VerticalAlignment="Center" AutomationProperties.Name="{Binding RemoveName}" Tag="{Binding}" Click="RemoveAddress_Click"/>
+                                            <StackPanel VerticalAlignment="Center">
+                                                <TextBlock Text="{Binding Address}" FontFamily="{StaticResource MonoFont}" FontSize="12"/>
+                                                <TextBlock Text="{Binding Status}" Style="{StaticResource Hint}" Margin="0,2,0,0"/>
+                                            </StackPanel>
                                         </DockPanel>
                                     </DataTemplate>
                                 </ItemsControl.ItemTemplate>
@@ -269,10 +277,10 @@
                         </StackPanel>
                     </Border>
 
-                    <!-- Change fleet code -->
+                    <!-- Change the fleet code on every PC -->
                     <Border Style="{StaticResource Group}">
-                        <local:SettingRow Glyph="&#xE72E;" Title="Change fleet code"
-                                          Description="Gives the PCs you keep a new pairing code. Use it when a PC was lost or the code got out.">
+                        <local:SettingRow Glyph="&#xE72E;" Title="Change the fleet code on every PC"
+                                          Description="Gives every PC you keep a new fleet code, and the old one stops working. Use it when a PC was lost or the code got out.">
                             <Button x:Name="ChangeFleetCodeButton" Content="Change code…" Click="ChangeFleetCode_Click"/>
                         </local:SettingRow>
                     </Border>
@@ -291,7 +299,7 @@
                     <Border Style="{StaticResource Group}">
                         <StackPanel>
                             <local:SettingRow Glyph="&#xE99A;" Title="Allow AI assistants"
-                                              Description="AI tools that support MCP can see your PCs and runners, and create and manage runners.">
+                                              Description="AI tools that support MCP can see your PCs and runners, and create and manage runners. They work through this PC's fleet agent, which is installed if needed.">
                                 <CheckBox x:Name="AssistantToggle" Style="{StaticResource ToggleSwitch}" AutomationProperties.Name="Allow AI assistants" Click="AssistantToggle_Click"/>
                             </local:SettingRow>
                             <Border Style="{StaticResource Divider}"/>
@@ -302,7 +310,8 @@
                             <Border Style="{StaticResource Divider}"/>
                             <local:SettingRow x:Name="AssistantHttpRow" Glyph="&#xE71B;" Title="Connect by URL">
                                 <StackPanel Orientation="Horizontal">
-                                    <Button x:Name="AssistantNewTokenButton" Content="New token" Style="{StaticResource GhostButton}" Margin="0,0,6,0" Click="AssistantNewToken_Click"/>
+                                    <Button x:Name="AssistantNewTokenButton" Content="New token" Style="{StaticResource GhostButton}" Margin="0,0,6,0" Click="AssistantNewToken_Click"
+                                            AutomationProperties.Name="New token for Connect by URL"/>
                                     <CheckBox x:Name="AssistantHttpToggle" Style="{StaticResource ToggleSwitch}" AutomationProperties.Name="Connect by URL" Click="AssistantHttpToggle_Click"/>
                                 </StackPanel>
                             </local:SettingRow>
@@ -316,11 +325,12 @@
                                 <WrapPanel x:Name="AssistantClientPanel"/>
                             </Border>
                             <DockPanel Margin="2,12,0,8">
-                                <Button DockPanel.Dock="Right" Content="Copy" Padding="12,3" Margin="12,0,0,0" VerticalAlignment="Top" Click="AssistantCopy_Click"/>
+                                <Button x:Name="AssistantCopyButton" DockPanel.Dock="Right" Content="Copy" Padding="12,3" Margin="12,0,0,0" VerticalAlignment="Top" MinWidth="64"
+                                        Click="AssistantCopy_Click" AutomationProperties.Name="Copy the setup for this AI tool"/>
                                 <TextBlock x:Name="AssistantWhereText" Style="{StaticResource Hint}" VerticalAlignment="Center"/>
                             </DockPanel>
                             <TextBox x:Name="AssistantSnippetBox" IsReadOnly="True" FontFamily="{StaticResource MonoFont}" FontSize="12"
-                                     TextWrapping="Wrap" AcceptsReturn="True"/>
+                                     TextWrapping="Wrap" AcceptsReturn="True" AutomationProperties.Name="Setup for this AI tool"/>
                             <TextBlock x:Name="AssistantHttpHint" Style="{StaticResource Hint}" Margin="2,8,0,0" Visibility="Collapsed"
                                        Text="Turn on “Connect by URL” above to use this."/>
                         </StackPanel>
@@ -358,7 +368,7 @@
                             </local:SettingRow>
                             <Border Style="{StaticResource Divider}"/>
                             <local:SettingRow Glyph="&#xE8A5;" Title="Release notes">
-                                <Button Content="Open" Style="{StaticResource GhostButton}" Click="Releases_Click"/>
+                                <Button Content="Open" Style="{StaticResource GhostButton}" Click="Releases_Click" AutomationProperties.Name="Open the release notes"/>
                             </local:SettingRow>
                         </StackPanel>
                     </Border>
@@ -367,11 +377,11 @@
                     <Border Style="{StaticResource Group}">
                         <StackPanel>
                             <local:SettingRow x:Name="ProgramRow" Glyph="&#xE74C;" Title="Program folder">
-                                <Button Content="Open folder" Style="{StaticResource GhostButton}" Click="OpenProgramFolder_Click"/>
+                                <Button Content="Open folder" Style="{StaticResource GhostButton}" Click="OpenProgramFolder_Click" AutomationProperties.Name="Open the program folder"/>
                             </local:SettingRow>
                             <Border Style="{StaticResource Divider}"/>
                             <local:SettingRow x:Name="DataRow" Glyph="&#xE838;" Title="Data and logs">
-                                <Button Content="Open folder" Style="{StaticResource GhostButton}" Click="OpenDataFolder_Click"/>
+                                <Button Content="Open folder" Style="{StaticResource GhostButton}" Click="OpenDataFolder_Click" AutomationProperties.Name="Open the data and logs folder"/>
                             </local:SettingRow>
                             <Border Style="{StaticResource Divider}"/>
                             <local:SettingRow Glyph="&#xE74D;" Title="Uninstall Runner Manager" Description="Your runners keep running.">
