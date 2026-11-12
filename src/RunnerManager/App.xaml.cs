@@ -19,6 +19,10 @@ public partial class App : Application
     /// current user refuses elevated dashboards (their objects are owned by the Administrators group, not the user).
     /// </summary>
     private const string ActivateEventName = @"Local\RunnerManagerDashboard.Activate";
+    /// <summary>Set by the dashboard's UI thread when it handled <see cref="ActivateEventName"/>, so a hung dashboard is noticed.</summary>
+    private const string ActivatedEventName = @"Local\RunnerManagerDashboard.Activated";
+    /// <summary>How long a second launch waits for the running dashboard to come to the front.</summary>
+    private static readonly TimeSpan ActivationAnswerTimeout = TimeSpan.FromSeconds(3);
     /// <summary>Set by setup and uninstall to ask the dashboard to exit, before they end it.</summary>
     internal const string ExitEventName = @"Local\RunnerManagerDashboard.Exit";
     /// <summary>How long a new dashboard waits for one that is exiting (for example after "Restart now").</summary>
@@ -26,6 +30,7 @@ public partial class App : Application
     private Mutex? _dashboardMutex;
     private bool _ownsDashboardMutex;
     private EventWaitHandle? _activateEvent;
+    private EventWaitHandle? _activatedEvent;
     private RegisteredWaitHandle? _activateWait;
     private EventWaitHandle? _exitEvent;
     private RegisteredWaitHandle? _exitWait;
@@ -39,14 +44,19 @@ public partial class App : Application
     protected override async void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
-        ElevatedByPrompt = e.Args.Contains(ElevationAttemptedArgument, StringComparer.OrdinalIgnoreCase);
-        if (e.Args.Contains(ProbeArgument, StringComparer.OrdinalIgnoreCase))
+        // An AI tool may start the exe by a path with spaces but without quotes; the pieces of that path are not arguments.
+        var startArgs = RunningCopies.WithoutProgramPathPieces(e.Args, Environment.CommandLine, Environment.ProcessPath);
+        // An exception on another thread ends the process; this is where it gets recorded.
+        AppDomain.CurrentDomain.UnhandledException += (_, args) =>
+            MachineRelay.AppendAgentLog($"Runner Manager stopped after an unexpected error: {args.ExceptionObject}");
+        ElevatedByPrompt = startArgs.Contains(ElevationAttemptedArgument, StringComparer.OrdinalIgnoreCase);
+        if (startArgs.Contains(ProbeArgument, StringComparer.OrdinalIgnoreCase))
         {
             Shutdown(0);
             return;
         }
         // Started by an AI tool, without administrator rights: changes go through the fleet agent.
-        if (AssistantHost.IsAssistantLaunch(e.Args))
+        if (AssistantHost.IsAssistantLaunch(startArgs))
         {
             ShutdownMode = ShutdownMode.OnExplicitShutdown;
             ThemeManager.Apply(AppSettings.Load().Theme);
@@ -56,7 +66,7 @@ public partial class App : Application
                 args.Handled = true;
             };
             int exitCode;
-            try { exitCode = await AssistantHost.RunAsync(e.Args); }
+            try { exitCode = await AssistantHost.RunAsync(startArgs); }
             catch (Exception ex)
             {
                 MachineRelay.AppendAgentLog($"Assistant stopped after an unexpected error: {ex.Message}");
@@ -68,7 +78,7 @@ public partial class App : Application
         if (!Elevation.IsElevated)
         {
             ShutdownMode = ShutdownMode.OnExplicitShutdown;
-            await HandOffToElevatedAsync(e.Args);
+            await HandOffToElevatedAsync(startArgs);
             Shutdown();
             return;
         }
@@ -79,19 +89,25 @@ public partial class App : Application
         };
         // Runner Manager installs per user. Elevated with another account's password, it would set itself up in that
         // account's profile (its own %LOCALAPPDATA%, registry and tasks), so it stops instead.
-        if (Elevation.OtherUserThanStarted(e.Args) is { } started)
+        if (Elevation.OtherUserThanStarted(startArgs) is { } started)
         {
             var message = $"Runner Manager needs a Windows account with administrator rights. It was started by {started}, " +
                           $"but with the password of {Elevation.CurrentUserName}, so it would set itself up for {Elevation.CurrentUserName} instead. " +
                           "Sign in to Windows with an administrator account and start Runner Manager there.";
             MachineRelay.AppendAgentLog($"Stopped: elevated as {Elevation.CurrentUserName}, started by {started}.");
-            if (!e.Args.Contains("--quiet", StringComparer.OrdinalIgnoreCase))
+            if (!startArgs.Contains("--quiet", StringComparer.OrdinalIgnoreCase))
                 MessageBox.Show(message, "Runner Manager", MessageBoxButton.OK, MessageBoxImage.Warning);
             Shutdown(1);
             return;
         }
 
-        if (e.Args.Any(a => a.Equals("--install-agent", StringComparison.OrdinalIgnoreCase)))
+        // A task an older version registered starts the agent and the dashboard below normal priority.
+        if (ProcessPriority.RaiseToNormal())
+            MachineRelay.AppendAgentLog("Runner Manager was started below normal priority. It now runs at normal priority.");
+        // Logs what it found; the dashboard tells the user about an exe that is missing for another reason.
+        UpdateGuard.RepairMissingExe(tellUser: false);
+
+        if (startArgs.Any(a => a.Equals("--install-agent", StringComparison.OrdinalIgnoreCase)))
         {
             ShutdownMode = ShutdownMode.OnExplicitShutdown;
             try { await MachineRelay.InstallAndStartAgentTaskAsync(); }
@@ -100,7 +116,7 @@ public partial class App : Application
             return;
         }
 
-        if (e.Args.Any(a => a.Equals("--agent", StringComparison.OrdinalIgnoreCase)))
+        if (startArgs.Any(a => a.Equals("--agent", StringComparison.OrdinalIgnoreCase)))
         {
             ShutdownMode = ShutdownMode.OnExplicitShutdown;
             DispatcherUnhandledException += (_, args) =>
@@ -108,53 +124,29 @@ public partial class App : Application
                 MachineRelay.AppendAgentLog($"Unhandled agent error: {args.Exception}");
                 args.Handled = true;
             };
-            // An update that keeps crashing is undone here; the task then starts the previous version again. A second
-            // agent exits right away (only one may run), so it is not counted.
-            var another = await MachineRelay.IsAgentRunningAsync();
-            if (!another && !UpdateGuard.OnAgentStarting())
-            {
-                AppUpdater.ScheduleAgentTaskRestart(ScheduledTasks.AgentTaskName);
-                Shutdown(1);
-                return;
-            }
-            // A task registered by an older version lacks the keep-alive trigger. Checked once the agent has proven
-            // itself, because re-registering may restart it.
-            if (!another)
-                _ = Task.Run(async () =>
-                {
-                    await Task.Delay(UpdateGuard.HealthyAfter + TimeSpan.FromMinutes(1));
-                    try
-                    {
-                        if (await ScheduledTasks.UpdateAgentTaskIfOutdatedAsync(fromAgent: true))
-                            MachineRelay.AppendAgentLog("Updated the fleet agent task: it now starts again by itself when it stopped.");
-                    }
-                    catch (Exception ex) { MachineRelay.AppendAgentLog($"Could not update the fleet agent task: {ex.Message}"); }
-                    foreach (var name in await ScheduledTasks.RepairOwnTasksAsync(fromAgent: true))
-                        MachineRelay.AppendAgentLog($"Repaired the scheduled task \"{name}\". Windows could not start it.");
-                });
-            try { await MachineRelay.RunAgentAsync(CancellationToken.None); }
+            int exitCode;
+            try { exitCode = await RunAgentProcessAsync(); }
             catch (Exception ex)
             {
                 MachineRelay.AppendAgentLog($"Agent stopped after an unexpected error: {ex}");
-                // A non-zero exit lets the scheduled task's restart-on-failure policy bring it back.
-                Shutdown(1);
-                return;
+                // A non-zero exit lets the scheduled task's restart-on-failure policy bring it back. A process left
+                // running without an agent would instead keep the task busy, so its IgnoreNew policy starts no other.
+                exitCode = 1;
             }
-            if (!another) UpdateGuard.OnAgentExiting();
-            Shutdown();
+            Shutdown(exitCode);
             return;
         }
 
-        if (e.Args.Any(a => a.Equals("--uninstall", StringComparison.OrdinalIgnoreCase)))
+        if (startArgs.Any(a => a.Equals("--uninstall", StringComparison.OrdinalIgnoreCase)))
         {
             ShutdownMode = ShutdownMode.OnExplicitShutdown;
             ThemeManager.Apply(AppSettings.Load().Theme);
-            await UninstallAsync(e.Args);
+            await UninstallAsync(startArgs);
             Shutdown();
             return;
         }
 
-        if (Installer.IsSetupLaunch(e.Args))
+        if (Installer.IsSetupLaunch(startArgs))
         {
             ShutdownMode = ShutdownMode.OnLastWindowClose;
             ThemeManager.Apply(AppTheme.Dark);
@@ -168,10 +160,10 @@ public partial class App : Application
         var settings = AppSettings.Load();
         ThemeManager.Apply(settings.Theme);
         ShutdownMode = ShutdownMode.OnExplicitShutdown;
-        var minimized = e.Args.Any(a => a.Equals("--minimized", StringComparison.OrdinalIgnoreCase));
+        var minimized = startArgs.Any(a => a.Equals("--minimized", StringComparison.OrdinalIgnoreCase));
 
         // "Restart now": the dashboard that started this one is exiting. Wait for it, so it is not asked to come to the front.
-        if (AfterProcessId(e.Args) is { } previous) await WaitForExitAsync(previous, PreviousDashboardExitTimeout);
+        if (AfterProcessId(startArgs) is { } previous) await WaitForExitAsync(previous, PreviousDashboardExitTimeout);
 
         // One dashboard per user: a second launch brings the running one to the front instead.
         _dashboardMutex = new Mutex(initiallyOwned: false, DashboardMutexName);
@@ -206,7 +198,7 @@ public partial class App : Application
 
         var window = new MainWindow();
         MainWindow = window;
-        foreach (var arg in e.Args)
+        foreach (var arg in startArgs)
         {
             if (arg.StartsWith("--fleet=", StringComparison.OrdinalIgnoreCase)) window.PostSetupFleet = arg[8..].ToLowerInvariant();
         }
@@ -216,6 +208,40 @@ public partial class App : Application
             await window.StartAsync();
         else
             window.Show();
+    }
+
+    /// <summary>Runs the fleet agent until it stops. Returns the exit code.</summary>
+    private static async Task<int> RunAgentProcessAsync()
+    {
+        // An update that keeps crashing is undone here; the task then starts the previous version again. A second
+        // agent exits right away (only one may run), so it is not counted.
+        var another = await MachineRelay.IsAgentRunningAsync();
+        if (!another && !UpdateGuard.OnAgentStarting())
+        {
+            AppUpdater.ScheduleAgentTaskRestart(ScheduledTasks.AgentTaskName);
+            return 1;
+        }
+        // A task registered by an older version lacks the keep-alive trigger or runs below normal priority. Checked once
+        // the agent has proven itself, because re-registering may restart it.
+        if (!another)
+            _ = Task.Run(async () =>
+            {
+                await Task.Delay(UpdateGuard.HealthyAfter + TimeSpan.FromMinutes(1));
+                try
+                {
+                    if (await ScheduledTasks.UpdateAgentTaskIfOutdatedAsync(fromAgent: true))
+                        MachineRelay.AppendAgentLog("Registered the fleet agent task again with the current settings.");
+                }
+                catch (Exception ex) { MachineRelay.AppendAgentLog($"Could not update the fleet agent task: {ex.Message}"); }
+                foreach (var name in await ScheduledTasks.RepairOwnTasksAsync(fromAgent: true))
+                    MachineRelay.AppendAgentLog($"Repaired the scheduled task \"{name}\". Windows could not start it.");
+                // The dashboard leaves its own tasks alone while they run it; the agent catches a moment when they do not.
+                try { await Installer.EnsureLaunchTaskAsync(); }
+                catch (Exception ex) { MachineRelay.AppendAgentLog($"Could not update the dashboard's scheduled tasks: {ex.Message}"); }
+            });
+        await MachineRelay.RunAgentAsync(CancellationToken.None);
+        if (!another) UpdateGuard.OnAgentExiting();
+        return 0;
     }
 
     /// <summary>Passed by "Restart now" with the id of the dashboard that exits, so the new one waits for it.</summary>
@@ -295,17 +321,14 @@ public partial class App : Application
         try
         {
             using var searcher = new System.Management.ManagementObjectSearcher(
-                $"SELECT ProcessId, SessionId, CommandLine FROM Win32_Process WHERE Name = '{AppPaths.ExeName}' OR Name = '{AppPaths.LegacyExeName}'");
+                $"SELECT ProcessId, SessionId, ExecutablePath, CommandLine FROM Win32_Process WHERE Name = '{AppPaths.ExeName}' OR Name = '{AppPaths.LegacyExeName}'");
             foreach (System.Management.ManagementObject item in searcher.Get())
             {
                 using (item)
                 {
                     var id = Convert.ToInt32(item["ProcessId"]);
-                    // Split loosely: only whole flags are compared, so a path with spaces does no harm.
-                    var arguments = (item["CommandLine"]?.ToString() ?? string.Empty).Split(' ', StringSplitOptions.RemoveEmptyEntries)
-                        .Select(a => a.Trim('"').ToLowerInvariant()).ToArray();
                     if (id == Environment.ProcessId || Convert.ToInt32(item["SessionId"]) != session) continue;
-                    if (arguments.Any(a => a is "--agent" or "--setup" or "--uninstall" or "--install-agent" or AssistantHost.McpArgument or AssistantHost.CliArgument)) continue;
+                    if (RunningCopies.RoleOf(item["CommandLine"]?.ToString(), item["ExecutablePath"]?.ToString()) != CopyRole.Dashboard) continue;
                     try { found.Add(Process.GetProcessById(id)); } catch (ArgumentException) { }
                 }
             }
@@ -392,6 +415,8 @@ public partial class App : Application
         _activateWait = null;
         _activateEvent?.Dispose();
         _activateEvent = null;
+        _activatedEvent?.Dispose();
+        _activatedEvent = null;
         _exitWait?.Unregister(null);
         _exitWait = null;
         _exitEvent?.Dispose();
@@ -432,9 +457,16 @@ public partial class App : Application
     {
         try
         {
+            // Created before the activation event, so a launch that finds that one can also check the answer.
+            var activated = _activatedEvent = new EventWaitHandle(false, EventResetMode.ManualReset, ActivatedEventName);
             _activateEvent = new EventWaitHandle(false, EventResetMode.AutoReset, ActivateEventName);
             _activateWait = ThreadPool.RegisterWaitForSingleObject(_activateEvent,
-                (_, _) => Dispatcher.BeginInvoke(window.ShowFromTray), null, Timeout.Infinite, executeOnlyOnce: false);
+                (_, _) => Dispatcher.BeginInvoke(() =>
+                {
+                    // Set on the UI thread: it answers only when the window can react.
+                    try { activated.Set(); } catch (ObjectDisposedException) { }
+                    window.ShowFromTray();
+                }), null, Timeout.Infinite, executeOnlyOnce: false);
         }
         catch (Exception ex) { MachineRelay.AppendAgentLog($"Could not listen for activation: {ex.Message}"); }
         // Setup replaces the exe, and uninstall removes it: they ask the dashboard to exit before they would end it.
@@ -447,15 +479,27 @@ public partial class App : Application
         catch (Exception ex) { MachineRelay.AppendAgentLog($"Could not listen for exit requests: {ex.Message}"); }
     }
 
-    /// <summary>Asks the running dashboard to come to the front. Returns false when no dashboard is listening.</summary>
-    private static Task<bool> SignalRunningDashboardAsync()
+    /// <summary>
+    /// Asks the running dashboard to come to the front. Returns false when no dashboard is listening, or when its UI thread
+    /// did not react within <see cref="ActivationAnswerTimeout"/> (it hangs).
+    /// </summary>
+    private static async Task<bool> SignalRunningDashboardAsync()
     {
+        EventWaitHandle? activated = null;
         try
         {
             using var activate = EventWaitHandle.OpenExisting(ActivateEventName);
-            return Task.FromResult(activate.Set());
+            // A dashboard of a version before the answer existed has no answer event: it counts as reacting.
+            try { activated = EventWaitHandle.OpenExisting(ActivatedEventName); }
+            catch (Exception ex) when (ex is WaitHandleCannotBeOpenedException or UnauthorizedAccessException) { }
+            activated?.Reset();
+            if (!activate.Set()) return false;
+            if (activated == null) return true;
+            var answer = activated;
+            return await Task.Run(() => answer.WaitOne(ActivationAnswerTimeout));
         }
-        catch { return Task.FromResult(false); }
+        catch { return false; }
+        finally { activated?.Dispose(); }
     }
 
     private void OnUiUnhandledException(object sender, DispatcherUnhandledExceptionEventArgs e)

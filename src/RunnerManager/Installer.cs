@@ -7,7 +7,8 @@ namespace RunnerManager;
 
 public enum FleetChoice { SinglePc, NewFleet, JoinFleet }
 
-public sealed record SetupChoices(bool DesktopShortcut, bool StartWithWindows, FleetChoice Fleet);
+/// <summary>The choices made in setup. <see cref="StartWithWindows"/> is null when setup leaves the startup task as it is.</summary>
+public sealed record SetupChoices(bool DesktopShortcut, bool? StartWithWindows, FleetChoice Fleet);
 
 /// <summary>
 /// Per-user install of Runner Manager: copies the app to %LOCALAPPDATA%\Programs\RunnerManager, adds shortcuts and an
@@ -25,13 +26,19 @@ public static class Installer
         => args.Any(a => a.Equals("--setup", StringComparison.OrdinalIgnoreCase))
            || Path.GetFileName(Environment.ProcessPath ?? string.Empty).StartsWith("RunnerManagerSetup", StringComparison.OrdinalIgnoreCase);
 
-    public static bool IsInstalled
+    public static bool IsInstalled => File.Exists(AppUpdater.InstalledExe) && HasUninstallEntry;
+
+    /// <summary>Whether this user has Runner Manager's entry in Settings → Apps.</summary>
+    internal static bool HasUninstallEntry
     {
         get
         {
-            if (!File.Exists(AppUpdater.InstalledExe)) return false;
-            using var key = Registry.CurrentUser.OpenSubKey(UninstallKey);
-            return key != null;
+            try
+            {
+                using var key = Registry.CurrentUser.OpenSubKey(UninstallKey);
+                return key != null;
+            }
+            catch { return false; }
         }
     }
 
@@ -76,7 +83,8 @@ public static class Installer
         var previous = RegisteredInstallDir()
                        ?? (File.Exists(Path.Combine(AppUpdater.DefaultInstallDir, AppPaths.ExeName)) ? AppUpdater.DefaultInstallDir : null);
         var moving = previous != null && !AppUpdater.SameFolder(previous, AppUpdater.InstallDir);
-        CloseRunningDashboards(log, moving ? new[] { AppUpdater.InstallDir, previous! } : new[] { AppUpdater.InstallDir });
+        // An AI tool's host keeps running the replaced exe and needs nothing from setup; only a move takes its exe away.
+        CloseRunningDashboards(log, moving ? new[] { AppUpdater.InstallDir, previous! } : new[] { AppUpdater.InstallDir }, endAssistants: moving);
         var replacing = File.Exists(AppUpdater.InstalledExe) && !AppUpdater.IsRunningInstalledCopy;
         // Setup warns on its first page when it is older than the installed copy, so going ahead is the user's choice.
         var exe = await AppUpdater.InstallCurrentBuildAsync(log, createShortcut: false, allowOlder: true);
@@ -107,8 +115,10 @@ public static class Installer
 
         await ScheduledTasks.RegisterLaunchTaskAsync(exe);
         await MigrateSharedTasksAsync(exe);
-        if (choices.StartWithWindows) await RegisterStartupTaskAsync(exe);
-        else await ScheduledTasks.DeleteTaskAsync(ScheduledTasks.DashboardTaskName);
+        if (choices.StartWithWindows == true) await RegisterStartupTaskAsync(exe);
+        else if (choices.StartWithWindows == false) await ScheduledTasks.DeleteTaskAsync(ScheduledTasks.DashboardTaskName);
+        // Unknown (the task could not be read): kept as it is, but pointed at this copy when it exists.
+        else if (!await UpdateStartupTaskAsync(exe)) log("The startup task could not be updated now. Runner Manager updates it on a later start.");
         await LegacyInstall.MigrateAsync(log, fromSetup: true);
 
         // An agent from an earlier install keeps running from the old place; point it at the new copy. Another Windows
@@ -128,12 +138,12 @@ public static class Installer
         {
             // The old copy may still be in use until this process exits (its agent was just switched over).
             log($"Removing the copy in {previous}...");
-            AppUpdater.RunAfterExit(RemoveProgramFilesScript(previous!), TimeSpan.FromMinutes(5), TimeSpan.FromSeconds(3));
+            AppUpdater.RunAfterExit(UnlessInstalledIn(previous!, RemoveProgramFilesScript(previous!)), TimeSpan.FromMinutes(5), TimeSpan.FromSeconds(3));
         }
 
         var settings = AppSettings.Load();
         settings.SetupCompleted = true;
-        settings.StartMinimizedHint = choices.StartWithWindows;
+        if (choices.StartWithWindows is { } startsWithWindows) settings.StartMinimizedHint = startsWithWindows;
         settings.Save();
         InstallChecks.MarkDone(LaunchTaskCheck);
         log("Installed.");
@@ -147,7 +157,7 @@ public static class Installer
     {
         try
         {
-            if (replaced) AppUpdater.RestorePrevious();
+            if (replaced) AppUpdater.RestorePrevious(new SwapMarker(SwapKind.Undo, AppUpdater.CurrentVersion, string.Empty));
         }
         catch (Exception ex) { log($"Could not put the previous version back: {ex.Message}"); }
         if (previousFolder == null) return;
@@ -158,10 +168,38 @@ public static class Installer
             AppUpdater.UseInstallDir(previousFolder);
             await RefreshShortcutsAsync(oldExe);
             await ScheduledTasks.RegisterLaunchTaskAsync(oldExe);
-            AppUpdater.RunAfterExit(RemoveProgramFilesScript(newFolder), TimeSpan.FromMinutes(5), TimeSpan.FromSeconds(3));
+            // Kept when setup is tried again and installs there after all.
+            AppUpdater.RunAfterExit(UnlessInstalledIn(newFolder, RemoveProgramFilesScript(newFolder)), TimeSpan.FromMinutes(5), TimeSpan.FromSeconds(3));
         }
         catch (Exception ex) { log($"Could not point Runner Manager back to {previousFolder}: {ex.Message}"); }
     }
+
+    /// <summary>
+    /// PowerShell that runs <paramref name="script"/> unless the Settings → Apps entry points at <paramref name="folder"/>
+    /// by then: a setup that is tried again in the same window may have installed there after all.
+    /// </summary>
+    internal static string UnlessInstalledIn(string folder, string script)
+    {
+        var path = Path.TrimEndingDirectorySeparator(folder).Replace("'", "''");
+        return $"$at = (Get-ItemProperty -LiteralPath 'HKCU:\\{UninstallKey}' -Name InstallLocation -ErrorAction SilentlyContinue).InstallLocation; " +
+               $"if (-not $at -or $at.TrimEnd([char]92) -ne '{path}') {{ {script} }}";
+    }
+
+    internal static bool HasDesktopShortcut => File.Exists(DesktopShortcut);
+
+    /// <summary>
+    /// Whether Runner Manager starts with Windows for this user: by its own startup task, or by one of an older version
+    /// that setup moves over (the shared task of 2.3 and earlier when it is this user's, or RunnerWidget's). Null when a
+    /// task could not be read, so setup leaves the startup task as it is.
+    /// </summary>
+    internal static async Task<bool?> StartsWithWindowsAsync() => AnyStartupTask(
+        await ScheduledTasks.ExistsOrUnknownAsync(ScheduledTasks.DashboardTaskName),
+        await IsOwnTaskOrUnknownAsync(ScheduledTasks.SharedDashboardTaskName),
+        await ScheduledTasks.ExistsOrUnknownAsync(ScheduledTasks.LegacyDashboardTaskName));
+
+    /// <summary>True when any startup task was found, otherwise null when one could not be read, otherwise false.</summary>
+    internal static bool? AnyStartupTask(params bool?[] found)
+        => found.Any(f => f == true) ? true : found.Any(f => f == null) ? null : false;
 
     public static Task RegisterStartupTaskAsync(string exe) => ScheduledTasks.RegisterLogonTaskAsync(
         ScheduledTasks.DashboardTaskName, exe, "--minimized",
@@ -171,39 +209,81 @@ public static class Installer
 
     /// <summary>
     /// The installed dashboard opens through the launch task, so make sure this user's task exists, is turned on and starts
-    /// the installed exe, and keep the version in Settings → Apps current after updates. The task is checked once per
-    /// version, or again when <paramref name="force"/> is set (the dashboard had to ask with UAC).
+    /// the installed exe, and keep the version in Settings → Apps current after updates. A launch or "start with Windows"
+    /// task that an older version registered below normal priority is registered again. The tasks are checked once per
+    /// version, or again when <paramref name="force"/> is set (the dashboard had to ask with UAC). A task that runs now (the
+    /// dashboard itself may have been started by it) is left for a later start, by the dashboard or by the fleet agent.
     /// </summary>
     public static async Task EnsureLaunchTaskAsync(bool force = false)
     {
         if (!AppUpdater.IsRunningInstalledCopy) return;
         RefreshUninstallEntryVersion();
         if (!force && InstallChecks.IsDone(LaunchTaskCheck)) return;
-        var xml = await ScheduledTasks.QueryXmlAsync(ScheduledTasks.LaunchTaskName);
-        if (xml.Length == 0 || !Elevation.IsUsableLaunchTask(xml, AppUpdater.InstalledExe))
-            await ScheduledTasks.RegisterLaunchTaskAsync(AppUpdater.InstalledExe);
-        await MigrateSharedTasksAsync(AppUpdater.InstalledExe);
-        InstallChecks.MarkDone(LaunchTaskCheck);
+        var exe = AppUpdater.InstalledExe;
+        var done = true;
+        if (LaunchTaskNeedsRegistering(await ScheduledTasks.QueryXmlAsync(ScheduledTasks.LaunchTaskName), exe))
+            done &= await RegisterIfIdleAsync(ScheduledTasks.LaunchTaskName, () => ScheduledTasks.RegisterLaunchTaskAsync(exe));
+        done &= await UpdateStartupTaskAsync(exe);
+        done &= await MigrateSharedTasksAsync(exe);
+        if (done) InstallChecks.MarkDone(LaunchTaskCheck);
     }
+
+    /// <summary>Registers this user's "start with Windows" task again when it needs it (see <see cref="StartupTaskNeedsRegistering"/>). False when that waits.</summary>
+    internal static async Task<bool> UpdateStartupTaskAsync(string exe)
+        => !StartupTaskNeedsRegistering(await ScheduledTasks.QueryXmlAsync(ScheduledTasks.DashboardTaskName), exe)
+           || await RegisterIfIdleAsync(ScheduledTasks.DashboardTaskName, () => RegisterStartupTaskAsync(exe));
+
+    /// <summary>
+    /// Changes a task (<paramref name="change"/> registers it again or deletes it) only while no instance of it runs:
+    /// that can end the running instance, and the dashboard that asks may be one. Returns false when it was left for later.
+    /// </summary>
+    internal static async Task<bool> RegisterIfIdleAsync(string name, Func<Task> change)
+    {
+        if (await ScheduledTasks.IsRunningAsync(name) != false) return false;
+        await change();
+        return true;
+    }
+
+    /// <summary>Whether the launch task must be registered: it is missing, cannot start <paramref name="exe"/>, or runs below normal priority.</summary>
+    internal static bool LaunchTaskNeedsRegistering(string xml, string exe)
+        => xml.Length == 0 || !Elevation.IsUsableLaunchTask(xml, exe) || !ScheduledTasks.HasCurrentPriority(xml);
+
+    /// <summary>
+    /// Whether this user's "start with Windows" task must be registered again: it is turned on but starts another exe or
+    /// runs below normal priority. A missing or turned-off task is left as the user chose.
+    /// </summary>
+    internal static bool StartupTaskNeedsRegistering(string xml, string exe)
+        => xml.Length > 0 && ScheduledTasks.IsEnabled(xml) && ScheduledTasks.IsCurrentUser(ScheduledTasks.PrincipalOf(xml))
+           && (!ScheduledTasks.HasCurrentPriority(xml) || !string.Equals(ScheduledTasks.CommandOf(xml), exe, StringComparison.OrdinalIgnoreCase));
 
     /// <summary>
     /// 2.3 and earlier named the launch and startup tasks the same for every Windows user, so a second user's setup took
-    /// them over. When they are this user's, they move to this user's own names; another user's are left alone.
+    /// them over. When they are this user's, they move to this user's own names; another user's are left alone. A shared
+    /// task that runs now is moved on a later start. Returns false when something was left for later.
     /// </summary>
-    private static async Task MigrateSharedTasksAsync(string exe)
+    private static async Task<bool> MigrateSharedTasksAsync(string exe)
     {
+        var done = true;
         if (await IsOwnTaskAsync(ScheduledTasks.SharedDashboardTaskName))
-        {
-            await RegisterStartupTaskAsync(exe);
-            await ScheduledTasks.DeleteTaskAsync(ScheduledTasks.SharedDashboardTaskName);
-        }
+            done &= await RegisterIfIdleAsync(ScheduledTasks.SharedDashboardTaskName, async () =>
+            {
+                await RegisterStartupTaskAsync(exe);
+                await ScheduledTasks.DeleteTaskAsync(ScheduledTasks.SharedDashboardTaskName);
+            });
         if (await IsOwnTaskAsync(ScheduledTasks.SharedLaunchTaskName))
-            await ScheduledTasks.DeleteTaskAsync(ScheduledTasks.SharedLaunchTaskName);
+            done &= await RegisterIfIdleAsync(ScheduledTasks.SharedLaunchTaskName,
+                () => ScheduledTasks.DeleteTaskAsync(ScheduledTasks.SharedLaunchTaskName));
+        return done;
     }
 
-    private static async Task<bool> IsOwnTaskAsync(string name)
+    private static async Task<bool> IsOwnTaskAsync(string name) => await IsOwnTaskOrUnknownAsync(name) == true;
+
+    /// <summary>Whether the task exists and is this user's; null when it could not be read.</summary>
+    private static async Task<bool?> IsOwnTaskOrUnknownAsync(string name)
     {
-        var principal = ScheduledTasks.PrincipalOf(await ScheduledTasks.QueryXmlAsync(name));
+        var xml = await ScheduledTasks.QueryXmlAsync(name);
+        if (xml.Length == 0) return ScheduledTasks.IsRegistered(name) == false ? false : null;
+        var principal = ScheduledTasks.PrincipalOf(xml);
         return principal.Length > 0 && ScheduledTasks.IsCurrentUser(principal);
     }
 
@@ -235,11 +315,11 @@ public static class Installer
 
     /// <summary>
     /// Closes every dashboard that runs from the install folder, including one hidden in the notification area, so it
-    /// can be replaced or removed and its single-instance lock is freed. The fleet agent (--agent) is handled separately.
+    /// can be replaced or removed and its single-instance lock is freed. AI tools' hosts (--mcp, ai) are ended too when
+    /// <paramref name="endAssistants"/> is set. The fleet agent (--agent) is handled separately, and setup, uninstall and
+    /// agent installs are left to finish.
     /// </summary>
-    private static void CloseRunningDashboards(Action<string> log) => CloseRunningDashboards(log, new[] { AppUpdater.InstallDir });
-
-    private static void CloseRunningDashboards(Action<string> log, IEnumerable<string> folders)
+    private static void CloseRunningDashboards(Action<string> log, IEnumerable<string> folders, bool endAssistants)
     {
         var installDirs = folders.Select(f => Path.TrimEndingDirectorySeparator(Path.GetFullPath(f)) + Path.DirectorySeparatorChar).ToList();
         var dashboards = new List<Process>();
@@ -253,8 +333,7 @@ public static class Installer
                 {
                     var id = Convert.ToInt32(item["ProcessId"]);
                     var path = item["ExecutablePath"]?.ToString() ?? string.Empty;
-                    var commandLine = item["CommandLine"]?.ToString() ?? string.Empty;
-                    if (id == Environment.ProcessId || IsAgentCommandLine(commandLine)) continue;
+                    if (id == Environment.ProcessId || !IsClosedBySetup(item["CommandLine"]?.ToString(), endAssistants, path)) continue;
                     if (!installDirs.Any(dir => path.StartsWith(dir, StringComparison.OrdinalIgnoreCase))) continue;
                     try { dashboards.Add(Process.GetProcessById(id)); } catch (ArgumentException) { }
                 }
@@ -293,9 +372,13 @@ public static class Installer
 
     private static readonly TimeSpan DashboardExitTimeout = TimeSpan.FromSeconds(5);
 
-    private static bool IsAgentCommandLine(string commandLine)
-        => commandLine.Split(' ', StringSplitOptions.RemoveEmptyEntries)
-            .Any(part => part.Trim('"').Equals("--agent", StringComparison.OrdinalIgnoreCase));
+    /// <summary>Whether setup or uninstall ends a Runner Manager process with this command line before it replaces the exe.</summary>
+    internal static bool IsClosedBySetup(string? commandLine, bool endAssistants, string? programPath = null) => RunningCopies.RoleOf(commandLine, programPath) switch
+    {
+        CopyRole.Dashboard => true,
+        CopyRole.Assistant => endAssistants,
+        _ => false
+    };
 
     private static void RegisterUninstallEntry(string exe)
     {
@@ -327,7 +410,7 @@ public static class Installer
     {
         // Read before the Settings → Apps entry that records a chosen folder is deleted below.
         var installDir = AppUpdater.InstallDir;
-        CloseRunningDashboards(log);
+        CloseRunningDashboards(log, new[] { installDir }, endAssistants: true);
         // Another Windows user's agent stays: it is their fleet membership, not this user's.
         if (await AgentOwnership.OtherUserAsync() is { } other)
             log($"The fleet agent on this PC runs for {other}, so it was left alone.");
@@ -357,7 +440,8 @@ public static class Installer
             if (scripts.Folder != null)
                 note = $" Startup scripts that Runner Manager had turned off are {(scripts.Moved ? "now" : "kept")} in {scripts.Folder}.";
         }
-        AppUpdater.RunAfterExit(script, TimeSpan.FromSeconds(60), TimeSpan.FromSeconds(1));
+        // No time limit: the "uninstalled" message keeps this process (and so its exe) until it is closed.
+        AppUpdater.RunAfterExit(script, timeout: null, TimeSpan.FromSeconds(1));
         log("Runner Manager was removed.");
         return note;
     }
@@ -412,7 +496,7 @@ public static class Installer
         // still hold it for a moment.
         var remove = AppUpdater.IsDefaultInstallDir(folder)
             ? "Remove-Item -LiteralPath $f -Recurse -Force -ErrorAction SilentlyContinue"
-            : "foreach ($p in 'RunnerManager.exe', 'RunnerManager.exe.new', 'RunnerManager.exe.previous', 'RunnerManager.*.old.exe') " +
+            : "foreach ($p in 'RunnerManager.exe', 'RunnerManager.exe.new', 'RunnerManager.exe.new.partial', 'RunnerManager.exe.previous', 'RunnerManager.exe.swapping', 'RunnerManager.*.old.exe') " +
               "{ Get-ChildItem -LiteralPath $f -Filter $p -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue }; " +
               "$left = @(Get-ChildItem -LiteralPath $f -Force -ErrorAction SilentlyContinue); " +
               "if ($left.Count -eq 0) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue } " +
