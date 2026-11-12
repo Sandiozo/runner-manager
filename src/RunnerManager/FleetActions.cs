@@ -64,18 +64,34 @@ public sealed class FleetActions
     /// <summary>
     /// Why Start, Stop or Restart can't be used on a runner, or null. A runner can have a Windows service and still run in
     /// a console window instead: starting the service would run it twice, and stopping it would not stop the runner.
+    /// A runner that a startup entry opens in a console window at sign-in would also run twice, even while that window
+    /// is not open, and so would one that runs twice already when its service is restarted. Stop is always possible then.
     /// </summary>
-    internal static string? ConsoleRunnerProblem(bool interactive, bool serviceInstalled, string action)
-        => !interactive || !serviceInstalled ? null
-            : action == "Stop" ? "This runner runs in a console window, not as its Windows service. Close the console window to stop it."
-            : "This runner runs in a console window. Starting its Windows service would run it twice. Close the console window first.";
+    /// <param name="consoleAtSignIn">A startup entry that is turned on opens it in a console window at sign-in.</param>
+    /// <param name="runsTwice">Its Windows service runs, and a console window runs it too or opens it at sign-in.</param>
+    internal static string? ConsoleRunnerProblem(bool interactive, bool serviceInstalled, string action,
+        bool consoleAtSignIn = false, bool runsTwice = false)
+    {
+        if (!serviceInstalled) return null;
+        if (action == "Stop")
+            return interactive ? "This runner runs in a console window, not as its Windows service. Close the console window to stop it." : null;
+        if (runsTwice)
+            return "This runner runs twice: as its Windows service and in a console window. Starting or restarting the service keeps it so. " +
+                   "Stop the Windows service to keep the console window, or turn off “Start when you sign in” and close the console window, then start the service.";
+        if (interactive)
+            return "This runner runs in a console window. Starting its Windows service would run it twice. Close the console window first.";
+        return consoleAtSignIn
+            ? "This runner is set to open in a console window when you sign in. Starting its Windows service would run it twice. " +
+              "Turn off “Start when you sign in” first, or use the console window."
+            : null;
+    }
 
     /// <param name="action">"Start", "Stop" or "Restart".</param>
     public Task ControlRunnerAsync(MachineInfo machine, MachineRunnerStatus runner, string action, Action<string> log)
         => RunOnMachineAsync(machine, "runner", runner.CommandKey, action, log,
             async () =>
             {
-                if (ConsoleRunnerProblem(runner.IsInteractive, runner.ServiceInstalled, action) is { } problem)
+                if (ConsoleRunnerProblem(runner.IsInteractive, runner.ServiceInstalled, action, runner.ConsoleAtSignIn, runner.RunsTwice) is { } problem)
                     throw new InvalidOperationException(problem);
                 await RunnerService.ControlServiceAsync(runner.CommandKey, action);
                 FleetConfig.SetManuallyStopped(runner.CommandKey, action == "Stop");

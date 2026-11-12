@@ -1186,7 +1186,8 @@ public static class MachineRelay
                 case "Start" or "Stop" or "Restart":
                     // Dashboards don't offer these for such a runner, but a command can be sent from an older status.
                     if (await RunnerService.FindRunnerAsync(command.TargetKey) is { } target
-                        && FleetActions.ConsoleRunnerProblem(target.IsInteractive, target.ServiceInstalled, command.Action) is { } problem)
+                        && FleetActions.ConsoleRunnerProblem(target.IsInteractive, target.ServiceInstalled, command.Action,
+                            target.ConsoleAtSignIn, target.RunsTwice) is { } problem)
                         throw new InvalidOperationException(problem);
                     await RunnerService.ControlServiceAsync(command.TargetKey, command.Action);
                     FleetConfig.SetManuallyStopped(command.TargetKey, command.Action == "Stop");
@@ -1258,10 +1259,11 @@ public static class MachineRelay
         var acted = false;
         foreach (var runner in local.Runners.Where(r => r.ServiceInstalled))
         {
-            // A runner that runs from a console window is left alone: when that closes (sign-out), starting the
-            // service would run it twice at the next sign-in.
-            var step = Recovery.Check(runner.Name, runner.IsInteractive, runner.IsRunning, IsPending(runner),
-                watchdogOn: config.Watchdog, held: IsManuallyStopped(runner.Name), DateTime.UtcNow);
+            if (TwiceReported.Changed(runner.Name, runner.RunsTwice))
+                AddEvent(runner.RunsTwice
+                    ? $"Runner {runner.AgentName} runs twice: as its Windows service and in a console window. Stop the service, or turn off “Start when you sign in”."
+                    : $"Runner {runner.AgentName} no longer runs twice", warning: runner.RunsTwice);
+            var step = CheckRecovery(Recovery, runner, config.Watchdog, IsManuallyStopped(runner.Name), DateTime.UtcNow);
             if (step == RunnerRecovery.Step.GiveUp)
                 AddEvent($"Auto-recovery stopped for runner {runner.AgentName} after {RunnerRecovery.MaxAttempts} attempts in one hour", warning: true);
             if (step != RunnerRecovery.Step.Start) continue;
@@ -1275,6 +1277,29 @@ public static class MachineRelay
         }
 
         return acted;
+    }
+
+    /// <summary>
+    /// Auto-recovery's step for a runner with a service. A runner that runs from a console window, or that a startup
+    /// entry opens in one at sign-in, is left alone: starting its service would run it twice, also when the window is
+    /// closed now (signed out) and when this agent never saw the window. The startup entry is read on every reading.
+    /// </summary>
+    internal static RunnerRecovery.Step CheckRecovery(RunnerRecovery recovery, RunnerInfo runner, bool watchdogOn, bool held, DateTime nowUtc)
+        => recovery.Check(runner.Name, runner.HasConsoleCopy, runner.IsRunning, IsPending(runner), watchdogOn, held, nowUtc);
+
+    /// <summary>The runners this agent reported as running twice, so each time is reported once.</summary>
+    private static readonly OnceReported TwiceReported = new();
+
+    /// <summary>Keys reported as in a state, so a state is reported once when it begins and once when it ends.</summary>
+    internal sealed class OnceReported
+    {
+        private readonly HashSet<string> _keys = new(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>Whether the state of this key changed since the last call; a key never seen starts as not in it.</summary>
+        public bool Changed(string key, bool now)
+        {
+            lock (_keys) return now ? _keys.Add(key) : _keys.Remove(key);
+        }
     }
 
     /// <summary>Its service is starting or stopping (Win32_Service.State "Start Pending", "Stop Pending" and so on).</summary>
@@ -1829,6 +1854,10 @@ public static class MachineRelay
                 ServiceInstalled = r.ServiceInstalled,
                 MovedAway = r.MovedAway,
                 StartsAt = r.StartsAt,
+                RunsTwice = r.RunsTwice,
+                ConsoleAtSignIn = r.ConsoleAtSignIn,
+                ServiceAccount = r.ServiceAccount,
+                WorkFolderOwner = r.WorkFolderOwner,
                 RunnerVersion = r.RunnerVersion,
                 WorkFolderBytes = r.WorkFolderBytes,
                 ManuallyStopped = config.ManuallyStopped.Contains(r.Name, StringComparer.OrdinalIgnoreCase),

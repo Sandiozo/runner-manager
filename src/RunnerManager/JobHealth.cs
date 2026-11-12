@@ -3,10 +3,13 @@ using System.Text.Json;
 
 namespace RunnerManager;
 
-public enum RunnerConcern { None, Stuck, RunningLong, IdleWithWaitingJobs }
+public enum RunnerConcern { None, Stuck, RunningLong, IdleWithWaitingJobs, RunsTwice, WorkFolderOwner }
 
-/// <summary>Whether a runner needs attention: its job makes no progress or runs far too long, or it idles while jobs wait.</summary>
-/// <param name="Label">Short, for the status pill: "Stuck", "Running long" or "Idle · jobs waiting".</param>
+/// <summary>
+/// Whether a runner needs attention: its job makes no progress or runs far too long, it idles while jobs wait, it runs
+/// twice (its Windows service and a console window), or its service cannot use its work folder.
+/// </summary>
+/// <param name="Label">Short, for the status pill: "Stuck", "Running long", "Idle · jobs waiting", "Runs twice" or "Work folder owner".</param>
 /// <param name="Detail">One or two sentences for the details, notifications and AI assistants.</param>
 /// <param name="Subject">What the concern is about (a job's ID or start), so it is reported once.</param>
 public sealed record RunnerHealth(RunnerConcern Concern, string Label, string Detail, string Subject = "")
@@ -110,6 +113,46 @@ public static class JobHealth
             "waiting|" + string.Join(',', waits.Select(w => w.Job.Id).Order()));
     }
 
+    /// <summary>
+    /// The concern that the runner's own status shows, which comes before the job checks: its Windows service runs and a
+    /// console window runs it too or opens it at sign-in, or its running service's work folder has folders of another
+    /// account, which git refuses. Healthy otherwise, and for runners from agents before 2.9.1, which do not tell.
+    /// </summary>
+    public static RunnerHealth ForSetup(MachineRunnerStatus runner)
+    {
+        if (runner.RunsTwice)
+        {
+            var what = runner.ConsoleAtSignIn
+                ? "Its Windows service runs, and a startup entry also opens it in a console window when you sign in."
+                : "Its Windows service runs, and a console window runs it too.";
+            var fix = !runner.ConsoleAtSignIn
+                ? "Stop the Windows service to keep the console window, or close the console window to keep the service."
+                : runner.StartsAt == RunnerStart.SignInShared
+                    ? "Stop the Windows service to keep the console window, or remove the runner from the startup entry that also starts other runners and close the console window to keep the service."
+                    : "Stop the Windows service to keep the console window, or turn off “Start when you sign in” and close the console window to keep the service.";
+            return new RunnerHealth(RunnerConcern.RunsTwice, "Runs twice",
+                $"{what} Both copies use one registration, so only one of them gets jobs, and its jobs can fail or wait: " +
+                $"the service runs as another account than the console window, and git refuses work folders that another account owns. {fix}",
+                SetupSubject + "twice");
+        }
+        if (runner.WorkFolderOwner.Length > 0 && runner.ServiceInstalled && !runner.IsInteractive && runner.IsRunning)
+        {
+            var account = runner.ServiceAccount.Length > 0 ? runner.ServiceAccount : "the service's account";
+            return new RunnerHealth(RunnerConcern.WorkFolderOwner, "Work folder owner",
+                $"Folders in the work folder belong to {runner.WorkFolderOwner}, and the Windows service runs as {account}. " +
+                "Git refuses folders that another account owns (“dubious ownership”), so jobs that check out code there fail. " +
+                "Use “Clean work folder”: the service makes the folders again as its own.",
+                $"{SetupSubject}owner|{runner.WorkFolderOwner}");
+        }
+        return RunnerHealth.Healthy;
+    }
+
+    /// <summary>How the subjects of <see cref="ForSetup"/>'s concerns start: such a concern lasts until it is fixed.</summary>
+    internal const string SetupSubject = "setup|";
+
+    /// <summary>A concern of <see cref="ForSetup"/>, which the runner's status shows rather than the dashboard's check.</summary>
+    internal static bool IsSetupConcern(RunnerConcern concern) => concern is RunnerConcern.RunsTwice or RunnerConcern.WorkFolderOwner;
+
     /// <summary>The jobs a runner can take, as GitHub lists them for its repository: running ones first, then queued ones by age.</summary>
     public static List<QueueEntry> QueueFor(IEnumerable<GitHubJobState> jobs, DateTime nowUtc)
         => jobs.OrderBy(j => j.Status.Equals("in_progress", StringComparison.OrdinalIgnoreCase) ? 0 : 1)
@@ -203,7 +246,9 @@ public static class JobHealth
             var jobs = active?.Where(j => RunnerLabels.CanRun(j.Labels, labelsOf[key])).ToList() ?? new List<GitHubJobState>();
             if (jobs.Count > 0) health.Queues[key] = QueueFor(jobs, nowUtc);
 
-            if (runner.IsBusy)
+            if (ForSetup(runner) is { IsProblem: true } setup)
+                health.Runners[key] = setup;
+            else if (runner.IsBusy)
                 health.Runners[key] = await ForBusyRunnerAsync(runner, active, unread.Contains(runner.RepositoryPath), github, quietLimit, nowUtc);
             else if (runner.IsRunning && online.Contains(machine))
             {

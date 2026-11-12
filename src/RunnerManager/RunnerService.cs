@@ -58,10 +58,10 @@ public static partial class RunnerService
         foreach (var root in FleetConfig.Current.KnownRunnerRoots)
             if (File.Exists(Path.Combine(root, ".runner"))) roots.Add(LongPath(root));
 
-        // What starts console runners at sign-in, read once for all of them.
-        var startup = roots.Any(root => !services.Any(s => s.Root.Equals(root, StringComparison.OrdinalIgnoreCase)))
-                      || processes.Any(p => p.SessionId != 0 && p.Name.Equals("Runner.Listener.exe", StringComparison.OrdinalIgnoreCase))
-            ? await ReadStartupEntriesAsync() ?? new List<string>() : new List<string>();
+        // What starts console runners at sign-in, read once for all of them. Runners with a service are checked too: a
+        // startup entry that opens one in a console window runs it twice while its service runs. The scheduled tasks in
+        // it are read in the background at most every five minutes.
+        var startup = roots.Count > 0 ? await ReadStartupEntriesAsync() ?? new List<string>() : new List<string>();
         var runners = await Task.WhenAll(roots.OrderBy(x => x)
             .Select(root => BuildRunnerInfoAsync(root, services, processes, queryGitHub, startup, roots)));
         return runners.ToList();
@@ -97,7 +97,20 @@ public static partial class RunnerService
         return ConsoleSeenUtc.TryGetValue(root, out var seen) && nowUtc - seen < ConsoleRestartGrace;
     }
 
-    private static async Task<RunnerInfo> BuildRunnerInfoAsync(
+    /// <summary>A listener of the runner in this folder runs in a user's session, as a console window runs it.</summary>
+    internal static bool ListenerInSession(string root, List<ProcessInfo> processes)
+        => processes.Any(p => p.SessionId != 0 && p.Name.Equals("Runner.Listener.exe", StringComparison.OrdinalIgnoreCase)
+                              && RootFromExecutable(p.ExecutablePath).Equals(root, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>
+    /// Two copies of one runner: its Windows service runs, and a console window in a user's session runs it too, or a
+    /// startup entry that is turned on opens one there at sign-in. The startup entry alone is enough, so a console copy
+    /// that is down for a moment (it restarts, or nobody is signed in) does not hide it.
+    /// </summary>
+    internal static bool RunsTwice(bool serviceRunning, bool listenerInSession, bool consoleAtSignIn)
+        => serviceRunning && (listenerInSession || consoleAtSignIn);
+
+    internal static async Task<RunnerInfo> BuildRunnerInfoAsync(
         string root, List<RunnerServiceRecord> services, List<ProcessInfo> processes, bool queryGitHub,
         List<string> startupEntries, IEnumerable<string> allRoots)
     {
@@ -115,6 +128,9 @@ public static partial class RunnerService
         var restarting = !serviceRunning && IsConsoleRestarting(root, consoleListener != null, DateTime.UtcNow);
         var interactive = consoleListener != null || restarting;
         var running = serviceRunning || consoleListener != null;
+        var consoleStart = ConsoleStartsAt(root, startupEntries, allRoots);
+        var consoleAtSignIn = consoleStart is RunnerStart.SignIn or RunnerStart.SignInShared;
+        var runsTwice = RunsTwice(serviceRunning, serviceRunning && ListenerInSession(root, processes), consoleAtSignIn);
         var busy = running && HasDescendantWorker(consoleListener?.ProcessId ?? service?.ProcessId ?? 0, processes);
         var repoPath = RepositoryPath(config.GitHubUrl);
         var scope = ApiScope(config.GitHubUrl);
@@ -158,9 +174,16 @@ public static partial class RunnerService
             DisableUpdate = config.DisableUpdate,
             NoDefaultLabels = remote is { HasDefaultLabels: false },
             ServiceInstalled = serviceInstalled,
-            StartsAt = serviceInstalled && !interactive ? ServiceStartsAt(service!.StartMode) : ConsoleStartsAt(root, startupEntries, allRoots),
+            // A runner with a service that a startup entry opens in a console window starts from that entry.
+            StartsAt = serviceInstalled && !interactive && !consoleAtSignIn ? ServiceStartsAt(service!.StartMode) : consoleStart,
+            ServiceStart = serviceInstalled ? ServiceStartsAt(service!.StartMode) : null,
+            ConsoleAtSignIn = consoleAtSignIn,
+            RunsTwice = runsTwice,
+            ServiceAccount = serviceInstalled ? ServiceAccountName(service!.Account) : string.Empty,
+            // The service runs the jobs, so its account must own the folders in the work folder.
+            WorkFolderOwner = serviceInstalled && !interactive ? ForeignWorkFolderOwner(root, workFolder, service!.Account) : string.Empty,
             IsRunning = running,
-            StatusBrush = interactive ? Palette.Warning : running ? Palette.Success : serviceInstalled ? Palette.Danger : Palette.Warning,
+            StatusBrush = interactive || runsTwice ? Palette.Warning : running ? Palette.Success : serviceInstalled ? Palette.Danger : Palette.Warning,
             GitHubText = remote == null
                 ? (queryGitHub ? "unavailable" : "connect GitHub to see status")
                 : $"{remote.Status}  ·  {(remote.Busy ? "busy" : "idle")}",
@@ -204,7 +227,7 @@ public static partial class RunnerService
     {
         var result = new List<RunnerServiceRecord>();
         using var searcher = new ManagementObjectSearcher(
-            "SELECT Name, DisplayName, State, StartMode, PathName, ProcessId FROM Win32_Service WHERE Name LIKE 'actions.runner.%'");
+            "SELECT Name, DisplayName, State, StartMode, StartName, PathName, ProcessId FROM Win32_Service WHERE Name LIKE 'actions.runner.%'");
         foreach (ManagementObject service in searcher.Get())
         {
             var pathName = service["PathName"]?.ToString() ?? string.Empty;
@@ -214,6 +237,7 @@ public static partial class RunnerService
                 DisplayName = service["DisplayName"]?.ToString() ?? string.Empty,
                 State = service["State"]?.ToString() ?? "Unknown",
                 StartMode = service["StartMode"]?.ToString() ?? string.Empty,
+                Account = service["StartName"]?.ToString() ?? string.Empty,
                 Root = ResolveRunnerRoot(pathName),
                 ProcessId = ConvertToUInt(service["ProcessId"])
             });
@@ -278,6 +302,7 @@ public static partial class RunnerService
             return;
         }
         var serviceName = key;
+        if (action is "Start" or "Restart") await EnsureNoConsoleCopyAsync(serviceName, action);
         await Task.Run(() =>
         {
             // A new ServiceController reads the current status on first use, so no Refresh is needed here.
@@ -286,6 +311,36 @@ public static partial class RunnerService
             else if (action == "Stop") StopService(service);
             else if (action == "Restart") { StopService(service); StartService(service); }
         });
+    }
+
+    /// <summary>A start or restart of a runner's service was refused: a console window runs the runner, or opens it at sign-in.</summary>
+    internal sealed class ConsoleCopyException(string message) : InvalidOperationException(message);
+
+    /// <summary>
+    /// Refuses to start or restart a runner's service while a console window in a user's session runs the runner, or a
+    /// startup entry that is turned on opens it there at sign-in: both copies would run. Everything is read now (the
+    /// scheduled tasks too), so it holds for every caller, also in a fleet agent that has just started.
+    /// </summary>
+    private static async Task EnsureNoConsoleCopyAsync(string serviceName, string action)
+    {
+        var (service, processes) = await Task.Run(() => (
+            ReadRunnerServices().FirstOrDefault(s => s.Name.Equals(serviceName, StringComparison.OrdinalIgnoreCase)), ReadProcesses()));
+        if (service == null || string.IsNullOrEmpty(service.Root)) return;
+        var entries = await ReadStartupEntriesAsync(freshTasks: true) ?? await ReadStartupEntriesAsync() ?? new List<string>();
+        var others = await Task.Run(() => OtherRunnerRoots(service.Root));
+        if (ServiceStartProblem(service, processes, entries, others.Append(service.Root), action) is { } problem)
+            throw new ConsoleCopyException(problem);
+    }
+
+    /// <summary>Why a runner's service must not be started or restarted now (see <see cref="EnsureNoConsoleCopyAsync"/>), or null.</summary>
+    internal static string? ServiceStartProblem(RunnerServiceRecord service, List<ProcessInfo> processes, List<string> startupEntries,
+        IEnumerable<string> allRoots, string action)
+    {
+        var running = service.State.Equals("Running", StringComparison.OrdinalIgnoreCase);
+        var inSession = ListenerInSession(service.Root, processes);
+        var atSignIn = ConsoleStartsAt(service.Root, startupEntries, allRoots) is RunnerStart.SignIn or RunnerStart.SignInShared;
+        return FleetActions.ConsoleRunnerProblem(interactive: inSession && !running, serviceInstalled: true, action,
+            consoleAtSignIn: atSignIn, runsTwice: RunsTwice(running, inSession, atSignIn));
     }
 
     private static readonly TimeSpan ServiceTimeout = TimeSpan.FromSeconds(25);
@@ -536,7 +591,18 @@ public static partial class RunnerService
             if (updated == null || !updated.ServiceInstalled) return;
             renamed = !string.IsNullOrEmpty(before.Name) && !updated.Name.Equals(before.Name, StringComparison.OrdinalIgnoreCase);
             if (renamed) MarkStopped(updated.Name, true);
-            if (wasRunning && !updated.IsRunning) await ControlServiceAsync(updated.Name, "Start");
+            if (wasRunning && !updated.IsRunning)
+            {
+                try { await ControlServiceAsync(updated.Name, "Start"); }
+                catch (ConsoleCopyException refused) { log($"The runner service was not started again. {refused.Message}"); }
+            }
+            else if (wasRunning && updated.RunsTwice && !HasWorkerNow(updated))
+            {
+                // config.cmd started the service, and a console window runs the runner too or opens it at sign-in: the
+                // service is not started again for it, as Start and Restart are not.
+                log("Stopping the runner service again: a console window runs this runner too, or opens it when you sign in, so it would run twice.");
+                await ControlServiceAsync(updated.Name, "Stop");
+            }
             else if (!wasRunning && updated.IsRunning)
             {
                 if (HasWorkerNow(updated))
@@ -770,6 +836,9 @@ public static partial class RunnerService
 
     private static async Task RegisterAsync(RunnerInfo runner, Registration registration, Action<string> log)
     {
+        // config.cmd installs the service to run as NETWORK SERVICE. A runner that ran in a console window before (a
+        // conversion, a repair, an edit of a console runner) has a work folder of the window's user, which git refuses.
+        await GiveWorkFolderToServiceAsync(runner.InstallPath, runner.WorkFolder, log);
         log("Requesting a registration token…");
         var token = await GitHubCli.GetRunnerTokenAsync(runner.ApiScope, removal: false);
         log("Configuring the runner as a Windows service…");
@@ -1949,6 +2018,7 @@ public static partial class RunnerService
                 return failed;
             });
             SystemHealth.ForgetFolderSize(fullFolder);
+            ForgetWorkFolderOwners(fullFolder);
             log(failures == 0 ? "Work folder cleaned." : $"Work folder cleaned. {failures} item(s) were in use and were not deleted.");
         }
         finally
@@ -1958,7 +2028,8 @@ public static partial class RunnerService
                 if (wasRunning)
                 {
                     log("Starting the runner service…");
-                    await ControlServiceAsync(runner.Name, "Start");
+                    try { await ControlServiceAsync(runner.Name, "Start"); }
+                    catch (ConsoleCopyException refused) { log($"The runner service was not started again. {refused.Message}"); }
                 }
             }
             finally { restoreRecovery(); }
@@ -2059,6 +2130,8 @@ public sealed class RunnerServiceRecord
     public string State { get; init; } = string.Empty;
     /// <summary>"Auto", "Manual" or "Disabled" (Win32_Service.StartMode).</summary>
     public string StartMode { get; init; } = string.Empty;
+    /// <summary>The account it runs as, such as "NT AUTHORITY\NetworkService" or "LocalSystem" (Win32_Service.StartName).</summary>
+    public string Account { get; init; } = string.Empty;
     public string Root { get; init; } = string.Empty;
     public uint ProcessId { get; init; }
 }
@@ -2094,13 +2167,36 @@ public sealed class RunnerInfo : INotifyPropertyChanged
     public bool NoDefaultLabels { get; init; }
     /// <summary>The settings to pass to config.cmd when this runner is registered again, on this PC or another one.</summary>
     public RunnerRegistrationOptions RegistrationOptions
-        => new(RunnerGroup, Ephemeral, DisableUpdate, NoDefaultLabels,
-            ManualStart: StartsAt == RunnerStart.Off || (StartsAt == RunnerStart.Disabled && ManualStartBeforeMove));
+    {
+        get
+        {
+            // A service that a startup entry also opens in a console window keeps how the service itself starts: an
+            // edit must not make it start with Windows as well.
+            var start = ServiceInstalled && !IsInteractive ? ServiceStart ?? StartsAt : StartsAt;
+            return new(RunnerGroup, Ephemeral, DisableUpdate, NoDefaultLabels,
+                ManualStart: start == RunnerStart.Off || (start == RunnerStart.Disabled && ManualStartBeforeMove));
+        }
+    }
     /// <summary>The old copy of a moved runner (disabled) was set not to start with Windows before the move.</summary>
     public bool ManualStartBeforeMove { get; init; }
     public bool ServiceInstalled { get; init; }
     /// <summary>What starts the runner after a restart (a <see cref="RunnerStart"/> value).</summary>
     public string StartsAt { get; init; } = RunnerStart.Unknown;
+    /// <summary>How its Windows service starts (a <see cref="RunnerStart"/> value), or null without a service or when not read.</summary>
+    public string? ServiceStart { get; init; }
+    /// <summary>A startup entry that is turned on opens it in a console window when the user signs in.</summary>
+    public bool ConsoleAtSignIn { get; init; }
+    /// <summary>Its Windows service runs, and a console window runs it too or opens it at sign-in (<see cref="RunnerService.RunsTwice"/>).</summary>
+    public bool RunsTwice { get; init; }
+    /// <summary>
+    /// A console window runs it, or opens it at sign-in: its Windows service must not be started or restarted, since that
+    /// would run it twice. Stopping the service stays possible.
+    /// </summary>
+    public bool HasConsoleCopy => IsInteractive || ConsoleAtSignIn || RunsTwice;
+    /// <summary>The account its Windows service runs as; empty without a service.</summary>
+    public string ServiceAccount { get; init; } = string.Empty;
+    /// <summary>The account that owns folders in its work folder although its service runs as another one; empty otherwise.</summary>
+    public string WorkFolderOwner { get; init; } = string.Empty;
     /// <summary>
     /// Running from a console window (run.cmd) rather than as a Windows service. Also true for a few minutes after the
     /// console's listener stopped (see <see cref="ConsoleRestarting"/>).

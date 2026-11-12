@@ -39,6 +39,21 @@ Runner Manager updates itself from [Releases](https://github.com/Sandiozo/runner
 - The job, the repository and the current job in a runner's details are now buttons, so Tab and screen readers reach
   them. A job or a run without an address on GitHub, there and in the queue and the recent runs, is plain text and not a
   button, and so is **Repository unknown**.
+- Fix: a runner could run twice on a PC, as its Windows service and in a console window that a startup entry opens when
+  you sign in, and look healthy. Only one copy gets jobs, and in the service they failed because git refused the work
+  folder of the console window's user. Such a runner now shows **Runs twice**, and its details say why jobs fail or wait
+  and what to do. It counts under **Needs attention**, gives one alert when it begins (with **Stuck and waiting jobs**
+  turned on), and the other PCs and AI assistants see it too.
+- Start and Restart of a runner's service are refused while a console window runs the runner, or while a startup entry
+  that is turned on opens it in one when you sign in, also when no console window runs now. This holds for the
+  dashboard, commands from other PCs, AI assistants, auto-recovery, and the restart after an edit or **Clean work
+  folder**. After an edit, a service that config.cmd started is stopped again for such a runner. **Stop** still works.
+  The runner's **Start when you sign in** switch turns its startup entries off and on.
+- A runner's details show the account its service runs as. When folders in its work folder belong to another account,
+  which git refuses, the details say so, and a running runner counts under **Needs attention** as **Work folder owner**.
+- **Run as Windows service**, **Repair Windows service** and an edit give the work folder to the service's account,
+  NETWORK SERVICE, before config.cmd installs the service, when folders in it belong to another account. Nothing is
+  deleted, and links in it are not followed.
 
 ## 2.9.0
 

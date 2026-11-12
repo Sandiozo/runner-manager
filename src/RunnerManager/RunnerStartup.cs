@@ -61,8 +61,7 @@ public static partial class RunnerService
     public static async Task SetStartAutomaticallyAsync(string key, bool start, Action<string> log)
     {
         var runner = await FindRunnerAsync(key) ?? throw new InvalidOperationException("The runner was not found on this PC.");
-        // A runner with a service that runs from a console window starts from its console's startup entries.
-        if (runner.ServiceInstalled && !runner.IsInteractive)
+        if (StartsFromService(runner))
         {
             if (start && runner.MovedAway)
                 throw new InvalidOperationException("This is the old copy of a runner that was moved to another PC. Delete it instead.");
@@ -74,6 +73,13 @@ public static partial class RunnerService
         else await TurnOffConsoleStartupAsync(runner, log);
         ForgetStartupTasks();
     }
+
+    /// <summary>
+    /// Whether the switch sets the runner's service to start with Windows. A runner with a service that runs from a
+    /// console window, or that a startup entry opens in one at sign-in, starts from its console's startup entries, as
+    /// the card shows it ("Start when you sign in"); turning those off is what lets its service be used.
+    /// </summary>
+    internal static bool StartsFromService(RunnerInfo runner) => runner.ServiceInstalled && !runner.IsInteractive && !runner.ConsoleAtSignIn;
 
     private static async Task TurnOnConsoleStartupAsync(RunnerInfo runner, Action<string> log)
     {

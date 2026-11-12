@@ -41,6 +41,8 @@ public sealed class MachineRunnerStatus : INotifyPropertyChanged
     private readonly string _activityText = string.Empty;
     private readonly string _startsAt = RunnerStart.Unknown;
     private readonly string _runnerVersion = string.Empty;
+    private readonly string _serviceAccount = string.Empty;
+    private readonly string _workFolderOwner = string.Empty;
 
     public string ServiceName { get => _serviceName; init => _serviceName = value ?? string.Empty; }
     public string InstallPath { get => _installPath; init => _installPath = value ?? string.Empty; }
@@ -67,6 +69,14 @@ public sealed class MachineRunnerStatus : INotifyPropertyChanged
     public bool MovedAway { get; init; }
     /// <summary>What starts the runner after a restart (a <see cref="RunnerStart"/> value; empty from agents before protocol 13).</summary>
     public string StartsAt { get => _startsAt; init => _startsAt = value ?? RunnerStart.Unknown; }
+    /// <summary>Its Windows service runs, and a console window runs it too or opens it at sign-in (false from agents before 2.9.1).</summary>
+    public bool RunsTwice { get; init; }
+    /// <summary>It has a service, and a startup entry that is turned on opens it in a console window at sign-in (false before 2.9.1).</summary>
+    public bool ConsoleAtSignIn { get; init; }
+    /// <summary>The account its Windows service runs as (empty without a service, and from agents before 2.9.1).</summary>
+    public string ServiceAccount { get => _serviceAccount; init => _serviceAccount = value ?? string.Empty; }
+    /// <summary>The account that owns folders in its work folder although its service runs as another (empty when none does, and before 2.9.1).</summary>
+    public string WorkFolderOwner { get => _workFolderOwner; init => _workFolderOwner = value ?? string.Empty; }
     public string RunnerVersion { get => _runnerVersion; init => _runnerVersion = value ?? string.Empty; }
     public long? WorkFolderBytes { get; init; }
     public bool ManuallyStopped { get; init; }
@@ -90,7 +100,12 @@ public sealed class MachineRunnerStatus : INotifyPropertyChanged
     [JsonIgnore] public Visibility ConvertVisibility => (IsInteractive || IsStoppedConsole) && !ServiceInstalled ? Visibility.Visible : Visibility.Collapsed;
     /// <summary>Start with Windows (services) or at sign-in (console runners) can be turned on and off from protocol 13.</summary>
     /// <summary>Started by a console window's startup entries rather than by its Windows service.</summary>
-    [JsonIgnore] private bool StartsFromConsole => !ServiceInstalled || IsInteractive;
+    [JsonIgnore] private bool StartsFromConsole => !ServiceInstalled || IsInteractive || ConsoleAtSignIn;
+    /// <summary>
+    /// A console window runs it or opens it at sign-in, so its Windows service is not started or restarted: both copies
+    /// would run. Stop is still possible.
+    /// </summary>
+    [JsonIgnore] private bool HasConsoleCopy => IsInteractive || ConsoleAtSignIn || RunsTwice;
     [JsonIgnore] public bool CanChangeStartup => (IsLocalMachine || (MachineOnline && AgentProtocolVersion >= 13))
         && string.IsNullOrEmpty(_pendingAction) && !string.IsNullOrEmpty(CommandKey) && !MovedAway
         && (StartsFromConsole ? StartsAt is RunnerStart.SignIn or RunnerStart.Off
@@ -132,23 +147,25 @@ public sealed class MachineRunnerStatus : INotifyPropertyChanged
         "Convert" => "Converting…",
         "Startup" => "Updating…",
         "StopJob" => "Stopping processes…",
-        _ when _health.IsProblem => _health.Label + (IsInteractive ? " · console" : string.Empty),
+        _ when Health.IsProblem => Health.Label + (IsInteractive ? " · console" : string.Empty),
         _ => IsInteractive ? (IsBusy ? "Busy · console" : "Console")
             : IsStoppedConsole ? "Console · stopped"
             : !ServiceInstalled ? "No service" : IsBusy ? "Busy" : IsRunning ? "Idle" : "Stopped"
     };
     [JsonIgnore]
     public Brush StatusBrush => !string.IsNullOrEmpty(_pendingAction) ? Palette.Warning
-        : _health.IsProblem ? Palette.Warning
+        : Health.IsProblem ? Palette.Warning
         : !ServiceInstalled ? Palette.Warning
         : IsBusy ? Palette.Info
         : IsRunning ? Palette.Success
         : Palette.Danger;
     [JsonIgnore] public Brush StatusTint => Palette.Tint(StatusBrush);
     [JsonIgnore] public Brush StatusTextBrush => Palette.OnTint(StatusBrush);
-    [JsonIgnore] public string StatusTip => _health.IsProblem ? _health.Detail
+    [JsonIgnore] public string StatusTip => Health.IsProblem ? Health.Detail
         : IsInteractive && ServiceInstalled
         ? "Runs in a console window in your session. Its Windows service is not used; starting it would run the runner twice."
+        : ConsoleAtSignIn
+        ? "Runs in a console window that opens when you sign in. Its Windows service is not used; starting it would run the runner twice."
         : IsInteractive
         ? "Runs in a console window in your session, so its jobs can use your desktop. It goes offline when the window closes or you sign out."
         : IsStoppedConsole && StartsAt == RunnerStart.Off
@@ -161,11 +178,18 @@ public sealed class MachineRunnerStatus : INotifyPropertyChanged
     // Not while it runs from a console window: starting or restarting its service would run it twice.
     [JsonIgnore] public bool CanControl => ServiceInstalled && !IsInteractive && !string.IsNullOrWhiteSpace(ServiceName)
         && string.IsNullOrEmpty(_pendingAction) && (IsLocalMachine || MachineOnline);
+    /// <summary>Start or Stop: a stopped service is not started while a console window runs the runner or opens it at sign-in.</summary>
+    [JsonIgnore] public bool CanPower => CanControl && (IsRunning || !HasConsoleCopy);
+    [JsonIgnore] public bool CanRestart => CanControl && !HasConsoleCopy;
     [JsonIgnore] public bool CanEdit => (IsLocalMachine || AgentProtocolVersion >= 2) && CanControl && !IsBusy;
     [JsonIgnore] public bool CanCleanWork => (IsLocalMachine || AgentProtocolVersion >= 9) && CanControl && !IsBusy;
     [JsonIgnore] public bool CanViewLog => IsLocalMachine || (MachineOnline && AgentProtocolVersion >= 9);
+    [JsonIgnore] private string AccountText => ServiceAccount.Length > 0 ? $"  ·  runs as {ServiceAccount}" : string.Empty;
     [JsonIgnore] public string ServiceText => ServiceInstalled && IsInteractive ? $"{ServiceName} (not used: the runner runs in a console window)"
-        : ServiceInstalled ? ServiceName
+        : RunsTwice && ConsoleAtSignIn ? $"{ServiceName}{AccountText} (runs, and the runner also opens in a console window when you sign in)"
+        : RunsTwice ? $"{ServiceName}{AccountText} (runs, and a console window runs the runner too)"
+        : ServiceInstalled && ConsoleAtSignIn ? $"{ServiceName} (not used: the runner opens in a console window when you sign in)"
+        : ServiceInstalled ? ServiceName + AccountText
         : IsInteractive || IsStoppedConsole ? "None. Runs in a console window that closes when you sign out." : "Not installed";
     [JsonIgnore] public string TitleText => string.IsNullOrWhiteSpace(AgentName) ? DisplayName : AgentName;
     [JsonIgnore] public string RepositoryText => IsOrgRunner ? $"{OrgName}  ·  organization runner"
@@ -204,8 +228,10 @@ public sealed class MachineRunnerStatus : INotifyPropertyChanged
     // Runners on this PC use the dashboard's own readings, so the details are complete even before the agent is updated.
     [JsonIgnore] private long? EffectiveWorkFolderBytes => LocalRunner?.WorkFolderBytes ?? WorkFolderBytes;
     [JsonIgnore] private string EffectiveRunnerVersion => string.IsNullOrWhiteSpace(LocalRunner?.RunnerVersion) ? RunnerVersion : LocalRunner!.RunnerVersion;
-    [JsonIgnore] public string WorkFolderText => EffectiveWorkFolderBytes == null ? "Not measured yet" : SystemHealth.FormatBytes(EffectiveWorkFolderBytes);
-    [JsonIgnore] public Brush WorkFolderBrush => EffectiveWorkFolderBytes > 20L * 1024 * 1024 * 1024 ? Palette.Warning : Palette.Text;
+    [JsonIgnore] public string WorkFolderText => (EffectiveWorkFolderBytes == null ? "Not measured yet" : SystemHealth.FormatBytes(EffectiveWorkFolderBytes))
+        + (WorkFolderOwner.Length > 0 ? $"  ·  {WorkFolderOwnerNote}" : string.Empty);
+    [JsonIgnore] public Brush WorkFolderBrush => EffectiveWorkFolderBytes > 20L * 1024 * 1024 * 1024 || WorkFolderOwner.Length > 0 ? Palette.Warning : Palette.Text;
+    [JsonIgnore] private string WorkFolderOwnerNote => $"folders in it belong to {WorkFolderOwner}, not to {(ServiceAccount.Length > 0 ? ServiceAccount : "the service's account")}";
     [JsonIgnore]
     public string RunnerVersionText
     {
@@ -243,11 +269,15 @@ public sealed class MachineRunnerStatus : INotifyPropertyChanged
         new[] { (Count: _queue.Count(q => q.Running), Text: "running"), (Count: _queue.Count(q => !q.Running), Text: "waiting") }
             .Where(p => p.Count > 0).Select(p => $"{p.Count} {p.Text}"));
 
-    /// <summary>Whether the runner needs attention (a stuck or long job, or jobs waiting while it idles); set by the dashboard.</summary>
+    /// <summary>
+    /// Whether the runner needs attention (a stuck or long job, or jobs waiting while it idles); set by the dashboard.
+    /// What the runner's own status says comes first, without waiting for the dashboard's check: it runs twice, or its
+    /// service cannot use its work folder (<see cref="JobHealth.ForSetup"/>).
+    /// </summary>
     [JsonIgnore]
     public RunnerHealth Health
     {
-        get => _health;
+        get => JobHealth.ForSetup(this) is { IsProblem: true } setup ? setup : _health;
         set
         {
             if (_health == value) return;
@@ -264,9 +294,9 @@ public sealed class MachineRunnerStatus : INotifyPropertyChanged
             Notify(nameof(NoJobsVisibility));
         }
     }
-    [JsonIgnore] public Visibility HealthVisibility => IsExpanded && _health.IsProblem ? Visibility.Visible : Visibility.Collapsed;
+    [JsonIgnore] public Visibility HealthVisibility => IsExpanded && Health.IsProblem ? Visibility.Visible : Visibility.Collapsed;
     /// <summary>The note's button: for a job that is stuck or runs long.</summary>
-    [JsonIgnore] public Visibility StopJobVisibility => _health.Concern is RunnerConcern.Stuck or RunnerConcern.RunningLong ? Visibility.Visible : Visibility.Collapsed;
+    [JsonIgnore] public Visibility StopJobVisibility => Health.Concern is RunnerConcern.Stuck or RunnerConcern.RunningLong ? Visibility.Visible : Visibility.Collapsed;
     [JsonIgnore] public bool CanStopJob => IsBusy && string.IsNullOrEmpty(_pendingAction)
         && (IsLocalMachine || (MachineOnline && AgentProtocolVersion >= 14));
 
@@ -491,6 +521,10 @@ public sealed class MachineInfo : INotifyPropertyChanged
                 ServiceInstalled = r.ServiceInstalled,
                 MovedAway = r.MovedAway,
                 StartsAt = r.StartsAt,
+                RunsTwice = r.RunsTwice,
+                ConsoleAtSignIn = r.ConsoleAtSignIn,
+                ServiceAccount = r.ServiceAccount,
+                WorkFolderOwner = r.WorkFolderOwner,
                 RunnerVersion = r.RunnerVersion,
                 WorkFolderBytes = r.WorkFolderBytes,
                 MachineKey = MachineKey,
@@ -504,7 +538,7 @@ public sealed class MachineInfo : INotifyPropertyChanged
         var merged = (MachineInfo)MemberwiseClone();
         merged.PropertyChanged = null;
         merged.Runners = Runners.Concat(extra).OrderBy(r => r.TitleText, StringComparer.OrdinalIgnoreCase).ToArray();
-        merged.Fingerprint = Fingerprint + "|local:" + string.Join(';', extra.Select(r => $"{r.CommandKey}/{r.IsRunning}/{r.ActivityText}/{r.IsInteractive}/{r.ServiceInstalled}/{r.StartsAt}"));
+        merged.Fingerprint = Fingerprint + "|local:" + string.Join(';', extra.Select(r => $"{r.CommandKey}/{r.IsRunning}/{r.ActivityText}/{r.IsInteractive}/{r.ServiceInstalled}/{r.StartsAt}/{r.RunsTwice}/{r.ConsoleAtSignIn}/{r.WorkFolderOwner}"));
         return merged;
     }
     public string PendingAction => _pendingAction;

@@ -627,7 +627,7 @@
                                                                         </Border>
                                                                         </Grid>
                                                                         </Button>
-                                                                        <Button Grid.Column="3" Click="RunnerPower_Click" IsEnabled="{Binding CanControl}" Padding="10,4" MinWidth="76"
+                                                                        <Button Grid.Column="3" Click="RunnerPower_Click" IsEnabled="{Binding CanPower}" Padding="10,4" MinWidth="76"
                                                                                 VerticalAlignment="Center" Visibility="{Binding PowerVisibility}">
                                                                             <AutomationProperties.Name>
                                                                                 <MultiBinding StringFormat="{}{0} {1}">
@@ -654,7 +654,7 @@
                                                                             <Button.ContextMenu>
                                                                                 <ContextMenu>
                                                                                     <MenuItem Header="Edit name and labels…" Tag="&#xE70F;" Click="RunnerEdit_Click" IsEnabled="{Binding CanEdit}"/>
-                                                                                    <MenuItem Header="Restart" Tag="&#xE72C;" Click="RunnerRestart_Click" IsEnabled="{Binding CanControl}"/>
+                                                                                    <MenuItem Header="Restart" Tag="&#xE72C;" Click="RunnerRestart_Click" IsEnabled="{Binding CanRestart}"/>
                                                                                     <MenuItem Header="Repair Windows service…" Tag="&#xE90F;" Click="RunnerRepair_Click" Visibility="{Binding RepairVisibility}"/>
                                                                                     <MenuItem Header="Run as Windows service…" Tag="&#xE90F;" Click="RunnerConvert_Click" Visibility="{Binding ConvertVisibility}" IsEnabled="{Binding CanConvert}"/>
                                                                                     <MenuItem Header="{Binding StartupHeader}" IsCheckable="True" IsChecked="{Binding StartsAutomatically, Mode=OneWay}"

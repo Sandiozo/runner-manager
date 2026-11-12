@@ -61,7 +61,8 @@ public partial class MainWindow
     /// <summary>
     /// The alerts for concerns that were not reported before, as the cards show them (<see cref="ApplyHealth"/>): the
     /// check runs beside the refreshes, so a job that ended while it asked GitHub is no longer stuck and is not reported.
-    /// Each concern reported is added to <paramref name="reported"/>, so it is reported once.
+    /// Each concern reported is added to <paramref name="reported"/>, so it is reported once. A runner that runs twice
+    /// or cannot use its work folder is reported when that begins, and again only after it was fixed and came back.
     /// </summary>
     internal static List<string> NewProblemAlerts(IEnumerable<MachineInfo> machines, ISet<string> reported)
     {
@@ -70,7 +71,12 @@ public partial class MainWindow
         foreach (var runner in machine.Runners)
         {
             var problem = runner.Health;
-            if (problem.IsProblem && reported.Add($"{JobHealth.Key(runner)}|{problem.Subject}"))
+            var subject = $"{JobHealth.Key(runner)}|{problem.Subject}";
+            var setup = $"{JobHealth.Key(runner)}|{JobHealth.SetupSubject}";
+            foreach (var gone in reported.Where(r => r.StartsWith(setup, StringComparison.OrdinalIgnoreCase)
+                                                     && !(problem.IsProblem && r.Equals(subject, StringComparison.OrdinalIgnoreCase))).ToList())
+                reported.Remove(gone);
+            if (problem.IsProblem && reported.Add(subject))
                 alerts.Add($"{machine.MachineName}: {runner.TitleText} — {problem.Label}. {problem.Detail}");
         }
         return alerts;
@@ -93,10 +99,13 @@ public partial class MainWindow
 
     /// <summary>
     /// A concern found on an earlier reading, if it still fits the runner as it is now. The check runs beside the
-    /// refresh, so a newer reading can arrive while it asks GitHub: a job that ended meanwhile is no longer stuck.
+    /// refresh, so a newer reading can arrive while it asks GitHub: a job that ended meanwhile is no longer stuck. A
+    /// runner's card takes its setup concerns from its own status (<see cref="MachineRunnerStatus.Health"/>), so one
+    /// fixed since is not kept.
     /// </summary>
     internal static RunnerHealth StillApplies(RunnerHealth health, MachineRunnerStatus runner) => health.Concern switch
     {
+        _ when JobHealth.IsSetupConcern(health.Concern) => RunnerHealth.Healthy,
         RunnerConcern.Stuck or RunnerConcern.RunningLong when !runner.IsBusy => RunnerHealth.Healthy,
         RunnerConcern.IdleWithWaitingJobs when !runner.IsRunning || runner.IsBusy => RunnerHealth.Healthy,
         _ => health
