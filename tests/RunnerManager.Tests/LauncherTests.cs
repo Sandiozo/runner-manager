@@ -368,6 +368,7 @@ public class LauncherTests
         Assert.Equal(0, launcher.ExitCode);
     }
 
+
     // ---- The exe and its source.
 
     [Fact]
@@ -722,12 +723,23 @@ public class LauncherTests
         /// <param name="withChild">False: no RunnerManager.exe next to the launcher.</param>
         public LauncherFolder(string? subfolder = null, int? folderLength = null, bool withChild = true)
         {
+            // Before anything is created: these fail when the binaries were not built.
+            var launcher = LauncherExe;
+            var stub = StubExe;
             if (folderLength != null) subfolder = new string('p', folderLength.Value - _root.Length - 1);
             Folder = subfolder == null ? _root : Path.Combine(_root, subfolder);
             Assert.True(folderLength == null || Folder.Length == folderLength);
-            Directory.CreateDirectory(Folder);
-            File.Copy(LauncherExe, Launcher);
-            if (withChild) File.Copy(StubExe, Child);
+            try
+            {
+                Directory.CreateDirectory(Folder);
+                File.Copy(launcher, Launcher);
+                if (withChild) File.Copy(stub, Child);
+            }
+            catch
+            {
+                Dispose();
+                throw;
+            }
         }
 
         public string Folder { get; }
