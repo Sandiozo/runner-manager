@@ -23,13 +23,19 @@ Runner Manager no longer starts a runner's service next to its console window.
   the runner first (see **Runners and jobs**).
 - A new file, `RunnerManagerLauncher.exe`, is in the install folder: the start helper (see **Security**). While Runner
   Manager runs, it also shows in Task Manager, next to each RunnerManager.exe that it started. A self-contained
-  Runner Manager unpacks its files into a `.net` folder there.
-- The scheduled tasks move to the start helper by themselves after the update: the launch task and the startup task
-  when the dashboard or the fleet agent runs with administrator rights and the task does not run the dashboard at that
-  moment, and the fleet agent's task only once the update has proven itself. The fleet agent then restarts once, when
-  it has no work.
+  Runner Manager unpacks its files into a `.net` folder there. The UAC prompt for Runner Manager now names
+  `RunnerManagerLauncher.exe`.
+- The scheduled tasks move to the start helper by themselves after the update, once the installed Runner Manager with
+  administrator rights has seen the start helper start it: the launch task and the startup task when the dashboard or
+  the fleet agent runs and the task does not run the dashboard at that moment, and the fleet agent's task only once the
+  update has proven itself. The fleet agent then restarts once, when it has no work. A dashboard that its launch task
+  or startup task started as RunnerManager.exe itself starts again through the start helper, once, before it opens its
+  window, so that its task can move too.
+- Links and the GitHub sign-in page open in your browser without administrator rights: Runner Manager gives them to
+  Explorer, which opens them for the signed-in Windows user. Runner Manager opens only https addresses without a comma.
 - GitHub CLI that is installed for one Windows user only, in a folder that only that user's PATH names, is no longer
-  found by Runner Manager, because it starts with the PC's PATH. Install GitHub CLI for all users instead.
+  found by Runner Manager, because it starts with the PC's PATH. Install GitHub CLI for all users instead: the
+  installer from https://cli.github.com/ does that.
 
 ### Security
 
@@ -85,10 +91,14 @@ Runner Manager no longer starts a runner's service next to its console window.
   `ALL_PROXY`, `NO_PROXY`, `GH_TOKEN`, `GITHUB_TOKEN`) from the environment it was given. Variables that any program of
   the user can set for the user, such as `DOTNET_*`, `CORECLR_*` and `PATH`, no longer reach Runner Manager with
   administrator rights through its tasks and its own starts. This protects an install that programs without
-  administrator rights cannot change, such as one in Program Files. Setup writes the start helper before it registers
-  the tasks, and the installed copy puts it back when it is missing. When antivirus software removes it again, or it
-  cannot be written, Runner Manager runs without it and its tasks start RunnerManager.exe as before, until the next
-  update or setup. The fleet agent's log says so, and so do Activity on every start and **Settings → Updates**.
+  administrator rights cannot change, such as one in Program Files. Setup writes the start helper and checks that it
+  starts Runner Manager before it registers the tasks. Only the installed Runner Manager with administrator rights
+  looks after it: it puts it back when it is missing and checks it in the same way before a task or a start depends on
+  it. An earlier copy that still runs after an update leaves it alone. When antivirus software removes or blocks it, it
+  cannot be written, or it does not start Runner Manager, Runner Manager runs without it and its tasks start
+  RunnerManager.exe as before, until the next update or setup. The fleet agent's log says so, and so do Activity on
+  every start and **Settings → Updates**. When the UAC prompt cannot start the start helper, or the launch task started
+  it but no dashboard appeared, Runner Manager asks with UAC for RunnerManager.exe itself.
 - The framework-dependent RunnerManager.exe looks for the .NET runtime only where it is installed for the whole PC, no
   longer in a folder that `DOTNET_ROOT` names.
 - Runner Manager with administrator rights no longer takes its data folder from `RUNNER_MANAGER_STATE_DIR`, which any
@@ -96,8 +106,14 @@ Runner Manager no longer starts a runner's service next to its console window.
 - Still open: an install in the user's profile, such as `%LOCALAPPDATA%\Programs\RunnerManager`, can be changed by any
   program of the user, so the start helper does not protect it until it is moved to Program Files. Runner Manager says
   so once for each version in Activity, and in **Settings → Updates**. The settings files in the user's data folder can
-  also be changed by any program of the user. After the update from 2.9.0, the first start of the dashboard and the
-  fleet agent until the update has proven itself still start as before.
+  also be changed by any program of the user. Setup itself always runs with the environment it was started with. A PC
+  that runs without the start helper starts Runner Manager as before. After the update from 2.9.0, the first start of
+  the dashboard, and the fleet agent until the update has proven itself, still start as before. A dashboard that a task
+  started as RunnerManager.exe itself runs with the environment it was given until it has started again through the
+  start helper, before it opens its window. When antivirus software removes or blocks the start helper while Runner
+  Manager is closed, the fleet agent does not start until someone opens Runner Manager and accepts the UAC prompt; then
+  Runner Manager puts the start helper back or runs without it. To avoid that, exclude `RunnerManagerLauncher.exe` in
+  the install folder from the antivirus software's checks.
 
 ### Fleet and pairing
 
