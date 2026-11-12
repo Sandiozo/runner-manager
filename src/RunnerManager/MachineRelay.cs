@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Threading.Channels;
 
 namespace RunnerManager;
@@ -313,6 +314,7 @@ public static class MachineRelay
     private static MachineInfo Accept(MachineStatusPayload? payload, string address)
     {
         if (payload == null) throw new InvalidOperationException("The PC returned no status.");
+        payload = PeerStatus.Checked(payload, AppendAgentLog);
         var machineKey = Sanitize(payload.MachineName);
         payload = ByLocalClock(machineKey, payload, DateTime.UtcNow);
         NoteAnswer(machineKey, payload);
@@ -446,6 +448,7 @@ public static class MachineRelay
     private static MachineInfo AcceptManaged(ManagedPcRecord pc, MachineStatusPayload? payload, string address)
     {
         if (payload == null) throw new InvalidOperationException("The PC returned no status.");
+        payload = PeerStatus.Checked(payload, AppendAgentLog);
         var machineKey = Sanitize(payload.MachineName);
         if (machineKey != Sanitize(pc.Name) && (machineKey == LocalMachineKey || FleetConfig.Current.KnownPeers.Any(p => Sanitize(p.Name) == machineKey)))
             return MachineInfo.Placeholder("MANAGED_" + machineKey, payload.MachineName, DateTime.UtcNow, address, ManagedNameProblem(payload.MachineName), managed: true);
@@ -1743,13 +1746,17 @@ public sealed record LogPayload
     public DateTime CreatedUtc { get; init; }
 }
 
+/// <summary>
+/// A PC's status. Another PC may send a null where a text or a list belongs (an older or odd agent): it reads as empty,
+/// so the status still shows. Its values are checked before use (see <see cref="PeerStatus"/>).
+/// </summary>
 public sealed record MachineStatusPayload
 {
-    public string MachineName { get; init; } = string.Empty;
+    public string MachineName { get; init => field = value ?? string.Empty; } = string.Empty;
     /// <summary>The PC's own ID (protocol 12; empty from older agents).</summary>
-    public string MachineId { get; init; } = string.Empty;
+    public string MachineId { get; init => field = value ?? string.Empty; } = string.Empty;
     public int AgentProtocolVersion { get; init; }
-    public string AppVersion { get; init; } = string.Empty;
+    public string AppVersion { get; init => field = value ?? string.Empty; } = string.Empty;
     /// <summary>
     /// When the status was current. The agent stamps it when it answers (unless it could not build a status for a
     /// while); dashboards replace it with their own clock's time (see <see cref="MachineRelay.ByLocalClock"/>).
@@ -1761,12 +1768,12 @@ public sealed record MachineStatusPayload
     /// </summary>
     public DateTime AnsweredUtc { get; init; }
     public bool FleetAgentRunning { get; init; }
-    public string LastCommandId { get; init; } = string.Empty;
-    public string LastCommandResult { get; init; } = string.Empty;
+    public string LastCommandId { get; init => field = value ?? string.Empty; } = string.Empty;
+    public string LastCommandResult { get; init => field = value ?? string.Empty; } = string.Empty;
     /// <summary>Results of the last commands, oldest first (protocol 12; empty from older agents).</summary>
-    public FleetCommandResult[] RecentCommands { get; init; } = Array.Empty<FleetCommandResult>();
+    public FleetCommandResult[] RecentCommands { get; init => field = value?.OfType<FleetCommandResult>().ToArray() ?? []; } = [];
     /// <summary>Commands that are queued or running (protocol 12).</summary>
-    public string[] PendingCommandIds { get; init; } = Array.Empty<string>();
+    public string[] PendingCommandIds { get; init => field = value?.Where(id => !string.IsNullOrEmpty(id)).ToArray() ?? []; } = [];
     /// <summary>The agent is running a command or other work, which a restart would cut off (protocol 12).</summary>
     public bool Busy { get; init; }
     public int CpuPercent { get; init; }
@@ -1774,12 +1781,37 @@ public sealed record MachineStatusPayload
     public double MemoryTotalGb { get; init; }
     public DateTime? BootUtc { get; init; }
     public bool RebootPending { get; init; }
-    public DiskStatus[] Disks { get; init; } = Array.Empty<DiskStatus>();
+    public DiskStatus[] Disks
+    {
+        get;
+        init => field = value?.OfType<DiskStatus>().Select(d => d.Name == null ? d with { Name = string.Empty } : d).ToArray() ?? [];
+    } = [];
     public bool WatchdogEnabled { get; init; }
     /// <summary>Short fingerprint of this PC's code, so dashboards can spot a PC with a different code.</summary>
-    public string SigningKeyId { get; init; } = string.Empty;
-    public AgentEvent[] RecentEvents { get; init; } = Array.Empty<AgentEvent>();
-    public MachineRunnerStatus[] Runners { get; init; } = Array.Empty<MachineRunnerStatus>();
+    public string SigningKeyId { get; init => field = value ?? string.Empty; } = string.Empty;
+    public AgentEvent[] RecentEvents
+    {
+        get;
+        init => field = value?.OfType<AgentEvent>().Select(e => e.Text == null ? e with { Text = string.Empty } : e).ToArray() ?? [];
+    } = [];
+
+    /// <summary>The runners. An entry that could not be read is left out, and counted in <see cref="UnreadableRunners"/>.</summary>
+    [JsonConverter(typeof(RunnerListConverter))]
+    public MachineRunnerStatus[] Runners
+    {
+        get;
+        init
+        {
+            var runners = value ?? [];
+            var unreadable = runners.Count(r => r == null || ReferenceEquals(r, RunnerListConverter.Unreadable));
+            field = unreadable == 0 ? runners : runners.Where(r => r != null && !ReferenceEquals(r, RunnerListConverter.Unreadable)).ToArray();
+            if (unreadable > 0) UnreadableRunners = unreadable;
+        }
+    } = [];
+
+    /// <summary>How many runner entries in the status as it arrived could not be read.</summary>
+    [JsonIgnore]
+    internal int UnreadableRunners { get; init; }
 
     /// <summary>
     /// Everything except values that tick on their own (our heartbeat, the relay's last_seen, CPU and memory load),
@@ -1798,8 +1830,8 @@ public sealed record MachineStatusPayload
 /// <summary>What a finished command reported.</summary>
 public sealed record FleetCommandResult
 {
-    public string Id { get; init; } = string.Empty;
-    public string Result { get; init; } = string.Empty;
+    public string Id { get; init => field = value ?? string.Empty; } = string.Empty;
+    public string Result { get; init => field = value ?? string.Empty; } = string.Empty;
     public DateTime CompletedUtc { get; init; }
 }
 
