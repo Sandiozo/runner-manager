@@ -45,7 +45,9 @@ internal static class FleetAddressRules
             return $"This is the address of {managed.Name}, a PC managed one way. It is found without this address, so you can remove it.";
         if (knownPeers.FirstOrDefault(p => SameHost(p.Address, address)) is { } peer)
             return $"{peer.Name} answers here  ·  last seen {lastSeen(peer.LastSeenUtc)}";
-        // The newest refresh did not reach the address.
+        // The newest refresh did not reach the address. It goes before what the address answered when Settings asked:
+        // a PC that answers then is saved at this address (MachineRelay.RememberPeer), and the line above names it. Only
+        // a later refresh moves it to another address, and a refresh that asks this address after that is the newer one.
         if (machines.FirstOrDefault(m => IsAddressPlaceholder(m, address)) is { } unanswered)
             return NoAnswer(unanswered.ConnectionProblem);
         if (answer != null && IsAddressPlaceholder(answer, address)) return NoAnswer(answer.ConnectionProblem);
