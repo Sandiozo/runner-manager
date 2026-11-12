@@ -79,6 +79,8 @@ public partial class App : Application
         {
             ShutdownMode = ShutdownMode.OnExplicitShutdown;
             await HandOffToElevatedAsync(startArgs);
+            // Download folders that 2.9.0 and earlier left in the data folder: only removed here, without administrator rights.
+            await Task.Run(() => AppUpdater.RemoveOldStagingFolders());
             Shutdown();
             return;
         }

@@ -424,20 +424,29 @@ public static class AppUpdater
     private const string OldStagingPrefix = "update-";
     private static readonly Regex OldStagingName = new(@"^update-\d+$", RegexOptions.IgnoreCase);
 
-    private static void RemoveStaleStagingFolders() => RemoveStaleStagingFolders(InstallDir, FleetConfig.StateDir, IsProcessRunning);
+    private static void RemoveStaleStagingFolders() => RemoveStaleStagingFolders(InstallDir, IsProcessRunning);
 
     /// <summary>
-    /// Removes download folders left by processes that have exited: <see cref="StagingFolder"/>'s in the install folder,
-    /// and update-&lt;number&gt; in the data folder, where versions up to 2.9.0 prepared updates. A program of the user
-    /// can change the data folder, and this runs with administrator rights, so nothing is followed or deleted through a
-    /// reparse point (a junction or link): a download folder only ever holds files, and one that holds anything else, or
-    /// is a reparse point itself, is left as it is.
+    /// Removes the download folders (see <see cref="StagingFolder"/>) that processes left in the install folder when they
+    /// exited. Nothing is followed or deleted through a reparse point (a junction or link): a download folder only ever
+    /// holds files, and one that holds anything else, or is a reparse point itself, is left as it is.
     /// </summary>
-    internal static void RemoveStaleStagingFolders(string installDir, string dataDir, Func<int, bool> isRunning)
+    internal static void RemoveStaleStagingFolders(string installDir, Func<int, bool> isRunning)
+        => RemoveStale(installDir, StagingPrefix, StagingName, isRunning);
+
+    /// <summary>
+    /// Removes the download folders update-&lt;number&gt; that versions up to 2.9.0 left in the data folder, only in a
+    /// start without administrator rights (<paramref name="elevated"/> false). Any program of the user can change the
+    /// data folder, so it could swap such a folder for a link while it is deleted. Without administrator rights, that
+    /// reaches nothing that the user could not delete anyway. With them, the folders are left as they are.
+    /// </summary>
+    internal static void RemoveOldStagingFolders(string dataDir, bool elevated, Func<int, bool> isRunning)
     {
-        RemoveStale(installDir, StagingPrefix, StagingName, isRunning);
-        RemoveStale(dataDir, OldStagingPrefix, OldStagingName, isRunning);
+        if (!elevated) RemoveStale(dataDir, OldStagingPrefix, OldStagingName, isRunning);
     }
+
+    /// <summary><see cref="RemoveOldStagingFolders(string, bool, Func{int, bool})"/> for this user's data folder.</summary>
+    internal static void RemoveOldStagingFolders() => RemoveOldStagingFolders(FleetConfig.StateDir, Elevation.IsElevated, IsProcessRunning);
 
     private static void RemoveStale(string parent, string prefix, Regex name, Func<int, bool> isRunning)
     {
@@ -462,14 +471,20 @@ public static class AppUpdater
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException) { }
     }
 
+    /// <summary>
+    /// Whether a process with this id runs. One that exists but cannot be asked (a start without administrator rights
+    /// cannot always ask one with them) counts as running, so its download folder is left as it is.
+    /// </summary>
     private static bool IsProcessRunning(int id)
     {
-        try
+        Process process;
+        try { process = Process.GetProcessById(id); }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException) { return false; }
+        using (process)
         {
-            using var process = Process.GetProcessById(id);
-            return !process.HasExited;
+            try { return !process.HasExited; }
+            catch { return true; }
         }
-        catch { return false; }
     }
 
     /// <summary>

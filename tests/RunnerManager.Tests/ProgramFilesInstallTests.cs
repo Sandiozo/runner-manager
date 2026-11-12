@@ -309,11 +309,18 @@ public class ProgramFilesInstallTests
             Junction(link, Path.Combine(elsewhere, "target"));
             Junction(Path.Combine(holdsLink, "inner"), Path.Combine(elsewhere, "target"));
 
-            AppUpdater.RemoveStaleStagingFolders(install, data, id => id == 222);
+            // With administrator rights (an update): only the install folder is cleaned up, never the data folder, where a
+            // program of the user could swap a folder for a link while it is deleted.
+            AppUpdater.RemoveStaleStagingFolders(install, id => id == 222);
+            AppUpdater.RemoveOldStagingFolders(data, elevated: true, id => false);
 
             Assert.True(File.Exists(Path.Combine(own, AppPaths.ExeName)));
             Assert.False(Directory.Exists(stale));
             Assert.True(Directory.Exists(running));
+            Assert.True(File.Exists(Path.Combine(oldStale, AppPaths.ExeName)));
+
+            // Without administrator rights (the start before the hand-off): the data folder's old download folders go.
+            AppUpdater.RemoveOldStagingFolders(data, elevated: false, id => false);
             Assert.False(Directory.Exists(oldStale));
             // Nothing was deleted through a link.
             Assert.True(File.Exists(Path.Combine(elsewhere, "target", AppPaths.ExeName)));
