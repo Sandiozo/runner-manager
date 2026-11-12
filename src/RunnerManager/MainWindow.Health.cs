@@ -61,10 +61,11 @@ public partial class MainWindow
     /// <summary>
     /// The alerts for concerns that were not reported before, as the cards show them (<see cref="ApplyHealth"/>): the
     /// check runs beside the refreshes, so a job that ended while it asked GitHub is no longer stuck and is not reported.
-    /// Each concern reported is added to <paramref name="reported"/>, so it is reported once. A runner that runs twice
-    /// or cannot use its work folder is reported when that begins, and again only after it was fixed and came back. A
-    /// job concern can hide the work folder concern for a while (<see cref="JobHealth.Shown"/>): that one is forgotten
-    /// only when the runner's setup concern is gone or is another one, not each time a job concern comes and goes.
+    /// Each concern reported is added to <paramref name="reported"/>, so it is reported once. A runner that runs twice,
+    /// that two console windows run, or that cannot use its work folder is reported when that begins, and again only
+    /// after it was fixed and came back. A job concern can hide the last two for a while (<see cref="JobHealth.Shown"/>):
+    /// such a concern is forgotten only when the runner's setup concern is gone or is another one, not each time a job
+    /// concern comes and goes.
     /// </summary>
     internal static List<string> NewProblemAlerts(IEnumerable<MachineInfo> machines, ISet<string> reported)
     {

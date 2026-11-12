@@ -133,7 +133,8 @@ public static class AssistantTools
         new AssistantTool("list_runners",
             "Lists the GitHub Actions self-hosted runners on every PC (or one PC): state (busy, idle, stopped), repository or organization, labels and version. " +
             "problem says when a runner needs attention: its job is stuck (no CPU use or output for a while) or runs far longer than usual, or it is idle while jobs it can take wait, " +
-            "or it runs twice (its Windows service runs, and a console window runs it too or opens it at sign-in), or folders in its work folder belong to another account than its service's, which git refuses. " +
+            "or it runs twice (its Windows service runs, and a console window runs it too or opens it at sign-in), or two console windows run it and only one of them gets jobs, " +
+            "or folders in its work folder belong to another account than its service's, which git refuses. " +
             "runs_twice and console_at_sign_in are true for such runners: their service must not be started or restarted. " +
             "pc_online is false for a runner on a PC that cannot be reached now: its state is unknown, and last_known_state is what the PC reported last.",
             AssistantToolKind.Read, Schema(("pc", "string", "Only this PC. Optional.", false)), ListRunnersAsync),

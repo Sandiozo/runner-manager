@@ -127,11 +127,52 @@ public static partial class RunnerService
     internal static bool RunsTwice(bool serviceRunning, bool listenerInSession, bool consoleAtSignIn)
         => serviceRunning && (listenerInSession || consoleAtSignIn);
 
+    /// <summary>
+    /// How long two listeners of one runner must both have run in users' sessions before the runner counts as open in two
+    /// console windows. A listener that restarts overlaps with its old process for a moment only. A second console
+    /// window's listener tries to connect for a few minutes ("A session for this runner already exists") before it exits.
+    /// </summary>
+    internal static readonly TimeSpan SecondConsoleAfter = TimeSpan.FromMinutes(2);
+
+    /// <summary>
+    /// How long a runner still counts as open in two console windows after that was last seen. The second window starts
+    /// its listener again about 30 seconds after it exits, and the new one counts only after <see cref="SecondConsoleAfter"/>:
+    /// without this, the concern would end and begin again, with an alert each time, every few minutes.
+    /// </summary>
+    internal static readonly TimeSpan SecondConsoleHold = TimeSpan.FromMinutes(5);
+
+    /// <summary>Folders of runners last seen in two console windows, and when (<see cref="InTwoConsoleWindows"/>).</summary>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, DateTime> SecondConsoleSeenUtc = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Two or more console windows run the runner in this folder: two of its listeners in users' sessions have both run
+    /// for <see cref="SecondConsoleAfter"/>, as when a startup entry opened it in a second Windows session too. Only one
+    /// of them gets jobs. The start of each process is used, not when it was first seen, so a short overlap never counts,
+    /// also in a fleet agent that has just started; a listener whose start could not be read counts as just started. Once
+    /// seen, it lasts for <see cref="SecondConsoleHold"/>. It only shows: Start, Stop, Restart and auto-recovery do not
+    /// read it.
+    /// </summary>
+    internal static bool InTwoConsoleWindows(string root, List<ProcessInfo> processes, DateTime nowUtc)
+    {
+        var started = processes
+            .Where(p => p.SessionId != 0 && p.Name.Equals("Runner.Listener.exe", StringComparison.OrdinalIgnoreCase)
+                        && RootFromExecutable(p.ExecutablePath).Equals(root, StringComparison.OrdinalIgnoreCase))
+            .Select(p => p.StartedUtc ?? nowUtc).Order().ToList();
+        // The second oldest of them started long enough ago, so two have run side by side since then.
+        if (started.Count >= 2 && nowUtc - started[1] >= SecondConsoleAfter)
+        {
+            SecondConsoleSeenUtc[root] = nowUtc;
+            return true;
+        }
+        return SecondConsoleSeenUtc.TryGetValue(root, out var seen) && nowUtc - seen < SecondConsoleHold;
+    }
+
     internal static async Task<RunnerInfo> BuildRunnerInfoAsync(
         string root, List<RunnerServiceRecord> services, List<ProcessInfo> processes, bool queryGitHub,
         List<string> startupEntries, IEnumerable<string> allRoots)
     {
         var config = ReadRunnerConfig(root);
+        var now = DateTime.UtcNow;
         var service = services.FirstOrDefault(s => s.Root.Equals(root, StringComparison.OrdinalIgnoreCase));
         var serviceInstalled = service != null;
         var serviceRunning = service?.State.Equals("Running", StringComparison.OrdinalIgnoreCase) == true;
@@ -142,12 +183,13 @@ public static partial class RunnerService
             p.Name.Equals("Runner.Listener.exe", StringComparison.OrdinalIgnoreCase)
             && (!serviceInstalled || p.SessionId != 0)
             && RootFromExecutable(p.ExecutablePath).Equals(root, StringComparison.OrdinalIgnoreCase));
-        var restarting = !serviceRunning && IsConsoleRestarting(root, consoleListener != null, DateTime.UtcNow);
+        var restarting = !serviceRunning && IsConsoleRestarting(root, consoleListener != null, now);
         var interactive = consoleListener != null || restarting;
         var running = serviceRunning || consoleListener != null;
         var consoleStart = ConsoleStartsAt(root, startupEntries, allRoots);
         var consoleAtSignIn = consoleStart is RunnerStart.SignIn or RunnerStart.SignInShared;
         var runsTwice = RunsTwice(serviceRunning, serviceRunning && ListenerInSession(root, processes), consoleAtSignIn);
+        var twoConsoles = running && InTwoConsoleWindows(root, processes, now);
         var busy = running && HasDescendantWorker(consoleListener?.ProcessId ?? service?.ProcessId ?? 0, processes);
         var repoPath = RepositoryPath(config.GitHubUrl);
         var scope = ApiScope(config.GitHubUrl);
@@ -196,6 +238,7 @@ public static partial class RunnerService
             ServiceStart = serviceInstalled ? ServiceStartsAt(service!.StartMode) : null,
             ConsoleAtSignIn = consoleAtSignIn,
             RunsTwice = runsTwice,
+            TwoConsoleWindows = twoConsoles,
             ServiceAccount = serviceInstalled ? ServiceAccountName(service!.Account) : string.Empty,
             // When the service runs the jobs, its account must own the folders in the work folder. Not when a console
             // window runs the runner instead, or a startup entry opens it in one at sign-in: the jobs there run as the
@@ -268,7 +311,7 @@ public static partial class RunnerService
     {
         var result = new List<ProcessInfo>();
         using var searcher = new ManagementObjectSearcher(
-            "SELECT ProcessId, ParentProcessId, Name, ExecutablePath, SessionId FROM Win32_Process WHERE Name LIKE 'Runner%'");
+            "SELECT ProcessId, ParentProcessId, Name, ExecutablePath, SessionId, CreationDate FROM Win32_Process WHERE Name LIKE 'Runner%'");
         foreach (ManagementObject process in searcher.Get())
         {
             result.Add(new ProcessInfo
@@ -277,7 +320,8 @@ public static partial class RunnerService
                 ParentProcessId = ConvertToUInt(process["ParentProcessId"]),
                 Name = process["Name"]?.ToString() ?? string.Empty,
                 ExecutablePath = process["ExecutablePath"]?.ToString() ?? string.Empty,
-                SessionId = ConvertToUInt(process["SessionId"])
+                SessionId = ConvertToUInt(process["SessionId"]),
+                StartedUtc = RunnerActivity.ParseStarted(process["CreationDate"]?.ToString() ?? string.Empty)
             });
         }
         return result;
@@ -2268,6 +2312,11 @@ public sealed class RunnerInfo : INotifyPropertyChanged
     /// <summary>Its Windows service runs, and a console window runs it too or opens it at sign-in (<see cref="RunnerService.RunsTwice"/>).</summary>
     public bool RunsTwice { get; init; }
     /// <summary>
+    /// Two or more console windows run it, in users' sessions (<see cref="RunnerService.InTwoConsoleWindows"/>): only one
+    /// of them gets jobs. Shown only; what Start, Stop and Restart do does not depend on it.
+    /// </summary>
+    public bool TwoConsoleWindows { get; init; }
+    /// <summary>
     /// A console window runs it, or opens it at sign-in: its Windows service must not be started or restarted, since that
     /// would run it twice. Stopping the service stays possible.
     /// </summary>
@@ -2324,4 +2373,6 @@ public sealed class ProcessInfo
     public string ExecutablePath { get; init; } = string.Empty;
     /// <summary>0 for services; a signed-in user's session for programs they started.</summary>
     public uint SessionId { get; init; }
+    /// <summary>When the process started (Win32_Process.CreationDate); null when it could not be read.</summary>
+    public DateTime? StartedUtc { get; init; }
 }

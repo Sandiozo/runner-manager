@@ -71,6 +71,8 @@ public sealed class MachineRunnerStatus : INotifyPropertyChanged
     public string StartsAt { get => _startsAt; init => _startsAt = value ?? RunnerStart.Unknown; }
     /// <summary>Its Windows service runs, and a console window runs it too or opens it at sign-in (false from agents before 2.10.0).</summary>
     public bool RunsTwice { get; init; }
+    /// <summary>Two or more console windows run it, of which only one gets jobs (false from agents before 2.10.0). Shown only.</summary>
+    public bool TwoConsoleWindows { get; init; }
     /// <summary>It has a service, and a startup entry that is turned on opens it in a console window at sign-in (false before 2.10.0).</summary>
     public bool ConsoleAtSignIn { get; init; }
     /// <summary>The account its Windows service runs as (empty without a service, and from agents before 2.10.0).</summary>
@@ -147,7 +149,8 @@ public sealed class MachineRunnerStatus : INotifyPropertyChanged
         "Convert" => "Converting…",
         "Startup" => "Updating…",
         "StopJob" => "Stopping processes…",
-        _ when Health.IsProblem => Health.Label + (IsInteractive ? " · console" : string.Empty),
+        // "Two console windows" says the console already.
+        _ when Health.IsProblem => Health.Label + (IsInteractive && Health.Concern != RunnerConcern.TwoConsoleWindows ? " · console" : string.Empty),
         _ => IsInteractive ? (IsBusy ? "Busy · console" : "Console")
             : IsStoppedConsole ? "Console · stopped"
             : !ServiceInstalled ? "No service" : IsBusy ? "Busy" : IsRunning ? "Idle" : "Stopped"
@@ -523,6 +526,7 @@ public sealed class MachineInfo : INotifyPropertyChanged
                 MovedAway = r.MovedAway,
                 StartsAt = r.StartsAt,
                 RunsTwice = r.RunsTwice,
+                TwoConsoleWindows = r.TwoConsoleWindows,
                 ConsoleAtSignIn = r.ConsoleAtSignIn,
                 ServiceAccount = r.ServiceAccount,
                 WorkFolderOwner = r.WorkFolderOwner,
@@ -539,7 +543,7 @@ public sealed class MachineInfo : INotifyPropertyChanged
         var merged = (MachineInfo)MemberwiseClone();
         merged.PropertyChanged = null;
         merged.Runners = Runners.Concat(extra).OrderBy(r => r.TitleText, StringComparer.OrdinalIgnoreCase).ToArray();
-        merged.Fingerprint = Fingerprint + "|local:" + string.Join(';', extra.Select(r => $"{r.CommandKey}/{r.IsRunning}/{r.ActivityText}/{r.IsInteractive}/{r.ServiceInstalled}/{r.StartsAt}/{r.RunsTwice}/{r.ConsoleAtSignIn}/{r.WorkFolderOwner}"));
+        merged.Fingerprint = Fingerprint + "|local:" + string.Join(';', extra.Select(r => $"{r.CommandKey}/{r.IsRunning}/{r.ActivityText}/{r.IsInteractive}/{r.ServiceInstalled}/{r.StartsAt}/{r.RunsTwice}/{r.TwoConsoleWindows}/{r.ConsoleAtSignIn}/{r.WorkFolderOwner}"));
         return merged;
     }
     public string PendingAction => _pendingAction;

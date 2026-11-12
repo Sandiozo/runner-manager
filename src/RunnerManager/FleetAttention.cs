@@ -3,13 +3,13 @@ namespace RunnerManager;
 /// <summary>
 /// What the "Needs attention" tile counts, over the whole fleet: PCs that are offline (each PC once, not its runners),
 /// and on the PCs that are online, runners that are stopped and runners with a concern (<see cref="RunnerHealth"/>):
-/// a job that looks stuck or runs long, a runner that idles while jobs wait for it, a runner that runs twice, or one
-/// whose service cannot use its work folder. Its filter shows only those.
+/// a job that looks stuck or runs long, a runner that idles while jobs wait for it, a runner that runs twice, one that
+/// two console windows run, or one whose service cannot use its work folder. Its filter shows only those.
 /// </summary>
 internal sealed record FleetAttention(int OfflinePcs, int StoppedRunners, int StuckJobs, int LongJobs, int IdleRunners,
-    int RunningTwice = 0, int FolderOwners = 0)
+    int RunningTwice = 0, int FolderOwners = 0, int TwoConsoles = 0)
 {
-    public int Total => OfflinePcs + StoppedRunners + StuckJobs + LongJobs + IdleRunners + RunningTwice + FolderOwners;
+    public int Total => OfflinePcs + StoppedRunners + StuckJobs + LongJobs + IdleRunners + RunningTwice + FolderOwners + TwoConsoles;
 
     /// <summary>
     /// A runner that is not running, unless it was stopped on purpose with Stop. A console runner that is stopped because
@@ -19,7 +19,7 @@ internal sealed record FleetAttention(int OfflinePcs, int StoppedRunners, int St
 
     public static FleetAttention Count(IEnumerable<MachineInfo> machines)
     {
-        int offline = 0, stopped = 0, stuck = 0, longJobs = 0, idle = 0, twice = 0, owners = 0;
+        int offline = 0, stopped = 0, stuck = 0, longJobs = 0, idle = 0, twice = 0, owners = 0, consoles = 0;
         foreach (var machine in machines)
         {
             if (!machine.IsReachable)
@@ -38,10 +38,11 @@ internal sealed record FleetAttention(int OfflinePcs, int StoppedRunners, int St
                     case RunnerConcern.IdleWithWaitingJobs: idle++; break;
                     case RunnerConcern.RunsTwice: twice++; break;
                     case RunnerConcern.WorkFolderOwner: owners++; break;
+                    case RunnerConcern.TwoConsoleWindows: consoles++; break;
                 }
             }
         }
-        return new FleetAttention(offline, stopped, stuck, longJobs, idle, twice, owners);
+        return new FleetAttention(offline, stopped, stuck, longJobs, idle, twice, owners, consoles);
     }
 
     /// <summary>
@@ -70,6 +71,8 @@ internal sealed record FleetAttention(int OfflinePcs, int StoppedRunners, int St
                 parts.Add(IdleRunners == 1 ? "1 runner is idle while jobs wait for it" : $"{IdleRunners} runners are idle while jobs wait for them");
             if (RunningTwice > 0)
                 parts.Add(RunningTwice == 1 ? "1 runner runs twice" : $"{RunningTwice} runners run twice");
+            if (TwoConsoles > 0)
+                parts.Add(TwoConsoles == 1 ? "1 runner runs in two console windows" : $"{TwoConsoles} runners run in two console windows");
             if (FolderOwners > 0)
                 parts.Add(FolderOwners == 1 ? "1 runner's work folder belongs to another account" : $"{FolderOwners} runners' work folders belong to another account");
             return parts.Count == 0 ? "Nothing needs attention." : string.Join(", ", parts) + ".";
@@ -88,6 +91,7 @@ internal sealed record FleetAttention(int OfflinePcs, int StoppedRunners, int St
             if (LongJobs > 0) parts.Add($"{LongJobs} running long");
             if (IdleRunners > 0) parts.Add($"{IdleRunners} idle, jobs waiting");
             if (RunningTwice > 0) parts.Add($"{RunningTwice} running twice");
+            if (TwoConsoles > 0) parts.Add($"{TwoConsoles} in two console windows");
             if (FolderOwners > 0) parts.Add(FolderOwners == 1 ? "1 work folder of another account" : $"{FolderOwners} work folders of another account");
             return string.Join(" · ", parts);
         }

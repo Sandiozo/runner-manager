@@ -3,13 +3,17 @@ using System.Text.Json;
 
 namespace RunnerManager;
 
-public enum RunnerConcern { None, Stuck, RunningLong, IdleWithWaitingJobs, RunsTwice, WorkFolderOwner }
+public enum RunnerConcern { None, Stuck, RunningLong, IdleWithWaitingJobs, RunsTwice, WorkFolderOwner, TwoConsoleWindows }
 
 /// <summary>
 /// Whether a runner needs attention: its job makes no progress or runs far too long, it idles while jobs wait, it runs
-/// twice (its Windows service and a console window), or its service cannot use its work folder.
+/// twice (its Windows service and a console window), two console windows run it, or its service cannot use its work
+/// folder.
 /// </summary>
-/// <param name="Label">Short, for the status pill: "Stuck", "Running long", "Idle · jobs waiting", "Runs twice" or "Work folder owner".</param>
+/// <param name="Label">
+/// Short, for the status pill: "Stuck", "Running long", "Idle · jobs waiting", "Runs twice", "Two console windows" or
+/// "Work folder owner".
+/// </param>
 /// <param name="Detail">One or two sentences for the details, notifications and AI assistants.</param>
 /// <param name="Subject">What the concern is about (a job's ID or start), so it is reported once.</param>
 public sealed record RunnerHealth(RunnerConcern Concern, string Label, string Detail, string Subject = "")
@@ -115,10 +119,15 @@ public static class JobHealth
 
     /// <summary>
     /// The concern that the runner's own status shows, without the job checks: its Windows service runs and a console
-    /// window runs it too or opens it at sign-in, or its running service's work folder has folders of another account,
-    /// which git refuses. Healthy otherwise, and for runners from agents before 2.10.0, which do not tell. See
-    /// <see cref="Shown"/> for how it ranks with the job checks.
+    /// window runs it too or opens it at sign-in, two console windows run it, or its running service's work folder has
+    /// folders of another account, which git refuses. Healthy otherwise, and for runners from agents before 2.10.0, which
+    /// do not tell. See <see cref="Shown"/> for how it ranks with the job checks.
     /// </summary>
+    /// <remarks>
+    /// Two console windows are a concern of their own, not a kind of "Runs twice": no Windows service runs, so the fix
+    /// is another, Start and Restart of the service are not refused for it (a console window that runs the runner already
+    /// does that), and the copy that has the session runs its jobs as usual, so a stuck job is still shown first.
+    /// </remarks>
     public static RunnerHealth ForSetup(MachineRunnerStatus runner)
     {
         if (runner.RunsTwice)
@@ -136,6 +145,12 @@ public static class JobHealth
                 $"the service runs as another account than the console window, and git refuses work folders that another account owns. {fix}",
                 SetupSubject + "twice");
         }
+        if (runner.TwoConsoleWindows)
+            return new RunnerHealth(RunnerConcern.TwoConsoleWindows, "Two console windows",
+                "A second console window runs the same runner, for example in another Windows session on this PC. " +
+                "Both use one registration, so only one of them gets jobs, and the other keeps trying to connect. " +
+                "Close one of the console windows, or sign out of the other Windows session.",
+                SetupSubject + "consoles");
         if (runner.WorkFolderOwner.Length > 0 && runner.ServiceInstalled && !runner.IsInteractive && runner.IsRunning)
         {
             var account = runner.ServiceAccount.Length > 0 ? runner.ServiceAccount : "the service's account";
@@ -152,13 +167,14 @@ public static class JobHealth
     internal const string SetupSubject = "setup|";
 
     /// <summary>A concern of <see cref="ForSetup"/>, which the runner's status shows rather than the dashboard's check.</summary>
-    internal static bool IsSetupConcern(RunnerConcern concern) => concern is RunnerConcern.RunsTwice or RunnerConcern.WorkFolderOwner;
+    internal static bool IsSetupConcern(RunnerConcern concern)
+        => concern is RunnerConcern.RunsTwice or RunnerConcern.TwoConsoleWindows or RunnerConcern.WorkFolderOwner;
 
     /// <summary>
     /// The one concern a runner shows, of its setup concern (<see cref="ForSetup"/>) and the concern its job checks
     /// found: a runner that runs twice first; then a job that is stuck or runs long, or jobs that wait while it idles,
-    /// which can be acted on now (Stop job); a work folder of another account only when there is none of those. That one
-    /// lasts until someone fixes it, and can be a false alarm, so it must not hide a job for that long.
+    /// which can be acted on now (Stop job); two console windows or a work folder of another account only when there is
+    /// none of those. Those last until someone fixes them, so they must not hide a job for that long.
     /// </summary>
     public static RunnerHealth Shown(RunnerHealth setup, RunnerHealth jobs)
         => setup.Concern == RunnerConcern.RunsTwice || !jobs.IsProblem ? setup : jobs;

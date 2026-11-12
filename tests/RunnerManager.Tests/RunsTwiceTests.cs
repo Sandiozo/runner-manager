@@ -65,7 +65,7 @@ public class RunsTwiceTests : IDisposable
         ServiceName = r.Name, InstallPath = r.InstallPath, IsInteractive = r.IsInteractive, DisplayName = r.DisplayName,
         RepositoryPath = r.RepositoryPath, Scope = r.ApiScope, AgentName = r.AgentName, AgentId = r.AgentId,
         IsRunning = r.IsRunning, ActivityText = r.ActivityText, ServiceInstalled = r.ServiceInstalled, StartsAt = r.StartsAt,
-        RunsTwice = r.RunsTwice, ConsoleAtSignIn = r.ConsoleAtSignIn, ServiceAccount = r.ServiceAccount, WorkFolderOwner = r.WorkFolderOwner,
+        RunsTwice = r.RunsTwice, TwoConsoleWindows = r.TwoConsoleWindows, ConsoleAtSignIn = r.ConsoleAtSignIn, ServiceAccount = r.ServiceAccount, WorkFolderOwner = r.WorkFolderOwner,
         ManuallyStopped = manuallyStopped, MachineName = "SANDIS", MachineKey = "sandis", IsLocalMachine = true, MachineOnline = true,
         AgentProtocolVersion = MachineRelay.ProtocolVersion
     };
@@ -576,6 +576,193 @@ public class RunsTwiceTests : IDisposable
             RunnerService.MatchStartupEntry(@"del D:\Git-Runners\Study-Tool\_work\x.log", @"D:\Git-Runners", new[] { @"D:\Git-Runners\Study-Tool" }));
         Assert.Equal(RunnerService.StartupMatch.None,
             RunnerService.MatchStartupEntry(@"del D:\Git-Runners\Study-Tool\_work\x.log", @"D:\Git-Runners\Study-Tool", new[] { @"D:\Git-Runners" }));
+    }
+
+    // ----- Two console windows of one runner -----
+
+    /// <summary>A listener of the runner in this folder, in a session, started at <paramref name="startedUtc"/> (null: not read).</summary>
+    private static ProcessInfo StartedListener(string root, uint id, uint session, DateTime? startedUtc)
+        => new() { ProcessId = id, ParentProcessId = 9000u + session, Name = "Runner.Listener.exe",
+                   ExecutablePath = Path.Combine(root, "bin", "Runner.Listener.exe"), SessionId = session, StartedUtc = startedUtc };
+
+    /// <summary>A console runner as its PC reports it, with or without a second console window.</summary>
+    private static MachineRunnerStatus ConsoleRunner(string root, bool twoConsoles, bool busy = false) => new()
+    {
+        InstallPath = root, DisplayName = Path.GetFileName(root), AgentName = Path.GetFileName(root), IsInteractive = true, IsRunning = true,
+        ActivityText = busy ? "Busy" : "Idle", StartsAt = RunnerStart.SignIn, TwoConsoleWindows = twoConsoles,
+        JobStartedUtc = busy ? DateTime.UtcNow.AddMinutes(-40) : null, QuietSinceUtc = busy ? DateTime.UtcNow.AddMinutes(-30) : null,
+        MachineName = "SANDIS", MachineKey = "sandis", IsLocalMachine = true, MachineOnline = true, AgentProtocolVersion = MachineRelay.ProtocolVersion
+    };
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ASecondConsoleWindow_IsShownAndReportedOnce_AndChangesNoAction(bool disabledService)
+    {
+        // The incident: the startup shortcut opened the runner in a second Windows session too. The listener there tries to
+        // connect for a few minutes, exits, and is started again. The owner's console runners have a disabled service.
+        var root = MakeRunner("livonia-core");
+        var services = disabledService ? new List<RunnerServiceRecord> { Service(root, "Stopped", "Disabled", name: CoreService) } : new List<RunnerServiceRecord>();
+        var startup = StartupShortcut(root);
+        var now = DateTime.UtcNow;
+        var oneWindow = new List<ProcessInfo> { StartedListener(root, 9100, 1, now.AddHours(-5)) };
+        var twoWindows = new List<ProcessInfo> { oneWindow[0], StartedListener(root, 9300, 2, now.AddMinutes(-3)) };
+        var once = await Read(root, services, oneWindow, startup);
+        var twice = await Read(root, services, twoWindows, startup);
+
+        Assert.False(once.TwoConsoleWindows);
+        Assert.True(twice.TwoConsoleWindows);
+        Assert.False(twice.RunsTwice);
+        Assert.True(twice.IsInteractive);
+        Assert.True(twice.IsRunning);
+
+        // Shown: the card, the Needs attention tile, one alert, the fleet status and the AI tools.
+        var status = Status(twice);
+        Assert.Equal(RunnerConcern.TwoConsoleWindows, status.Health.Concern);
+        Assert.Equal("Two console windows", status.StatusText);
+        Assert.StartsWith("livonia-core, Two console windows.", status.HeaderName);
+        Assert.Contains("A second console window runs the same runner", status.Health.Detail);
+        Assert.Contains("only one of them gets jobs", status.Health.Detail);
+        Assert.Contains("Close one of the console windows, or sign out of the other Windows session.", status.Health.Detail);
+        Assert.Equal(status.Health.Detail, status.StatusTip);
+        var pc = Pc(status);
+        var attention = FleetAttention.Count(new[] { pc });
+        Assert.Equal(1, attention.TwoConsoles);
+        Assert.Equal(1, attention.Total);
+        Assert.Contains("1 runner runs in two console windows", attention.Summary);
+        Assert.Contains("1 in two console windows", attention.SubText);
+        Assert.True(FleetAttention.ShowsRunner(pc, pc.Runners[0]));
+        var reported = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        Assert.StartsWith("SANDIS: livonia-core — Two console windows. A second console window",
+            Assert.Single(MainWindow.NewProblemAlerts(new[] { pc }, reported)));
+        Assert.Empty(MainWindow.NewProblemAlerts(new[] { Pc(Status(twice)) }, reported));
+        var json = JsonSerializer.Serialize(new MachineStatusPayload { Runners = new[] { status } });
+        Assert.Contains("\"TwoConsoleWindows\":true", json);
+        Assert.True(JsonSerializer.Deserialize<MachineStatusPayload>(json)!.Runners[0].TwoConsoleWindows);
+        var health = await JobHealth.EvaluateAsync(new[] { pc }, TimeSpan.FromMinutes(15), null, useGitHub: false, DateTime.UtcNow);
+        Assert.Contains("\"kind\":\"Two console windows\"", JsonSerializer.Serialize(AssistantTools.DescribeRunner(pc, pc.Runners[0], online: true, health)));
+        Assert.Equal(RunnerHealth.Healthy, MainWindow.StillApplies(health.Runners[JobHealth.Key(status)], status));
+
+        // Only shown: what can be done with the runner, and auto-recovery, are as with one console window.
+        var single = Status(once);
+        Assert.False(single.Health.IsProblem);
+        Assert.Equal(once.HasConsoleCopy, twice.HasConsoleCopy);
+        Assert.Equal(once.StartsAt, twice.StartsAt);
+        Assert.Equal(once.RegistrationOptions, twice.RegistrationOptions);
+        Assert.Equal(RunnerService.StartsFromService(once), RunnerService.StartsFromService(twice));
+        Assert.Equal((single.CanControl, single.CanPower, single.CanRestart, single.CanEdit, single.CanCleanWork, single.CanMove, single.CanChangeStartup, single.PowerVisibility),
+            (status.CanControl, status.CanPower, status.CanRestart, status.CanEdit, status.CanCleanWork, status.CanMove, status.CanChangeStartup, status.PowerVisibility));
+        foreach (var action in new[] { "Start", "Stop", "Restart" })
+        {
+            Assert.Equal(FleetActions.ConsoleRunnerProblem(once.IsInteractive, once.ServiceInstalled, action, once.ConsoleAtSignIn, once.RunsTwice),
+                FleetActions.ConsoleRunnerProblem(twice.IsInteractive, twice.ServiceInstalled, action, twice.ConsoleAtSignIn, twice.RunsTwice));
+            Assert.Equal(Record.Exception(() => AssistantTools.RequireService(Pc(single), single, action))?.Message,
+                Record.Exception(() => AssistantTools.RequireService(pc, status, action))?.Message);
+            if (disabledService)
+                Assert.Equal(RunnerService.ServiceStartProblem(services[0], oneWindow, startup, new[] { root }, action),
+                    RunnerService.ServiceStartProblem(services[0], twoWindows, startup, new[] { root }, action));
+        }
+        var recovery = new RunnerRecovery();
+        for (var i = 0; i < 4; i++)
+            Assert.Equal(RunnerRecovery.Step.None, MachineRelay.CheckRecovery(recovery, i % 2 == 0 ? once : twice, watchdogOn: true, held: false, now.AddSeconds(30 * i)));
+    }
+
+    [Fact]
+    public void AShortOverlap_WhenARunnerRestarts_IsNotTwoConsoleWindows()
+    {
+        var root = MakeRunner("restarts", workFolder: false);
+        var now = DateTime.UtcNow;
+        var old = StartedListener(root, 9100, 1, now.AddHours(-5));
+        var restarted = StartedListener(root, 9300, 1, now);
+        var reported = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        // The old listener and the new one side by side for a minute, read every 10 seconds, then the new one alone.
+        for (var s = 0; s <= 600; s += 10)
+        {
+            var two = RunnerService.InTwoConsoleWindows(root, s <= 60 ? new List<ProcessInfo> { old, restarted } : new List<ProcessInfo> { restarted }, now.AddSeconds(s));
+            Assert.False(two);
+            Assert.Empty(MainWindow.NewProblemAlerts(new[] { Pc(ConsoleRunner(root, two)) }, reported));
+        }
+        Assert.Equal(0, FleetAttention.Count(new[] { Pc(ConsoleRunner(root, twoConsoles: false)) }).Total);
+
+        // A listener whose start could not be read counts as just started. The service's listener in session 0 and the
+        // listener of another runner are not a second console window.
+        var later = now.AddHours(1);
+        Assert.False(RunnerService.InTwoConsoleWindows(root, new List<ProcessInfo> { old, StartedListener(root, 9400, 2, null) }, later));
+        Assert.False(RunnerService.InTwoConsoleWindows(root, new List<ProcessInfo> { old, StartedListener(root, 4200, 0, now.AddHours(-5)) }, later));
+        var other = MakeRunner("restarts-2", workFolder: false);
+        Assert.False(RunnerService.InTwoConsoleWindows(root, new List<ProcessInfo> { old, StartedListener(other, 9500, 2, now.AddHours(-5)) }, later));
+        // Two that have both run for two minutes are.
+        Assert.True(RunnerService.InTwoConsoleWindows(root, new List<ProcessInfo> { old, StartedListener(root, 9600, 2, later - RunnerService.SecondConsoleAfter) }, later));
+    }
+
+    [Fact]
+    public void ASecondConsoleWindowThatStartsItsListenerAgainAndAgain_IsReportedOnce_AndEndsWhenItIsClosed()
+    {
+        var root = MakeRunner("loop", workFolder: false);
+        var start = DateTime.UtcNow;
+        var first = StartedListener(root, 9100, 1, start.AddHours(-5));
+        var reported = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var alerts = 0;
+        bool Reading(DateTime at, List<ProcessInfo> processes)
+        {
+            var two = RunnerService.InTwoConsoleWindows(root, processes, at);
+            alerts += MainWindow.NewProblemAlerts(new[] { Pc(ConsoleRunner(root, two)) }, reported).Count;
+            return two;
+        }
+
+        // Two hours, read every 20 seconds: the second window's listener runs for 4 minutes, exits, and is started again
+        // 30 seconds later. It counts from its third reading on, and goes on counting while it is started again.
+        var seen = new List<bool>();
+        var lastTwo = start;
+        for (var s = 0; s < 2 * 3600; s += 20)
+        {
+            var at = start.AddSeconds(s);
+            var cycle = s % 270;
+            var processes = new List<ProcessInfo> { first };
+            if (cycle < 240)
+            {
+                processes.Add(StartedListener(root, 9300u + (uint)(s / 270), 2, at.AddSeconds(-cycle)));
+                if (cycle >= RunnerService.SecondConsoleAfter.TotalSeconds) lastTwo = at;
+            }
+            seen.Add(Reading(at, processes));
+        }
+        Assert.All(seen.Take(6), Assert.False);
+        Assert.All(seen.Skip(6), Assert.True);
+        Assert.Equal(1, alerts);
+
+        // The second window is closed: it still counts for a while, as between its listener's starts, then it ends.
+        Assert.True(Reading(lastTwo + RunnerService.SecondConsoleHold - TimeSpan.FromSeconds(20), new List<ProcessInfo> { first }));
+        Assert.False(Reading(lastTwo + RunnerService.SecondConsoleHold, new List<ProcessInfo> { first }));
+        Assert.Equal(1, alerts);
+        // When it comes back, it is reported again.
+        var back = lastTwo + TimeSpan.FromHours(1);
+        Assert.True(Reading(back, new List<ProcessInfo> { first, StartedListener(root, 9900, 2, back - TimeSpan.FromMinutes(3)) }));
+        Assert.Equal(2, alerts);
+    }
+
+    [Fact]
+    public async Task AJobConcern_IsShownBeforeTwoConsoleWindows_AndRunsTwiceBeforeBoth()
+    {
+        var busy = ConsoleRunner(Path.Combine(_temp, "gpu"), twoConsoles: true, busy: true);
+        Assert.Equal(RunnerConcern.TwoConsoleWindows, busy.Health.Concern);
+
+        // The copy that has the session runs its jobs as usual: a stuck job is shown, with its button.
+        busy.Health = StuckJob();
+        Assert.Equal(RunnerConcern.Stuck, busy.Health.Concern);
+        Assert.Equal(System.Windows.Visibility.Visible, busy.StopJobVisibility);
+        busy.Health = RunnerHealth.Healthy;
+        var health = await JobHealth.EvaluateAsync(new[] { Pc(busy) }, TimeSpan.FromMinutes(15), null, useGitHub: false, DateTime.UtcNow);
+        Assert.Equal(RunnerConcern.Stuck, health.Runners[JobHealth.Key(busy)].Concern);
+
+        // With its Windows service running as well, it runs twice, and that is shown first.
+        var three = new MachineRunnerStatus
+        {
+            ServiceName = ServiceName, InstallPath = Path.Combine(_temp, "three"), DisplayName = "three", ServiceInstalled = true, IsRunning = true,
+            ActivityText = "Busy", RunsTwice = true, TwoConsoleWindows = true, IsLocalMachine = true, MachineOnline = true
+        };
+        three.Health = StuckJob();
+        Assert.Equal(RunnerConcern.RunsTwice, three.Health.Concern);
     }
 
     // ----- The first runner list -----

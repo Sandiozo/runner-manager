@@ -1860,6 +1860,7 @@ public static class MachineRelay
                 MovedAway = r.MovedAway,
                 StartsAt = r.StartsAt,
                 RunsTwice = r.RunsTwice,
+                TwoConsoleWindows = r.TwoConsoleWindows,
                 ConsoleAtSignIn = r.ConsoleAtSignIn,
                 ServiceAccount = r.ServiceAccount,
                 WorkFolderOwner = r.WorkFolderOwner,

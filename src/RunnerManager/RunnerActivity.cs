@@ -589,7 +589,7 @@ public static class RunnerActivity
     /// <summary>Output files written before the job's worker started belong to an earlier job (a minute of slack for clocks).</summary>
     private static DateTime? OutputNotBefore(DateTime? workerStartedUtc) => workerStartedUtc?.AddMinutes(-1);
 
-    private static DateTime? ParseStarted(string dmtf)
+    internal static DateTime? ParseStarted(string dmtf)
     {
         try { return dmtf.Length == 0 ? null : ManagementDateTimeConverter.ToDateTime(dmtf).ToUniversalTime(); }
         catch { return null; }
