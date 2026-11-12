@@ -731,6 +731,7 @@ public class AuditRunnerTests
         const string key = "actions.runner.octo-app.off";
         var recovery = new RunnerRecovery();
 
+        // The overload the fleet agent's watchdog calls (MachineRelay), with auto-recovery and the hold apart.
         recovery.Check(key, interactive: false, running: true, pending: false, watchdogOn: false, held: false, Watch);
         Assert.Equal(RunnerRecovery.Step.None, recovery.Check(key, false, running: false, pending: false, watchdogOn: false, held: false, Watch.AddSeconds(10)));
         Assert.Equal(RunnerRecovery.Step.None, recovery.Check(key, false, running: false, pending: false, watchdogOn: true, held: false, Watch.AddSeconds(20)));
@@ -837,19 +838,27 @@ public class RegisteredRunnerTests
     {
         var scope = NewOrganization();
         var first = new TaskCompletionSource<ConditionalResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var firstSent = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var asked = 0;
-        Task<ConditionalResult> Get(string endpoint, string? etag) => ++asked == 1 ? first.Task : NotFound();
+        Task<ConditionalResult> Get(string endpoint, string? etag)
+        {
+            // The read runs on another thread.
+            if (Interlocked.Increment(ref asked) > 1) return NotFound();
+            firstSent.TrySetResult();
+            return first.Task;
+        }
         var now = DateTime.UtcNow;
+        var limit = TimeSpan.FromSeconds(30);
 
         var sent = RegisteredRunners.GetAsync(scope, Get, now);
-        while (asked == 0) await Task.Delay(10);
+        await firstSent.Task.WaitAsync(limit);
         GitHubCli.ForgetProblems();
         first.SetResult(new ConditionalResult(404, string.Empty, string.Empty));
-        Assert.Null(await sent);
+        Assert.Null(await sent.WaitAsync(limit));
 
         // The answer came after the reset, so it is not kept for 6 hours.
-        Assert.Null(await RegisteredRunners.GetAsync(scope, Get, now.AddMinutes(2)));
-        Assert.Equal(2, asked);
+        Assert.Null(await RegisteredRunners.GetAsync(scope, Get, now.AddMinutes(2)).WaitAsync(limit));
+        Assert.Equal(2, Volatile.Read(ref asked));
     }
 
     [Theory]
