@@ -214,33 +214,76 @@ public class AppSettingsFileTests
     }
 }
 
-[Collection(FleetSettingsCollection.Name)]
+/// <summary>
+/// Uninstall with "delete settings": the startup scripts that Runner Manager had turned off stay in the data folder,
+/// nothing is copied with administrator rights, and the result says where they are. The data folders are the tests' own
+/// in %TEMP%; the removal script runs as uninstall runs it after exit.
+/// </summary>
 public class UninstallDataTests
 {
-    [Fact]
-    public void RemovingData_KeepsTheTurnedOffStartupScripts()
+    private static string NewDataFolder()
     {
-        var source = Path.Combine(FleetConfig.StateDir, "disabled-startup");
-        var documents = Path.Combine(Path.GetTempPath(), $"rm-documents-{Guid.NewGuid():N}");
-        Directory.CreateDirectory(source);
-        Directory.CreateDirectory(documents);
+        var data = Path.Combine(Path.GetTempPath(), $"rm-uninstall-data-{Guid.NewGuid():N}", "RunnerManager");
+        Directory.CreateDirectory(Path.Combine(data, "logs"));
+        File.WriteAllText(Path.Combine(data, "settings.json"), "{}");
+        File.WriteAllText(Path.Combine(data, "logs", "agent.log"), "log");
+        return data;
+    }
+
+    private static Dictionary<string, string> Environment(string data) => new() { [Installer.DataVariable] = data };
+
+    /// <summary>What Documents holds under the name that versions up to 2.9.0 and test builds of 2.10.0 copied the scripts to.</summary>
+    private static string[] CopiesInDocuments()
+    {
+        var documents = System.Environment.GetFolderPath(System.Environment.SpecialFolder.MyDocuments);
+        return Directory.Exists(documents) ? Directory.GetDirectories(documents, "Runner Manager startup scripts*") : Array.Empty<string>();
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void WithoutTurnedOffStartupScripts_TheWholeDataFolderGoes(bool emptyStartupFolder)
+    {
+        var data = NewDataFolder();
+        if (emptyStartupFolder) Directory.CreateDirectory(Path.Combine(data, "disabled-startup"));
+        var log = new List<string>();
         try
         {
-            Assert.Null(Installer.KeepDisabledStartupScripts(_ => { }, documents).Folder);
-            File.WriteAllText(Path.Combine(source, "start-runner.cmd"), "run.cmd");
-            Directory.CreateDirectory(Path.Combine(documents, "Runner Manager startup scripts"));
+            var (script, note) = Installer.DataRemoval(data, log.Add);
 
-            var (folder, moved) = Installer.KeepDisabledStartupScripts(_ => { }, documents);
-
-            Assert.True(moved);
-            Assert.Equal(Path.Combine(documents, "Runner Manager startup scripts (2)"), folder);
-            Assert.Equal("run.cmd", File.ReadAllText(Path.Combine(folder!, "start-runner.cmd")));
+            Assert.Equal(string.Empty, note);
+            Assert.Empty(log);
+            InstallFolderTests.RunPowerShell(script, Environment(data));
+            Assert.False(Directory.Exists(data));
         }
-        finally
+        finally { Directory.Delete(Path.GetDirectoryName(data)!, recursive: true); }
+    }
+
+    [Fact]
+    public void TurnedOffStartupScripts_StayWhereTheyAre_AndTheResultSaysWhere()
+    {
+        var data = NewDataFolder();
+        var startup = Path.Combine(data, "disabled-startup");
+        Directory.CreateDirectory(Path.Combine(startup, "tasks"));
+        File.WriteAllText(Path.Combine(startup, "start-runner.cmd"), "run.cmd");
+        File.WriteAllText(Path.Combine(startup, "tasks", "Start runner.xml"), "<Task/>");
+        var copiesBefore = CopiesInDocuments();
+        var log = new List<string>();
+        try
         {
-            Directory.Delete(source, recursive: true);
-            Directory.Delete(documents, recursive: true);
+            var (script, note) = Installer.DataRemoval(data, log.Add);
+
+            Assert.Equal($" The startup scripts that Runner Manager had turned off are kept in {startup}.", note);
+            Assert.Contains(startup, Assert.Single(log));
+            InstallFolderTests.RunPowerShell(script, Environment(data));
+            // Only the scripts' folder is left of the data folder, as it was.
+            Assert.Equal(new[] { startup }, Directory.GetFileSystemEntries(data));
+            Assert.Equal("run.cmd", File.ReadAllText(Path.Combine(startup, "start-runner.cmd")));
+            Assert.Equal("<Task/>", File.ReadAllText(Path.Combine(startup, "tasks", "Start runner.xml")));
+            // Nothing was copied to Documents.
+            Assert.Equal(copiesBefore, CopiesInDocuments());
         }
+        finally { Directory.Delete(Path.GetDirectoryName(data)!, recursive: true); }
     }
 }
 
@@ -291,20 +334,21 @@ public class UninstallDataLinkTests
     }
 
     [JunctionFact]
-    public void TheStartupScripts_AreCopiedWithoutWhatALinkInsideHolds()
+    public void AStartupScriptsFolderWithALinkInside_StaysWhereItIs_AndNothingIsDeletedThroughIt()
     {
         using var folders = new Folders();
         var source = Path.Combine(folders.Data, "disabled-startup");
-        var documents = Path.Combine(folders.Root, "Documents");
         Directory.CreateDirectory(source);
-        Directory.CreateDirectory(documents);
         File.WriteAllText(Path.Combine(source, "start-runner.cmd"), "run.cmd");
-        folders.Link(Path.Combine(source, "x"));
+        var link = folders.Link(Path.Combine(source, "x"));
 
-        var (folder, moved) = Installer.KeepDisabledStartupScripts(_ => { }, documents, source);
+        var (script, note) = Installer.DataRemoval(folders.Data, _ => { });
 
-        Assert.True(moved);
-        Assert.Equal(new[] { Path.Combine(folder!, "start-runner.cmd") }, Directory.GetFiles(folder!, "*", SearchOption.AllDirectories));
+        Assert.Contains(source, note);
+        InstallFolderTests.RunPowerShell(script, folders.Environment);
+        Assert.True(File.Exists(Path.Combine(source, "start-runner.cmd")));
+        Assert.True(Directory.Exists(link));
+        folders.AssertElsewhereIsWhole();
     }
 
     [JunctionFact]
@@ -312,20 +356,17 @@ public class UninstallDataLinkTests
     {
         using var folders = new Folders();
         Directory.CreateDirectory(folders.Data);
+        File.WriteAllText(Path.Combine(folders.Data, "settings.json"), "{}");
         var source = folders.Link(Path.Combine(folders.Data, "disabled-startup"));
-        var documents = Path.Combine(folders.Root, "Documents");
-        Directory.CreateDirectory(documents);
         var log = new List<string>();
 
-        var (folder, moved) = Installer.KeepDisabledStartupScripts(log.Add, documents, source);
+        var (script, note) = Installer.DataRemoval(folders.Data, log.Add);
 
-        Assert.False(moved);
-        Assert.Equal(source, folder);
-        Assert.Empty(Directory.GetFileSystemEntries(documents));
+        Assert.Contains(source, note);
         Assert.DoesNotContain("n't", Assert.Single(log));
-        // Uninstall then keeps that entry of the data folder, and deletes nothing through it.
-        InstallFolderTests.RunPowerShell(Installer.RemoveDataScript(keepDisabledStartup: true), folders.Environment);
-        Assert.True(Directory.Exists(source));
+        // Uninstall keeps that entry of the data folder, and deletes nothing through it.
+        InstallFolderTests.RunPowerShell(script, folders.Environment);
+        Assert.Equal(new[] { source }, Directory.GetFileSystemEntries(folders.Data));
         folders.AssertElsewhereIsWhole();
     }
 

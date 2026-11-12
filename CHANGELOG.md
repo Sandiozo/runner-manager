@@ -72,8 +72,8 @@ Runner Manager no longer starts a runner's service next to its console window.
   nothing but files.
 - **Uninstall and delete settings** no longer goes into a link (a junction or symbolic link) that it finds in the data
   folder: it removes the link itself. A data folder that is a link itself is not emptied. The startup scripts that
-  Runner Manager had turned off are not moved to Documents when their folder is a link, and links in that folder are
-  not followed.
+  Runner Manager had turned off are no longer moved to Documents. They stay in the `disabled-startup` folder of the
+  data folder, and the result of the uninstall says where they are.
 - The console window in which Runner Manager runs gh for the GitHub sign-in no longer runs the AutoRun commands of
   cmd.exe, which any program of the user can set in the registry.
 - Runner Manager now starts through a start helper, `RunnerManagerLauncher.exe`, beside RunnerManager.exe. Its

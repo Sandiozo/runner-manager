@@ -574,12 +574,10 @@ public static class Installer
             {
                 log($"The AI assistant settings could not be removed: {ex.Message}");
             }
-            // Startup scripts that converting a runner to a service turned off exist nowhere else, so they are never deleted.
-            var startup = KeepDisabledStartupScripts(log);
-            scripts.Add(RemoveDataScript(keepDisabledStartup: !startup.Moved && startup.Folder != null));
+            var data = DataRemoval(FleetConfig.StateDir, log);
+            scripts.Add(data.Script);
             environment[DataVariable] = FleetConfig.StateDir;
-            if (startup.Folder != null)
-                note += $" Startup scripts that Runner Manager had turned off are {(startup.Moved ? "now" : "kept")} in {startup.Folder}.";
+            note += data.Note;
         }
         // No time limit: the "uninstalled" message keeps this process (and so its exe) until it is closed.
         AppUpdater.RunAfterExit(scripts.Count == 0 ? "$null" : string.Join("; ", scripts), timeout: null, TimeSpan.FromSeconds(1), environment);
@@ -626,53 +624,34 @@ public static class Installer
     private const string DisabledStartupFolderName = "disabled-startup";
 
     /// <summary>
-    /// Moves the startup scripts that Runner Manager turned off (when a console runner became a service) from its data
-    /// folder to Documents\Runner Manager startup scripts. Returns where they are, and whether they were moved; the folder
-    /// is null when there are none.
+    /// What uninstall with "delete settings" does with the data folder <paramref name="dataFolder"/>: the script that
+    /// deletes it after exit (with the folder in <see cref="DataVariable"/>), and a sentence for the result, or empty.
+    /// The startup scripts that converting a runner to a service turned off exist nowhere else, so they are never
+    /// deleted: their folder stays where it is, with nothing else of the data folder, and the sentence says where. They
+    /// are not copied anywhere: a copy with administrator rights into a folder of the user, such as Documents, could be
+    /// sent into a folder that only administrators can change, through a link that a program of the user puts there
+    /// while the files are copied.
     /// </summary>
-    internal static (string? Folder, bool Moved) KeepDisabledStartupScripts(Action<string> log, string? documents = null)
-        => KeepDisabledStartupScripts(log, documents, Path.Combine(FleetConfig.StateDir, DisabledStartupFolderName));
+    internal static (string Script, string Note) DataRemoval(string dataFolder, Action<string> log)
+    {
+        if (DisabledStartupScriptsToKeep(Path.Combine(dataFolder, DisabledStartupFolderName)) is not { } kept)
+            return (RemoveDataScript(keepDisabledStartup: false), string.Empty);
+        log($"Kept the startup scripts that Runner Manager had turned off in {kept}.");
+        return (RemoveDataScript(keepDisabledStartup: true), $" The startup scripts that Runner Manager had turned off are kept in {kept}.");
+    }
 
     /// <summary>
-    /// <see cref="KeepDisabledStartupScripts(Action{string}, string?)"/> from <paramref name="source"/>. It runs with
-    /// administrator rights, and any program of the user can change the data folder, so nothing is copied through a link
-    /// (a junction or symbolic link): a link inside is left out, and a source that is a link itself stays where it is.
+    /// The folder of the startup scripts that Runner Manager turned off (when a console runner became a service),
+    /// <paramref name="folder"/>, when uninstall keeps it: when it holds anything, or cannot be read. Null when it is
+    /// missing or empty, so the whole data folder goes. Only read: the removal script leaves this entry of the data folder
+    /// as it is, also when it is a link (see <see cref="RemoveDataScript"/>).
     /// </summary>
-    internal static (string? Folder, bool Moved) KeepDisabledStartupScripts(Action<string> log, string? documents, string source)
+    internal static string? DisabledStartupScriptsToKeep(string folder)
     {
-        try
-        {
-            if (!Directory.Exists(source) || !Directory.EnumerateFileSystemEntries(source).Any()) return (null, false);
-            if (new DirectoryInfo(source).Attributes.HasFlag(FileAttributes.ReparsePoint))
-            {
-                log($"The folder of the startup scripts that Runner Manager had turned off is a link, so they were not moved. They stay in {source}.");
-                return (source, false);
-            }
-        }
-        catch { return (null, false); }
-        try
-        {
-            documents ??= Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
-            var target = Path.Combine(documents, "Runner Manager startup scripts");
-            for (var i = 2; Directory.Exists(target) || File.Exists(target); i++)
-                target = Path.Combine(documents, $"Runner Manager startup scripts ({i})");
-            Directory.CreateDirectory(target);
-            // Copied, not moved: Documents may be on another drive. Hidden files are copied too, links are left out.
-            var files = new System.IO.EnumerationOptions { RecurseSubdirectories = true, AttributesToSkip = FileAttributes.ReparsePoint, IgnoreInaccessible = false };
-            foreach (var file in Directory.EnumerateFiles(source, "*", files))
-            {
-                var destination = Path.Combine(target, Path.GetRelativePath(source, file));
-                Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
-                File.Copy(file, destination);
-            }
-            log($"Moved the startup scripts that Runner Manager had turned off to {target}.");
-            return (target, true);
-        }
-        catch (Exception ex)
-        {
-            log($"Could not move the startup scripts that Runner Manager had turned off ({ex.Message}). They stay in {source}.");
-            return (source, false);
-        }
+        try { return Directory.EnumerateFileSystemEntries(folder).Any() ? folder : null; }
+        catch (DirectoryNotFoundException) { return null; }
+        // Scripts that exist nowhere else are never deleted because their folder could not be read.
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException) { return folder; }
     }
 
     /// <summary>
