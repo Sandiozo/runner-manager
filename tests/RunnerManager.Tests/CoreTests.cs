@@ -389,13 +389,12 @@ public class PairingTests
     public async Task Join_TransfersTheCodeWhenAllowed_AndBothSidesShowTheSameNumber()
     {
         var key = CommandSigner.NewKey();
-        var port = TestPorts.FreeRange(3);
-        using var host = new Pairing.PairingHost(key, "HOSTPC", port, port + 1);
+        using var host = FreePorts.Host((p, a) => new Pairing.PairingHost(key, "HOSTPC", p, a), out _);
         string? hostCode = null;
         host.JoinRequested += request => { hostCode = request.Code; request.Allow(); };
-        host.Start();
 
-        var hosts = await Pairing.FindHostsAsync(TimeSpan.FromSeconds(1), port + 1);
+        // Found at the port the system gave it, and joined at the pairing port it announces.
+        var hosts = await Pairing.FindHostsAsync(TimeSpan.FromSeconds(1), host.AnnouncePortInUse);
         var found = Assert.Single(hosts, h => h.Name == "HOSTPC");
         string? joinerCode = null;
         var result = await Pairing.JoinAsync(found.Address, "NEWPC", code => joinerCode = code, CancellationToken.None);
@@ -409,10 +408,8 @@ public class PairingTests
     [Fact]
     public async Task Join_FailsWhenDenied()
     {
-        var port = TestPorts.FreeRange(3);
-        using var host = new Pairing.PairingHost(CommandSigner.NewKey(), "HOSTPC", port, port + 1);
+        using var host = FreePorts.Host((p, a) => new Pairing.PairingHost(CommandSigner.NewKey(), "HOSTPC", p, a), out var port);
         host.JoinRequested += request => request.Deny();
-        host.Start();
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
             Pairing.JoinAsync($"127.0.0.1:{port}", "NEWPC", _ => { }, CancellationToken.None));
     }

@@ -25,7 +25,7 @@ public class PairingProtocolTests
     {
         var key = CommandSigner.NewKey();
         var port = 0;
-        using var host = FreePorts.Listen(2, p => new Pairing.PairingHost(key, "HOSTPC", port = p, p + 1), h => h.Start());
+        using var host = FreePorts.Host((p, a) => new Pairing.PairingHost(key, "HOSTPC", p, a), out port);
         Pairing.JoinRequest? seen = null;
         host.JoinRequested += request => { seen = request; request.Allow(); };
 
@@ -44,7 +44,7 @@ public class PairingProtocolTests
     public async Task JoinerRevealingAnotherKey_ThanItCommittedTo_IsRefused()
     {
         var port = 0;
-        using var host = FreePorts.Listen(2, p => new Pairing.PairingHost(CommandSigner.NewKey(), "HOSTPC", port = p, p + 1), h => h.Start());
+        using var host = FreePorts.Host((p, a) => new Pairing.PairingHost(CommandSigner.NewKey(), "HOSTPC", p, a), out port);
         var requested = false;
         host.JoinRequested += request => { requested = true; request.Allow(); };
 
@@ -80,7 +80,7 @@ public class PairingProtocolTests
     public async Task OlderJoiner_IsToldToUpdate()
     {
         var port = 0;
-        using var host = FreePorts.Listen(2, p => new Pairing.PairingHost(CommandSigner.NewKey(), "HOSTPC", port = p, p + 1), h => h.Start());
+        using var host = FreePorts.Host((p, a) => new Pairing.PairingHost(CommandSigner.NewKey(), "HOSTPC", p, a), out port);
         host.JoinRequested += request => request.Allow();
 
         var (client, stream) = await ConnectAsync(port);
@@ -143,7 +143,7 @@ public class PairingProtocolTests
     public async Task StoppingTheHost_TellsWaitingPcsNo()
     {
         var port = 0;
-        var host = FreePorts.Listen(2, p => new Pairing.PairingHost(CommandSigner.NewKey(), "HOSTPC", port = p, p + 1), h => h.Start());
+        var host = FreePorts.Host((p, a) => new Pairing.PairingHost(CommandSigner.NewKey(), "HOSTPC", p, a), out port);
         var requested = new TaskCompletionSource<Pairing.JoinRequest>();
         host.JoinRequested += request => requested.TrySetResult(request);
 
@@ -160,7 +160,7 @@ public class PairingProtocolTests
     public async Task Host_TurnsAwayConnectionsBeyondItsLimit()
     {
         var port = 0;
-        using var host = FreePorts.Listen(2, p => new Pairing.PairingHost(CommandSigner.NewKey(), "HOSTPC", port = p, p + 1), h => h.Start());
+        using var host = FreePorts.Host((p, a) => new Pairing.PairingHost(CommandSigner.NewKey(), "HOSTPC", p, a), out port);
         var waiting = new List<TcpClient>();
         try
         {

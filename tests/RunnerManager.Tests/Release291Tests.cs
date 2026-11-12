@@ -381,3 +381,35 @@ public class UnreadableAfterResetTests
         Assert.Equal(2, gh.Calls.Length);
     }
 }
+
+/// <summary>Tests start pairing hosts on port 0: the system picks free ports as the host binds them, so no other test takes them first.</summary>
+public class PortZeroTests
+{
+    [Fact]
+    public async Task APairingHostOnPortZero_ReportsThePortsItGot_AndAnnouncesItsPairingPort()
+    {
+        using var first = FreePorts.Host((p, a) => new Pairing.PairingHost(CommandSigner.NewKey(), "HOSTPC", p, a), out var port);
+        using var second = FreePorts.Host((p, a) => new Pairing.PairingHost(CommandSigner.NewKey(), "OTHERPC", p, a), out var otherPort);
+        Assert.NotEqual(0, port);
+        Assert.Equal(port, first.Port);
+        Assert.NotEqual(0, first.AnnouncePortInUse);
+        Assert.NotEqual(port, otherPort);
+        Assert.NotEqual(first.AnnouncePortInUse, second.AnnouncePortInUse);
+        // The host holds the port from the moment it got it.
+        var other = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Any, port);
+        Assert.Throws<System.Net.Sockets.SocketException>(() => other.Start());
+
+        // A find-probe is answered with the pairing port it got, not with 0.
+        var found = await Pairing.FindHostsAsync(TimeSpan.FromSeconds(1), first.AnnouncePortInUse, new[] { "127.0.0.1" });
+        Assert.Contains(found, h => h.Name == "HOSTPC" && h.Address.EndsWith($":{port}", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void AHostWithAFixedPort_ReportsThatPort()
+    {
+        var host = new Pairing.PairingHost(CommandSigner.NewKey(), "HOSTPC", 41234, 41235);
+        Assert.Equal(41234, host.Port);
+        Assert.Equal(41235, host.AnnouncePortInUse);
+        host.Dispose();
+    }
+}

@@ -15,7 +15,7 @@ public class JoinConfirmationTests
     private static Pairing.PairingHost StartHost(byte[] key, Action<Pairing.JoinRequest> answer, out string address)
     {
         var port = 0;
-        var host = FreePorts.Listen(2, p => new Pairing.PairingHost(key, "HOSTPC", port = p, p + 1), h => h.Start());
+        var host = FreePorts.Host((p, a) => new Pairing.PairingHost(key, "HOSTPC", p, a), out port);
         host.JoinRequested += answer;
         address = $"127.0.0.1:{port}";
         return host;
@@ -125,7 +125,7 @@ public class SealedAllowTests
     private static Pairing.PairingHost StartHost(byte[] key, Action<Pairing.JoinRequest> answer, out int port)
     {
         var chosen = 0;
-        var host = FreePorts.Listen(2, p => new Pairing.PairingHost(key, "HOSTPC", chosen = p, p + 1), h => h.Start());
+        var host = FreePorts.Host((p, a) => new Pairing.PairingHost(key, "HOSTPC", p, a), out chosen);
         host.JoinRequested += answer;
         port = chosen;
         return host;
@@ -332,10 +332,10 @@ public class ConfirmedMessageTests
     internal static Pairing.PairingHost StartHost(Action<Pairing.JoinRequest> answer, out int port, TimeSpan? confirmTimeout = null)
     {
         var chosen = 0;
-        var host = FreePorts.Listen(2, p => new Pairing.PairingHost(CommandSigner.NewKey(), "HOSTPC", chosen = p, p + 1)
+        var host = FreePorts.Host((p, a) => new Pairing.PairingHost(CommandSigner.NewKey(), "HOSTPC", p, a)
         {
             ConfirmTimeout = confirmTimeout ?? Pairing.ConfirmTimeout
-        }, h => h.Start());
+        }, out chosen);
         host.JoinRequested += answer;
         port = chosen;
         return host;
@@ -548,7 +548,7 @@ public class ConfirmedMessageTests
     {
         var key = CommandSigner.NewKey();
         var port = 0;
-        using var host = FreePorts.Listen(2, p => new Pairing.PairingHost(key, "HOSTPC", port = p, p + 1), h => h.Start());
+        using var host = FreePorts.Host((p, a) => new Pairing.PairingHost(key, "HOSTPC", p, a), out port);
         host.JoinRequested += request => request.Allow();
         // The host is still saving the PC (or has gone) when the new PC stops waiting.
         using var saved = new ManualResetEventSlim();
@@ -579,7 +579,7 @@ public class ConfirmedMessageTests
         using var cancel = new CancellationTokenSource();
         var key = CommandSigner.NewKey();
         var port = 0;
-        using var host = FreePorts.Listen(2, p => new Pairing.PairingHost(key, "HOSTPC", port = p, p + 1), h => h.Start());
+        using var host = FreePorts.Host((p, a) => new Pairing.PairingHost(key, "HOSTPC", p, a), out port);
         host.JoinRequested += request => request.Allow();
         // Back or Cancel, while the host saves the PC.
         host.Joined += _ => cancel.Cancel();
@@ -869,7 +869,7 @@ public class PairingCommitmentTests
     public async Task ACommitment_OpensToOneKeyOnly()
     {
         var port = 0;
-        using var host = FreePorts.Listen(2, p => new Pairing.PairingHost(CommandSigner.NewKey(), "HOSTPC", port = p, p + 1), h => h.Start());
+        using var host = FreePorts.Host((p, a) => new Pairing.PairingHost(CommandSigner.NewKey(), "HOSTPC", p, a), out port);
         var requested = false;
         host.JoinRequested += request => { requested = true; request.Deny(); };
 

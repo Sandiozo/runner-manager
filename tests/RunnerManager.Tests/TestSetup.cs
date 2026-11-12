@@ -70,12 +70,33 @@ internal sealed class TestSwitches : IDisposable
     }
 }
 
-/// <summary>
-/// Starts a listener on ports that <see cref="TestPorts.FreeRange"/> found free. It finds them first and the listener
-/// takes them after, so a test running at the same time may take one in between; other ports are then tried.
-/// </summary>
+/// <summary>Starts test listeners on free ports.</summary>
 internal static class FreePorts
 {
+    /// <summary>
+    /// Starts a pairing host with port 0 for both its ports: the system picks free ports as the host binds them, so a
+    /// test running at the same time cannot take one in between. <paramref name="port"/> is the pairing port it got.
+    /// </summary>
+    /// <param name="create">Makes the host from a pairing port and an announce port (both 0).</param>
+    public static Pairing.PairingHost Host(Func<int, int, Pairing.PairingHost> create, out int port)
+    {
+        var host = create(0, 0);
+        try { host.Start(); }
+        catch
+        {
+            host.Dispose();
+            throw;
+        }
+        port = host.Port;
+        return host;
+    }
+
+    /// <summary>
+    /// Starts a listener on ports that <see cref="TestPorts.FreeRange"/> found free. It finds them first and the listener
+    /// takes them after, so a test running at the same time may take one in between; other ports are then tried.
+    /// Only for the fleet agent's server: it listens with HttpListener, whose address names its port, and HttpListener
+    /// cannot be given port 0 to pick one. Everything that can bind port 0 does so instead (see <see cref="Host"/>).
+    /// </summary>
     public static T Listen<T>(int count, Func<int, T> create, Action<T> start) where T : IDisposable
     {
         for (var attempt = 1; ; attempt++)
