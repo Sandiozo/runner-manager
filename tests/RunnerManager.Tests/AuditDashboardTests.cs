@@ -1149,4 +1149,15 @@ public class AuditDashboardTests
         Assert.Equal(new[] { "[fd7a:115c::5]:47821" },
             ForgetPc.ManualAddressesFor(new[] { "[fd7a:115c::5]:47821", "[fd7a:115c::6]:47821" }, new[] { "[fd7a:115c::5]:47821" }));
     }
+
+    // ----- 8: the fleet agent task -----
+
+    [Fact]
+    public void RepairingTheAgentTask_SaysItHasTheCurrentSettings()
+    {
+        // The repair registers the task again with every current setting, so the line does not name only some of them.
+        var check = MethodBody("MainWindow.xaml.cs", "private async Task EnsureAgentTaskSettingsAsync(");
+        Assert.Contains(@"AddActivity(""Updated the fleet agent task to the current settings."");", check);
+        Assert.DoesNotContain("3-day", check);
+    }
 }

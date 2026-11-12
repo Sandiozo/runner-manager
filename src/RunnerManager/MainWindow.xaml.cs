@@ -338,8 +338,9 @@ public partial class MainWindow : Window
         _agentTaskChecked = true;
         try
         {
+            // The task is registered again with all of its current settings, not only the ones the check looks at.
             if (await MachineRelay.RepairAgentTaskSettingsAsync())
-                AddActivity("Updated the fleet agent task to run on battery and without the 3-day time limit.");
+                AddActivity("Updated the fleet agent task to the current settings.");
             if (await ScheduledTasks.UpdateAgentTaskIfOutdatedAsync(fromAgent: false))
                 AddActivity("Updated the fleet agent task: it now starts again by itself when it stopped.");
         }
