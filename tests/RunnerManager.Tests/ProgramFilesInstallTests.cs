@@ -914,6 +914,27 @@ public class InstallEvidenceTests
     }
 
     [Fact]
+    public async Task NothingToRecord_IsLoggedOncePerVersion()
+    {
+        using var state = new TestInstallState();
+        InstallChecks.Forget(MachineInstall.NotRecordedCheck);
+        try
+        {
+            // No task of this user with the highest rights: a copy started once with a UAC prompt, or tasks that cannot be read.
+            state.Tasks.Definitions[ScheduledTasks.AgentTaskName] = null;
+            var log = new List<string>();
+            await MachineInstall.RecordRunningInstallAsync(elevated: true, @"C:\Users\me\Downloads\RunnerManager.exe", log.Add);
+            Assert.Equal(MachineInstall.NotRecordedText(Elevation.CurrentUserName), Assert.Single(log));
+            Assert.DoesNotContain("n't", log[0]);
+            // It runs at every start with administrator rights: the line is not written again.
+            await MachineInstall.RecordRunningInstallAsync(elevated: true, @"C:\Users\me\Downloads\RunnerManager.exe", log.Add);
+            Assert.Single(log);
+            Assert.Null(MachineInstall.ReadOwnRecordRaw());
+        }
+        finally { InstallChecks.Forget(MachineInstall.NotRecordedCheck); }
+    }
+
+    [Fact]
     public async Task ARunnerWidgetInstall_IsConfirmedByItsTasks()
     {
         // Its tasks were registered with the highest rights too, under RunnerWidget's names.

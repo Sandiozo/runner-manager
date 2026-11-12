@@ -159,7 +159,8 @@ public static class MachineInstall
     /// <summary>
     /// Records the folder of an install of an earlier version once, on an elevated start, before anything takes the
     /// install folder: the folder of the exe that this user's own tasks start (see <see cref="FolderToRecord"/>), also
-    /// when this copy is not the install (a build folder or a downloaded copy). Without such a task nothing is recorded.
+    /// when this copy is not the install (a build folder or a downloaded copy). Without such a task nothing is recorded,
+    /// and that is logged once per version (see <see cref="NotRecordedText"/>).
     /// </summary>
     internal static Task RecordRunningInstallAsync(Action<string> log)
         => RecordRunningInstallAsync(ElevatedProcess.Value, Environment.ProcessPath ?? string.Empty, log);
@@ -169,7 +170,14 @@ public static class MachineInstall
         try
         {
             if (!elevated || ReadOwnRecord() != null) return;
-            if (FolderToRecord(runningExe, await OwnTaskExesAsync(), Directory.Exists) is not { } folder) return;
+            if (FolderToRecord(runningExe, await OwnTaskExesAsync(), Directory.Exists) is not { } folder)
+            {
+                // This runs at every start with administrator rights, so the line is written once per version.
+                if (InstallChecks.IsDone(NotRecordedCheck)) return;
+                log(NotRecordedText(Elevation.CurrentUserName));
+                InstallChecks.MarkDone(NotRecordedCheck);
+                return;
+            }
             WriteOwnRecord(folder);
             log($"Recorded {folder} as the install folder of Runner Manager for {Elevation.CurrentUserName}.");
         }
@@ -178,6 +186,13 @@ public static class MachineInstall
             log($"Could not record the install folder of Runner Manager: {ex.Message}");
         }
     }
+
+    internal const string NotRecordedCheck = "install-not-recorded";
+
+    /// <summary>The log line when <see cref="RecordRunningInstallAsync(bool, string, Action{string})"/> finds nothing to record.</summary>
+    internal static string NotRecordedText(string user)
+        => $"Runner Manager did not record an install folder for {user}: no scheduled task of this user with administrator " +
+           "rights starts an installed copy, or the tasks could not be read. Setup records the folder when it installs Runner Manager.";
 
     /// <summary>
     /// The exes that this user's launch, startup and fleet agent tasks start, and those of RunnerWidget's tasks (before

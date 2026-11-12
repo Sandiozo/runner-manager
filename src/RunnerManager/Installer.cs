@@ -668,18 +668,33 @@ internal static class InstallChecks
     {
         lock (Gate)
         {
-            try
-            {
-                var entries = Read();
-                entries[check] = AppUpdater.CurrentVersion;
-                Directory.CreateDirectory(FleetConfig.StateDir);
-                // Written to a temporary file first, so an interrupted write never leaves an empty file behind.
-                var temp = $"{MarkerPath}.{Environment.ProcessId}.tmp";
-                File.WriteAllLines(temp, entries.Select(e => $"{e.Key}={e.Value}"));
-                File.Move(temp, MarkerPath, overwrite: true);
-            }
-            catch { }
+            var entries = Read();
+            entries[check] = AppUpdater.CurrentVersion;
+            Write(entries);
         }
+    }
+
+    /// <summary>Forgets that a check ran, so it runs again (for tests).</summary>
+    internal static void Forget(string check)
+    {
+        lock (Gate)
+        {
+            var entries = Read();
+            if (entries.Remove(check)) Write(entries);
+        }
+    }
+
+    private static void Write(Dictionary<string, string> entries)
+    {
+        try
+        {
+            Directory.CreateDirectory(FleetConfig.StateDir);
+            // Written to a temporary file first, so an interrupted write never leaves an empty file behind.
+            var temp = $"{MarkerPath}.{Environment.ProcessId}.tmp";
+            File.WriteAllLines(temp, entries.Select(e => $"{e.Key}={e.Value}"));
+            File.Move(temp, MarkerPath, overwrite: true);
+        }
+        catch { }
     }
 
     private static Dictionary<string, string> Read()
