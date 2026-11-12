@@ -430,6 +430,12 @@ public static class Installer
         var note = string.Empty;
         if (removeData)
         {
+            // Only together with the settings: a later install would otherwise move into the registry what fleet.json holds.
+            try { AssistantSwitches.Remove(); }
+            catch (Exception ex) when (ex is UnauthorizedAccessException or System.Security.SecurityException or IOException)
+            {
+                log($"The AI assistant settings could not be removed: {ex.Message}");
+            }
             // Startup scripts that converting a runner to a service turned off exist nowhere else, so they are never deleted.
             var scripts = KeepDisabledStartupScripts(log);
             var data = FleetConfig.StateDir.Replace("'", "''");
