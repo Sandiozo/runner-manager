@@ -1270,7 +1270,8 @@ public class FullJoinTests
         await AuditFleetConfig.WithConfigAsync(() =>
         {
             InAFleet(CommandSigner.NewKey());
-            // Change fleet code, or a new code entered by hand on each PC: the code replaces the one before it.
+            // Change the fleet code on every PC: the code replaces the one before it. (A code entered by hand forgets
+            // the managed PCs: see PastedFleetCodeTests.)
             FleetConfig.SetFleetKey(CommandSigner.NewKey());
             Assert.True(KeepsTheFleet(FleetConfig.Current));
             return Task.CompletedTask;

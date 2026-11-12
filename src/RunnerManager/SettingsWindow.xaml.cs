@@ -348,7 +348,13 @@ public partial class SettingsWindow : Window
             DialogWindow.Info(this, "Invalid fleet code", "Paste the full code copied from another PC. It starts with rwk_.");
             return;
         }
-        FleetConfig.SetFleetKey(key);
+        // Cancel keeps the code this PC has, and the box with the pasted one.
+        var config = FleetConfig.Current;
+        if (CodeRowText.PasteForgetsManagedPcs(config, key)
+            && !DialogWindow.Confirm(this, CodeRowText.PasteHeading, CodeRowText.PasteMessage(config.ManagedPcs.Select(p => p.Name).ToList()),
+                CodeRowText.PasteConfirm, danger: true))
+            return;
+        FleetConfig.SetFleetKey(key, pastedFromAnotherPc: true);
         CancelPasteKey_Click(sender, e);
         await JoinWithCodeAsync();
     }
@@ -419,8 +425,10 @@ public partial class SettingsWindow : Window
     }
 
     /// <summary>
-    /// Asks the addresses that no known PC has, with the status request the fleet refresh sends there. The refresh
-    /// lists a PC that answers at such an address under the address it already had, so this is what names it.
+    /// Asks the addresses that no known PC has, with the status request the fleet refresh sends there, so the list shows
+    /// what each one answers without waiting for a refresh. A PC that answers is saved at that address
+    /// (<see cref="MachineRelay.RememberPeer"/>), and the list names it from then on; an address where none answers
+    /// shows why.
     /// </summary>
     private async Task CheckAddressesAsync(bool again)
     {
@@ -734,6 +742,14 @@ public partial class SettingsWindow : Window
     private async void AssistantToggle_Click(object sender, RoutedEventArgs e)
     {
         var enable = AssistantToggle.IsChecked == true;
+        // Before the question and before anything below changes this PC: a switch that cannot be saved changes nothing.
+        if (AssistantSwitchForm.Problem() is { } problem)
+        {
+            DialogWindow.Error(this, AssistantSwitchForm.ErrorHeading, problem);
+            UpdateAssistants();
+            return;
+        }
+        var setUp = false;
         if (enable && (FleetConfig.Current.FleetKey == null || !await MachineRelay.IsAgentRunningAsync()))
         {
             // Assistants hand their changes to this PC's fleet agent, which needs a fleet code even with only this PC.
@@ -763,8 +779,14 @@ public partial class SettingsWindow : Window
                 AssistantToggle.IsChecked = false;
                 return;
             }
+            setUp = true;
         }
-        if (!ChangeAssistants(c => c.Assistant.Enabled = enable)) return;
+        if (!ChangeSwitches(enabled: enable))
+        {
+            // The fleet code or the fleet agent may be new all the same: the dashboard shows them.
+            if (setUp) await _fleetChanged();
+            return;
+        }
         AssistantLog.Append(enable ? "Assistant access turned on." : "Assistant access turned off.");
         UpdateAssistants();
         if (enable) await _fleetChanged();
@@ -773,12 +795,24 @@ public partial class SettingsWindow : Window
     private void AssistantAskToggle_Click(object sender, RoutedEventArgs e)
     {
         var ask = AssistantAskToggle.IsChecked == true;
-        if (ChangeAssistants(c => c.Assistant.AskBeforeChanges = ask)) UpdateAssistants();
+        if (ChangeSwitches(askBeforeChanges: ask)) UpdateAssistants();
     }
 
     /// <summary>
-    /// Saves a change to the AI assistant settings. When that fails, shows why, and sets the switches back to what is
-    /// stored: "Allow AI assistants" and "Ask before changes" need administrator rights, so a click alone does not change them.
+    /// Changes "Allow AI assistants" or "Ask before changes", which need administrator rights, so a click alone does
+    /// not change them. When that fails, shows why, and sets the switches back to what is stored.
+    /// </summary>
+    private bool ChangeSwitches(bool? enabled = null, bool? askBeforeChanges = null)
+    {
+        if (AssistantSwitchForm.Set(enabled, askBeforeChanges) is not { } problem) return true;
+        DialogWindow.Error(this, AssistantSwitchForm.ErrorHeading, problem);
+        UpdateAssistants();
+        return false;
+    }
+
+    /// <summary>
+    /// Saves a change to the AI assistant settings in fleet.json (Connect by URL and its token). When that fails, shows
+    /// why, and sets the controls back to what is stored.
     /// </summary>
     private bool ChangeAssistants(Action<FleetConfig> change)
     {
@@ -789,7 +823,7 @@ public partial class SettingsWindow : Window
         }
         catch (Exception ex)
         {
-            DialogWindow.Error(this, "Could not change the AI assistant settings", ex.Message);
+            DialogWindow.Error(this, AssistantSwitchForm.ErrorHeading, ex.Message);
             UpdateAssistants();
             return false;
         }

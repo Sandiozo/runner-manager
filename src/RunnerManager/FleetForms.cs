@@ -34,8 +34,9 @@ internal static class FleetAddressRules
     /// </summary>
     /// <param name="machines">The PCs of the last fleet refresh, with a placeholder for each address where none answered.</param>
     /// <param name="answer">
-    /// What the address answered when Settings asked it: the PC, or a placeholder with the reason. The fleet refresh
-    /// lists a PC that answers there at the address it already had, so only this names it.
+    /// What the address answered when Settings asked it: the PC, or a placeholder with the reason. A PC that answers is
+    /// saved at this address then (<see cref="MachineRelay.RememberPeer"/>), so the line for a known PC names it first;
+    /// this names it only after a later refresh has moved it to another address.
     /// </param>
     internal static string Status(string address, IEnumerable<PeerRecord> knownPeers, IEnumerable<ManagedPcRecord> managedPcs,
         IReadOnlyCollection<MachineInfo> machines, MachineInfo? answer, Func<DateTime, string> lastSeen)
@@ -106,6 +107,64 @@ internal static class CodeRowText
 
     internal static string ManagedCannotChange(string managedBy)
         => $"Only {managedBy}'s fleet changes this PC's access code. To stop it from managing this PC, click Disconnect.";
+
+    /// <summary>
+    /// Whether entering <paramref name="key"/> by hand makes this PC forget the PCs it manages one way, so it asks first:
+    /// the PC has another code now, and manages PCs (see <see cref="FleetConfig.SetFleetKey"/>).
+    /// </summary>
+    internal static bool PasteForgetsManagedPcs(FleetConfig config, byte[] key)
+        => config.FleetKey is { } current && !System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(current, key)
+           && config.ManagedPcs.Count > 0;
+
+    internal const string PasteHeading = "Use the new fleet code?";
+
+    /// <param name="managed">The names of the PCs this PC manages one way.</param>
+    internal static string PasteMessage(IReadOnlyList<string> managed)
+    {
+        var one = managed.Count == 1;
+        var names = one ? $"{managed[0]} one way" : $"these PCs one way: {string.Join(", ", managed)}";
+        return $"This PC manages {names}. With another fleet code, this PC forgets {(one ? "it" : "them")}, so the fleet " +
+               $"that has the new code does not get {(one ? "its access code" : "their access codes")}. If your fleet changed " +
+               $"its code and this is the new one, {(one ? "it comes" : "they come")} back from the other PCs of the fleet.";
+    }
+
+    internal const string PasteConfirm = "Use new code";
+}
+
+/// <summary>Settings → AI assistants: "Allow AI assistants" and "Ask before changes".</summary>
+internal static class AssistantSwitchForm
+{
+    internal const string ErrorHeading = "Could not change the AI assistant settings";
+
+    /// <summary>
+    /// What helps on that page when this process may not change the switches. <see cref="AssistantSwitches.NotAdministratorText"/>
+    /// is for <c>--mcp</c> and <c>ai</c>, and points to the page itself.
+    /// </summary>
+    internal const string NotAdministratorText =
+        "Only a program with administrator rights can change this setting. Start Runner Manager as administrator to change it.";
+
+    /// <summary>
+    /// Null when this process may change the switches, otherwise what to show. Asked before anything else is done for
+    /// a switch, so that nothing on this PC changes for a switch that cannot be saved.
+    /// </summary>
+    internal static string? Problem() => AssistantSwitches.Store.CanWrite ? null : NotAdministratorText;
+
+    /// <summary>
+    /// Changes one switch or both where they are kept (<see cref="AssistantSwitches"/>), not through fleet.json: they are
+    /// not in it, so a fleet.json that cannot be read does not block them, and one that cannot be written cannot report
+    /// a failure after they changed. Null when it worked, otherwise what to show.
+    /// </summary>
+    internal static string? Set(bool? enabled = null, bool? askBeforeChanges = null)
+    {
+        if (Problem() is { } problem) return problem;
+        try
+        {
+            AssistantSwitches.Set(enabled, askBeforeChanges);
+            return null;
+        }
+        catch (UnauthorizedAccessException) { return NotAdministratorText; }
+        catch (Exception ex) { return ex.Message; }
+    }
 }
 
 /// <summary>Forgetting a PC, worded and done the same way on the dashboard and in Settings.</summary>

@@ -435,10 +435,20 @@ public sealed class FleetConfig
     /// <summary>
     /// Sets the fleet code (a new fleet, a full join, a pasted code, or Change fleet code), so this PC is no longer
     /// managed. A PC without a code that gets one starts or joins a fleet: unless it is the code removed here last, what
-    /// belonged to its earlier fleet goes (<see cref="ForgetEarlierFleet"/>). A code that replaces another keeps it: that
-    /// is the same fleet with a new code, as after Change fleet code or a code entered by hand on each PC.
+    /// belonged to its earlier fleet goes (<see cref="ForgetEarlierFleet"/>). A code that replaces another keeps the
+    /// fleet's PCs and addresses: after Change fleet code, it is the same fleet with a new code.
     /// </summary>
-    public static void SetFleetKey(byte[]? key) => Update(c =>
+    /// <param name="pastedFromAnotherPc">
+    /// The code was copied from another PC and entered here by hand (Settings → Fleet → Enter fleet code). Such a code
+    /// may be another fleet's, whose PCs would then get the access codes of the PCs this PC manages one way (see
+    /// <see cref="ShareManaged"/>). So when it differs from the code this PC has, the managed PCs are forgotten here.
+    /// Only here: they are not added to <see cref="RemovedManagedPcs"/>, which goes to the other PCs, so that a code
+    /// that is the same fleet's new code (this PC missed Change fleet code) removes nothing across the fleet, and the
+    /// managed PCs come back from the other PCs. The saved PCs and the addresses added by hand stay: the PCs of an earlier
+    /// fleet do not have the new code, so this PC and they refuse each other's requests. False for a code made on this
+    /// PC, sent by Change fleet code, or set by joining.
+    /// </param>
+    public static void SetFleetKey(byte[]? key, bool pastedFromAnotherPc = false) => Update(c =>
     {
         var before = c.FleetKey;
         if (key == null)
@@ -448,7 +458,12 @@ public sealed class FleetConfig
         }
         else
         {
-            if (before == null && CommandSigner.KeyId(key) != c.RemovedFleetKeyId) c.ForgetEarlierFleet();
+            if (before == null)
+            {
+                if (CommandSigner.KeyId(key) != c.RemovedFleetKeyId) c.ForgetEarlierFleet();
+            }
+            // A PC managed one way manages no PCs: only its access code is replaced, as before.
+            else if (pastedFromAnotherPc && !CryptographicOperations.FixedTimeEquals(before, key)) c.ManagedPcs.Clear();
             c.RemovedFleetKeyId = string.Empty;
         }
         c.ProtectedFleetKey = Protect(key);
@@ -544,8 +559,10 @@ public sealed class FleetConfig
 
     /// <summary>
     /// A PC paired one way from this PC. Replaces an earlier one-way pairing with the same name or machine ID. A fleet
-    /// member with the machine ID is the same PC paired again the other way: it is forgotten here, so the PC isn't known
-    /// both ways (commands to it would be refused). One with only the same name is kept, as the joining PC picks its name.
+    /// member with the machine ID counts as the same PC paired again the other way: it is forgotten here, so the PC is not
+    /// known both ways (commands to it would be refused). One with only the same name is kept, as the joining PC picks its
+    /// name. The ID is what the joining PC says about itself and proves nothing, so "Add a PC" warns before it allows a
+    /// PC whose name or ID is saved here, and names what it replaces (see <see cref="PairingHostWindow.CheckRequest"/>).
     /// </summary>
     /// <param name="machineId">The PC's machine ID, as its status reports it; null when the pairing did not say.</param>
     public static void AddManagedPc(string name, string address, byte[] key, string? machineId = null) => Update(c =>
