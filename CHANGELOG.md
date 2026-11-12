@@ -53,9 +53,9 @@ Runner Manager no longer starts a runner's service next to its console window.
   Manager go back to the previous version. The file is deleted when the update is no longer watched. When an update
   was undone, the file records that, and only this record, not the update state, keeps Runner Manager from updating
   the fleet agent to that version again by itself. A program of the user can still end the watch of an update through
-  the update state, so that an update whose fleet agent does not work is not undone. Versions before 2.10.0 write no such file,
-  so for 24 hours after an update from one of them, or after a setup that replaced one of them, the update state alone
-  is still enough.
+  the update state, so that an update whose fleet agent does not work is not undone. Versions before 2.10.0 write no
+  such file, so for 24 hours after an update from one of them, or after a setup that replaced one of them, the update
+  state alone is still enough.
 - Updates are prepared in a `RunnerManager.update-<number>` folder in the install folder instead of in the user's data
   folder. In Program Files, the new files cannot be changed between the checksum check and the copy without
   administrator rights. Old update folders in the install folder are removed only when they hold nothing but files and
@@ -129,8 +129,8 @@ Runner Manager no longer starts a runner's service next to its console window.
   console windows**. Both use one registration, so only one of them gets jobs. Its details say to close one of the
   console windows or to sign out of the other Windows session. It counts under **Needs attention**, gives one alert
   (with **Stuck and waiting jobs** turned on), and the other PCs and AI assistants see it too. Only console windows that
-  have both run for 2 minutes count, so a runner that restarts is not reported. Start, Stop, Restart and auto-recovery
-  work as before.
+  have both run for 2 minutes count, so a runner that restarts is not reported. It stays shown for up to 5 minutes
+  after one of the console windows was closed. Start, Stop, Restart and auto-recovery work as before.
 - Start and Restart of a runner's service are refused while a console window runs the runner, or while a startup entry
   that is turned on opens it in one when you sign in, also when no console window runs now. This holds for the
   dashboard, commands from other PCs, AI assistants, auto-recovery, and the restart after an edit or **Clean work
@@ -139,12 +139,13 @@ Runner Manager no longer starts a runner's service next to its console window.
 - A startup entry that only names files in a runner's work folder or log folder (`_work`, `_diag`), such as a
   scheduled task that deletes old logs, no longer counts as one that opens the runner. Such a task does not make a
   runner show **Runs twice**, and Runner Manager no longer turns it off with the runner's startup entries.
-- A runner's details show the account its service runs as. When its Windows service runs it and folders in its work
-  folder belong to another account, which git refuses, the details say so, and a running runner counts under **Needs
-  attention** as **Work folder owner**. A stuck job, a job that runs long, or jobs that wait for an idle runner are
-  shown before it, with **Stop the job's processes**, and it gives one alert, not one each time such a job concern
-  ends. A runner that a startup entry opens in a console window is not warned about: its folders belong to the
-  signed-in user, as they should.
+- The **Windows service** row in a runner's details is short now. Pointing at it shows the service's name and the
+  account it runs as, with a note when a console window runs the runner. Screen readers read this too. When a
+  runner's Windows service runs it and folders in its work folder belong to another account, which git refuses, the
+  details say so, and a running runner counts under **Needs attention** as **Work folder owner**. A stuck job, a job
+  that runs long, or jobs that wait for an idle runner are shown before it, with **Stop the job's processes**, and it
+  gives one alert, not one each time such a job concern ends. A runner that a startup entry opens in a console window
+  is not warned about: its folders belong to the signed-in user, as they should.
 - **Run as Windows service**, **Repair Windows service** and an edit give the work folder to the service's account,
   NETWORK SERVICE, before config.cmd installs the service, when folders in it belong to another account and the service
   runs the runner from then on. Nothing is deleted, and links in it are not followed. An edit leaves the work folder as
@@ -163,6 +164,10 @@ Runner Manager no longer starts a runner's service next to its console window.
   stays stopped. A runner in a console window is no longer left looking like the old copy of a moved runner, and its
   console window, which the move closed, opens again at the next sign-in. Its disabled service also stays disabled
   after another failed move when an earlier move failed with 2.9.0. This needs 2.10.0 on the runner's PC.
+- A move to another PC still sets the runner up there as a Windows service, also when a console window ran it on the
+  old PC or its Windows service was disabled there. The service starts with Windows, or manually when the runner was
+  set not to start automatically. The Move window now says so. To keep such a runner in a console window, turn off its
+  service on the new PC and add the startup entry there.
 - Fix: when the processes on a PC could not be read, the live output of a step that printed nothing for 5 minutes was
   no longer shown. It is shown now when Runner Manager saw earlier, while it could read the processes, that it is the
   running job's output. Otherwise the output says that the processes could not be read.
@@ -190,8 +195,9 @@ Runner Manager no longer starts a runner's service next to its console window.
   second user who has no install. Setup never puts an older version in place of one that another user runs, as far as
   their records and the scheduled tasks that setup can read show, and keeps the installed version instead. Uninstall
   and a move to another folder keep the program files while another user still uses them, and also when setup cannot
-  read the scheduled tasks that show who uses them. The record and the scheduled tasks of a Windows user whose account
-  was removed do not count, and a folder in Task Scheduler is not taken for a task.
+  read the scheduled tasks that show who uses them. The record and the scheduled tasks of a Windows user who has no
+  profile on this PC any more do not count, and a folder in Task Scheduler is not taken for a task. An account that
+  was removed without its profile still counts until the profile is deleted.
 - Setup and uninstall close only the dashboards in the Windows session that runs them.
 - Fix: when a move to another folder failed, the startup task and the fleet agent's task could still start the new
   copy, which setup then removed. Setup now points them at the old copy again and restarts the fleet agent.
@@ -202,9 +208,9 @@ Runner Manager no longer starts a runner's service next to its console window.
   restarts is refused with a message. With **Settings → Updates** or **Update** on this PC's card, the restart also
   waits for work that starts while it waits, but work that starts just before the fleet agent is stopped can still be
   cut off.
-- Fix: an update switched the fleet agent's task to the new version before the agent's work was done, which could stop
-  that work. The task is now switched when the agent restarts. When the switch fails, the PC's card shows the error as
-  the result of the update.
+- Fix: an update switched the fleet agent's task to the new version before the fleet agent's work was done, which
+  could stop that work. The task is now switched when the fleet agent restarts. When the switch fails, the PC's card
+  shows the error as the result of the update.
 - When the fleet agent cannot restart to finish an update, for example because PowerShell cannot be started, it keeps
   running the version it has, takes commands again, and the PC's card says why.
 
