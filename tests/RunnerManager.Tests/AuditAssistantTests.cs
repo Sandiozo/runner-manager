@@ -631,6 +631,19 @@ public class AuditAssistantTests
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => patient.SendAsync(Initialize, cancellationToken: gone.Token)).WaitAsync(TimeSpan.FromSeconds(30));
     }
 
+    [Fact]
+    public async Task ARequestWithoutAValidToken_IsToldAboutTheConnectByUrlToken_NotAnAccessCode()
+    {
+        using var server = StartEndpoint(out var url, out _);
+        using var http = new HttpClient();
+        using var response = await PostMcpAsync(http, url, "not-a-token", Ping);
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+        Assert.Contains(AssistantHttpServer.MissingTokenText, JsonNode.Parse(await response.Content.ReadAsStringAsync())!["error"]!["message"]!.GetValue<string>());
+        // The word Settings uses for it. "Access code" is a managed PC's own code.
+        Assert.StartsWith("Missing or wrong Connect by URL token.", AssistantHttpServer.MissingTokenText);
+        Assert.DoesNotContain("access", AssistantHttpServer.MissingTokenText, StringComparison.OrdinalIgnoreCase);
+    }
+
     /// <summary>
     /// The agent is on this PC. A proxy from Windows' settings, or from the environment an AI tool starts its
     /// programs with, would get the token and every request.

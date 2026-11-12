@@ -15,7 +15,7 @@ namespace RunnerManager;
 /// <item><c>RunnerManager.exe --mcp</c> and <c>ai</c>, started by AI tools, forward to it after showing with DPAPI that
 /// they run as the same Windows user (see <see cref="LocalSignIn"/>). This also works when an AI tool runs them in a
 /// sandbox with its own copy of %LOCALAPPDATA%.</item>
-/// <item>AI tools that connect by URL use the access token from Settings → AI assistants, while that is turned on.</item>
+/// <item>AI tools that connect by URL use the Connect by URL token from Settings → AI assistants, while that is turned on.</item>
 /// </list>
 /// Most answers are plain JSON. A tool call is answered as an event stream when the client accepts one: progress
 /// while it works, then the result, with keep-alives in between, so a call of several minutes does not look stuck.
@@ -92,6 +92,13 @@ public sealed class AssistantHttpServer : IDisposable
     /// than this, the client is told to sign in again, which it does by itself. Tests shorten it.
     /// </summary>
     internal TimeSpan UnusedSignInLifetime { get; init; } = TimeSpan.FromMinutes(2);
+
+    /// <summary>
+    /// The answer to a request without a valid token. "Token" is the word Settings uses for Connect by URL; the access
+    /// code is something else (a managed PC's own code).
+    /// </summary>
+    internal const string MissingTokenText = "Missing or wrong Connect by URL token. Turn on Connect by URL in Runner Manager → Settings → AI assistants, " +
+                                             "and copy the setup from there.";
 
     /// <param name="port">Another port, for tests.</param>
     /// <param name="host">"localhost" for tests, which run without administrator rights.</param>
@@ -184,7 +191,7 @@ public sealed class AssistantHttpServer : IDisposable
             {
                 response.AddHeader("WWW-Authenticate", "Bearer");
                 await ReplyAsync(response, 401, McpServer.Error(null, -32001,
-                    "Missing or wrong access token. Turn on Connect by URL in Runner Manager → Settings → AI assistants, and copy the setup from there."));
+                    MissingTokenText));
                 return;
             }
             // Shows a signed-in client, on every answer from here on, that the answer comes from its agent.
