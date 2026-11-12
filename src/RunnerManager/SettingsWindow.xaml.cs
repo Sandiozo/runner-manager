@@ -760,7 +760,7 @@ public partial class SettingsWindow : Window
                 return;
             }
         }
-        FleetConfig.Update(c => c.Assistant.Enabled = enable);
+        if (!ChangeAssistants(c => c.Assistant.Enabled = enable)) return;
         AssistantLog.Append(enable ? "Assistant access turned on." : "Assistant access turned off.");
         UpdateAssistants();
         if (enable) await _fleetChanged();
@@ -768,27 +768,46 @@ public partial class SettingsWindow : Window
 
     private void AssistantAskToggle_Click(object sender, RoutedEventArgs e)
     {
-        FleetConfig.Update(c => c.Assistant.AskBeforeChanges = AssistantAskToggle.IsChecked == true);
-        UpdateAssistants();
+        var ask = AssistantAskToggle.IsChecked == true;
+        if (ChangeAssistants(c => c.Assistant.AskBeforeChanges = ask)) UpdateAssistants();
+    }
+
+    /// <summary>
+    /// Saves a change to the AI assistant settings. When that fails, shows why, and sets the switches back to what is
+    /// stored: "Allow AI assistants" and "Ask before changes" need administrator rights, so a click alone does not change them.
+    /// </summary>
+    private bool ChangeAssistants(Action<FleetConfig> change)
+    {
+        try
+        {
+            FleetConfig.Update(change);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            DialogWindow.Error(this, "Could not change the AI assistant settings", ex.Message);
+            UpdateAssistants();
+            return false;
+        }
     }
 
     private void AssistantHttpToggle_Click(object sender, RoutedEventArgs e)
     {
         var on = AssistantHttpToggle.IsChecked == true;
-        FleetConfig.Update(c =>
-        {
-            c.Assistant.HttpEnabled = on;
-            if (on && c.Assistant.HttpToken.Length == 0) c.Assistant.ProtectedHttpToken = AssistantOptions.ProtectToken(AssistantHttpServer.NewToken());
-        });
-        UpdateAssistants();
+        if (ChangeAssistants(c =>
+            {
+                c.Assistant.HttpEnabled = on;
+                if (on && c.Assistant.HttpToken.Length == 0) c.Assistant.ProtectedHttpToken = AssistantOptions.ProtectToken(AssistantHttpServer.NewToken());
+            }))
+            UpdateAssistants();
     }
 
     private void AssistantNewToken_Click(object sender, RoutedEventArgs e)
     {
         if (!DialogWindow.Confirm(this, "Create a new token?",
                 "AI tools that use the current token cannot connect until you give them the new one.", "New token", danger: true)) return;
-        FleetConfig.Update(c => c.Assistant.ProtectedHttpToken = AssistantOptions.ProtectToken(AssistantHttpServer.NewToken()));
-        UpdateAssistants();
+        if (ChangeAssistants(c => c.Assistant.ProtectedHttpToken = AssistantOptions.ProtectToken(AssistantHttpServer.NewToken())))
+            UpdateAssistants();
     }
 
     // ----- Updates -----
