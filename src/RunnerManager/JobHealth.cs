@@ -227,8 +227,7 @@ public static class JobHealth
     {
         var key = Key(runner);
         var subject = runner.JobStartedUtc is { } workerStarted ? $"{runner.CommandKey}@{workerStarted.Ticks}" : null;
-        var current = active?.FirstOrDefault(j => j.RunnerId != 0 && j.RunnerId == runner.AgentId
-                                                  && j.Status.Equals("in_progress", StringComparison.OrdinalIgnoreCase));
+        var current = active == null ? null : GitHubApi.RunningJobOf(active, runner.AgentId, runner.AgentName, runner.JobStartedUtc);
         KnownJob? known;
         lock (KnownJobs) known = KnownJobs.GetValueOrDefault(key);
         var sameWorker = known != null && runner.JobStartedUtc == known.WorkerStartedUtc;

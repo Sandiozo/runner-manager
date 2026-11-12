@@ -125,7 +125,7 @@ public static partial class RunnerService
             remote = await GitHubCli.GetRunnerStateAsync(scope, config.AgentId);
             // Job and queue details come from a repository's workflow runs, so they only exist for repository runners.
             if (!string.IsNullOrWhiteSpace(repoPath))
-                work = await GitHubApi.GetRunnerWorkAsync(repoPath, config.AgentId, remote?.Labels ?? Array.Empty<string>());
+                work = await GitHubApi.GetRunnerWorkAsync(repoPath, config.AgentId, remote?.Labels ?? Array.Empty<string>(), config.AgentName);
         }
         var workFolder = ResolveWorkFolder(root, config.WorkFolder);
 

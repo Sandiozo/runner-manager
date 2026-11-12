@@ -502,6 +502,65 @@ public class AuditRunnerTests
     }
 
     [Fact]
+    public async Task BusyRunner_IsNotGivenTheJob_OfAnotherRunnerWithTheSameId_OrAJobItGaveUp()
+    {
+        var now = DateTime.UtcNow;
+        var worker = now.AddMinutes(-30);
+        var machine = Pc("PC-MATCH", Runner("audit/match", 14, busy: true, workerStarted: worker));
+        var key = JobHealth.Key(machine.Runners[0]);
+        // An organization runner with the same ID, and a job this runner gave up when its PC restarted, both started 5 hours ago.
+        var organizationJob = new GitHubJobState
+        {
+            Id = 504, Name = "nightly", WorkflowName = "Nightly", Status = "in_progress", RunnerId = 14, RunnerName = "org-gpu",
+            StartedUtc = now.AddHours(-5), Labels = new[] { "self-hosted" }
+        };
+        var givenUp = new GitHubJobState
+        {
+            Id = 505, Name = "nightly", WorkflowName = "Nightly", Status = "in_progress", RunnerId = 14, RunnerName = "r14",
+            StartedUtc = now.AddHours(-5), Labels = new[] { "self-hosted" }
+        };
+        var current = new GitHubJobState
+        {
+            Id = 506, Name = "build", WorkflowName = "CI", Status = "in_progress", RunnerId = 14, RunnerName = "r14",
+            StartedUtc = worker, Labels = new[] { "self-hosted" }
+        };
+
+        // Only the organization runner's job is listed: it is not this runner's, whose own job is not listed yet.
+        var onlyOther = await JobHealth.EvaluateAsync(new[] { machine }, Quiet, null, Reads(_ => Work(organizationJob), _ => null), now);
+        Assert.False(onlyOther.Runners[key].IsProblem);
+
+        var all = await JobHealth.EvaluateAsync(new[] { machine }, Quiet, null,
+            Reads(_ => Work(organizationJob, givenUp, current), _ => null, () => (true, TimeSpan.FromMinutes(5))), now);
+        var health = all.Runners[key];
+        Assert.Equal(RunnerConcern.RunningLong, health.Concern);
+        Assert.Contains("usually takes 5 min", health.Detail);
+        Assert.Contains("run for 30 min", health.Detail);
+    }
+
+    [Theory]
+    [InlineData(null, 506L)]
+    [InlineData(-30, 506L)]
+    [InlineData(-300, 505L)]
+    public void RunningJob_IsTheOneThatStartedClosestToTheWorker_OrTheNewest(int? workerMinutes, long expected)
+    {
+        var now = DateTime.UtcNow;
+        var jobs = new[]
+        {
+            new GitHubJobState { Id = 505, Status = "in_progress", RunnerId = 14, RunnerName = "r14", StartedUtc = now.AddHours(-5) },
+            new GitHubJobState { Id = 506, Status = "in_progress", RunnerId = 14, RunnerName = "r14", StartedUtc = now.AddMinutes(-30) },
+            new GitHubJobState { Id = 507, Status = "in_progress", RunnerId = 14, RunnerName = "org-gpu", StartedUtc = now.AddMinutes(-1) },
+            new GitHubJobState { Id = 508, Status = "queued", RunnerId = 0 }
+        };
+
+        var job = GitHubApi.RunningJobOf(jobs, 14, "R14", workerMinutes is { } minutes ? now.AddMinutes(minutes) : null);
+
+        Assert.Equal(expected, job!.Id);
+        // Without a name to compare (an older caller, or GitHub gives none), the ID alone counts.
+        Assert.Equal(507, GitHubApi.RunningJobOf(jobs, 14)!.Id);
+        Assert.Null(GitHubApi.RunningJobOf(jobs, 0));
+    }
+
+    [Fact]
     public async Task UnservedJob_IsReported_OnlyWhenItWasMeantForTheFleet()
     {
         var now = DateTime.UtcNow;

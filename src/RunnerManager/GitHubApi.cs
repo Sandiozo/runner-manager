@@ -30,15 +30,15 @@ public static class GitHubApi
         => GitHubCli.ProblemFor(GitHubNames.IsRepositoryPath(repositoryPath) ? $"repos/{repositoryPath}" : null);
 
     /// <returns>The runner's current job and queue, or null when GitHub could not be read.</returns>
+    /// <param name="runnerName">The runner's name, so a job of another runner with the same ID is not taken (see <see cref="RunningJobOf"/>).</param>
     public static async Task<RunnerWorkState?> GetRunnerWorkAsync(
-        string repositoryPath, long runnerId, IEnumerable<string> customLabels)
+        string repositoryPath, long runnerId, IEnumerable<string> customLabels, string? runnerName = null)
     {
         var state = await GetRepositoryWorkAsync(repositoryPath);
         if (state == null) return null;
         var labels = RunnerLabels.Available(customLabels);
 
-        var current = state.Jobs.FirstOrDefault(j =>
-            j.Status.Equals("in_progress", StringComparison.OrdinalIgnoreCase) && j.RunnerId == runnerId);
+        var current = RunningJobOf(state.Jobs, runnerId, runnerName);
         // Longest wait first, so the job named as next is the one that waited longest.
         var queued = state.Jobs.Where(j =>
                 j.Status.Equals("queued", StringComparison.OrdinalIgnoreCase) && RunnerLabels.CanRun(j.Labels, labels))
@@ -61,12 +61,37 @@ public static class GitHubApi
     /// The job a runner is running now, with its steps. Read is false when GitHub could not be read; Job is null when
     /// GitHub does not (yet) report a running job for this runner. Shares the few-second cache of the queue view.
     /// </summary>
-    public static async Task<(bool Read, GitHubJobState? Job)> GetCurrentJobAsync(string repositoryPath, long runnerId)
+    /// <param name="runnerName">The runner's name, and <paramref name="workerStartedUtc"/> when its Runner.Worker
+    /// started: they tell the right job apart from another one with the same runner ID (see <see cref="RunningJobOf"/>).</param>
+    public static async Task<(bool Read, GitHubJobState? Job)> GetCurrentJobAsync(string repositoryPath, long runnerId,
+        string? runnerName = null, DateTime? workerStartedUtc = null)
     {
         var state = await GetRepositoryWorkAsync(repositoryPath);
         if (state == null) return (false, null);
-        return (true, state.Jobs.FirstOrDefault(j =>
-            j.Status.Equals("in_progress", StringComparison.OrdinalIgnoreCase) && j.RunnerId == runnerId));
+        return (true, RunningJobOf(state.Jobs, runnerId, runnerName, workerStartedUtc));
+    }
+
+    /// <summary>
+    /// The job that GitHub lists as running on a runner, among a repository's jobs.
+    /// - Runner IDs are numbered per repository and per organization, so an organization runner that runs a job of the
+    ///   repository can have the same ID as the repository's own runner. When GitHub and the caller both give the
+    ///   runner's name, it must match too.
+    /// - GitHub keeps listing a job as running for a while after its runner gave it up (the runner or the PC was
+    ///   restarted), also when the runner already runs its next job. Of several, the job that started closest to the
+    ///   runner's Runner.Worker is taken, or else the one that started last.
+    /// </summary>
+    internal static GitHubJobState? RunningJobOf(IEnumerable<GitHubJobState> jobs, long runnerId, string? runnerName = null,
+        DateTime? workerStartedUtc = null)
+    {
+        if (runnerId <= 0) return null;
+        var running = jobs.Where(j => j.RunnerId == runnerId && j.Status.Equals("in_progress", StringComparison.OrdinalIgnoreCase)
+                                      && (string.IsNullOrEmpty(runnerName) || j.RunnerName.Length == 0
+                                          || j.RunnerName.Equals(runnerName, StringComparison.OrdinalIgnoreCase)))
+            .ToList();
+        if (running.Count <= 1) return running.FirstOrDefault();
+        return workerStartedUtc is { } worker
+            ? running.MinBy(j => j.StartedUtc is { } started ? Math.Abs((started - worker).Ticks) : long.MaxValue)
+            : running.MaxBy(j => j.StartedUtc ?? DateTime.MinValue);
     }
 
     /// <summary>The jobs of a repository's queued and running workflow runs, or null when GitHub could not be read.</summary>
