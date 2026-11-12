@@ -180,6 +180,9 @@ Runner Manager no longer starts a runner's service next to its console window.
   stays stopped. A runner in a console window is no longer left looking like the old copy of a moved runner, and its
   console window, which the move closed, opens again at the next sign-in. Its disabled service also stays disabled
   after another failed move when an earlier move failed with 2.9.0. This needs 2.10.0 on the runner's PC.
+- When a move fails and the runner's PC runs a version before 2.10.0, a runner that a console window ran or whose
+  Windows service was disabled stays stopped there, and its service is not started. Runner Manager now says so, and to
+  update Runner Manager on that PC and then start the runner there as before.
 - A move to another PC still sets the runner up there as a Windows service, also when a console window ran it on the
   old PC or its Windows service was disabled there. The service starts with Windows, or manually when the runner was
   set not to start automatically. The Move window now says so. To keep such a runner in a console window, turn off its
