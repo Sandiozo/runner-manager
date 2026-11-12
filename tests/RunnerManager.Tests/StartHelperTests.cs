@@ -801,6 +801,67 @@ public class StartHelperEnsureTests
     }
 
     [Fact]
+    public async Task ACheckThatWaitsForTheLock_WhileAnotherProcessPutsTheStartHelperBack_NeitherSaysSoNorGivesItUp()
+    {
+        using var state = new TestInstallState();
+        using var seams = new Seams(Bytes);
+        using var folder = new HelperFolder(helper: false);
+        state.Tasks.Definitions[ScheduledTasks.LaunchTaskName] = InstallEvidenceTests.TaskOf(Me, folder.Helper);
+        // The fleet agent and the dashboard saw it missing at the same moment. The other one holds the update lock and
+        // puts it back while this check waits for the lock.
+        var putBack = 0;
+        Launcher.UnderUpdateLock = (_, write) =>
+        {
+            if (putBack++ == 0)
+            {
+                InstallChecks.MarkDone(Launcher.RepairedCheck);
+                File.WriteAllBytes(folder.Helper, Bytes);
+            }
+            return write();
+        };
+        var log = new List<string>();
+
+        Assert.True(await Launcher.EnsureAsync(folder.Path, afterInstall: false, log.Add));
+        Assert.Empty(log);
+        Assert.False(Launcher.RunsWithout(folder.Path));
+        Assert.Equal(Bytes, File.ReadAllBytes(folder.Helper));
+
+        // The other one had already marked it as put back once before this check looked: still not a second removal.
+        folder.RemoveHelper();
+        putBack = 0;
+        Assert.True(await Launcher.EnsureAsync(folder.Path, afterInstall: false, log.Add));
+        Assert.Empty(log);
+        Assert.False(Launcher.RunsWithout(folder.Path));
+
+        // Removed again with no one putting it back: given up, as before.
+        folder.RemoveHelper();
+        Launcher.UnderUpdateLock = (_, write) => write();
+        Assert.False(await Launcher.EnsureAsync(folder.Path, afterInstall: false, log.Add));
+        Assert.Equal(Launcher.OffLogText($"{Launcher.FileName} was removed again after it was put back"), Assert.Single(log));
+    }
+
+    [Fact]
+    public async Task WhileAnUpdateHoldsTheLock_AMissingStartHelperIsNotCountedAsPutBack()
+    {
+        using var state = new TestInstallState();
+        using var seams = new Seams(Bytes);
+        using var folder = new HelperFolder(helper: false);
+        state.Tasks.Definitions[ScheduledTasks.LaunchTaskName] = InstallEvidenceTests.TaskOf(Me, folder.Helper);
+        Launcher.UnderUpdateLock = (_, _) => null;
+        var log = new List<string>();
+
+        Assert.False(await Launcher.EnsureAsync(folder.Path, afterInstall: false, log.Add));
+        Assert.Empty(log);
+        Assert.False(InstallChecks.IsDone(Launcher.RepairedCheck));
+
+        // The update is done: the next check puts it back, once.
+        Launcher.UnderUpdateLock = (_, write) => write();
+        Assert.True(await Launcher.EnsureAsync(folder.Path, afterInstall: false, log.Add));
+        Assert.Contains(log, line => line.StartsWith($"{Launcher.FileName} was missing from {folder.Path}", StringComparison.Ordinal));
+        Assert.False(Launcher.RunsWithout(folder.Path));
+    }
+
+    [Fact]
     public async Task AStartHelperRemovedRightAfterItWasWritten_TurnsItOffForThisVersion()
     {
         using var state = new TestInstallState();
