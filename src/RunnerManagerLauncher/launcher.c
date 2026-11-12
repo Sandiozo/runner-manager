@@ -22,9 +22,10 @@
  *
  * The child's arguments are the launcher's command line after its own program name, unchanged. Its current folder is
  * the launcher's folder (System32 when that folder is too long for Windows to start a process in). The launcher waits
- * for the child and exits with the child's exit code. It shows no window, writes no file or registry value and opens no
- * network connection. It has the rights it was started with and gives the child the same: started without
- * administrator rights, it starts the app without them (CreateProcessW passes the launcher's own token on).
+ * for the child and exits with the child's exit code; at sign-out Windows ends it after the child (see Run). It shows
+ * no window, writes no file or registry value and opens no network connection. It has the rights it was started with
+ * and gives the child the same: started without administrator rights, it starts the app without them (CreateProcessW
+ * passes the launcher's own token on).
  *
  * Exit codes of the launcher itself. Task Scheduler shows them in hex. Runner Manager's own exit codes are 0, 1 and 2,
  * so a child's code is not mistaken for one of these.
@@ -716,6 +717,12 @@ static DWORD Run(void)
     /* DLLs loaded while the launcher runs (shell32 loads some on demand) come from System32 only, never from the
        launcher's folder. The DLLs in the import table are limited the same way by /DEPENDENTLOADFLAG:0x800. */
     if (!SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32)) { result = EXIT_DLL_SEARCH; goto done; }
+
+    /* At sign-out Windows ends processes from the highest shutdown level to the lowest, and those of one level in any
+       order. Every process starts at 0x280. At 0x100, the lowest an application may use, the launcher is ended after
+       the app, so its job (PutInJob) cannot end the app before the app has been sent WM_ENDSESSION. A failure changes
+       nothing else, so it is ignored. */
+    (void)SetProcessShutdownParameters(0x100, 0);
 
     if ((result = ReadOwnPath(&ownPath, &ownLength)) != 0) goto done;
     folderLength = ownLength;

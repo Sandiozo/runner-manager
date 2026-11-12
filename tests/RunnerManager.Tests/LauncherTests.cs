@@ -526,8 +526,8 @@ public class LauncherTests
                 "AssignProcessToJobObject", "CloseHandle", "CompareStringOrdinal", "CreateJobObjectW", "CreateProcessW", "ExitProcess",
                 "GetCommandLineW", "GetCurrentProcess", "GetEnvironmentVariableW", "GetExitCodeProcess", "GetLastError",
                 "GetModuleFileNameW", "GetProcessHeap", "GetSystemDirectoryW", "GetSystemWindowsDirectoryW", "HeapAlloc", "HeapFree",
-                "ResumeThread", "SetDefaultDllDirectories", "SetEnvironmentStringsW", "SetInformationJobObject", "TerminateProcess",
-                "WaitForSingleObject",
+                "ResumeThread", "SetDefaultDllDirectories", "SetEnvironmentStringsW", "SetInformationJobObject",
+                "SetProcessShutdownParameters", "TerminateProcess", "WaitForSingleObject",
             ],
             ["ADVAPI32.dll"] = ["GetTokenInformation", "LookupAccountSidW", "OpenProcessToken"],
             ["USERENV.dll"] = ["CreateEnvironmentBlock", "DestroyEnvironmentBlock", "GetUserProfileDirectoryW"],
@@ -632,6 +632,10 @@ public class LauncherTests
         Assert.True(At("ReplaceOwnEnvironment") < At("CreateEnvironmentBlock"));
         Assert.True(At("CreateEnvironmentBlock") < At("AddIdentity"));
         Assert.True(At("CreateEnvironmentBlock") < At("AddModulePath"));   // it compares with the system block's value
+        // At sign-out the launcher is ended after the app (the lowest shutdown level of an application), set before the
+        // app is started. Which process Windows ends first cannot be tested without signing out.
+        Assert.True(At("SetProcessShutdownParameters") < At("CreateProcessW"));
+        Assert.Matches(@"\bSetProcessShutdownParameters\(0x100, 0\)", code[run.Start..run.End]);
 
         // The system block without the launcher's environment, and the app started with the block built from it.
         Assert.Single(Regex.Matches(code, @"\bCreateEnvironmentBlock\s*\("));
