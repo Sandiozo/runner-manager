@@ -1145,7 +1145,7 @@ public class AuditAssistantTests
     /// <c>RunnerManager.exe ai</c> with its output read by another program, the way an AI tool runs it. The text has
     /// characters outside ASCII ("→" here), which must arrive as UTF-8.
     /// </summary>
-    [Fact]
+    [ChildProcessFact]
     public async Task CommandLine_WritesUtf8_WhenAnotherProgramReadsItsOutput()
     {
         var exe = Path.Combine(AppContext.BaseDirectory, AppPaths.ExeName);
@@ -1242,12 +1242,11 @@ public class AuditAssistantTests
     private static StringContent Json(string body) => new(body, Encoding.UTF8, "application/json");
 
     private static List<string> AgentLogLines(string text)
-        => File.Exists(MachineRelay.AgentLogPath) ? File.ReadLines(MachineRelay.AgentLogPath).Where(line => line.Contains(text, StringComparison.Ordinal)).ToList() : new List<string>();
+        => TestLogs.AgentLog().Split('\n').Select(line => line.TrimEnd('\r')).Where(line => line.Contains(text, StringComparison.Ordinal)).ToList();
 
     private static AssistantHttpServer StartEndpoint(out string url, out int port)
     {
-        port = TestPorts.FreeRange(1);
-        var server = new AssistantHttpServer(port, "localhost");
+        var server = FreePorts.AssistantEndpoint(out port);
         _ = server.RunAsync();
         url = $"http://localhost:{port}/mcp";
         return server;

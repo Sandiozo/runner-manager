@@ -249,7 +249,7 @@ public class UpdateMarkerTests
 
             Assert.False(UpdateGuard.Counts(Planted, exe, Now));
             Assert.Null(UpdateGuard.Load().Pending);
-            Assert.Contains(UpdateGuard.NotCountedText("2.11.0", folder), File.ReadAllText(MachineRelay.AgentLogPath));
+            Assert.Contains(UpdateGuard.NotCountedText("2.11.0", folder), TestLogs.AgentLog());
 
             File.WriteAllText(statePath, System.Text.Json.JsonSerializer.Serialize(new UpdateState { Pending = Planted }));
             UpdateGuard.WritePendingMarker(exe, "2.11.0");

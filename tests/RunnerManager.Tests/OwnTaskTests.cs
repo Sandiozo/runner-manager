@@ -23,12 +23,11 @@ public class OwnTaskTests
     /// <summary>What the test wrote to the fleet agent's log since <paramref name="from"/> (see <see cref="LogLength"/>).</summary>
     private static string LogSince(long from)
     {
-        if (!File.Exists(MachineRelay.AgentLogPath)) return string.Empty;
-        var text = File.ReadAllText(MachineRelay.AgentLogPath);
+        var text = TestLogs.AgentLog();
         return from <= text.Length ? text[(int)from..] : text;
     }
 
-    private static long LogLength() => File.Exists(MachineRelay.AgentLogPath) ? File.ReadAllText(MachineRelay.AgentLogPath).Length : 0;
+    private static long LogLength() => TestLogs.AgentLog().Length;
 
     private sealed class Folder : IDisposable
     {

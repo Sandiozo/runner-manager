@@ -613,9 +613,10 @@ public class ConfirmedMessageTests
     public async Task ThePc_KeepsItsCode_OnlyWhenTheHostItselfAnswersDone(string answer)
     {
         var key = CommandSigner.NewKey();
-        var port = TestPorts.FreeRange(1);
-        var listener = new TcpListener(IPAddress.Loopback, port);
+        // Windows picks a free port as the listener binds it, so no other test can take it in between.
+        var listener = new TcpListener(IPAddress.Loopback, 0);
         listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
         try
         {
             // A host that waits for "confirmed", by hand.

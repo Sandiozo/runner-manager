@@ -277,4 +277,61 @@ internal static class FreePorts
             }
         }
     }
+
+    /// <summary>
+    /// Starts an AI assistant endpoint on localhost through <see cref="Listen"/>. Its own start only logs a port that it
+    /// could not get and tries again 30 seconds later, so a port that another test took in between is seen here and
+    /// another port is tried. Throws when the endpoint does not listen after the last try.
+    /// </summary>
+    public static AssistantHttpServer AssistantEndpoint(out int port, Func<McpServer>? newServer = null)
+    {
+        var chosen = 0;
+        var server = Listen(1, free => new AssistantHttpServer(chosen = free, "localhost", newServer), endpoint =>
+        {
+            endpoint.Start();
+            if (!endpoint.IsListening)
+                throw new System.Net.HttpListenerException(32, $"The AI assistant endpoint could not listen on port {chosen}.");
+        });
+        port = chosen;
+        return server;
+    }
+}
+
+/// <summary>The logs that tests read while Runner Manager may write them.</summary>
+internal static class TestLogs
+{
+    /// <summary>
+    /// The fleet agent's log, or empty without one. It is opened so that a test or the code under test can still write
+    /// it meanwhile, and rotate it.
+    /// </summary>
+    public static string AgentLog()
+    {
+        try
+        {
+            using var stream = new FileStream(MachineRelay.AgentLogPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            using var reader = new StreamReader(stream);
+            return reader.ReadToEnd();
+        }
+        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException) { return string.Empty; }
+    }
+}
+
+/// <summary>
+/// A test that starts a copy of the built RunnerManager.exe. With administrator rights that copy ignores
+/// RUNNER_MANAGER_STATE_DIR, as Runner Manager does, and would use the real data folder of the user who runs the tests.
+/// So the test runs only without administrator rights, or on a runner that GitHub hosts, which is new for each job;
+/// otherwise it is skipped, with the reason.
+/// </summary>
+public sealed class ChildProcessFactAttribute : FactAttribute
+{
+    public ChildProcessFactAttribute()
+    {
+        if (Problem is { } problem) Skip = problem;
+    }
+
+    internal static string? Problem
+        => Elevation.IsElevated && Environment.GetEnvironmentVariable("RUNNER_ENVIRONMENT") != "github-hosted"
+            ? "This test starts RunnerManager.exe, which with administrator rights would use the real data folder of this user. " +
+              "Run the tests without administrator rights to run it."
+            : null;
 }
