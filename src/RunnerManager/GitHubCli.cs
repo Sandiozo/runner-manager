@@ -22,7 +22,7 @@ public static class GitHubCli
     {
         get
         {
-            var installed = @"C:\Program Files\GitHub CLI\gh.exe";
+            var installed = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "GitHub CLI", "gh.exe");
             return File.Exists(installed) ? installed
                 : FindOnPath("gh.exe", Environment.GetEnvironmentVariable("PATH"), AppContext.BaseDirectory, Environment.CurrentDirectory) ?? installed;
         }
@@ -236,7 +236,8 @@ public static class GitHubCli
     /// How <see cref="LaunchInConsole"/> starts <paramref name="gh"/>: in cmd.exe with /d, so the AutoRun commands in the
     /// registry (which any program of the user can set in HKCU) do not run in the console that Runner Manager opens.
     /// The console stays open after Runner Manager exits, so its current folder is the system folder: the install folder,
-    /// which Runner Manager starts in, could not be removed or updated while the console is open.
+    /// which Runner Manager starts in, could not be removed or updated while the console is open. gh opens the GitHub
+    /// sign-in page through Explorer (GH_BROWSER), so the browser does not get Runner Manager's administrator rights.
     /// </summary>
     internal static ProcessStartInfo ConsoleStartInfo(string gh, string arguments)
     {
@@ -248,8 +249,15 @@ public static class GitHubCli
             WorkingDirectory = Environment.SystemDirectory
         };
         PrepareEnvironment(startInfo, environmentToken: false);
+        startInfo.Environment["GH_BROWSER"] = BrowserForGh;
         return startInfo;
     }
+
+    /// <summary>
+    /// Explorer's full path for GH_BROWSER, with forward slashes: gh splits the value as a shell does, where a backslash
+    /// escapes the next character. Windows takes forward slashes in a path as well.
+    /// </summary>
+    internal static string BrowserForGh => WindowsTools.Explorer.Replace('\\', '/');
 
     /// <summary>
     /// The app only supports github.com, so GH_HOST (which sends gh api calls to another host) is always cleared. The
