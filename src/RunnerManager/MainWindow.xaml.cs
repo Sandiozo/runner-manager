@@ -144,9 +144,28 @@ public partial class MainWindow : Window
     /// </summary>
     internal static bool HoldsThisPcBack(bool operationRunning, bool onOtherPcOnly) => operationRunning && !onOtherPcOnly;
 
-    /// <summary>Waits until a fleet read that is still running has ended (it never throws).</summary>
-    private Task WaitForFleetReadAsync()
-        => _fleetRead is { IsCompleted: false } read ? read.ContinueWith(_ => { }, TaskScheduler.Default) : Task.CompletedTask;
+    /// <summary>How long joining or leaving the fleet waits for a fleet read that started before.</summary>
+    internal static readonly TimeSpan FleetReadWait = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// Waits until a fleet read that is still running has ended, at most <see cref="FleetReadWait"/>: a read that does
+    /// not end would leave Join or Leave running with no way to cancel it. It never throws.
+    /// </summary>
+    private async Task WaitForFleetReadAsync()
+    {
+        if (!await WaitForReadAsync(_fleetRead, () => Task.Delay(FleetReadWait)))
+            AddActivity("A fleet read that started before did not end within 30 seconds. Going on without it.", ActivityKind.Warning);
+    }
+
+    /// <summary>
+    /// Waits until <paramref name="read"/> has ended, or <paramref name="limit"/> has (started only when the read still
+    /// runs). True when the read ended or was not running. It never throws, also when the read failed.
+    /// </summary>
+    internal static async Task<bool> WaitForReadAsync(Task? read, Func<Task> limit)
+    {
+        if (read is not { IsCompleted: false }) return true;
+        return await Task.WhenAny(read, limit()) == read;
+    }
 
     /// <summary>
     /// Reads the fleet and this PC's runners and shows them. The GitHub sign-in is checked beside it

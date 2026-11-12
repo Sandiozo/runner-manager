@@ -121,6 +121,38 @@ public class AuditR4DashboardTests
         Assert.Empty(MainWindow.NewProblemAlerts(new[] { pc }, reported));
     }
 
+    // ----- 7: Join and Leave wait for a fleet read at most 30 seconds -----
+
+    [Fact]
+    public async Task JoinOrLeave_WaitsForAFleetReadAtMostItsLimit()
+    {
+        Assert.Equal(TimeSpan.FromSeconds(30), MainWindow.FleetReadWait);
+        // The limit stands in for the 30 seconds.
+        var never = new TaskCompletionSource();
+
+        // A read that does not end: the wait ends when the limit has passed.
+        var stuck = new TaskCompletionSource<List<MachineInfo>>();
+        var limit = new TaskCompletionSource();
+        var wait = MainWindow.WaitForReadAsync(stuck.Task, () => limit.Task);
+        Assert.False(wait.IsCompleted);
+        limit.SetResult();
+        Assert.False(await wait);
+
+        // A read that ends first, also when it fails.
+        var read = new TaskCompletionSource<List<MachineInfo>>();
+        wait = MainWindow.WaitForReadAsync(read.Task, () => never.Task);
+        Assert.False(wait.IsCompleted);
+        read.SetException(new System.IO.IOException("The network is not reachable."));
+        Assert.True(await wait);
+
+        // No read runs: nothing to wait for, and the limit is not started.
+        var limitStarted = false;
+        Task Limit() { limitStarted = true; return never.Task; }
+        Assert.True(await MainWindow.WaitForReadAsync(null, Limit));
+        Assert.True(await MainWindow.WaitForReadAsync(Task.CompletedTask, Limit));
+        Assert.False(limitStarted);
+    }
+
     // ----- 10: a sign-in check that failed -----
 
     [Fact]
