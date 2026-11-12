@@ -409,33 +409,57 @@ public static class AppUpdater
         }
     }
 
-    /// <summary>Where this process prepares an update: a folder of its own inside the install folder.</summary>
-    internal static string StagingFolder(string installDir, int processId) => Path.Combine(installDir, $"update-{processId}");
+    /// <summary>
+    /// Where this process prepares an update: a folder of its own inside the install folder, with a name that only
+    /// Runner Manager uses, because a folder chosen in setup may also hold the user's own folders.
+    /// </summary>
+    internal static string StagingFolder(string installDir, int processId) => Path.Combine(installDir, $"{StagingPrefix}{processId}");
 
     /// <summary>Whether a folder name is one that <see cref="StagingFolder"/> gives.</summary>
     internal static bool IsStagingFolderName(string name) => StagingName.IsMatch(name);
 
-    private static readonly Regex StagingName = new(@"^update-\d+$", RegexOptions.IgnoreCase);
+    private const string StagingPrefix = "RunnerManager.update-";
+    private static readonly Regex StagingName = new(@"^RunnerManager\.update-\d+$", RegexOptions.IgnoreCase);
+    /// <summary>The download folders of versions up to 2.9.0, in the data folder.</summary>
+    private const string OldStagingPrefix = "update-";
+    private static readonly Regex OldStagingName = new(@"^update-\d+$", RegexOptions.IgnoreCase);
+
+    private static void RemoveStaleStagingFolders() => RemoveStaleStagingFolders(InstallDir, FleetConfig.StateDir, IsProcessRunning);
 
     /// <summary>
-    /// Removes download folders left by processes that have exited: in the install folder, and in the data folder, where
-    /// versions up to 2.9.0 prepared updates.
+    /// Removes download folders left by processes that have exited: <see cref="StagingFolder"/>'s in the install folder,
+    /// and update-&lt;number&gt; in the data folder, where versions up to 2.9.0 prepared updates. A program of the user
+    /// can change the data folder, and this runs with administrator rights, so nothing is followed or deleted through a
+    /// reparse point (a junction or link): a download folder only ever holds files, and one that holds anything else, or
+    /// is a reparse point itself, is left as it is.
     /// </summary>
-    private static void RemoveStaleStagingFolders()
+    internal static void RemoveStaleStagingFolders(string installDir, string dataDir, Func<int, bool> isRunning)
     {
-        foreach (var parent in new[] { InstallDir, FleetConfig.StateDir })
+        RemoveStale(installDir, StagingPrefix, StagingName, isRunning);
+        RemoveStale(dataDir, OldStagingPrefix, OldStagingName, isRunning);
+    }
+
+    private static void RemoveStale(string parent, string prefix, Regex name, Func<int, bool> isRunning)
+    {
+        try
         {
-            try
+            var folder = new DirectoryInfo(parent);
+            if (!folder.Exists || folder.Attributes.HasFlag(FileAttributes.ReparsePoint)) return;
+            foreach (var staging in folder.EnumerateDirectories(prefix + "*"))
             {
-                foreach (var folder in Directory.EnumerateDirectories(parent, "update-*"))
+                if (!name.IsMatch(staging.Name) || staging.Attributes.HasFlag(FileAttributes.ReparsePoint)) continue;
+                if (int.TryParse(staging.Name[prefix.Length..], out var id) && isRunning(id)) continue;
+                try
                 {
-                    if (!IsStagingFolderName(Path.GetFileName(folder))) continue;
-                    if (int.TryParse(Path.GetFileName(folder)["update-".Length..], out var id) && IsProcessRunning(id)) continue;
-                    try { Directory.Delete(folder, recursive: true); } catch { }
+                    var entries = staging.EnumerateFileSystemInfos().ToList();
+                    if (entries.Any(e => e is DirectoryInfo || e.Attributes.HasFlag(FileAttributes.ReparsePoint))) continue;
+                    foreach (var file in entries) file.Delete();
+                    staging.Delete(recursive: false);
                 }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
             }
-            catch { }
         }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException) { }
     }
 
     private static bool IsProcessRunning(int id)

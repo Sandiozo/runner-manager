@@ -252,14 +252,76 @@ public class ProgramFilesInstallTests
     public void Updates_ArePreparedInsideTheInstallFolder_NotInTheUsersDataFolder()
     {
         var staging = AppUpdater.StagingFolder(ProgramFiles, 4242);
-        Assert.Equal(Path.Combine(ProgramFiles, "update-4242"), staging);
+        Assert.Equal(Path.Combine(ProgramFiles, "RunnerManager.update-4242"), staging);
         Assert.True(MachineInstall.IsInside(staging, ProgramFiles));
         Assert.False(MachineInstall.IsInside(AppUpdater.StagingFolder(MachineInstall.ProgramFilesDir, 1), FleetConfig.StateDir));
         Assert.True(AppUpdater.IsStagingFolderName(Path.GetFileName(staging)));
         // The clean-up after a multi-file build leaves another process's update alone, and only that.
         Assert.False(AppUpdater.IsStagingFolderName("runtimes"));
-        Assert.False(AppUpdater.IsStagingFolderName("update-x"));
-        Assert.False(AppUpdater.IsStagingFolderName("update-1.old"));
+        Assert.False(AppUpdater.IsStagingFolderName("update-1"));
+        Assert.False(AppUpdater.IsStagingFolderName("RunnerManager.update-x"));
+    }
+
+    [Fact]
+    public void StaleUpdateFolders_AreRemoved_OnlyWithTheirOwnNames_AndNeverThroughALink()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"rm-staging-{Guid.NewGuid():N}");
+        var install = Path.Combine(root, "Apps");
+        var data = Path.Combine(root, "data");
+        var elsewhere = Path.Combine(root, "elsewhere");
+        string Folder(string parent, string name, bool withFile = true)
+        {
+            var folder = Path.Combine(parent, name);
+            Directory.CreateDirectory(folder);
+            if (withFile) File.WriteAllText(Path.Combine(folder, AppPaths.ExeName), "x");
+            return folder;
+        }
+        try
+        {
+            Folder(elsewhere, "target");
+            // A folder chosen in setup may hold the user's own folders, such as one named update-2024.
+            var own = Folder(install, "update-2024");
+            var stale = Folder(install, "RunnerManager.update-111");
+            var running = Folder(install, "RunnerManager.update-222");
+            // The data folder of versions up to 2.9.0, which a program of the user can change.
+            var oldStale = Folder(data, "update-333");
+            var link = Path.Combine(data, "update-444");
+            var holdsLink = Folder(data, "update-555", withFile: false);
+            Junction(link, Path.Combine(elsewhere, "target"));
+            Junction(Path.Combine(holdsLink, "inner"), Path.Combine(elsewhere, "target"));
+
+            AppUpdater.RemoveStaleStagingFolders(install, data, id => id == 222);
+
+            Assert.True(File.Exists(Path.Combine(own, AppPaths.ExeName)));
+            Assert.False(Directory.Exists(stale));
+            Assert.True(Directory.Exists(running));
+            Assert.False(Directory.Exists(oldStale));
+            // Nothing was deleted through a link.
+            Assert.True(File.Exists(Path.Combine(elsewhere, "target", AppPaths.ExeName)));
+            Assert.True(Directory.Exists(holdsLink));
+        }
+        finally
+        {
+            // Links first, so the clean-up of the test never follows one.
+            foreach (var junction in new[] { Path.Combine(data, "update-444"), Path.Combine(data, "update-555", "inner") })
+                if (Directory.Exists(junction)) Directory.Delete(junction);
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static void Junction(string link, string target)
+    {
+        var start = new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "cmd.exe"))
+        {
+            ArgumentList = { "/c", "mklink", "/J", link, target },
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true
+        };
+        using var process = Process.Start(start)!;
+        process.StandardOutput.ReadToEnd();
+        Assert.True(process.WaitForExit(30_000));
+        Assert.True(new DirectoryInfo(link).Attributes.HasFlag(FileAttributes.ReparsePoint), $"No junction at {link}");
     }
 
     [Fact]
