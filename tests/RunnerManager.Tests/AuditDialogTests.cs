@@ -269,6 +269,23 @@ public class AuditDialogTests
         Assert.Equal(("OFFICE", "OFFICE"), AddRunnerForm.PcLabel(Pc("OFFICE")));
     }
 
+    [Fact]
+    public void PcPicker_SaysWhyTheDashboardsPcIsMissing_AlsoWhenOnlyThisPcCanBeChosen()
+    {
+        var thisPc = Pc(Environment.MachineName);
+        var offline = Pc("OFFICE", online: false);
+        Assert.Equal("OFFICE is not in the list: it is offline, or its Runner Manager is too old to add runners from here.",
+            AddRunnerForm.MissingPcHint(offline, AddRunnerForm.TargetPcs(new[] { thisPc, offline, Pc("LAB") })));
+        // No picker: the window adds the runner on this PC, and says so.
+        Assert.Equal("OFFICE cannot be chosen: it is offline, or its Runner Manager is too old to add runners from here. The runner is added on this PC.",
+            AddRunnerForm.MissingPcHint(offline, AddRunnerForm.TargetPcs(new[] { thisPc, offline })));
+        Assert.EndsWith("The runner is added on this PC.", AddRunnerForm.MissingPcHint(Pc("OLD", protocol: 8), Array.Empty<MachineInfo>()));
+
+        Assert.Null(AddRunnerForm.MissingPcHint(null, new[] { thisPc }));
+        Assert.Null(AddRunnerForm.MissingPcHint(thisPc, new[] { thisPc }));
+        Assert.Null(AddRunnerForm.MissingPcHint(Pc("LAB"), AddRunnerForm.TargetPcs(new[] { thisPc, Pc("LAB") })));
+    }
+
     [Theory]
     [InlineData("")]
     [InlineData("  ")]

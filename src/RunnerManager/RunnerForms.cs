@@ -138,6 +138,20 @@ internal static class AddRunnerForm
             .OrderByDescending(m => m.IsLocal).ThenBy(m => m.MachineName, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
+    /// <summary>
+    /// What to say when the PC selected on the dashboard cannot be chosen: it is offline, or its fleet agent cannot
+    /// create runners. Null when it can be chosen, or is this PC. Without a picker (only this PC can be chosen), it also
+    /// says where the runner goes.
+    /// </summary>
+    internal static string? MissingPcHint(MachineInfo? selectedPc, IReadOnlyCollection<MachineInfo> targets)
+    {
+        if (selectedPc is not { IsLocal: false } || targets.Any(m => m.MachineKey == selectedPc.MachineKey)) return null;
+        const string reason = "it is offline, or its Runner Manager is too old to add runners from here.";
+        if (targets.Count > 1) return $"{selectedPc.MachineName} is not in the list: {reason}";
+        var addedOn = targets.FirstOrDefault() is { IsLocal: false } only ? only.MachineName : "this PC";
+        return $"{selectedPc.MachineName} cannot be chosen: {reason} The runner is added on {addedOn}.";
+    }
+
     /// <summary>The PC as the picker shows it, and as screen readers read it.</summary>
     internal static (string Label, string AccessibleName) PcLabel(MachineInfo pc)
         => pc.IsLocal ? ($"{pc.MachineName} (this PC)", $"{pc.MachineName}, this PC") : (pc.MachineName, pc.MachineName);
