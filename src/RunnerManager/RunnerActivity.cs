@@ -167,11 +167,19 @@ public static class RunnerActivity
     }
 
     /// <summary>The last lines of the running step's output, without timestamps and color codes. None when the runner runs no job.</summary>
-    internal static string[] ReadOutput(string root, int lines)
+    internal static string[] ReadOutput(string root, int lines) => ReadOutput(root, lines, () => ProcessSnapshot.Read(WorkerName));
+
+    /// <param name="readWorkers">Reads the PC's Runner.Worker processes; tests replace it.</param>
+    internal static string[] ReadOutput(string root, int lines, Func<ProcessSnapshot> readWorkers)
     {
         ProcessSnapshot workers;
-        try { workers = ProcessSnapshot.Read(WorkerName); }
-        catch (Exception ex) when (ex is ManagementException or System.Runtime.InteropServices.COMException) { return Array.Empty<string>(); }
+        try { workers = readWorkers(); }
+        catch (Exception ex) when (ex is ManagementException or System.Runtime.InteropServices.COMException or UnauthorizedAccessException)
+        {
+            // Without the process list it is unknown whether a job runs and when it started, so the newest page is
+            // shown. Most often it is the running step's; between jobs it can be the last step of an earlier one.
+            return ReadLines(CurrentOutputFile(root), lines);
+        }
         return ReadOutput(root, lines, workers);
     }
 
@@ -182,7 +190,11 @@ public static class RunnerActivity
         // Without a job, files in _diag\pages are left over from an earlier one (a page the runner did not upload).
         if (workers.Count == 0) return Array.Empty<string>();
         var workerStarted = workers.Select(p => ParseStarted(p.Started)).Where(s => s != null).Min();
-        var file = CurrentOutputFile(root, OutputNotBefore(workerStarted));
+        return ReadLines(CurrentOutputFile(root, OutputNotBefore(workerStarted)), lines);
+    }
+
+    private static string[] ReadLines(OutputFile? file, int lines)
+    {
         if (file == null) return Array.Empty<string>();
         try { return CleanLines(ReadTail(file.Path, 64 * 1024)).TakeLast(lines).ToArray(); }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return Array.Empty<string>(); }

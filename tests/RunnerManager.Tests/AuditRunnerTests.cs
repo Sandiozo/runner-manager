@@ -315,6 +315,21 @@ public class AuditRunnerTests
     public void ProcessArguments_LeaveOutPasswordsAfterPw_AndOfMorePrograms(string commandLine, string expected)
         => Assert.Equal(expected, RunnerActivity.ShortArguments(commandLine));
 
+    [Fact]
+    public void JobLog_ShowsTheNewestPage_WhenTheProcessListCannotBeRead()
+    {
+        var root = NewRunnerRoot();
+        try
+        {
+            WritePage(root, "a_1.log", "2026-10-19T12:00:00.0000000Z Compiling…\n", DateTime.UtcNow.AddHours(-2));
+
+            var lines = RunnerActivity.ReadOutput(root, 10, () => throw new System.Runtime.InteropServices.COMException("WMI is not available."));
+
+            Assert.Equal(new[] { "Compiling…", "" }, lines);
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
     /// <summary>
     /// A web server on this PC that answers one request with headers for a large file and then sends a byte every
     /// <paramref name="byteEvery"/>, or nothing more when it is null.
