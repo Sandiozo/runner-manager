@@ -180,6 +180,15 @@ public class AuditR4DashboardTests
         Assert.Equal((false, ""), MainWindow.WorkflowCheckAfterRemoteAdd(asked: true, "", signedIn: true));
     }
 
+    // ----- 11: the job panel before the first sign-in check has answered -----
+
+    [Theory]
+    [InlineData(false, false, "Checking the GitHub connection…")]
+    [InlineData(true, false, "Connect GitHub to see the job and its steps.")]
+    [InlineData(true, true, null)]
+    public void JobPanel_AsksToConnectGitHub_OnlyAfterTheCheckFoundNoSignIn(bool signInChecked, bool signedIn, string? note)
+        => Assert.Equal(note, MainWindow.JobNoteWithoutSignIn(signInChecked, signedIn));
+
     // ----- 10: a sign-in check that failed -----
 
     [Fact]
