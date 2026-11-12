@@ -236,5 +236,5 @@ public sealed class FleetActions
     /// config.cmd installs runner services, so turning a service on again leaves it as it was installed.
     /// </summary>
     internal static string StartMode(bool enabled, bool manualStart)
-        => !enabled ? ServiceStart.Disabled : manualStart ? ServiceStart.Manual : "delayed-auto";
+        => !enabled ? ServiceStart.Disabled : manualStart ? ServiceStart.Manual : ServiceStart.Automatic;
 }
