@@ -1,5 +1,7 @@
 using System.ComponentModel;
+using System.Globalization;
 using System.IO;
+using System.Text;
 using System.Windows;
 using System.Windows.Input;
 using System.Windows.Threading;
@@ -16,7 +18,10 @@ public partial class PairingHostWindow : Window
     private readonly Queue<Pairing.JoinRequest> _pending = new();
     private readonly DispatcherTimer _expiry = new() { Interval = OpenFor };
     private Pairing.JoinRequest? _current;
-    /// <summary>Whether the request on screen can be allowed: not for a PC with this PC's name or machine ID.</summary>
+    /// <summary>
+    /// Whether the request on screen can be allowed: not for a PC with this PC's name or machine ID, or with characters
+    /// in its name that cannot be seen.
+    /// </summary>
     private bool _canAllow;
     /// <summary>This PC's machine ID, read before the window takes requests; empty when it is not known.</summary>
     private string _thisPcId = string.Empty;
@@ -145,14 +150,25 @@ public partial class PairingHostWindow : Window
         if (IsKeyboardFocusWithin) Keyboard.ClearFocus();
     }
 
-    /// <summary>
-    /// Shows what the window knows against the request, and turns Allow off for a PC that cannot be added. Shown again
-    /// when the PCs allowed but not added yet change, as they are part of it.
-    /// </summary>
-    private void ShowCheck(Pairing.JoinRequest request)
+    /// <summary>The check of the request on screen, as it is shown.</summary>
+    private RequestCheck? _shownCheck;
+
+    /// <summary>The request checked against this PC, the PCs saved here and the PCs allowed but not added yet.</summary>
+    private RequestCheck Check(Pairing.JoinRequest request)
     {
         var allowed = _sending.Keys.Where(r => r != request).Select(r => (r.Name, r.MachineId)).ToList();
-        var check = CheckRequest(FleetConfig.Current, request.Name, request.MachineId, allowed, Environment.MachineName, _thisPcId);
+        return CheckRequest(FleetConfig.Current, request.Name, request.MachineId, allowed, Environment.MachineName, _thisPcId);
+    }
+
+    /// <summary>
+    /// Shows what the window knows against the request, and turns Allow off for a PC that cannot be added. Shown again
+    /// when the PCs allowed but not added yet change, as they are part of it, and when Allow finds that it changed.
+    /// </summary>
+    /// <param name="check">The check of <paramref name="request"/>; made here when null.</param>
+    private void ShowCheck(Pairing.JoinRequest request, RequestCheck? check = null)
+    {
+        check ??= Check(request);
+        _shownCheck = check;
         SameNameText.Text = check.Warning ?? string.Empty;
         SameNamePanel.Visibility = check.Warning != null ? Visibility.Visible : Visibility.Collapsed;
         _canAllow = check.CanAllow;
@@ -167,9 +183,9 @@ public partial class PairingHostWindow : Window
     internal sealed record RequestCheck(string? Warning, bool CanAllow);
 
     /// <summary>
-    /// Checks a request against this PC and the PCs saved here. A PC with this PC's name or machine ID cannot be added.
-    /// One whose name or machine ID belongs to a saved PC, or to a PC allowed a moment ago that is not added yet, takes
-    /// that PC's place once it is added, so the warning names that PC.
+    /// Checks a request against this PC and the PCs saved here. A PC with this PC's name or machine ID, or with characters
+    /// in its name that cannot be seen, cannot be added. One whose name or machine ID belongs to a saved PC, or to a PC
+    /// allowed a moment ago that is not added yet, takes that PC's place once it is added, so the warning names that PC.
     /// </summary>
     /// <param name="allowed">The PCs allowed in this window that are not added yet, with their machine IDs.</param>
     /// <param name="thisPcId">This PC's machine ID; empty when it is not known.</param>
@@ -179,6 +195,14 @@ public partial class PairingHostWindow : Window
         var pending = allowed.ToList();
         if (MachineRelay.Sanitize(name) == MachineRelay.Sanitize(thisPc))
             return new RequestCheck(SameNameWarning(config, name, machineId, thisPc), CanAllow: false);
+        // Such a name looks like another one, of a saved PC or of this PC, and the fleet keeps them apart.
+        if (name.EnumerateRunes().Any(IsInvisible))
+        {
+            var shown = VisiblePart(name).Trim();
+            if (shown.Length == 0) shown = "the PC that asks";
+            return new RequestCheck($"The name of {shown} contains characters that cannot be seen, so {shown} cannot be added. " +
+                                    "Rename the PC in Windows first.", CanAllow: false);
+        }
         // A copied disk keeps the machine ID, and the fleet cannot tell such a PC from this one.
         if (machineId is { Length: > 0 } && thisPcId.Length > 0 && machineId.Equals(thisPcId, StringComparison.OrdinalIgnoreCase))
             return new RequestCheck($"{name} sends the machine ID of this PC, so the fleet cannot tell the two PCs apart, and {name} cannot be added. " +
@@ -189,32 +213,68 @@ public partial class PairingHostWindow : Window
     }
 
     /// <summary>
-    /// What to tell the user when a joining PC sends the machine ID of a PC saved here under another name. Once added,
-    /// it takes the place of that PC, as a PC that was renamed. The ID is what the PC says about itself, and other
-    /// devices on the network can see it, so the warning names the PC that would be replaced. Null otherwise.
+    /// A character that cannot be seen in a name: a format or control character, a line or paragraph separator, a
+    /// combining mark, or a Hangul filler (a letter that shows as nothing).
+    /// </summary>
+    internal static bool IsInvisible(Rune rune)
+        => Rune.GetUnicodeCategory(rune) is UnicodeCategory.Format or UnicodeCategory.Control or UnicodeCategory.LineSeparator
+               or UnicodeCategory.ParagraphSeparator or UnicodeCategory.NonSpacingMark or UnicodeCategory.EnclosingMark
+           || rune.Value is 0x115F or 0x1160 or 0x3164 or 0xFFA0;
+
+    /// <summary>The name without the characters that cannot be seen, for messages.</summary>
+    internal static string VisiblePart(string name)
+        => string.Concat(name.EnumerateRunes().Where(r => !IsInvisible(r)).Select(r => r.ToString()));
+
+    /// <summary>
+    /// Whether two names count as one for the warnings: as Runner Manager keys them (<see cref="MachineRelay.Sanitize"/>),
+    /// or in Unicode normalization form KC, so that a decomposed and a composed form of one name (A with a combining
+    /// macron, and Ā), or full-width letters, count as one name. Saving and the block on this PC's name use the key only.
+    /// Letters of other alphabets that look alike (a Cyrillic О for a Latin O) still count as other names.
+    /// </summary>
+    internal static bool SameNameForWarning(string a, string b)
+        => MachineRelay.Sanitize(a) == MachineRelay.Sanitize(b) || MachineRelay.Sanitize(FormKC(a)) == MachineRelay.Sanitize(FormKC(b));
+
+    private static string FormKC(string name)
+    {
+        try { return name.Normalize(NormalizationForm.FormKC); }
+        // Not valid Unicode (a lone surrogate, for example): compared as it is.
+        catch (ArgumentException) { return name; }
+    }
+
+    /// <summary>
+    /// What to tell the user when a joining PC sends the machine ID of PCs saved here under another name. Once added,
+    /// it takes the place of each of them, as a PC that was renamed. The ID is what the PC says about itself, and other
+    /// devices on the network can see it, so the warning names every PC that would be replaced. Null otherwise.
     /// </summary>
     internal static string? SameIdWarning(FleetConfig config, string name, string? machineId, IEnumerable<(string Name, string? MachineId)>? allowed = null)
     {
         if (machineId is not { Length: > 0 }) return null;
-        var key = MachineRelay.Sanitize(name);
         bool UnderAnotherName(string otherName, string? otherId)
-            => otherId is { Length: > 0 } && otherId.Equals(machineId, StringComparison.OrdinalIgnoreCase) && MachineRelay.Sanitize(otherName) != key;
-        string Replaces(string other, string what)
-            => $"{name} says it is {other}, {what}, with a new name. If you allow it, it takes the place of {other}. Allow only if {other} was renamed to {name}.";
-        if (config.KnownPeers.FirstOrDefault(p => UnderAnotherName(p.Name, p.MachineId)) is { } peer)
-            return Replaces(peer.Name, "a PC in this fleet");
-        if (config.ManagedPcs.FirstOrDefault(p => UnderAnotherName(p.Name, p.MachineId)) is { } managed)
-            return Replaces(managed.Name, "a PC that this fleet manages one way");
-        foreach (var pc in allowed ?? [])
-            if (UnderAnotherName(pc.Name, pc.MachineId))
-                return Replaces(pc.Name, "which was allowed a moment ago");
-        return null;
+            => otherId is { Length: > 0 } && otherId.Equals(machineId, StringComparison.OrdinalIgnoreCase) && !SameNameForWarning(otherName, name);
+        var replaced = config.KnownPeers.Where(p => UnderAnotherName(p.Name, p.MachineId)).Select(p => (p.Name, What: "a PC in this fleet", Short: "in this fleet"))
+            .Concat(config.ManagedPcs.Where(p => UnderAnotherName(p.Name, p.MachineId))
+                .Select(p => (p.Name, What: "a PC that this fleet manages one way", Short: "managed one way")))
+            .Concat((allowed ?? []).Where(p => UnderAnotherName(p.Name, p.MachineId))
+                .Select(p => (p.Name, What: "which was allowed a moment ago", Short: "allowed a moment ago")))
+            .ToList();
+        if (replaced.Count == 0) return null;
+        if (replaced.Count == 1)
+        {
+            var other = replaced[0].Name;
+            return $"{name} says it is {other}, {replaced[0].What}, with a new name. If you allow it, it takes the place of {other}. " +
+                   $"Allow only if {other} was renamed to {name}.";
+        }
+        var list = replaced.Select(p => $"{p.Name} ({p.Short})").ToArray();
+        return $"{name} sends the machine ID that these PCs have: {string.Join(", ", list[..^1])} and {list[^1]}. " +
+               $"If you allow it, it takes the place of each of them. Allow only if one of them was renamed to {name}.";
     }
 
     /// <summary>
     /// What to tell the user when the name of a joining PC is taken here already. The joining PC chooses its name, and
-    /// a PC that is saved takes the place of the one saved under that name. Null when the name is free, or when the PC
-    /// sent the machine ID of the PC that has the name: then it is that PC, joining again.
+    /// a PC that is saved takes the place of the one saved under that name. A machine ID proves nothing: it travels in
+    /// clear, so any device on the network can send the ID of a saved PC. So a taken name is always warned about. When
+    /// the PC sends the ID of the PC with the name, the warning says that it says it is that PC, and what allowing it
+    /// replaces. Null when the name is free.
     /// </summary>
     /// <param name="machineId">The joining PC's machine ID, or null from a PC that sends none.</param>
     /// <param name="thisPc">The name of this PC; tests give one.</param>
@@ -224,22 +284,40 @@ public partial class PairingHostWindow : Window
     internal static string? SameNameWarning(FleetConfig config, string name, string? machineId, string? thisPc = null,
         IEnumerable<(string Name, string? MachineId)>? allowed = null)
     {
-        var key = MachineRelay.Sanitize(name);
-        // A saved PC without an ID (it has an older agent, or was not reached yet) cannot be told to be the same PC.
-        bool IsAnother(string knownName, string knownId)
-            => MachineRelay.Sanitize(knownName) == key
-               && (machineId == null || !knownId.Equals(machineId, StringComparison.OrdinalIgnoreCase));
         // Never the same PC, whatever ID it sends.
-        if (key == MachineRelay.Sanitize(thisPc ?? Environment.MachineName))
+        if (MachineRelay.Sanitize(name) == MachineRelay.Sanitize(thisPc ?? Environment.MachineName))
             return $"This PC is also named {name}. Two PCs in one fleet cannot have the same name. Rename one of them in Windows first.";
-        if (config.KnownPeers.Any(p => IsAnother(p.Name, p.MachineId)))
-            return $"A PC named {name} is already in this fleet. Allow only if this is the same PC.";
-        if (config.ManagedPcs.Any(p => IsAnother(p.Name, p.MachineId)))
-            return $"This fleet already manages a PC named {name}. Allow only if this is the same PC.";
-        // An older PC sends no ID: then the two cannot be told apart either.
-        if ((allowed ?? []).Any(p => IsAnother(p.Name, p.MachineId ?? string.Empty)))
-            return $"A PC named {name} was allowed a moment ago and is not added yet. Allow only if this is the same PC.";
-        return null;
+        var id = machineId is { Length: > 0 } ? machineId : null;
+        // The PCs that have the name, and the one of them that has the ID the PC sends. A saved PC without an ID (it
+        // has an older agent, or was not reached yet) never has it, and neither does an older PC that sends none.
+        (string? Named, string? WithId) Taken(IEnumerable<(string Name, string? MachineId)> pcs)
+        {
+            var named = pcs.Where(p => SameNameForWarning(p.Name, name)).ToList();
+            var withId = id == null ? null : named.FirstOrDefault(p => id.Equals(p.MachineId, StringComparison.OrdinalIgnoreCase)).Name;
+            return (named.Count > 0 ? named[0].Name : null, withId);
+        }
+        const string saysItIs = "and the PC that asks says it is that PC";
+        var warnings = new List<string>();
+        var member = Taken(config.KnownPeers.Select(p => (p.Name, (string?)p.MachineId)));
+        if (member.WithId is { } samePeer)
+            // "Manage it one way" forgets a fleet member with the ID (FleetConfig.AddManagedPc).
+            warnings.Add($"A PC named {name} is already in this fleet, {saysItIs}. If you allow it, it replaces the saved {samePeer}. " +
+                         "Allowed one way, it stops being a fleet member here. Allow only if this is the same PC.");
+        else if (member.Named != null)
+            warnings.Add($"A PC named {name} is already in this fleet. Allow only if this is the same PC.");
+        var managed = Taken(config.ManagedPcs.Select(p => (p.Name, (string?)p.MachineId)));
+        if (managed.WithId is { } sameManaged)
+            warnings.Add($"This fleet already manages a PC named {name}, {saysItIs}. If you allow it, it replaces the saved {sameManaged}. " +
+                         "Allow only if this is the same PC.");
+        else if (managed.Named != null)
+            warnings.Add($"This fleet already manages a PC named {name}. Allow only if this is the same PC.");
+        var pending = Taken(allowed ?? []);
+        if (pending.WithId != null)
+            warnings.Add($"A PC named {name} was allowed a moment ago and is not added yet, {saysItIs}. " +
+                         "If you allow it too, the one that is added last replaces the other. Allow only if this is the same PC.");
+        else if (pending.Named != null)
+            warnings.Add($"A PC named {name} was allowed a moment ago and is not added yet. Allow only if this is the same PC.");
+        return warnings.Count > 0 ? string.Join("\n\n", warnings) : null;
     }
 
     private void Next()
@@ -276,6 +354,18 @@ public partial class PairingHostWindow : Window
     private void Allow_Click(object sender, RoutedEventArgs e)
     {
         if (_current is not { } request || AllowButton.IsEnabled != true || !_canAllow) return;
+        // The saved PCs can change while the request is on screen (the fleet agent syncs them, or another window saves
+        // one), and the user allows what the window shows. When the check differs now, the new one is shown first.
+        var check = Check(request);
+        if (check != _shownCheck)
+        {
+            ShowCheck(request, check);
+            if (check.CanAllow)
+                AllowNoteText.Text = check.Warning != null
+                    ? "The warning above changed. Read it, then click Allow again."
+                    : "The warning no longer applies. Click Allow again to allow.";
+            return;
+        }
         if (ManagedAccessOption.IsChecked == true)
         {
             if (!request.CanBeManaged) return;
@@ -317,7 +407,7 @@ public partial class PairingHostWindow : Window
         _confirming.Remove(request);
         if (_sending.Remove(request, out var ownCode) && ownCode != null)
         {
-            // With its machine ID, a fleet member that is the same PC is forgotten, so the PC is not known both ways.
+            // A fleet member with its machine ID is forgotten, as the warning before Allow said, so the PC is not known both ways.
             try { FleetConfig.AddManagedPc(request.Name, FleetNetwork.WithPort(request.Address), ownCode, request.MachineId); }
             catch (Exception ex) when (request.Confirms)
             {

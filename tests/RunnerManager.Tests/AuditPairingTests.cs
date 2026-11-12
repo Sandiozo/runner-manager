@@ -811,11 +811,16 @@ public class JoinerMachineIdTests
     }
 
     [Fact]
-    public void AddAPc_DoesNotWarn_WhenThePcOfThatNameJoinsAgain()
+    public void AddAPc_Warns_AlsoWhenThePcSendsTheMachineIdOfThePcOfThatName()
     {
-        Assert.Null(Warning("OFFICE-PC", Id));
-        Assert.Null(Warning("OFFICE-PC", Id.ToUpperInvariant()));
-        Assert.Null(Warning("GUEST-PC", "aaaa1111"));
+        // The ID travels in clear, so any device can send it: it proves nothing.
+        const string member = "A PC named OFFICE-PC is already in this fleet, and the PC that asks says it is that PC. " +
+                              "If you allow it, it replaces the saved OFFICE-PC. Allowed one way, it stops being a fleet member here. " +
+                              "Allow only if this is the same PC.";
+        Assert.Equal(member, Warning("OFFICE-PC", Id));
+        Assert.Equal(member, Warning("OFFICE-PC", Id.ToUpperInvariant()));
+        Assert.Equal("This fleet already manages a PC named GUEST-PC, and the PC that asks says it is that PC. " +
+                     "If you allow it, it replaces the saved GUEST-PC. Allow only if this is the same PC.", Warning("GUEST-PC", "aaaa1111"));
     }
 
     [Theory]
@@ -836,11 +841,14 @@ public class JoinerMachineIdTests
     [Fact]
     public void AddAPc_Warns_WhenAnotherPcOfThatNameIsKnownToo()
     {
-        // The ID is the one of the fleet's PC of that name, but a managed PC has the name as well.
+        // The ID is the one of the fleet's PC of that name, but a managed PC has the name as well: both are named.
         var fleet = Fleet();
         fleet.ManagedPcs.Add(new ManagedPcRecord { Name = "OFFICE-PC", MachineId = "bbbb2222" });
 
-        Assert.Equal("This fleet already manages a PC named OFFICE-PC. Allow only if this is the same PC.",
+        Assert.Equal("A PC named OFFICE-PC is already in this fleet, and the PC that asks says it is that PC. " +
+                     "If you allow it, it replaces the saved OFFICE-PC. Allowed one way, it stops being a fleet member here. " +
+                     "Allow only if this is the same PC.\n\n" +
+                     "This fleet already manages a PC named OFFICE-PC. Allow only if this is the same PC.",
             PairingHostWindow.SameNameWarning(fleet, "OFFICE-PC", Id, thisPc: "HOST-PC"));
     }
 

@@ -421,8 +421,10 @@ public class AuditDialogTests
         // Older PCs send no ID, so they cannot be told apart.
         Assert.Equal(warning, CheckJoin("LAPTOP", null, ("laptop", null)).Warning);
         Assert.Equal(warning, CheckJoin("LAPTOP", "1111", ("LAPTOP", null)).Warning);
-        // The same PC asking again, and another name.
-        Assert.Null(CheckJoin("LAPTOP", "1111", ("LAPTOP", "1111")).Warning);
+        // The PC says it is the one allowed a moment ago, which proves nothing; another name gets no warning.
+        Assert.Equal("A PC named LAPTOP was allowed a moment ago and is not added yet, and the PC that asks says it is that PC. " +
+                     "If you allow it too, the one that is added last replaces the other. Allow only if this is the same PC.",
+            CheckJoin("LAPTOP", "1111", ("LAPTOP", "1111")).Warning);
         Assert.Null(CheckJoin("LAPTOP", "1111", ("DESKTOP", "2222")).Warning);
         Assert.Null(CheckJoin("LAPTOP", null).Warning);
     }
@@ -457,9 +459,10 @@ public class AuditDialogTests
             CheckJoin("LAPTOP", OfficeId.ToUpperInvariant()));
         Assert.StartsWith("LAPTOP says it is GUEST-PC, a PC that this fleet manages one way, with a new name.", CheckJoin("LAPTOP", "AAAA1111").Warning);
         Assert.StartsWith("LAPTOP says it is DESKTOP, which was allowed a moment ago, with a new name.", CheckJoin("LAPTOP", "3333", ("DESKTOP", "3333")).Warning);
-        // The PC that has the name and the ID, joining again.
-        Assert.Null(CheckJoin("OFFICE-PC", OfficeId).Warning);
-        Assert.Null(CheckJoin("office_pc", OfficeId).Warning);
+        // The PC that has the name and the ID: only the warning for the name, which says what it replaces.
+        Assert.StartsWith("A PC named OFFICE-PC is already in this fleet, and the PC that asks says it is that PC.", CheckJoin("OFFICE-PC", OfficeId).Warning);
+        Assert.DoesNotContain("with a new name", CheckJoin("OFFICE-PC", OfficeId).Warning);
+        Assert.DoesNotContain("with a new name", CheckJoin("office_pc", OfficeId).Warning);
         // No ID, or one that no saved PC has.
         Assert.Null(CheckJoin("LAPTOP", null).Warning);
         Assert.Null(CheckJoin("LAPTOP", "4444").Warning);

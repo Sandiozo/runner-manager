@@ -544,8 +544,10 @@ public sealed class FleetConfig
 
     /// <summary>
     /// A PC paired one way from this PC. Replaces an earlier one-way pairing with the same name or machine ID. A fleet
-    /// member with the machine ID is the same PC paired again the other way: it is forgotten here, so the PC isn't known
-    /// both ways (commands to it would be refused). One with only the same name is kept, as the joining PC picks its name.
+    /// member with the machine ID counts as the same PC paired again the other way: it is forgotten here, so the PC is not
+    /// known both ways (commands to it would be refused). One with only the same name is kept, as the joining PC picks its
+    /// name. The ID is what the joining PC says about itself and proves nothing, so "Add a PC" warns before it allows a
+    /// PC whose name or ID is saved here, and names what it replaces (see <see cref="PairingHostWindow.CheckRequest"/>).
     /// </summary>
     /// <param name="machineId">The PC's machine ID, as its status reports it; null when the pairing did not say.</param>
     public static void AddManagedPc(string name, string address, byte[] key, string? machineId = null) => Update(c =>
