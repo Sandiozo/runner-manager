@@ -59,7 +59,8 @@ public static class GitHubApi
 
     /// <summary>
     /// The job a runner is running now, with its steps. Read is false when GitHub could not be read; Job is null when
-    /// GitHub does not (yet) report a running job for this runner. Shares the few-second cache of the queue view.
+    /// GitHub does not (yet) report a running job for this runner, or only jobs that started well before its worker
+    /// (see <see cref="RunningJobOf"/>). Shares the few-second cache of the queue view.
     /// </summary>
     /// <param name="runnerName">The runner's name, and <paramref name="workerStartedUtc"/> when its Runner.Worker
     /// started: they tell the right job apart from another one with the same runner ID (see <see cref="RunningJobOf"/>).</param>
@@ -77,8 +78,11 @@ public static class GitHubApi
     ///   repository can have the same ID as the repository's own runner. When GitHub and the caller both give the
     ///   runner's name, it must match too.
     /// - GitHub keeps listing a job as running for a while after its runner gave it up (the runner or the PC was
-    ///   restarted), also when the runner already runs its next job. Of several, the job that started closest to the
-    ///   runner's Runner.Worker is taken, or else the one that started last.
+    ///   restarted), also when the runner already runs its next job. When the start of the runner's Runner.Worker is
+    ///   known, a job that started more than <see cref="WorkerStartSlack"/> before it is not the worker's, also when
+    ///   it is the only one listed (with many runs in progress, the run of the worker's job may not be read), and of
+    ///   several the job that started closest to the worker is taken. Without the worker's start, the one that started
+    ///   last is taken.
     /// </summary>
     internal static GitHubJobState? RunningJobOf(IEnumerable<GitHubJobState> jobs, long runnerId, string? runnerName = null,
         DateTime? workerStartedUtc = null)
@@ -88,11 +92,17 @@ public static class GitHubApi
                                       && (string.IsNullOrEmpty(runnerName) || j.RunnerName.Length == 0
                                           || j.RunnerName.Equals(runnerName, StringComparison.OrdinalIgnoreCase)))
             .ToList();
-        if (running.Count <= 1) return running.FirstOrDefault();
-        return workerStartedUtc is { } worker
-            ? running.MinBy(j => j.StartedUtc is { } started ? Math.Abs((started - worker).Ticks) : long.MaxValue)
-            : running.MaxBy(j => j.StartedUtc ?? DateTime.MinValue);
+        if (workerStartedUtc is not { } worker) return running.MaxBy(j => j.StartedUtc ?? DateTime.MinValue);
+        return running.Where(j => j.StartedUtc is not { } started || worker - started <= WorkerStartSlack)
+            .MinBy(j => j.StartedUtc is { } started ? Math.Abs((started - worker).Ticks) : long.MaxValue);
     }
+
+    /// <summary>
+    /// How much earlier than the runner's Runner.Worker its job can have started on GitHub: the runner starts the worker
+    /// right after GitHub gives it the job, but the worker's start is read on the PC and GitHub's on its own clock, and
+    /// clocks differ a little.
+    /// </summary>
+    internal static readonly TimeSpan WorkerStartSlack = TimeSpan.FromMinutes(5);
 
     /// <summary>The jobs of a repository's queued and running workflow runs, or null when GitHub could not be read.</summary>
     public static Task<RepositoryWorkState?> GetRepositoryJobsAsync(string repositoryPath) => GetRepositoryWorkAsync(repositoryPath);

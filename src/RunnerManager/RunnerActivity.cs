@@ -32,19 +32,55 @@ public static class RunnerActivity
     private static readonly Regex AnsiCodes = new(@"\x1B\[[0-9;?]*[A-Za-z]", RegexOptions.Compiled);
     // actions/checkout passes the repository token to git as -c http.extraheader="AUTHORIZATION: basic …".
     // sonar.login= holds a token, sig= signs an Azure storage URL, and curl -H "Cookie: …" sends a session. key= is in
-    // storage connection strings (AccountKey=, SharedAccessKey=) and in API URLs (?key=).
+    // storage connection strings (AccountKey=, SharedAccessKey=) and in API URLs (?key=); key: is in API key headers
+    // (curl -H "x-functions-key: …", "Ocp-Apim-Subscription-Key: …").
     private static readonly string[] SecretHints =
     {
         "token", "password", "passwd", "pwd", "secret", "apikey", "api_key", "api-key", "pat=", "authorization", "extraheader",
-        "bearer", "credential", "auth", "pass:", "pass=", "login=", "sig=", "cookie", "key="
+        "bearer", "credential", "auth", "pass:", "pass=", "login=", "sig=", "cookie", "key=", "key:"
     };
     /// <summary>
     /// Raw tokens, alone or as a value: GitHub (ghp_…, github_pat_…), GitLab (glpat-…), Slack (xoxb-…), npm, PyPI,
-    /// Docker Hub, HashiCorp Vault and Anthropic, and JSON web tokens (eyJ… with a dot).
+    /// Docker Hub, HashiCorp Vault (hvs., hvb., hvr.), Anthropic and OpenAI (sk-… with at least 20 more characters), and
+    /// JSON web tokens (eyJ… with a dot).
     /// </summary>
     private static readonly Regex TokenValue = new(
-        @"(^|[=:])(gh[pousr]_|github_pat_|glpat-|xox[abprs]-|npm_|pypi-AgE|dckr_pat_|hvs\.|sk-ant-|eyJ[a-z0-9_-]{8,}\.)",
+        @"(^|[=:])(gh[pousr]_|github_pat_|glpat-|xox[abprs]-|npm_|pypi-AgE|dckr_pat_|hv[sbr]\.|sk-ant-|sk-\S{20}|eyJ[a-z0-9_-]{8,}\.)",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    /// <summary>A HashiCorp Vault token of the old form: s. and exactly 24 letters or digits.</summary>
+    private static readonly Regex OldVaultToken = new(@"(^|[=:])s\.[A-Za-z0-9]{24}$", RegexOptions.Compiled);
+    /// <summary>
+    /// Options whose value is a password or key, per program (the file name without .exe, any letter case): redis-cli
+    /// -a, the OpenLDAP tools' bind password -w, ssh-keygen's new and old passphrase (-N, -P), Chocolatey's API key and
+    /// sshpass -p. An option of one letter counts also with its value attached (-wSecret) and after other letters
+    /// (ldapsearch -xw Secret); a long one alone, or with = or : and its value.
+    /// </summary>
+    private static readonly Dictionary<string, string[]> SecretOptions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["redis-cli"] = new[] { "-a", "--pass" },
+        ["ldapsearch"] = new[] { "-w" },
+        ["ldapmodify"] = new[] { "-w" },
+        ["ldapadd"] = new[] { "-w" },
+        ["ldapdelete"] = new[] { "-w" },
+        ["ldapwhoami"] = new[] { "-w" },
+        ["ldapmodrdn"] = new[] { "-w" },
+        ["ldapcompare"] = new[] { "-w" },
+        ["ldapexop"] = new[] { "-w" },
+        // ldappasswd also takes the old (-a) and the new (-s) password.
+        ["ldappasswd"] = new[] { "-w", "-a", "-s" },
+        ["ssh-keygen"] = new[] { "-N", "-P" },
+        ["choco"] = new[] { "-k", "--key", "--api-key", "--apikey" },
+        ["chocolatey"] = new[] { "-k", "--key", "--api-key", "--apikey" },
+        ["sshpass"] = new[] { "-p" }
+    };
+    /// <summary>
+    /// rabbitmqctl takes a password as a plain argument after these commands (add_user ci Secret), so nothing after them
+    /// is shown.
+    /// </summary>
+    private static readonly HashSet<string> RabbitMqPasswordCommands = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "add_user", "change_password", "authenticate_user"
+    };
     /// <summary>An option for a password or passphrase whose value follows it: --pass X, --passphrase X, keytool -storepass X, openssl -passin.</summary>
     private static readonly Regex PassOption = new(@"^(--?|/)[a-z0-9._-]*(?<!by)pass(phrase|in|out)?([=:]|$)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     /// <summary>
@@ -67,9 +103,9 @@ public static class RunnerActivity
     };
     /// <summary>
     /// User and password with -u, --user or curl's proxy options -U and --proxy-user (curl -u user:pass,
-    /// --user=user:pass, -uuser:pass).
+    /// --user=user:pass, -uuser:pass), or with % as Samba's tools write it (smbclient -U user%pass, -Uuser%pass).
     /// </summary>
-    private static readonly Regex AttachedUser = new(@"^(-u|-U|--user=|--proxy-user=)\S*:", RegexOptions.Compiled);
+    private static readonly Regex AttachedUser = new(@"^(-u|-U|--user=|--proxy-user=)\S*[:%]", RegexOptions.Compiled);
     private static readonly char[] Spaces = { ' ', '\t' };
     /// <summary>The user and password in a URL (https://user:pass@host/…).</summary>
     private static readonly Regex UrlCredentials = new(@"(?<=://)[^/@\s]+@", RegexOptions.Compiled);
@@ -169,16 +205,24 @@ public static class RunnerActivity
     /// <summary>The last lines of the running step's output, without timestamps and color codes. None when the runner runs no job.</summary>
     internal static string[] ReadOutput(string root, int lines) => ReadOutput(root, lines, () => ProcessSnapshot.Read(WorkerName));
 
+    /// <summary>
+    /// Without the process list, the newest page is shown only when it was written this recently: then it is most often
+    /// the running step's. An older one can be the last step of an earlier job, for an organization runner even
+    /// another repository's.
+    /// </summary>
+    internal static readonly TimeSpan RecentPage = TimeSpan.FromMinutes(5);
+
     /// <param name="readWorkers">Reads the PC's Runner.Worker processes; tests replace it.</param>
-    internal static string[] ReadOutput(string root, int lines, Func<ProcessSnapshot> readWorkers)
+    /// <param name="nowUtc">The time, which tests set.</param>
+    internal static string[] ReadOutput(string root, int lines, Func<ProcessSnapshot> readWorkers, DateTime? nowUtc = null)
     {
         ProcessSnapshot workers;
         try { workers = readWorkers(); }
         catch (Exception ex) when (ex is ManagementException or System.Runtime.InteropServices.COMException or UnauthorizedAccessException)
         {
-            // Without the process list it is unknown whether a job runs and when it started, so the newest page is
-            // shown. Most often it is the running step's; between jobs it can be the last step of an earlier one.
-            return ReadLines(CurrentOutputFile(root), lines);
+            // Without the process list it is unknown whether a job runs and when it started.
+            var page = CurrentOutputFile(root);
+            return page != null && (nowUtc ?? DateTime.UtcNow) - page.ChangedUtc <= RecentPage ? ReadLines(page, lines) : Array.Empty<string>();
         }
         return ReadOutput(root, lines, workers);
     }
@@ -407,7 +451,8 @@ public static class RunnerActivity
         if (end < 0) return string.Empty;
         var program = ProgramName(text[..end]);
         var limit = ShownArguments(program);
-        var passwordP = PasswordP.Contains(program);
+        var rules = new ProgramRules();
+        rules.Add(program);
         var tokens = text[(end + 1)..].Split(Spaces, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .Select(t => UrlCredentials.Replace(t.Trim('"', '\''), string.Empty)).Where(t => t.Length > 0).ToList();
         var parts = new List<string>();
@@ -415,14 +460,53 @@ public static class RunnerActivity
         {
             var clean = tokens[i];
             // Everything from a secret on is left out: the value often follows its option.
-            if (LooksSecret(clean, i + 1 < tokens.Count ? tokens[i + 1] : string.Empty, passwordP)) break;
+            if (LooksSecret(clean, i + 1 < tokens.Count ? tokens[i + 1] : string.Empty, rules)) break;
             parts.Add(clean.Contains('\\') || clean.Contains('/') ? Path.GetFileName(clean.TrimEnd('\\', '/')) : clean);
+            if (rules.RabbitMq && RabbitMqPasswordCommands.Contains(clean)) break;
             // A program started through another one (cmd /c mysql -pSecret), or the rest of a path with spaces that is
             // not in quotes (C:\Program Files\MySQL\bin\mysql.exe -pSecret).
-            if (!passwordP && PasswordP.Contains(ProgramName(clean))) passwordP = true;
+            rules.Add(ProgramName(clean));
         }
         var joined = string.Join(' ', parts);
         return joined.Length > 60 ? joined[..57] + "…" : joined;
+    }
+
+    /// <summary>The rules for secrets of the programs in a command line: the program itself, and the ones it starts.</summary>
+    private sealed class ProgramRules
+    {
+        /// <summary>A program takes a password with -p or -P (see <see cref="RunnerActivity.PasswordP"/>).</summary>
+        public bool PasswordP;
+        /// <summary>A program is rabbitmqctl (see <see cref="RunnerActivity.RabbitMqPasswordCommands"/>).</summary>
+        public bool RabbitMq;
+        /// <summary>The options whose value is secret (see <see cref="RunnerActivity.SecretOptions"/>).</summary>
+        public readonly HashSet<string> SecretOptions = new(StringComparer.Ordinal);
+
+        public void Add(string program)
+        {
+            if (program.Length == 0) return;
+            if (RunnerActivity.PasswordP.Contains(program)) PasswordP = true;
+            if (program.Equals("rabbitmqctl", StringComparison.OrdinalIgnoreCase)) RabbitMq = true;
+            if (RunnerActivity.SecretOptions.TryGetValue(program, out var options)) SecretOptions.UnionWith(options);
+        }
+    }
+
+    /// <summary>
+    /// Whether an argument is one of <paramref name="options"/>: a short option (-w) also with its value attached
+    /// (-wSecret) or after other short options (-xw), a long option (--key) alone or with = or : and its value.
+    /// </summary>
+    private static bool IsSecretOption(string token, IEnumerable<string> options)
+    {
+        foreach (var option in options)
+        {
+            if (option.StartsWith("--", StringComparison.Ordinal))
+            {
+                if (token.Equals(option, StringComparison.OrdinalIgnoreCase)
+                    || (token.StartsWith(option, StringComparison.OrdinalIgnoreCase) && token.Length > option.Length && token[option.Length] is '=' or ':'))
+                    return true;
+            }
+            else if (token.Length >= 2 && token[0] == '-' && token[1] != '-' && token.IndexOf(option[1], 1) > 0) return true;
+        }
+        return false;
     }
 
     /// <summary>"docker" for docker, docker.exe, DOCKER.EXE, C:\Tools\docker.exe and "C:\Program Files\Docker\docker.exe".</summary>
@@ -435,19 +519,27 @@ public static class RunnerActivity
         "net" or "net1" => 1,
         // nuget push package.nupkg ApiKey.
         "nuget" => 2,
+        // smbclient //server/share Password.
+        "smbclient" => 1,
         _ => 3
     };
 
-    /// <param name="passwordP">The program takes a password with -p or -P (see <see cref="PasswordP"/>).</param>
-    private static bool LooksSecret(string token, string next, bool passwordP)
+    /// <param name="rules">What the programs of the command line take a secret with (see <see cref="ProgramRules"/>).</param>
+    private static bool LooksSecret(string token, string next, ProgramRules rules)
         => SecretHints.Any(hint => token.Contains(hint, StringComparison.OrdinalIgnoreCase))
            || TokenValue.IsMatch(token)
+           || OldVaultToken.IsMatch(token)
            || PassOption.IsMatch(token)
            || PwOption.IsMatch(token)
-           || (passwordP && token.Length >= 2 && token[0] == '-' && (token[1] is 'p' or 'P'))
+           || (rules.PasswordP && token.Length >= 2 && token[0] == '-' && (token[1] is 'p' or 'P'))
+           || IsSecretOption(token, rules.SecretOptions)
+           // --key and --api-key hold a key for every program.
+           || IsSecretOption(token, LongKeyOptions)
            || AttachedUser.IsMatch(token)
-           || ((token is "-u" or "--user" or "-U" or "--proxy-user") && next.Contains(':'))
+           || ((token is "-u" or "--user" or "-U" or "--proxy-user") && (next.Contains(':') || next.Contains('%')))
            || token.Equals("/p", StringComparison.OrdinalIgnoreCase) || token.Equals("/rp", StringComparison.OrdinalIgnoreCase);
+
+    private static readonly string[] LongKeyOptions = { "--key", "--api-key" };
 
     /// <summary>Output files written before the job's worker started belong to an earlier job (a minute of slack for clocks).</summary>
     private static DateTime? OutputNotBefore(DateTime? workerStartedUtc) => workerStartedUtc?.AddMinutes(-1);

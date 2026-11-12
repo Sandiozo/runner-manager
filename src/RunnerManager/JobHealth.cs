@@ -40,6 +40,12 @@ public static class JobHealth
     public static readonly TimeSpan WaitLimit = TimeSpan.FromMinutes(5);
     /// <summary>The limit for a job without earlier successful runs to compare with.</summary>
     public static readonly TimeSpan NoHistoryLimit = TimeSpan.FromHours(2);
+    /// <summary>
+    /// When GitHub cannot tell a job's usual duration, the job is not judged by <see cref="NoHistoryLimit"/>: a normal
+    /// long job would be reported. Once the usual duration has stayed unknown this long, it is, so that a job that runs
+    /// away while it keeps printing output is still reported.
+    /// </summary>
+    public static readonly TimeSpan UnknownUsualLimit = NoHistoryLimit * 2;
     /// <summary>Short jobs get at least this long before they count as running long.</summary>
     public static readonly TimeSpan MinimumLongLimit = TimeSpan.FromMinutes(20);
     private const int LongFactor = 3;
@@ -131,6 +137,11 @@ public static class JobHealth
     /// </summary>
     private sealed record KnownJob(DateTime? StartedUtc, TimeSpan? Usual, bool UsualKnown, DateTime WorkerStartedUtc);
     private static readonly Dictionary<string, KnownJob> KnownJobs = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>
+    /// Since when the usual duration of a busy runner's job has been unknown, by <see cref="Key"/>, with the job's
+    /// subject, so that the next job starts over. Guarded by <see cref="KnownJobs"/>'s lock.
+    /// </summary>
+    private static readonly Dictionary<string, (string Subject, DateTime SinceUtc)> UsualUnknownSince = new(StringComparer.OrdinalIgnoreCase);
     /// <summary>The last usual duration GitHub gave per "repository|workflow|job".</summary>
     private static readonly Dictionary<string, TimeSpan> KnownUsual = new(StringComparer.OrdinalIgnoreCase);
 
@@ -174,8 +185,11 @@ public static class JobHealth
         var labelsOf = new Dictionary<string, IReadOnlySet<string>>(StringComparer.OrdinalIgnoreCase);
         foreach (var (machine, runner) in runners) labelsOf[Key(runner)] = LabelsOf(machine, runner, registered);
         lock (KnownJobs)
-            foreach (var gone in KnownJobs.Keys.Where(k => !runners.Any(x => x.Runner.IsBusy && Key(x.Runner).Equals(k, StringComparison.OrdinalIgnoreCase))).ToList())
-                KnownJobs.Remove(gone);
+        {
+            bool IsGone(string k) => !runners.Any(x => x.Runner.IsBusy && Key(x.Runner).Equals(k, StringComparison.OrdinalIgnoreCase));
+            foreach (var gone in KnownJobs.Keys.Where(IsGone).ToList()) KnownJobs.Remove(gone);
+            foreach (var gone in UsualUnknownSince.Keys.Where(IsGone).ToList()) UsualUnknownSince.Remove(gone);
+        }
 
         foreach (var (machine, runner) in runners)
         {
@@ -223,7 +237,7 @@ public static class JobHealth
     /// reported once. When GitHub does not list the job this time, the job it listed last is used if the same worker
     /// still runs. When GitHub could not be read (the jobs, or the job's usual duration) and nothing is known, only a
     /// stuck job is found, since the 2-hour limit for jobs without history would report a normal long job as running
-    /// long.
+    /// long; once that has lasted <see cref="UnknownUsualLimit"/>, the 2-hour limit is used all the same.
     /// </summary>
     private static async Task<RunnerHealth> ForBusyRunnerAsync(MachineRunnerStatus runner, List<GitHubJobState>? active, bool unread,
         GitHubReads? github, TimeSpan quietLimit, DateTime nowUtc)
@@ -236,24 +250,50 @@ public static class JobHealth
         var sameWorker = known != null && runner.JobStartedUtc == known.WorkerStartedUtc;
         DateTime? started;
         TimeSpan? usual = null;
+        bool usualKnown;
         if (current != null && github != null)
         {
-            var (usualKnown, usualRead) = await UsualDurationAsync(github, runner.RepositoryPath, current);
-            if (!usualKnown && sameWorker && known!.UsualKnown) (usualKnown, usualRead) = (true, known.Usual);
-            usual = usualRead;
+            (usualKnown, usual) = await UsualDurationAsync(github, runner.RepositoryPath, current);
+            if (!usualKnown && sameWorker && known!.UsualKnown) (usualKnown, usual) = (true, known.Usual);
             started = current.StartedUtc ?? runner.JobStartedUtc;
             subject ??= current.Id.ToString();
             if (runner.JobStartedUtc is { } worker) lock (KnownJobs) KnownJobs[key] = new KnownJob(started, usual, usualKnown, worker);
-            // Without the usual duration the limit is not known: the 2-hour limit is for jobs without history only.
-            if (!usualKnown) started = null;
         }
         else if (sameWorker)
         {
-            started = known!.UsualKnown ? known.StartedUtc : null;
+            started = known!.StartedUtc;
             usual = known.Usual;
+            usualKnown = known.UsualKnown;
         }
-        else started = unread ? null : runner.JobStartedUtc;
-        return ForBusyRunner(runner.QuietSinceUtc, started, usual, quietLimit, subject ?? $"{runner.CommandKey}@", nowUtc);
+        else
+        {
+            started = runner.JobStartedUtc;
+            usualKnown = !unread;
+        }
+        subject ??= $"{runner.CommandKey}@";
+        // Without the usual duration the limit is not known: the 2-hour limit is for jobs without history only, until
+        // the usual duration has stayed unknown for long.
+        if (!LimitIsKnown(key, subject, usualKnown, nowUtc)) started = null;
+        return ForBusyRunner(runner.QuietSinceUtc, started, usual, quietLimit, subject, nowUtc);
+    }
+
+    /// <summary>
+    /// Whether a busy runner's job may be judged by <see cref="LongLimit"/>: its usual duration is known (or it has no
+    /// history), or it has stayed unknown for <see cref="UnknownUsualLimit"/> during this job.
+    /// </summary>
+    private static bool LimitIsKnown(string key, string subject, bool usualKnown, DateTime nowUtc)
+    {
+        lock (KnownJobs)
+        {
+            if (usualKnown)
+            {
+                UsualUnknownSince.Remove(key);
+                return true;
+            }
+            if (!UsualUnknownSince.TryGetValue(key, out var unknown) || unknown.Subject != subject)
+                UsualUnknownSince[key] = unknown = (subject, nowUtc);
+            return nowUtc - unknown.SinceUtc >= UnknownUsualLimit;
+        }
     }
 
     /// <summary>

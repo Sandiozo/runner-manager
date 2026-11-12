@@ -444,13 +444,15 @@ public static partial class RunnerService
         // ones" (unless clearLabels), and a failed registration is rolled back to them.
         var current = await ReadRegistrationBeforeRemovalAsync(local);
         var wanted = current with { Name = newName.Trim(), Labels = LabelsAfterEdit(current.Labels, labels, clearLabels) };
+        if (LabelEditProblem(clearLabels, wanted.Labels, current.Options.NoDefaultLabels) is { } labelProblem)
+            throw new InvalidOperationException(labelProblem);
         EnsureValidConfigInput(wanted.Url, wanted.Name, wanted.Labels);
         await EnsureNameIsFreeAsync(local, wanted.Name);
         var wasRunning = local.IsRunning;
         var wasMarked = IsMarkedStopped(local.Name);
         var restoreOldName = HoldAutoRecovery(local.Name);
         // config.cmd gives a renamed runner a new service name and starts it, so that name is held as well.
-        var restoreNewName = HoldAutoRecovery(ServiceNameAfterRename(local.Name, wanted.Name));
+        var restoreNewName = HoldAutoRecovery(ServiceNameAfterRename(local.Name, local.AgentName, wanted.Name));
         void restoreRecovery()
         {
             restoreNewName();
@@ -483,17 +485,36 @@ public static partial class RunnerService
     internal static string[] LabelsAfterEdit(string[] current, string[] requested, bool clearLabels)
         => requested.Length > 0 || clearLabels ? requested : current;
 
+    internal const string NoLabelsLeftMessage = "This runner has no default labels, so it needs at least one label.";
+
     /// <summary>
-    /// The service name config.cmd gives a runner that is renamed: actions.runner.{owner-repo}.{name}. Empty when the
-    /// name does not change, and when config.cmd would shorten the name (over 80 characters, with a random ending).
-    /// Only used to hold auto-recovery, so a guess that is wrong does no harm.
+    /// Null when an edit may leave the runner with these custom labels, otherwise the message to show. A runner set up
+    /// without the default labels (self-hosted, Windows and its architecture) has only its custom labels: with none left
+    /// it could not take a job, and config.cmd would give it the default labels instead (--no-default-labels needs a
+    /// label), so it would start taking ordinary self-hosted jobs. Removing every label of such a runner is refused.
     /// </summary>
-    internal static string ServiceNameAfterRename(string serviceName, string newName)
+    /// <param name="labelsAfterEdit">The custom labels the edit gives the runner (see <see cref="LabelsAfterEdit"/>).</param>
+    /// <param name="noDefaultLabels">The runner has no default labels, as GitHub lists it.</param>
+    internal static string? LabelEditProblem(bool clearLabels, string[] labelsAfterEdit, bool noDefaultLabels)
+        => clearLabels && noDefaultLabels && labelsAfterEdit.Length == 0 ? NoLabelsLeftMessage : null;
+
+    /// <summary>
+    /// The service name config.cmd gives a runner that is renamed: actions.runner.{owner-repo}.{name}. The old runner
+    /// name is cut off the end of the old service name; a dot does not tell where it starts, since runner and repository
+    /// names may contain dots. Empty when the name does not change, when the old service name does not end with the old
+    /// runner name (config.cmd shortened it, and its repository part may be shortened too), and when config.cmd would
+    /// shorten the new name (over 80 characters, with a random ending). Only used to hold auto-recovery, so a guess that
+    /// is wrong does no harm, but without the right name the watchdog can start the runner after the edit stops it.
+    /// </summary>
+    internal static string ServiceNameAfterRename(string serviceName, string oldName, string newName)
     {
-        var dot = serviceName.LastIndexOf('.');
-        if (!serviceName.StartsWith("actions.runner.", StringComparison.OrdinalIgnoreCase) || dot < "actions.runner.".Length) return string.Empty;
-        if (serviceName[(dot + 1)..].Equals(newName, StringComparison.OrdinalIgnoreCase)) return string.Empty;
-        var renamed = serviceName[..(dot + 1)] + newName;
+        const string prefix = "actions.runner.";
+        if (string.IsNullOrWhiteSpace(oldName) || string.IsNullOrWhiteSpace(newName)) return string.Empty;
+        if (oldName.Equals(newName, StringComparison.OrdinalIgnoreCase)) return string.Empty;
+        if (!serviceName.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
+            || !serviceName.EndsWith("." + oldName, StringComparison.OrdinalIgnoreCase)
+            || serviceName.Length - oldName.Length - 1 <= prefix.Length) return string.Empty;
+        var renamed = serviceName[..^oldName.Length] + newName;
         return renamed.Length <= 80 ? renamed : string.Empty;
     }
 

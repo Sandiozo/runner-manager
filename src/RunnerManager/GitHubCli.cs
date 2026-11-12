@@ -475,11 +475,14 @@ public static class GitHubCli
         }
 
         CommandResult result;
+        int generation;
         await PollGate.WaitAsync();
         try
         {
             // Polls that waited here while another one found GitHub unreachable or rate-limited do not start gh either.
             if (GitHubFailures.Blocking(endpoint) != null) return notSent;
+            // A failure is not stored when the failures were forgotten while this request waited for its answer.
+            generation = GitHubFailures.Generation;
             result = await ApiAsync(endpoint, options);
         }
         finally { PollGate.Release(); }
@@ -507,7 +510,7 @@ public static class GitHubCli
         }
         var response = new ConditionalResult(status, string.IsNullOrEmpty(newEtag) ? known : newEtag, body);
         if (response.Ok || response.NotModified) GitHubFailures.Succeeded(endpoint);
-        else GitHubFailures.Failed(endpoint, status, new LimitHeaders(remaining, reset, retryAfter, date), result);
+        else GitHubFailures.Failed(endpoint, status, new LimitHeaders(remaining, reset, retryAfter, date), result, generation);
         return response;
     }
 
