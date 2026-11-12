@@ -167,7 +167,7 @@ public sealed class FleetActions
 
     /// <summary>What to tell the user when the old copy of a moved runner is still there.</summary>
     internal static string RetireByHand(string source, string target)
-        => $"Delete its Windows service and folder on {source} by hand. Don't unregister it from GitHub: the registration now belongs to {target}.";
+        => $"Delete its Windows service and folder on {source} by hand. Do not unregister it from GitHub: the registration now belongs to {target}.";
 
     /// <summary>
     /// The labels to register a moved runner with. They are read from GitHub when not known; when GitHub can't be read

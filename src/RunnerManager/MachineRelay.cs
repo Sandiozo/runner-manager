@@ -404,8 +404,7 @@ public static class MachineRelay
         if (key == LocalMachineKey || FleetConfig.Current.KnownPeers.Any(p => Sanitize(p.Name) == key))
             return MachineInfo.Placeholder("MANAGED_" + key, pc.Name, pc.LastSeenUtc, pc.Address, ManagedNameProblem(pc.Name), managed: true);
         if (pc.Key is not { } pairingKey)
-            return MachineInfo.Placeholder(key, pc.Name, pc.LastSeenUtc, pc.Address,
-                $"This PC can't read the pairing code for {pc.Name}. Remove it and pair it again.", managed: true);
+            return MachineInfo.Placeholder(key, pc.Name, pc.LastSeenUtc, pc.Address, FleetNetwork.AccessCodeUnreadableText(pc.Name), managed: true);
 
         var addresses = new List<string> { pc.Address };
         if (candidates != null) addresses.AddRange(candidates.Select(c => c.Address).Where(a => !addresses.Any(b => SameEndpoint(a, b))));
@@ -434,9 +433,7 @@ public static class MachineRelay
             catch (PairingMismatchException ex)
             {
                 refused = true;
-                problem = ex.Reason is "" or "denied"
-                    ? $"{pc.Name} no longer accepts this fleet's requests. It may have been disconnected there. Remove it here, or pair it again."
-                    : ex.Message;
+                problem = ex.Reason is "" or "denied" ? FleetNetwork.AccessCodeRefusedText(pc.Name) : ex.Message;
             }
             catch (Exception) { if (problem.Length == 0) problem = $"Not reachable at {FleetNetwork.WithPort(attempt)}"; }
         }
@@ -606,7 +603,7 @@ public static class MachineRelay
         if (peer != null && managed != null) throw new InvalidOperationException(ManagedNameProblem(managed.Name));
         if (managed != null)
             return (managed.Address, managed.MachineId, managed.Key
-                ?? throw new InvalidOperationException($"This PC can't read the pairing code for {managed.Name}. Remove it and pair it again."));
+                ?? throw new InvalidOperationException(FleetNetwork.AccessCodeUnreadableText(managed.Name)));
         if (peer == null) throw new InvalidOperationException($"Could not reach {machineKey}. Check that it is on and on the same network.");
         return (peer.Address, peer.MachineId, null);
     }
@@ -1263,7 +1260,7 @@ public static class MachineRelay
         {
             try
             {
-                var oldManaged = pc.Key ?? throw new InvalidOperationException("This PC can't read its pairing code.");
+                var oldManaged = pc.Key ?? throw new InvalidOperationException("Its access code cannot be read on this PC. Remove it and pair it again.");
                 var newManaged = CommandSigner.NewKey();
                 await SendNewKeyAsync(pc.Address, Sanitize(pc.Name), pc.MachineId, oldManaged, newManaged);
                 FleetConfig.ReplaceManagedKey(pc.KeyId, newManaged);

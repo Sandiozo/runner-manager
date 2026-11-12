@@ -730,7 +730,7 @@ public class RunnerMoveTests
     {
         var (source, _, error) = await MoveAsync(c => c.Action == "Retire" ? "runner Retire failed: in use" : $"Runner {c.Action} completed");
         Assert.Contains("now runs on TARGETPC", error!.Message);
-        Assert.Contains("Don't unregister it from GitHub", error.Message);
+        Assert.Contains("Do not unregister it from GitHub", error.Message);
         Assert.Equal("Stop:disable Retire:keep", Steps(source));
     }
 }

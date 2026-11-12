@@ -1295,3 +1295,52 @@ public class FullJoinTests
         });
     }
 }
+
+public class CodeProblemTests
+{
+    public static TheoryData<string> CodeProblems => new()
+    {
+        FleetNetwork.RefusalMessage("denied"),
+        FleetNetwork.RefusalMessage(""),
+        // With the note about an older agent that cannot read the name.
+        FleetNetwork.RefusalMessage("denied", "ÖSTRA"),
+        FleetNetwork.NoCodeThereText,
+        FleetNetwork.NoCodeHereText,
+        FleetNetwork.ResponseNotVerifiedText,
+        FleetNetwork.AccessCodeUnreadableText("PC2"),
+        FleetNetwork.AccessCodeRefusedText("PC2"),
+        // Versions 2.4 to 2.8.2.
+        "The pairing code does not match. Use the same pairing code on every PC.",
+        "The fleet agent on that PC has no pairing code.",
+        "Could not verify the response with this PC's pairing code.",
+        "This PC can't read the pairing code for PC2. Remove it and pair it again.",
+        "This PC has no pairing code. Set one up in Settings → Fleet."
+    };
+
+    [Theory]
+    [MemberData(nameof(CodeProblems))]
+    public void AWrongOrMissingCode_IsACodeProblem(string message) => Assert.True(FleetNetwork.IsCodeProblem(message));
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("Not reachable at 10.0.0.5:47821")]
+    [InlineData("The other PC refused the request: wrong PC")]
+    [InlineData("Could not reach PC2. Check that it is on and on the same network.")]
+    public void OtherProblems_AreNot(string? message) => Assert.False(FleetNetwork.IsCodeProblem(message));
+
+    [Fact]
+    public void ClockAndNameProblems_AreNot()
+    {
+        Assert.False(FleetNetwork.IsCodeProblem(FleetNetwork.RefusalMessage("the PC clocks differ by more than 5 minutes; set both to the correct time")));
+        Assert.False(FleetNetwork.IsCodeProblem(MachineRelay.ManagedNameProblem("PC2")));
+        Assert.False(FleetNetwork.IsCodeProblem(MachineRelay.ManagedNameTakenProblem("PC2")));
+    }
+
+    [Fact]
+    public void AManagedPcsCode_IsCalledItsAccessCode()
+    {
+        Assert.Equal("This PC cannot read the access code for PC2. Remove it and pair it again.", FleetNetwork.AccessCodeUnreadableText("PC2"));
+        Assert.DoesNotContain("pairing", FleetNetwork.AccessCodeRefusedText("PC2"));
+    }
+}

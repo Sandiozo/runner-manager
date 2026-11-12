@@ -286,8 +286,8 @@ public static class Pairing
             hostWaits = false;
             sealedAllow = FleetCrypto.Open(transferKey, payload, AllowContext(decision.Name, decision.Managed));
         }
-        // A PC that is managed one way gets a code of its own, which is not the fleet code.
-        var code = decision.Managed ? "pairing code" : "fleet code";
+        // A PC that is managed one way gets a code of its own, its access code, which is not the fleet code.
+        var code = decision.Managed ? "access code" : "fleet code";
         var key = sealedAllow ?? FleetCrypto.Open(transferKey, payload, TransferContext)
                   ?? throw new CryptographicException($"Could not decrypt the {code}.");
         if (key.Length != 32) throw new CryptographicException($"Received an invalid {code}.");
