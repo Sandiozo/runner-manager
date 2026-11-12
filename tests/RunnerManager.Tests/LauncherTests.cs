@@ -368,6 +368,42 @@ public class LauncherTests
         Assert.Equal(0, launcher.ExitCode);
     }
 
+    /// <summary>
+    /// A broken file named like each DLL the launcher loads, put beside it, changes nothing: Windows looks for the exe's
+    /// own imports and theirs only in System32 (/DEPENDENTLOADFLAG:0x800), and the launcher asks the same for what is
+    /// loaded later (SetDefaultDllDirectories). Without the flag Windows takes USERENV.dll from the launcher's folder and
+    /// stops the launcher with a load error before any of its code runs.
+    /// </summary>
+    [Fact]
+    public void DllsPutBesideTheLauncher_AreNotLoaded()
+    {
+        List<string> loaded;
+        using (var folder = new LauncherFolder())
+        {
+            folder.Control("RunnerManager", "sleep 3000");
+            using var launcher = folder.Start();
+            StubRun.WaitFor(folder.OutputOf("RunnerManager"));
+            launcher.Refresh();
+            loaded = launcher.Modules.Cast<ProcessModule>().Select(module => module.FileName)
+                .Where(path => path.EndsWith(".dll", StringComparison.OrdinalIgnoreCase)).ToList();
+            Assert.True(launcher.WaitForExit(30_000));
+            Assert.Equal(0, launcher.ExitCode);
+        }
+        var userenv = Assert.Single(loaded, path => Path.GetFileName(path).Equals("userenv.dll", StringComparison.OrdinalIgnoreCase));
+        Assert.Equal(Environment.SystemDirectory, Path.GetDirectoryName(userenv), ignoreCase: true);
+
+        using var planted = new LauncherFolder();
+        foreach (var path in loaded) File.WriteAllText(Path.Combine(planted.Folder, Path.GetFileName(path)), "not a DLL");
+        var names = string.Join(", ", loaded.Select(Path.GetFileName));
+        using var started = planted.Start();
+        if (!started.WaitForExit(15_000))
+        {
+            try { started.Kill(); started.WaitForExit(5000); } catch (InvalidOperationException) { }
+            Assert.Fail($"The launcher did not end within 15 seconds with these files beside it, so Windows probably loaded one: {names}");
+        }
+        Assert.True(started.ExitCode == 0, $"The launcher exited with 0x{started.ExitCode:X8} with these files beside it, so Windows loaded one: {names}");
+        Assert.True(File.Exists(planted.OutputOf("RunnerManager")), "The app was not started.");
+    }
 
     // ---- The exe and its source.
 
