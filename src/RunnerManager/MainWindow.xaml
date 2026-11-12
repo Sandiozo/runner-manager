@@ -58,6 +58,36 @@
             <Setter Property="Padding" Value="10,8"/>
             <Setter Property="Margin" Value="0,0,8,0"/>
         </Style>
+        <!-- A tile that is pressed to show only what it counts (Needs attention). Pressed, it takes the warning colors. -->
+        <Style x:Key="ToggleTile" TargetType="ToggleButton">
+            <Setter Property="Foreground" Value="{DynamicResource TextBrush}"/>
+            <Setter Property="Background" Value="{DynamicResource Bg1Brush}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderSubtleBrush}"/>
+            <Setter Property="Padding" Value="10,8"/>
+            <Setter Property="Margin" Value="0,0,8,0"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+            <Setter Property="FocusVisualStyle" Value="{StaticResource SubtleFocus}"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ToggleButton">
+                        <Border x:Name="Chrome" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="1" CornerRadius="10" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Chrome" Property="BorderBrush" Value="{DynamicResource HoverBorderBrush}"/>
+                            </Trigger>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="Chrome" Property="Background" Value="{DynamicResource BadgeWarnBgBrush}"/>
+                                <Setter TargetName="Chrome" Property="BorderBrush" Value="{DynamicResource WarningBrush}"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
         <Style x:Key="Chip" TargetType="Border">
             <Setter Property="Background" Value="{DynamicResource Bg2Brush}"/>
             <Setter Property="BorderBrush" Value="{DynamicResource BorderSubtleBrush}"/>
@@ -87,28 +117,22 @@
                 </Setter.Value>
             </Setter>
         </Style>
-        <Style x:Key="RunRow" TargetType="Border">
-            <Setter Property="Background" Value="Transparent"/>
-            <Setter Property="Focusable" Value="True"/>
-            <Setter Property="FocusVisualStyle" Value="{StaticResource SubtleFocus}"/>
-            <Setter Property="CornerRadius" Value="6"/>
+        <!-- A job or run that opens on GitHub -->
+        <Style x:Key="RunRow" TargetType="Button" BasedOn="{StaticResource FlatButton}">
             <Setter Property="Padding" Value="6,4"/>
             <Setter Property="Margin" Value="-6,0,0,0"/>
-            <Setter Property="Cursor" Value="Hand"/>
             <Style.Triggers>
                 <Trigger Property="IsMouseOver" Value="True">
                     <Setter Property="Background" Value="{DynamicResource Bg3Brush}"/>
                 </Trigger>
             </Style.Triggers>
         </Style>
+        <!-- A runner; its header is a flat button that shows or hides the details -->
         <Style x:Key="RunnerRow" TargetType="Border">
             <Setter Property="Background" Value="Transparent"/>
-            <Setter Property="Focusable" Value="True"/>
-            <Setter Property="FocusVisualStyle" Value="{StaticResource SubtleFocus}"/>
             <Setter Property="CornerRadius" Value="8"/>
             <Setter Property="Padding" Value="8,5"/>
             <Setter Property="Margin" Value="0,1"/>
-            <Setter Property="Cursor" Value="Hand"/>
             <Style.Triggers>
                 <Trigger Property="IsMouseOver" Value="True">
                     <Setter Property="Background" Value="{DynamicResource Bg2Brush}"/>
@@ -179,7 +203,7 @@
                     <DockPanel x:Name="NavHeader" DockPanel.Dock="Top" Margin="8,0,6,6">
                         <TextBlock x:Name="FleetSecureIcon" DockPanel.Dock="Right" Text="&#xE72E;" Style="{StaticResource Icon}" FontSize="11"
                                    Foreground="{DynamicResource TextFaintBrush}" Visibility="Collapsed"
-                                   ToolTip="PCs in the fleet connect directly. Connections are encrypted with the pairing code."/>
+                                   ToolTip="PCs in the fleet connect directly. Connections are encrypted with the fleet code."/>
                         <TextBlock x:Name="FleetHeaderText" Text="FLEET" Style="{StaticResource SectionLabel}" VerticalAlignment="Center"/>
                     </DockPanel>
                     <ListBox x:Name="MachineNav" DockPanel.Dock="Top" ItemsSource="{Binding NavItems}" ItemContainerStyle="{StaticResource NavItem}"
@@ -286,7 +310,7 @@
                             <TextBlock Text="Connect GitHub"/>
                         </StackPanel>
                     </Button>
-                    <Button Style="{StaticResource PrimaryButton}" Click="AddRunner_Click" ToolTip="Add a self-hosted runner on this PC (Ctrl+N)" AutomationProperties.Name="Add runner">
+                    <Button Style="{StaticResource PrimaryButton}" Click="AddRunner_Click" ToolTip="Add a self-hosted runner on this PC or another PC (Ctrl+N)" AutomationProperties.Name="Add runner">
                         <StackPanel Orientation="Horizontal">
                             <TextBlock Text="&#xE710;" Style="{StaticResource Icon}" FontSize="12" Foreground="{DynamicResource OnAccentBrush}" Margin="0,0,8,0"/>
                             <TextBlock Text="Add runner" Foreground="{DynamicResource OnAccentBrush}"/>
@@ -336,6 +360,21 @@
                         </StackPanel>
                     </DockPanel>
                 </Border>
+                <!-- Needs attention: offline PCs, and stopped runners and runners with a concern. Click: show only those. Hidden at zero. -->
+                <ToggleButton x:Name="AttentionTile" Style="{StaticResource ToggleTile}" Visibility="Collapsed" Click="AttentionTile_Click"
+                              AutomationProperties.Name="Needs attention">
+                    <DockPanel>
+                        <Border Width="28" Height="28" CornerRadius="7" Background="{DynamicResource Bg3Brush}" VerticalAlignment="Center">
+                            <TextBlock Text="&#xE7BA;" Style="{StaticResource Icon}" FontSize="12" Foreground="{DynamicResource WarningBrush}"/>
+                        </Border>
+                        <TextBlock x:Name="TileAttention" Text="–" FontSize="17" FontWeight="SemiBold" Margin="10,0,10,0" VerticalAlignment="Center"/>
+                        <StackPanel VerticalAlignment="Center">
+                            <TextBlock Text="Needs attention" Style="{StaticResource Caption}" FontSize="11" TextTrimming="CharacterEllipsis"/>
+                            <TextBlock x:Name="TileAttentionSub" Style="{StaticResource Caption}" FontSize="11" Foreground="{DynamicResource WarningBrush}"
+                                       TextTrimming="CharacterEllipsis"/>
+                        </StackPanel>
+                    </DockPanel>
+                </ToggleButton>
             </UniformGrid>
 
             <!-- Machine cards -->
@@ -353,9 +392,9 @@
                                         </Grid.RowDefinitions>
 
                                         <!-- Machine header: click it to collapse or expand the card -->
-                                        <Grid Margin="12,9,12,9" Background="Transparent" Cursor="Hand" MouseLeftButtonUp="MachineHeader_Click"
-                                              Focusable="True" FocusVisualStyle="{StaticResource SubtleFocus}" KeyDown="MachineHeader_KeyDown"
-                                              ToolTip="Click to show or hide this PC's runners">
+                                        <Button Style="{StaticResource FlatButton}" Margin="12,9,12,9" Click="MachineHeader_Click"
+                                                ToolTip="Click to show or hide this PC's runners" AutomationProperties.Name="{Binding HeaderName}">
+                                        <Grid>
                                             <Grid.ColumnDefinitions>
                                                 <ColumnDefinition Width="Auto"/>
                                                 <ColumnDefinition Width="Auto"/>
@@ -374,7 +413,7 @@
                                                         <TextBlock Text="This PC" FontSize="11" Foreground="{DynamicResource AccentBrush}"/>
                                                     </Border>
                                                     <Border Style="{StaticResource Badge}" Background="{DynamicResource Bg3Brush}" BorderBrush="{DynamicResource BorderSubtleBrush}" Visibility="{Binding ManagedVisibility}"
-                                                            ToolTip="Managed one way: the fleet can view and control this PC, but it can't see or control the fleet's PCs.">
+                                                            ToolTip="Managed one way: the fleet can view and control this PC, but it cannot see or control the fleet's PCs.">
                                                         <TextBlock Text="Managed" FontSize="11" Foreground="{DynamicResource TextMutedBrush}"/>
                                                     </Border>
                                                     <Button Style="{StaticResource BadgeButton}" Visibility="{Binding UpdateBadgeVisibility}"
@@ -436,6 +475,7 @@
                                                 </Button>
                                             </StackPanel>
                                         </Grid>
+                                        </Button>
 
                                         <!-- Health strip -->
                                         <WrapPanel Grid.Row="1" Margin="73,0,12,8" Visibility="{Binding HealthVisibility}">
@@ -478,12 +518,13 @@
                                                     <StackPanel Orientation="Horizontal" Margin="8,8,8,10" Visibility="{Binding NoRunnersVisibility}">
                                                         <TextBlock Text="{Binding NoRunnersText}" Style="{StaticResource Caption}" VerticalAlignment="Center"/>
                                                         <Button Content="Add runner" Click="AddRunner_Click" Padding="10,3" Margin="12,0,0,0"
-                                                                Visibility="{Binding AddRunnerVisibility}" ToolTip="Add a self-hosted runner on this PC (Ctrl+N)"/>
+                                                                Visibility="{Binding AddRunnerVisibility}" ToolTip="{Binding AddRunnerTip}"
+                                                                AutomationProperties.Name="{Binding MachineName, StringFormat='Add runner on {0}'}"/>
                                                     </StackPanel>
                                                     <ItemsControl ItemsSource="{Binding Runners}">
                                                         <ItemsControl.ItemTemplate>
                                                             <DataTemplate DataType="{x:Type local:MachineRunnerStatus}">
-                                                                <Border Style="{StaticResource RunnerRow}" Visibility="{Binding RowVisibility}" MouseLeftButtonUp="RunnerRow_Click" KeyDown="RunnerRow_KeyDown">
+                                                                <Border Style="{StaticResource RunnerRow}" Visibility="{Binding RowVisibility}">
                                                                     <Grid>
                                                                         <Grid.RowDefinitions>
                                                                             <RowDefinition Height="Auto"/>
@@ -496,6 +537,15 @@
                                                                             <ColumnDefinition Width="Auto"/>
                                                                             <ColumnDefinition Width="Auto"/>
                                                                         </Grid.ColumnDefinitions>
+                                                                        <!-- The header: click it, or press Enter or Space on it, to show or hide the details -->
+                                                                        <Button Grid.ColumnSpan="3" Style="{StaticResource FlatButton}" Click="RunnerRow_Click"
+                                                                                AutomationProperties.Name="{Binding HeaderName}">
+                                                                        <Grid>
+                                                                            <Grid.ColumnDefinitions>
+                                                                                <ColumnDefinition Width="Auto"/>
+                                                                                <ColumnDefinition Width="*"/>
+                                                                                <ColumnDefinition Width="Auto"/>
+                                                                            </Grid.ColumnDefinitions>
                                                                         <TextBlock Text="{Binding ExpandGlyph}" Style="{StaticResource Icon}" FontSize="9"
                                                                                    Foreground="{DynamicResource TextFaintBrush}" Margin="2,0,10,0"/>
                                                                         <StackPanel Grid.Column="1" VerticalAlignment="Center">
@@ -515,6 +565,8 @@
                                                                                 <TextBlock Text="{Binding StatusText}" Foreground="{Binding StatusTextBrush}" FontSize="11" FontWeight="SemiBold"/>
                                                                             </StackPanel>
                                                                         </Border>
+                                                                        </Grid>
+                                                                        </Button>
                                                                         <Button Grid.Column="3" Click="RunnerPower_Click" IsEnabled="{Binding CanControl}" Padding="10,4" MinWidth="76"
                                                                                 VerticalAlignment="Center" Visibility="{Binding PowerVisibility}">
                                                                             <AutomationProperties.Name>
@@ -589,8 +641,14 @@
                                                                             <Border Background="{DynamicResource BadgeInfoBgBrush}" BorderBrush="{DynamicResource BadgeInfoBorderBrush}" BorderThickness="1"
                                                                                     CornerRadius="6" Padding="10,7" Margin="0,0,0,8" Visibility="{Binding ConsoleNoteVisibility}">
                                                                                 <TextBlock TextWrapping="Wrap" FontSize="12" Foreground="{DynamicResource TextMutedBrush}"
-                                                                                           Text="This runner runs in a console window in your session, opened when you sign in. Its jobs can use your desktop, which builds that open windows, such as Unity, need. It is offline while you are signed out. A Windows service runs without sign-in but has no desktop; “Run as service” changes it, if its jobs don't need one."/>
+                                                                                           Text="This runner runs in a console window in your session, opened when you sign in. Its jobs can use your desktop, which builds that open windows, such as Unity, need. It is offline while you are signed out. A Windows service runs without sign-in but has no desktop; “Run as service” changes it, if its jobs do not need one."/>
                                                                             </Border>
+                                                                            <!-- GitHub could not be read for this runner: why, and when it is asked again -->
+                                                                            <DockPanel Margin="0,0,0,8" Visibility="{Binding GitHubNoteVisibility}" ToolTip="{Binding GitHubNoteTip}">
+                                                                                <TextBlock Text="&#xE7BA;" Style="{StaticResource Icon}" FontSize="11" Foreground="{DynamicResource WarningBrush}"
+                                                                                           VerticalAlignment="Top" Margin="0,2,8,0"/>
+                                                                                <TextBlock Text="{Binding GitHubNote}" TextWrapping="Wrap" FontSize="12" Foreground="{DynamicResource TextMutedBrush}"/>
+                                                                            </DockPanel>
                                                                             <!-- Live job: steps from GitHub, output and processes from the runner's PC -->
                                                                             <Border x:Name="LiveJobPanel" Visibility="{Binding LiveJobVisibility}" Background="{DynamicResource Bg2Brush}"
                                                                                     BorderBrush="{DynamicResource BorderSubtleBrush}" BorderThickness="1" CornerRadius="8" Padding="12,10" Margin="0,0,0,10">
@@ -705,7 +763,13 @@
                                                                                 <ItemsControl ItemsSource="{Binding Queue}" Visibility="{Binding QueueListVisibility}">
                                                                                     <ItemsControl.ItemTemplate>
                                                                                         <DataTemplate DataType="{x:Type local:QueueEntry}">
-                                                                                            <Border Style="{StaticResource RunRow}" Tag="{Binding Url}" MouseLeftButtonUp="Link_Click" KeyDown="Link_KeyDown" ToolTip="Open the job on GitHub">
+                                                                                            <Button Style="{StaticResource RunRow}" Tag="{Binding Url}" Click="RunRow_Click" ToolTip="Open the job on GitHub">
+                                                                                                <AutomationProperties.Name>
+                                                                                                    <MultiBinding StringFormat="{}{0}, {1}">
+                                                                                                        <Binding Path="Title"/>
+                                                                                                        <Binding Path="Detail"/>
+                                                                                                    </MultiBinding>
+                                                                                                </AutomationProperties.Name>
                                                                                                 <DockPanel>
                                                                                                     <TextBlock FontSize="11" Margin="0,0,10,0" VerticalAlignment="Center">
                                                                                                         <TextBlock.Style>
@@ -724,7 +788,7 @@
                                                                                                     <TextBlock DockPanel.Dock="Right" Text="{Binding Detail}" Style="{StaticResource Caption}" FontSize="11" Margin="12,0,6,0" VerticalAlignment="Center"/>
                                                                                                     <TextBlock Text="{Binding Title}" FontSize="12" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" local:TrimmedText.ToolTip="True"/>
                                                                                                 </DockPanel>
-                                                                                            </Border>
+                                                                                            </Button>
                                                                                         </DataTemplate>
                                                                                     </ItemsControl.ItemTemplate>
                                                                                 </ItemsControl>
@@ -741,7 +805,13 @@
                                                                                 <ItemsControl ItemsSource="{Binding RecentRuns}" Visibility="{Binding RecentRunsListVisibility}">
                                                                                     <ItemsControl.ItemTemplate>
                                                                                         <DataTemplate DataType="{x:Type local:WorkflowRunSummary}">
-                                                                                            <Border Style="{StaticResource RunRow}" Tag="{Binding HtmlUrl}" MouseLeftButtonUp="Link_Click" KeyDown="Link_KeyDown" ToolTip="{Binding Title}">
+                                                                                            <Button Style="{StaticResource RunRow}" Tag="{Binding HtmlUrl}" Click="RunRow_Click" ToolTip="{Binding Title}">
+                                                                                                <AutomationProperties.Name>
+                                                                                                    <MultiBinding StringFormat="{}{0}, {1}">
+                                                                                                        <Binding Path="TitleText"/>
+                                                                                                        <Binding Path="StateText"/>
+                                                                                                    </MultiBinding>
+                                                                                                </AutomationProperties.Name>
                                                                                                 <DockPanel>
                                                                                                     <!-- Colors come from the theme resources, so they follow theme changes. -->
                                                                                                     <TextBlock Text="{Binding Glyph}" FontSize="11" Margin="0,0,10,0">
@@ -773,7 +843,7 @@
                                                                                                     <TextBlock DockPanel.Dock="Right" Text="{Binding DetailText}" Style="{StaticResource Caption}" FontSize="11" Margin="12,0,6,0" VerticalAlignment="Center"/>
                                                                                                     <TextBlock Text="{Binding TitleText}" FontSize="12" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
                                                                                                 </DockPanel>
-                                                                                            </Border>
+                                                                                            </Button>
                                                                                         </DataTemplate>
                                                                                     </ItemsControl.ItemTemplate>
                                                                                 </ItemsControl>

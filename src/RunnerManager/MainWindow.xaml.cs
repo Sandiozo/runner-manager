@@ -114,6 +114,30 @@ public partial class MainWindow : Window
 
     // ================= Refresh =================
 
+    private const string JoinFleetTitle = "Join fleet";
+    private const string LeaveFleetTitle = "Leave fleet";
+
+    /// <summary>The fleet read that runs now or ran last, so joining or leaving the fleet can wait for it.</summary>
+    private Task? _fleetRead;
+
+    /// <summary>
+    /// This PC joins or leaves the fleet. The fleet is not read meanwhile: a read saves the PCs it finds, and could add a PC
+    /// back to the list that leaving just cleared. The refresh at the end of the operation reads it again.
+    /// </summary>
+    private bool FleetMembershipChanging => _operationRunning && !ReadsFleetDuring(_operationTitle);
+
+    /// <summary>Whether the fleet is read while the operation with this title runs on this PC.</summary>
+    internal static bool ReadsFleetDuring(string operationTitle) => operationTitle is not (JoinFleetTitle or LeaveFleetTitle);
+
+    /// <summary>Waits until a fleet read that is still running has ended (it never throws).</summary>
+    private Task WaitForFleetReadAsync()
+        => _fleetRead is { IsCompleted: false } read ? read.ContinueWith(_ => { }, TaskScheduler.Default) : Task.CompletedTask;
+
+    /// <summary>
+    /// Reads the fleet and this PC's runners and shows them. Nothing here waits for gh: the GitHub sign-in is checked
+    /// beside it (<see cref="StartGitHubCheck"/>), and the job health, update and recent-run checks run after it, so the
+    /// next timer tick is not skipped while GitHub is slow.
+    /// </summary>
     private async Task RefreshAsync(bool forceAuthCheck = false)
     {
         if (_refreshing)
@@ -124,12 +148,15 @@ public partial class MainWindow : Window
             _refreshQueuedForceAuth |= forceAuthCheck;
             return;
         }
+        if (FleetMembershipChanging) return;
         _refreshing = true;
+        var completed = false;
         try
         {
-            // Other PCs are read directly from their agents on the network; GitHub isn't involved, so they never
+            // Other PCs are read directly from their agents on the network; GitHub is not involved, so they never
             // wait for it.
             var machinesTask = MachineRelay.ReadFleetAsync(_forceDiscovery);
+            _fleetRead = machinesTask;
             _forceDiscovery = false;
             // While an operation runs on this PC, only the other PCs are refreshed: this PC's runners, fleet agent and
             // fleet membership are what operations change, and everything is refreshed when the operation ends.
@@ -139,22 +166,16 @@ public partial class MainWindow : Window
                 LastUpdatedText.Text = $"Updated {TimeFormat.WithSeconds(DateTime.Now)}  ·  Refreshes every {_settings.RefreshSeconds}s";
                 return;
             }
-            var enrollmentTask = MachineRelay.IsAgentInstalledAsync();
-            if (forceAuthCheck || DateTime.Now - _lastAuthCheck > AuthCheckInterval)
-            {
-                var wasAuthenticated = _githubAuthenticated;
-                _githubAuthenticated = await GitHubCli.IsAuthenticatedAsync();
-                _githubChecked = true;
-                _lastAuthCheck = DateTime.Now;
-                if (_githubAuthenticated && (!wasAuthenticated || string.IsNullOrEmpty(_githubLogin)))
-                {
-                    var login = await GitHubCli.RunAsync("api user --jq .login");
-                    _githubLogin = login.ExitCode == 0 ? login.Output.Trim() : string.Empty;
-                }
-                if (!_githubAuthenticated) _githubLogin = string.Empty;
-                ApplyGitHubStatus();
-            }
-            _isEnrolled = await enrollmentTask;
+            if (forceAuthCheck || DateTime.Now - _lastAuthCheck > AuthCheckInterval) StartGitHubCheck();
+            // This PC's runners are read with GitHub when it was connected at the last check. When the check that runs
+            // now says otherwise, they are read again (see CheckGitHubAsync).
+            var refreshLocalRunners = forceAuthCheck || Runners.Count == 0
+                || DateTime.Now - _lastLocalRunnerRefresh >= LocalGitHubRefreshInterval;
+            var runnersTask = refreshLocalRunners
+                ? RunnerService.ReadSnapshotAsync(_githubAuthenticated)
+                : Task.FromResult(Runners.ToList());
+
+            _isEnrolled = await MachineRelay.IsAgentInstalledAsync();
             // Another Windows user runs this PC's fleet agent: this dashboard shows the PC but leaves the agent alone.
             _agentOwner = await AgentOwnership.OtherUserAsync();
             if (_agentOwner != null)
@@ -164,13 +185,7 @@ public partial class MainWindow : Window
                 _agentOwnerReported = true;
             }
             ApplyEnrollmentStatus();
-            await EnsureAgentTaskSettingsAsync();
 
-            var refreshLocalRunners = forceAuthCheck || Runners.Count == 0
-                || DateTime.Now - _lastLocalRunnerRefresh >= LocalGitHubRefreshInterval;
-            var runnersTask = refreshLocalRunners
-                ? RunnerService.ReadSnapshotAsync(_githubAuthenticated)
-                : Task.FromResult(Runners.ToList());
             // This PC's runners wait for GitHub, which can be slow: show the other PCs first, with this PC's last readings.
             if (await Task.WhenAny(runnersTask, machinesTask) == machinesTask && !runnersTask.IsCompleted)
                 ApplyFleet(await machinesTask, Runners.ToList(), localRunnersRead: false);
@@ -183,15 +198,9 @@ public partial class MainWindow : Window
                 return;
             }
             ApplyFleet(machines, runners, refreshLocalRunners);
-            await CheckRunnerHealthAsync();
-            await RefreshFleetExtrasAsync();
+            completed = true;
             LastUpdatedText.Text = $"Updated {TimeFormat.WithSeconds(DateTime.Now)}  ·  Refreshes every {_settings.RefreshSeconds}s";
-            if (!_operationRunning && DateTime.UtcNow >= _noticeUntilUtc)
-            {
-                if (_agentOwner != null) SetStatus($"The fleet agent on this PC runs for {_agentOwner}.", StatusKind.Warning);
-                else SetStatus(_githubAuthenticated ? "Ready" : "GitHub is not connected. Jobs, queues and recent runs are not shown.",
-                    _githubAuthenticated ? StatusKind.Ok : StatusKind.Warning);
-            }
+            ShowIdleStatus();
         }
         catch (Exception ex)
         {
@@ -204,13 +213,93 @@ public partial class MainWindow : Window
             _refreshing = false;
             // A first refresh that failed says so in the status bar.
             LoadingPanel.Visibility = Visibility.Collapsed;
-            if (_refreshQueued)
+        }
+        if (completed) _ = RunChecksAfterRefreshAsync();
+        if (_refreshQueued)
+        {
+            var force = _refreshQueuedForceAuth;
+            _refreshQueued = _refreshQueuedForceAuth = false;
+            await RefreshAsync(force);
+        }
+    }
+
+    /// <summary>
+    /// The checks that ask Windows and GitHub, after a refresh has shown the fleet. They are not awaited by the refresh,
+    /// and each check runs once at a time, so a slow one never holds the next refresh back or runs twice.
+    /// </summary>
+    private async Task RunChecksAfterRefreshAsync()
+    {
+        try
+        {
+            await EnsureAgentTaskSettingsAsync();
+            await CheckRunnerHealthAsync();
+            await RefreshFleetExtrasAsync();
+        }
+        catch (Exception ex) { AddActivity($"Background check failed: {ex.Message}"); }
+    }
+
+    /// <summary>What the status bar says when no operation runs and no result is shown.</summary>
+    private void ShowIdleStatus()
+    {
+        if (_operationRunning || DateTime.UtcNow < _noticeUntilUtc) return;
+        if (_agentOwner != null) SetStatus($"The fleet agent on this PC runs for {_agentOwner}.", StatusKind.Warning);
+        else if (!_githubChecked) SetStatus("Checking the GitHub connection…", StatusKind.Busy);
+        // Not the problem of one repository: only a pause that holds back every request to GitHub is about the whole view.
+        else if (_githubAuthenticated && GitHubCli.ProblemFor(null) is { } pause)
+            SetStatus(GitHubNotes.Describe(GitHubNotes.PauseLead, pause, DateTime.UtcNow), StatusKind.Warning);
+        else if (_githubAuthenticated) SetStatus("Ready", StatusKind.Ok);
+        else SetStatus("GitHub is not connected. Jobs, queues and recent runs are not shown.", StatusKind.Warning);
+    }
+
+    /// <summary>The GitHub sign-in check that runs now or ran last.</summary>
+    private Task? _gitHubCheck;
+
+    /// <summary>
+    /// Asks gh whether GitHub is connected, beside the refresh: gh can take up to 45 seconds to answer, and the fleet is
+    /// shown without it. One check runs at a time.
+    /// </summary>
+    private void StartGitHubCheck()
+    {
+        if (_gitHubCheck is { IsCompleted: false }) return;
+        _lastAuthCheck = DateTime.Now;
+        _gitHubCheck = CheckGitHubAsync();
+    }
+
+    private async Task CheckGitHubAsync()
+    {
+        var wasAuthenticated = _githubAuthenticated;
+        var wasChecked = _githubChecked;
+        bool authenticated;
+        var login = _githubLogin;
+        try
+        {
+            authenticated = await GitHubCli.IsAuthenticatedAsync();
+            if (authenticated && (!wasAuthenticated || login.Length == 0))
             {
-                var force = _refreshQueuedForceAuth;
-                _refreshQueued = _refreshQueuedForceAuth = false;
-                await RefreshAsync(force);
+                var user = await GitHubCli.RunAsync("api user --jq .login");
+                login = user.ExitCode == 0 ? user.Output.Trim() : string.Empty;
             }
         }
+        catch (Exception ex)
+        {
+            AddActivity($"Could not check the GitHub connection: {ex.Message}");
+            return;
+        }
+        _githubAuthenticated = authenticated;
+        _githubLogin = authenticated ? login : string.Empty;
+        _githubChecked = true;
+        ApplyGitHubStatus();
+        UpdatePageHeader();
+        if (authenticated == wasAuthenticated)
+        {
+            if (!wasChecked) ShowIdleStatus();
+            return;
+        }
+        // Connected now: what GitHub refused before (no sign-in) is asked again at once, not after its pause.
+        if (authenticated) GitHubCli.ForgetProblems();
+        // This PC's runners were read the other way, with or without GitHub.
+        _lastLocalRunnerRefresh = DateTime.MinValue;
+        await RefreshAsync();
     }
 
     /// <summary>
@@ -247,12 +336,14 @@ public partial class MainWindow : Window
 
     private async Task EnsureAgentTaskSettingsAsync()
     {
-        if (_agentTaskChecked || !_isEnrolled) return;
+        // Not while an operation installs or removes the task; a later refresh checks it.
+        if (_agentTaskChecked || !_isEnrolled || _operationRunning) return;
         _agentTaskChecked = true;
         try
         {
+            // The task is registered again with all of its current settings, not only the ones the check looks at.
             if (await MachineRelay.RepairAgentTaskSettingsAsync())
-                AddActivity("Updated the fleet agent task to run on battery and without the 3-day time limit.");
+                AddActivity("Updated the fleet agent task to the current settings.");
             if (await ScheduledTasks.UpdateAgentTaskIfOutdatedAsync(fromAgent: false))
                 AddActivity("Updated the fleet agent task: it now starts again by itself when it stopped.");
         }
@@ -551,7 +642,7 @@ public partial class MainWindow : Window
 
     private static string Plural(int count, string word) => $"{count} {word}{(count == 1 ? "" : "s")}";
 
-    private void UpdateSummary()
+    internal void UpdateSummary()
     {
         var machines = Machines.ToList();
         var reachable = machines.Count(m => m.IsReachable);
@@ -570,6 +661,8 @@ public partial class MainWindow : Window
         TileBusy.Text = busy.Count.ToString();
         TileBusySub.Text = busy.Count > 0 ? string.Join(", ", busy.Select(r => r.TitleText))
             : queued > 0 ? $"{queued} job{(queued == 1 ? "" : "s")} queued on this PC" : "No jobs running";
+        // Like the other tiles, over the whole fleet, not the filtered view.
+        UpdateAttentionTile(machines);
 
         _allMachines.Update($"{Plural(machines.Count, "PC")}  ·  {Plural(runners.Count, "runner")}");
         ApplyOptionalSections(machines);
@@ -594,8 +687,12 @@ public partial class MainWindow : Window
     {
         if (item is not MachineInfo machine) return false;
         if (_selectedMachineKey != null && machine.MachineKey != _selectedMachineKey) return false;
-        return MatchesSearch(machine);
+        return ShownWithoutSelection(machine);
     }
+
+    /// <summary>The search and the Needs attention tile show the PC, whatever is selected in the sidebar.</summary>
+    private bool ShownWithoutSelection(MachineInfo machine)
+        => (!_attentionOnly || FleetAttention.PcNeedsAttention(machine)) && MatchesSearch(machine);
 
     private bool MatchesSearch(MachineInfo machine)
         => string.IsNullOrWhiteSpace(_filter)
@@ -604,37 +701,47 @@ public partial class MainWindow : Window
 
     private void ApplyFilter()
     {
+        var searching = !string.IsNullOrWhiteSpace(_filter);
         foreach (var machine in Machines)
         {
-            var machineMatch = !string.IsNullOrWhiteSpace(_filter)
-                && machine.MachineName.Contains(_filter, StringComparison.OrdinalIgnoreCase);
+            var machineMatch = searching && machine.MachineName.Contains(_filter, StringComparison.OrdinalIgnoreCase);
             var runnerMatch = false;
+            var shown = false;
             foreach (var runner in machine.Runners)
             {
                 var match = runner.Matches(_filter);
                 runnerMatch |= match;
-                runner.MatchesFilter = machineMatch || match;
+                runner.MatchesFilter = (machineMatch || match) && (!_attentionOnly || FleetAttention.ShowsRunner(machine, runner));
+                shown |= runner.MatchesFilter;
             }
-            // A match in a runner's own details is otherwise hidden in a collapsed card.
-            machine.SetOpenForSearch(runnerMatch && !string.IsNullOrWhiteSpace(_filter));
+            // A match in a runner's own details, or a runner that needs attention, is otherwise hidden in a collapsed card.
+            machine.SetOpenForSearch((runnerMatch && searching) || (_attentionOnly && shown));
         }
         // Refreshing the view rebuilds every card, so only do it when the visible set actually changes.
         var visible = MachinesView.Cast<MachineInfo>().Select(m => m.MachineKey);
         var wanted = Machines.Where(FilterMachine).Select(m => m.MachineKey);
         if (!visible.SequenceEqual(wanted)) MachinesView.Refresh();
-        var empty = MachinesView.IsEmpty && !string.IsNullOrWhiteSpace(_filter);
+        var empty = MachinesView.IsEmpty && (searching || _attentionOnly);
         NoResultsPanel.Visibility = empty ? Visibility.Visible : Visibility.Collapsed;
         NoResultsText.Text = NoResultsMessage();
     }
 
-    /// <summary>With one PC selected in the sidebar, the search covers only that PC: say so, and whether others match.</summary>
+    /// <summary>
+    /// Why nothing is shown. With one PC selected in the sidebar, the search and the Needs attention tile cover only
+    /// that PC: say so, and whether other PCs have something to show.
+    /// </summary>
     private string NoResultsMessage()
     {
+        var searching = !string.IsNullOrWhiteSpace(_filter);
         if (_selectedMachineKey == null || Machines.FirstOrDefault(m => m.MachineKey == _selectedMachineKey) is not { } selected)
-            return $"No runners or PCs match “{_filter}”.";
-        return Machines.Any(m => m != selected && MatchesSearch(m))
-            ? $"Nothing on {selected.MachineName} matches “{_filter}”. Other PCs have matches. Select All PCs to see them."
-            : $"Nothing on {selected.MachineName} matches “{_filter}”.";
+            return !searching ? "Nothing needs attention."
+                : _attentionOnly ? $"Nothing that needs attention matches “{_filter}”."
+                : $"No runners or PCs match “{_filter}”.";
+        var what = !searching ? "needs attention" : _attentionOnly ? $"needs attention and matches “{_filter}”" : $"matches “{_filter}”";
+        if (!Machines.Any(m => m != selected && ShownWithoutSelection(m))) return $"Nothing on {selected.MachineName} {what}.";
+        return searching
+            ? $"Nothing on {selected.MachineName} {what}. Other PCs have matches. Select All PCs to see them."
+            : $"Nothing on {selected.MachineName} {what}. Other PCs do. Select All PCs to see them.";
     }
 
     private void SearchBox_TextChanged(object sender, TextChangedEventArgs e)
@@ -730,7 +837,7 @@ public partial class MainWindow : Window
         DisconnectMenuItem.Visibility = _githubAuthenticated ? Visibility.Visible : Visibility.Collapsed;
     }
 
-    /// <summary>In a fleet = the agent is installed and this PC has the fleet's pairing code.</summary>
+    /// <summary>In a fleet = the fleet agent is installed and this PC has the fleet code (or, managed one way, its access code).</summary>
     private bool InFleet => _isEnrolled && FleetConfig.Current.FleetKey != null;
 
     private void ApplyEnrollmentStatus()
@@ -756,6 +863,10 @@ public partial class MainWindow : Window
             await RunOperationAsync("Disconnect GitHub", async log =>
             {
                 await GitHubCli.DisconnectAsync();
+                // So the refresh after it does not ask GitHub; the sign-in check that it starts says the same.
+                _githubAuthenticated = false;
+                _githubLogin = string.Empty;
+                ApplyGitHubStatus();
                 log("GitHub disconnected.");
             });
             return;
@@ -839,17 +950,17 @@ public partial class MainWindow : Window
         _lastSignInCheckUtc = DateTime.UtcNow;
         try
         {
-            if (await GitHubCli.IsAuthenticatedAsync()) await RefreshAsync(forceAuthCheck: true);
-        }
-        catch
-        {
-            // The refresh reports problems with gh; this check only makes it come sooner.
+            // A sign-in that it finds refreshes the dashboard.
+            StartGitHubCheck();
+            if (_gitHubCheck is { } check) await check;
         }
         finally { _checkingSignIn = false; }
     }
 
     private async void AddRunner_Click(object sender, RoutedEventArgs e)
     {
+        // The first sign-in check runs beside the first refresh; until it answers, the sign-in is not known.
+        if (!_githubChecked && _gitHubCheck is { } check) await check;
         if (!_githubAuthenticated)
         {
             if (DialogWindow.Show(this, DialogTone.Info, "Connect GitHub first",
@@ -859,10 +970,39 @@ public partial class MainWindow : Window
             return;
         }
         if (IsOperationRunning("Add runner")) return;
-        var dialog = new AddRunnerWindow { Owner = this };
-        if (dialog.ShowDialog() != true || dialog.Setup == null) return;
-        await RunOperationAsync("Add runner", log => RunnerService.CreateRunnerAsync(dialog.Setup, log));
+        // A PC card's button adds on that PC; the toolbar and Ctrl+N on the PC selected in the sidebar.
+        var selected = ItemFrom<MachineInfo>(sender) ?? Machines.FirstOrDefault(m => m.MachineKey == _selectedMachineKey);
+        var dialog = new AddRunnerWindow(null, Machines, selected) { Owner = this };
+        if (dialog.ShowDialog() != true || dialog.Setup is not { } setup) return;
+        if (OtherPcToAddOn(dialog.TargetPc, Machines) is not { } pc)
+        {
+            await RunOperationAsync("Add runner", log => RunnerService.CreateRunnerAsync(setup, log));
+            return;
+        }
+        if (!CanSendTo(pc.MachineKey)) return;
+        await RunOperationAsync($"Add runner on {pc.MachineName}", async log =>
+        {
+            log(RemoteAddRunnerNote(pc.MachineName));
+            await _fleetActions.CreateRunnerAsync(pc, setup.RepositoryUrl, setup.RunnerName, setup.Labels, log);
+            var path = RunnerService.RepositoryPath(setup.RepositoryUrl);
+            if (!setup.CheckWorkflows || string.IsNullOrWhiteSpace(path)) return;
+            // The workflows are on GitHub, so this PC checks them; the runner works either way.
+            log("Checking repository workflows…");
+            try { await WorkflowManager.CheckAndUpdateAsync(path, setup.Labels, log); }
+            catch (Exception ex) { log($"Warning: the workflow check failed: {ex.Message.Split('\n')[0].Trim()} The runner was created."); }
+        });
     }
+
+    /// <summary>
+    /// The PC the Add runner window chose, as the dashboard knows it now, when it is another PC; null for this PC.
+    /// The window keeps the reading it was opened with, which a refresh may have replaced meanwhile.
+    /// </summary>
+    internal static MachineInfo? OtherPcToAddOn(MachineInfo? chosen, IEnumerable<MachineInfo> machines)
+        => chosen is not { IsLocal: false } ? null : machines.FirstOrDefault(m => m.MachineKey == chosen.MachineKey) ?? chosen;
+
+    /// <summary>The first line of an Add runner on another PC: its fleet agent sends nothing until it is done.</summary>
+    internal static string RemoteAddRunnerNote(string pcName)
+        => $"{pcName} downloads and sets up the runner. It reports no progress until it is done, which can take several minutes.";
 
     // ================= Operations =================
 
@@ -1100,38 +1240,26 @@ public partial class MainWindow : Window
 
     private static T? ItemFrom<T>(object sender) where T : class => (sender as FrameworkElement)?.DataContext as T;
 
-    private void RunnerRow_Click(object sender, MouseButtonEventArgs e)
+    /// <summary>
+    /// The click of this flat button itself. A button inside it, such as a card's update badge, its ⋯ menu or a run's
+    /// Re-run, raises its own Click, which reaches the outer button too.
+    /// </summary>
+    internal static bool IsOwnClick(object sender, RoutedEventArgs e) => ReferenceEquals(e.OriginalSource, sender);
+
+    private void RunnerRow_Click(object sender, RoutedEventArgs e)
     {
-        var current = e.OriginalSource as DependencyObject;
-        while (current != null && current != sender)
-        {
-            // Buttons, links and the live job panel (so its output can be read and selected) do not toggle the row.
-            if (current is ButtonBase || current is TextBlock { Tag: string { Length: > 0 } } || current is FrameworkElement { Name: "LiveJobPanel" }) return;
-            // Text pieces such as a Run (a Hyperlink's text) are not visuals; their parent is in the logical tree.
-            current = current is Visual or System.Windows.Media.Media3D.Visual3D
-                ? VisualTreeHelper.GetParent(current)
-                : LogicalTreeHelper.GetParent(current);
-        }
-        if (ItemFrom<MachineRunnerStatus>(sender) is { } runner) ToggleRunner(runner);
+        if (IsOwnClick(sender, e) && ItemFrom<MachineRunnerStatus>(sender) is { } runner) ToggleRunner(runner);
     }
 
-    // Enter or Space on a focused card header, runner row or link does what a click does.
+    /// <summary>A job of the queue or a recent run: opens it on GitHub.</summary>
+    private void RunRow_Click(object sender, RoutedEventArgs e)
+    {
+        if (IsOwnClick(sender, e) && sender is FrameworkElement { Tag: string { Length: > 0 } url }) OpenUrl(url);
+    }
+
+    // Enter or Space on a focused link does what a click does.
     private static bool IsActivation(object sender, KeyEventArgs e)
         => e.Key is Key.Enter or Key.Space && Keyboard.Modifiers == ModifierKeys.None && ReferenceEquals(e.OriginalSource, sender);
-
-    private void RunnerRow_KeyDown(object sender, KeyEventArgs e)
-    {
-        if (!IsActivation(sender, e) || ItemFrom<MachineRunnerStatus>(sender) is not { } runner) return;
-        ToggleRunner(runner);
-        e.Handled = true;
-    }
-
-    private void MachineHeader_KeyDown(object sender, KeyEventArgs e)
-    {
-        if (!IsActivation(sender, e) || ItemFrom<MachineInfo>(sender) is not { } machine) return;
-        ToggleCollapsed(machine);
-        e.Handled = true;
-    }
 
     private void Link_KeyDown(object sender, KeyEventArgs e)
     {
@@ -1165,15 +1293,10 @@ public partial class MainWindow : Window
         foreach (var runner in Machines.SelectMany(m => m.Runners)) runner.Refresh();
     }
 
-    private void MachineHeader_Click(object sender, MouseButtonEventArgs e)
+    private void MachineHeader_Click(object sender, RoutedEventArgs e)
     {
-        for (var current = e.OriginalSource as DependencyObject; current != null && current != sender;
-             current = current is Visual ? VisualTreeHelper.GetParent(current) : LogicalTreeHelper.GetParent(current))
-        {
-            // The update badge, the ⋯ menu and other buttons keep working without collapsing the card.
-            if (current is ButtonBase) return;
-        }
-        if (ItemFrom<MachineInfo>(sender) is { } machine) ToggleCollapsed(machine);
+        // The update badge and the ⋯ menu keep working without collapsing the card.
+        if (IsOwnClick(sender, e) && ItemFrom<MachineInfo>(sender) is { } machine) ToggleCollapsed(machine);
     }
 
     private void ToggleCollapsed(MachineInfo machine)
@@ -1287,15 +1410,15 @@ public partial class MainWindow : Window
     /// <summary>Takes this PC out of the fleet (the other PCs are told to forget it).</summary>
     public async Task LeaveFleetAsync()
     {
-        if (!InFleet || IsAgentWorkRunning() || IsOperationRunning("Leave fleet")) return;
+        if (!InFleet || IsAgentWorkRunning() || IsOperationRunning(LeaveFleetTitle)) return;
         var others = Machines.Where(m => !m.IsLocal && !m.IsManaged).Select(m => m.MachineName).ToList();
         if (!DialogWindow.Confirm(this, $"Remove {Environment.MachineName} from the fleet?",
-                (others.Count > 0 ? $"{string.Join(", ", others)} will forget this PC. " : string.Empty) +
-                "The fleet agent and pairing code are removed from this PC. Runners keep running. " +
-                "You can add this PC again later.",
+                LeaveFleetMessage(others, managed: FleetConfig.Current.ManagedBy.Length > 0),
                 "Leave fleet", danger: true)) return;
-        await RunOperationAsync("Leave fleet", async log =>
+        await RunOperationAsync(LeaveFleetTitle, async log =>
         {
+            // A fleet read that started before could save a PC again after the list is cleared.
+            await WaitForFleetReadAsync();
             var told = await MachineRelay.LeaveFleetAsync(log);
             _isEnrolled = false;
             _agentTaskChecked = false;
@@ -1307,6 +1430,12 @@ public partial class MainWindow : Window
 
     private async void InstallAgent_Click(object sender, RoutedEventArgs e) => await SetUpFleetAsync(FleetStart.Ask);
 
+    /// <summary>What leaving the fleet does. A PC managed one way has its own access code instead of the fleet code.</summary>
+    internal static string LeaveFleetMessage(IReadOnlyCollection<string> others, bool managed)
+        => (others.Count > 0 ? $"{string.Join(", ", others)} will forget this PC. " : string.Empty)
+           + (managed ? "The fleet agent and this PC's access code are removed from this PC. " : "The fleet agent and the fleet code are removed from this PC. ")
+           + "Runners keep running. You can add this PC again later.";
+
     private enum FleetStart { Ask, New, Join }
 
     /// <summary>Joins or starts a fleet (from the sidebar, or right after setup), then installs the agent.</summary>
@@ -1317,7 +1446,7 @@ public partial class MainWindow : Window
             DialogWindow.Info(this, "Another Windows user runs the fleet agent", AgentOwnership.Describe(owner));
             return;
         }
-        if (IsAgentWorkRunning() || IsOperationRunning("Join fleet")) return;
+        if (IsAgentWorkRunning() || IsOperationRunning(JoinFleetTitle)) return;
         var newFleet = false;
         if (start == FleetStart.New && FleetConfig.Current.FleetKey == null)
         {
@@ -1335,20 +1464,21 @@ public partial class MainWindow : Window
             }
             else if (join.PairingKey != null && join.Managed)
             {
-                // Its own code: the fleet can reach this PC, but this PC can't reach the fleet, so it doesn't list the host.
+                // Its own access code: the fleet can reach this PC, but this PC cannot reach the fleet, so it does not list the host.
                 FleetConfig.BecomeManaged(join.PairingKey, join.HostName);
-                AddActivity($"{join.HostName}'s fleet manages this PC one way now. It can view and control this PC; this PC can't see its PCs.");
+                AddActivity($"{join.HostName}'s fleet manages this PC one way now. It can view and control this PC; this PC cannot see its PCs.");
             }
             else if (join.PairingKey != null)
             {
                 FleetConfig.SetFleetKey(join.PairingKey);
                 if (join.HostName.Length > 0) MachineRelay.AddKnownPeer(join.HostName, join.HostAddress);
-                AddActivity(join.HostName.Length > 0 ? $"Joined the fleet through {join.HostName}." : "Joined the fleet with a pairing code.");
+                AddActivity(join.HostName.Length > 0 ? $"Joined the fleet through {join.HostName}." : "Joined the fleet with the fleet code.");
             }
             else return;
         }
-        await RunOperationAsync("Join fleet", async log =>
+        await RunOperationAsync(JoinFleetTitle, async log =>
         {
+            await WaitForFleetReadAsync();
             await AppUpdater.InstallCurrentBuildAsync(log);
             log("Starting the fleet agent and opening its ports for the local network and Tailscale…");
             await MachineRelay.InstallAndStartAgentTaskAsync();
@@ -1367,7 +1497,7 @@ public partial class MainWindow : Window
         var window = new PairingHostWindow(key) { Owner = this };
         window.ShowDialog();
         foreach (var name in window.JoinedPcs) AddActivity($"{name} joined the fleet.");
-        foreach (var name in window.ManagedPcs) AddActivity($"{name} is managed one way. It can't see or control the fleet's PCs.");
+        foreach (var name in window.ManagedPcs) AddActivity($"{name} is managed one way. It cannot see or control the fleet's PCs.");
         _forceDiscovery = true;
         await RefreshAsync();
     }
@@ -1382,6 +1512,8 @@ public partial class MainWindow : Window
         SetStatus("Refreshing…", StatusKind.Busy);
         try
         {
+            // GitHub is asked again at once, so the user does not wait out a pause after fixing its cause.
+            GitHubCli.ForgetProblems();
             _forceDiscovery = true;
             _lastLocalRunnerRefresh = DateTime.MinValue;
             await RefreshAsync(forceAuthCheck: true);
@@ -1436,6 +1568,10 @@ public partial class MainWindow : Window
         StateChanged += (_, _) =>
         {
             if (WindowState != WindowState.Minimized) _shownState = WindowState;
+            // A window saved as maximized opens on a screen that is there; its normal place may be on a screen that
+            // is gone. Windows moves it there when it is restored, so it is fitted then, once the move is done.
+            if (WindowState == WindowState.Normal)
+                Dispatcher.BeginInvoke(DispatcherPriority.Background, () => WindowPlacement.EnsureOnScreen(this));
         };
         SizeChanged += (_, _) => NoteNormalBounds();
         LocationChanged += (_, _) => NoteNormalBounds();

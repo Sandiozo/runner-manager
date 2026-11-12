@@ -66,8 +66,13 @@ public partial class MainWindow
 
     // ================= Periodic extras =================
 
+    /// <summary>The checks run beside the refresh; a refresh that ends while they still run does not start them again.</summary>
+    private bool _extrasRunning;
+
     private async Task RefreshFleetExtrasAsync()
     {
+        if (_extrasRunning) return;
+        _extrasRunning = true;
         try
         {
             // Releases are public, so updates are checked whether or not GitHub is connected.
@@ -104,6 +109,7 @@ public partial class MainWindow
             }
         }
         catch (Exception ex) { AddActivity($"Background check failed: {ex.Message}"); }
+        finally { _extrasRunning = false; }
     }
 
     private async Task RefreshRecentRunsAsync()
@@ -213,7 +219,7 @@ public partial class MainWindow
         else
         {
             var (read, job) = await GitHubApi.GetCurrentJobAsync(runner.RepositoryPath, runner.AgentId);
-            if (!read) state.JobNote = "Could not read the job from GitHub. Trying again.";
+            if (!read) state.JobNote = GitHubNotes.Describe(GitHubNotes.JobLead, GitHubApi.ProblemFor(runner.RepositoryPath), DateTime.UtcNow);
             else
             {
                 state.Job = job;
@@ -305,7 +311,9 @@ public partial class MainWindow
             existing.Activate();
             return;
         }
-        var window = new SettingsWindow(_settings, ApplySettings, OnFleetSettingsChangedAsync, RunOperationAsync) { Owner = this };
+        // With the fleet code saved but no fleet agent, Settings offers to finish joining, as the sidebar does.
+        var window = new SettingsWindow(_settings, ApplySettings, OnFleetSettingsChangedAsync, RunOperationAsync,
+            finishJoining: () => SetUpFleetAsync(FleetStart.Ask)) { Owner = this };
         window.Show();
     }
 
@@ -370,7 +378,7 @@ public partial class MainWindow
         var check = await AppUpdater.CheckForUpdateAsync(force: true);
         if (check.Release is not { } release)
         {
-            DialogWindow.Error(this, "Couldn't check for updates", check.Problem);
+            DialogWindow.Error(this, "Could not check for updates", check.Problem);
             return;
         }
         if (!check.UpdateAvailable)
@@ -511,14 +519,10 @@ public partial class MainWindow
             await StopManagingAsync(machine.MachineName);
             return;
         }
-        if (!DialogWindow.Confirm(this, $"Forget {machine.MachineName}?",
-                machine.IsOnline
-                    ? $"{machine.MachineName} is online and still has the pairing code, so it may appear again. To remove it permanently, use \u201cLeave fleet\u201d in its \u22ef menu on {machine.MachineName}."
-                    : $"{machine.MachineName} is removed from this list. If it is still in the fleet, it appears again when it is found.",
+        if (!DialogWindow.Confirm(this, ForgetPc.Heading(machine.MachineName), ForgetPc.Message(machine.MachineName, machine.IsOnline),
                 "Forget")) return;
-        MachineRelay.ForgetPeer(machine.MachineName);
-        var host = machine.Address.Split(':')[0];
-        FleetConfig.Update(c => c.ManualAddresses.RemoveAll(a => a.Split(':')[0].Equals(host, StringComparison.OrdinalIgnoreCase)));
+        // As in Settings: the host of an IPv6 address has colons, so it is not what comes before the first one.
+        ForgetPc.Forget(machine.MachineName, machine.Address);
         AddActivity($"Forgot {machine.MachineName}.");
         if (_selectedMachineKey == machine.MachineKey) _selectedMachineKey = null;
         await RefreshAsync();

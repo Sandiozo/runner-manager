@@ -44,6 +44,9 @@ public partial class MainWindow
             foreach (var (key, value) in health.Queues) _runnerQueues[key] = value;
             // Cards may have been rebuilt meanwhile; the results are kept by runner key.
             foreach (var runner in Machines.SelectMany(m => m.Runners)) ApplyHealth(runner);
+            // A concern found or gone changes what the Needs attention tile counts and shows.
+            ApplyFilter();
+            UpdateAttentionTile(Machines.ToList());
 
             if (!_settings.NotifyOnJobProblems) return;
             foreach (var machine in Machines)
@@ -66,9 +69,28 @@ public partial class MainWindow
     private void ApplyHealth(MachineRunnerStatus runner)
     {
         var key = JobHealth.Key(runner);
-        runner.Health = _runnerHealth.GetValueOrDefault(key) ?? RunnerHealth.Healthy;
+        runner.Health = StillApplies(_runnerHealth.GetValueOrDefault(key) ?? RunnerHealth.Healthy, runner);
         runner.Queue = _runnerQueues.GetValueOrDefault(key) ?? (IReadOnlyList<QueueEntry>)Array.Empty<QueueEntry>();
+        runner.SetGitHubProblem(_githubAuthenticated ? GitHubProblemFor(runner) : null, DateTime.UtcNow);
     }
+
+    /// <summary>
+    /// Why GitHub could not be read for the runner: for its repository or organization, or a pause of every request.
+    /// A runner from an older agent may have no scope; its repository then says where it is.
+    /// </summary>
+    internal static GitHubProblem? GitHubProblemFor(MachineRunnerStatus runner)
+        => runner.Scope.Length > 0 ? GitHubCli.ProblemFor(runner.Scope) : GitHubApi.ProblemFor(runner.RepositoryPath);
+
+    /// <summary>
+    /// A concern found on an earlier reading, if it still fits the runner as it is now. The check runs beside the
+    /// refresh, so a newer reading can arrive while it asks GitHub: a job that ended meanwhile is no longer stuck.
+    /// </summary>
+    internal static RunnerHealth StillApplies(RunnerHealth health, MachineRunnerStatus runner) => health.Concern switch
+    {
+        RunnerConcern.Stuck or RunnerConcern.RunningLong when !runner.IsBusy => RunnerHealth.Healthy,
+        RunnerConcern.IdleWithWaitingJobs when !runner.IsRunning || runner.IsBusy => RunnerHealth.Healthy,
+        _ => health
+    };
 
     private async void RunnerStopJob_Click(object sender, RoutedEventArgs e)
     {

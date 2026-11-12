@@ -2,6 +2,8 @@ using System.Globalization;
 using System.IO;
 using System.Text.RegularExpressions;
 using System.Windows;
+using System.Windows.Automation;
+using System.Windows.Automation.Peers;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Input;
@@ -780,11 +782,12 @@ public class AuditDashboardTests
             MachineName = "BUILD-08", AgentProtocolVersion = 14, UpdatedUtc = DateTime.UtcNow, FleetAgentRunning = true
         });
         Assert.Equal("No runners on BUILD-08.", online.NoRunnersText);
-        // Runners are added on this PC.
-        Assert.Equal(Visibility.Collapsed, online.AddRunnerVisibility);
+        // Runners are added there through its fleet agent (round 3, item 11).
+        Assert.Equal(Visibility.Visible, online.AddRunnerVisibility);
 
         var offline = MachineInfo.Placeholder("BUILD-09", "BUILD-09", DateTime.UtcNow.AddHours(-2), "192.168.1.29", "Not reachable at 192.168.1.29:47800");
         Assert.Equal("BUILD-09 is not connected, so its runners are not known.", offline.NoRunnersText);
+        Assert.Equal(Visibility.Collapsed, offline.AddRunnerVisibility);
     }
 
     // ----- Item 22: smaller points -----
@@ -868,4 +871,634 @@ public class AuditDashboardTests
     [InlineData(Key.A, ModifierKeys.Control, null)]
     public void CtrlAndADigit_SelectsASidebarEntry(Key key, ModifierKeys modifiers, int? index)
         => Assert.Equal(index, MainWindow.NavShortcutIndex(key, modifiers));
+
+    // ================= Round 3 =================
+
+    // ----- 1: the refresh does not wait for gh; checks that run beside it see newer readings -----
+
+    private static MachineRunnerStatus RunnerIn(string state) => new()
+    {
+        ServiceName = "actions.runner.api", DisplayName = "api",
+        IsRunning = state != "stopped", ActivityText = state == "busy" ? "Busy" : "Idle"
+    };
+
+    [Theory]
+    [InlineData(RunnerConcern.Stuck, "busy", true)]
+    [InlineData(RunnerConcern.Stuck, "idle", false)]
+    [InlineData(RunnerConcern.RunningLong, "busy", true)]
+    [InlineData(RunnerConcern.RunningLong, "stopped", false)]
+    [InlineData(RunnerConcern.IdleWithWaitingJobs, "idle", true)]
+    [InlineData(RunnerConcern.IdleWithWaitingJobs, "busy", false)]
+    [InlineData(RunnerConcern.IdleWithWaitingJobs, "stopped", false)]
+    public void JobHealth_FromAnEarlierReading_IsShownOnlyWhileItStillFits(RunnerConcern concern, string state, bool shown)
+    {
+        var health = new RunnerHealth(concern, "Label", "Detail.");
+        var applied = MainWindow.StillApplies(health, RunnerIn(state));
+        Assert.Equal(shown ? health : RunnerHealth.Healthy, applied);
+    }
+
+    // ----- 3: output of a job that ended -----
+
+    private static (Dictionary<string, MainWindow.OutputCopy> Live, Dictionary<string, MainWindow.OutputCopy> Finished) Outputs()
+        => (new(StringComparer.OrdinalIgnoreCase), new(StringComparer.OrdinalIgnoreCase));
+
+    [Fact]
+    public void JobOutput_OfARunnerThatIsGone_IsNotKept()
+    {
+        var (live, finished) = Outputs();
+        MainWindow.KeepFinishedOutput(new[] { JobRunner("api", "error CS1002: ; expected") }, live, finished);
+        // The runner was deleted, or its PC is no longer listed.
+        MainWindow.KeepFinishedOutput(Array.Empty<MachineRunnerStatus>(), live, finished);
+        Assert.Empty(live);
+        Assert.Empty(finished);
+    }
+
+    [Fact]
+    public void FinishedOutput_GoesWithItsRunner()
+    {
+        var (live, finished) = Outputs();
+        MainWindow.KeepFinishedOutput(new[] { JobRunner("api", "Build failed") }, live, finished);
+        MainWindow.KeepFinishedOutput(new[] { JobRunner("api", "", busy: false) }, live, finished);
+        Assert.Single(finished);
+        MainWindow.KeepFinishedOutput(new[] { JobRunner("web", "", busy: false) }, live, finished);
+        Assert.Empty(finished);
+    }
+
+    [Fact]
+    public void JobOutput_IsKeptWhenTheWorkerEndsBeforeTheRunnerIsIdle()
+    {
+        var (live, finished) = Outputs();
+        MainWindow.KeepFinishedOutput(new[] { JobRunner("api", "error MSB3073: exited with code 1") }, live, finished);
+        // The job's process has exited, so there is no output, but the runner still shows the job.
+        MainWindow.KeepFinishedOutput(new[] { JobRunner("api", "") }, live, finished);
+        Assert.Equal("error MSB3073: exited with code 1", Assert.Single(live).Value.Text);
+        Assert.Empty(finished);
+        // Then the runner is idle.
+        MainWindow.KeepFinishedOutput(new[] { JobRunner("api", "", busy: false) }, live, finished);
+        Assert.Empty(live);
+        Assert.Equal("error MSB3073: exited with code 1", Assert.Single(finished).Value.Text);
+    }
+
+    [Fact]
+    public void JobOutput_IsNotKeptWhenTheRunnerIsClosedAfterItsWorkerEnded()
+    {
+        var (live, finished) = Outputs();
+        MainWindow.KeepFinishedOutput(new[] { JobRunner("api", "Compiling") }, live, finished);
+        MainWindow.KeepFinishedOutput(new[] { JobRunner("api", "") }, live, finished);
+        MainWindow.KeepFinishedOutput(new[] { JobRunner("api", "", open: false) }, live, finished);
+        Assert.Empty(live);
+        Assert.Empty(finished);
+    }
+
+    // ----- 5: JSON null in another PC's status -----
+
+    [Fact]
+    public void PcStatus_WithJsonNulls_IsShownWithoutFailing()
+    {
+        const string json = """
+            {
+              "MachineName": "BUILD-10", "AgentProtocolVersion": 14, "FleetAgentRunning": true,
+              "MachineId": null, "AppVersion": null, "LastCommandId": null, "LastCommandResult": null, "SigningKeyId": null,
+              "RecentCommands": [null, { "Id": null, "Result": null }], "PendingCommandIds": null,
+              "Disks": [null], "RecentEvents": [null],
+              "Runners": [
+                null,
+                { "ServiceName": null, "InstallPath": "C:\\runners\\api", "DisplayName": null, "RepositoryPath": null,
+                  "Scope": null, "AgentName": null, "CustomLabels": null, "ActivityText": null, "StartsAt": null,
+                  "RunnerVersion": null, "IsRunning": true },
+                { "ServiceName": "actions.runner.web", "CustomLabels": ["gpu", null] }
+              ]
+            }
+            """;
+        var payload = System.Text.Json.JsonSerializer.Deserialize<MachineStatusPayload>(json,
+            new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true })!;
+        var pc = MachineInfo.FromPayload("build-10", payload with { UpdatedUtc = DateTime.UtcNow });
+
+        Assert.Equal(2, pc.Runners.Length);
+        Assert.Empty(pc.PendingCommandIds);
+        Assert.Empty(pc.Disks);
+        Assert.Empty(pc.RecentEvents);
+        Assert.False(pc.IsRunningCommand("c1"));
+        Assert.Null(pc.CommandResult("c1"));
+        Assert.Equal(string.Empty, pc.LastResultText);
+        Assert.Equal("fleet agent protocol 14", pc.VersionText);
+        Assert.Equal("1/2 runners running", pc.SidebarSubtitle);
+
+        var first = pc.Runners[0];
+        Assert.Equal(string.Empty, first.Scope);
+        Assert.Equal(string.Empty, first.AgentName);
+        Assert.Equal(string.Empty, first.RepositoryPath);
+        Assert.Empty(first.CustomLabels);
+        Assert.False(first.IsBusy);
+        Assert.Equal(RunnerStart.Unknown, first.StartsAt);
+        Assert.Equal("C:\\runners\\api", first.CommandKey);
+        Assert.Equal("Repository unknown", first.RepositoryText);
+        Assert.False(first.Matches("gpu"));
+        Assert.Equal(Visibility.Collapsed, first.LabelsVisibility);
+        Assert.NotNull(first.StatusText);
+        Assert.NotNull(first.RunnerVersionText);
+
+        var second = pc.Runners[1];
+        Assert.Equal(new[] { "gpu" }, second.CustomLabels);
+        Assert.True(second.Matches("GPU"));
+        Assert.All(pc.Runners, r => Assert.Equal("BUILD-10", r.MachineName));
+    }
+
+    // ----- 6: no fleet read while this PC joins or leaves the fleet -----
+
+    [Theory]
+    [InlineData("Leave fleet", false)]
+    [InlineData("Join fleet", false)]
+    [InlineData("Add runner", true)]
+    [InlineData("Delete api", true)]
+    public void FleetIsNotRead_WhileThisPcJoinsOrLeaves(string operation, bool reads)
+        => Assert.Equal(reads, MainWindow.ReadsFleetDuring(operation));
+
+    [Fact]
+    public void JoiningAndLeaving_WaitForAFleetReadThatStartedBefore()
+    {
+        var code = File.ReadAllText(Path.Combine(SourceDir, "MainWindow.xaml.cs"));
+        foreach (var title in new[] { "RunOperationAsync(LeaveFleetTitle", "RunOperationAsync(JoinFleetTitle" })
+        {
+            var start = code.IndexOf(title, StringComparison.Ordinal);
+            Assert.True(start >= 0, title);
+            var wait = code.IndexOf("await WaitForFleetReadAsync();", start, StringComparison.Ordinal);
+            Assert.True(wait > start && wait - start < 300, title);
+        }
+    }
+
+    // ----- 4: what is pressed is a button -----
+
+    [Fact]
+    public void PressableAreas_AreButtonsWithANameForScreenReaders()
+    {
+        var xaml = Xaml("MainWindow.xaml");
+        // A focusable panel or border has no automation peer: a screen reader does not offer it as something to press.
+        Assert.DoesNotMatch(@"<(Grid|Border|StackPanel|DockPanel)\b[^>]*(MouseLeftButtonUp=|Focusable=""True"")", xaml);
+        Assert.DoesNotMatch(@"TargetType=""(Grid|Border)""[^>]*>(\s*<Setter[^>]*/>)*\s*<Setter Property=""Focusable"" Value=""True""/>", xaml);
+        // The PC header, the runner header, and the rows of the queue and of the recent runs.
+        var flat = Regex.Matches(xaml, @"<Button\b[^>]*Style=""\{StaticResource (FlatButton|RunRow)\}""[^>]*>(\s*<AutomationProperties\.Name>)?");
+        Assert.Equal(4, flat.Count);
+        Assert.All(flat, m => Assert.True(m.Value.Contains("AutomationProperties.Name=") || m.Groups[2].Success, m.Value));
+    }
+
+    [Fact]
+    public void FlatButton_IsAButtonForTheKeyboardAndScreenReaders()
+        => WpfTestApp.Run(() =>
+        {
+            var rerun = new Button { Content = "Re-run" };
+            var row = new Button
+            {
+                Style = (Style)Application.Current.FindResource("FlatButton"),
+                Content = new StackPanel { Children = { new TextBlock { Text = "CI  #42" }, rerun } }
+            };
+            AutomationProperties.SetName(row, "CI  #42, Failed");
+            WpfTestApp.Layout(row);
+
+            var peer = UIElementAutomationPeer.CreatePeerForElement(row);
+            Assert.Equal(AutomationControlType.Button, peer.GetAutomationControlType());
+            Assert.Equal("CI  #42, Failed", peer.GetName());
+            // In the tab order, so Enter and Space press it (the peer says focusable only once it is on screen).
+            Assert.True(row.Focusable && row.IsTabStop);
+            Assert.NotNull(peer.GetPattern(PatternInterface.Invoke));
+            // No look of its own: its content gives the look, and text keeps the window's color.
+            Assert.Equal(Colors.Transparent, WpfTestApp.ColorOf(row.Background));
+            Assert.Equal(new Thickness(0), row.BorderThickness);
+            Assert.Equal(WpfTestApp.Resource("TextBrush"), WpfTestApp.ColorOf(row.Foreground));
+
+            // A button inside it keeps its own click: only the row's own click opens the row.
+            var own = new List<bool>();
+            row.Click += (sender, e) => own.Add(MainWindow.IsOwnClick(sender, e));
+            rerun.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent, rerun));
+            row.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent, row));
+            Assert.Equal(new[] { false, true }, own);
+        });
+
+    [Fact]
+    public void HeaderButtons_SayWhatAClickShowsOrHides()
+    {
+        var pc = PcWith("BUILD-21", RunnerWith("api"));
+        var changed = new List<string?>();
+        pc.PropertyChanged += (_, e) => changed.Add(e.PropertyName);
+        try
+        {
+            Assert.Equal($"BUILD-21, {pc.StatusText}. Hide its runners", pc.HeaderName);
+            pc.ToggleCollapsed();
+            Assert.Equal($"BUILD-21, {pc.StatusText}. Show its runners", pc.HeaderName);
+            Assert.Contains(nameof(MachineInfo.HeaderName), changed);
+        }
+        finally { MachineInfo.CollapsedPcs.Remove("BUILD-21"); }
+
+        var runner = pc.Runners[0];
+        Assert.Equal($"api, {runner.StatusText}. Show details", runner.HeaderName);
+        runner.IsExpanded = true;
+        Assert.Equal($"api, {runner.StatusText}. Hide details", runner.HeaderName);
+    }
+
+    // ----- 4: OptionCard -----
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void OptionCard_LooksDisabledInBothThemes(bool light)
+        => WpfTestApp.Run(() =>
+        {
+            try
+            {
+                WpfTestApp.UseColors(light);
+                var card = WpfTestApp.Layout(new RadioButton
+                {
+                    Style = (Style)Application.Current.FindResource("OptionCard"),
+                    Content = new TextBlock { Text = "Several PCs" },
+                    IsChecked = true
+                });
+                var chrome = (Border)card.Template.FindName("Chrome", card);
+                Assert.Equal(1.0, chrome.Opacity);
+                Assert.Equal(Cursors.Hand, card.Cursor);
+
+                card.IsEnabled = false;
+                WpfTestApp.Layout(card);
+                // Faded on the theme's own colors, like a disabled button, and it no longer looks clickable.
+                Assert.Equal(0.45, chrome.Opacity, 3);
+                Assert.Equal(Cursors.Arrow, card.Cursor);
+                Assert.Equal(WpfTestApp.Resource("AccentBrush"), WpfTestApp.ColorOf(chrome.BorderBrush));
+                Assert.Equal(WpfTestApp.Resource("SelectedBrush"), WpfTestApp.ColorOf(chrome.Background));
+            }
+            finally { WpfTestApp.UseColors(light: false); }
+        });
+
+    // ----- 7: forgetting a PC -----
+
+    /// <summary>The body of a method in the app's source, from its name to its closing brace.</summary>
+    private static string MethodBody(string file, string signature)
+    {
+        var code = File.ReadAllText(Path.Combine(SourceDir, file)).Replace("\r\n", "\n");
+        var start = code.IndexOf(signature, StringComparison.Ordinal);
+        Assert.True(start >= 0, signature);
+        return code[start..code.IndexOf("\n    }\n", start, StringComparison.Ordinal)];
+    }
+
+    [Fact]
+    public void ForgettingAPc_OnTheDashboard_IsWordedAndDoneAsInSettings()
+    {
+        var forget = MethodBody("MainWindow.Fleet.cs", "void MachineForget_Click(");
+        Assert.Contains("ForgetPc.Heading(machine.MachineName)", forget);
+        Assert.Contains("ForgetPc.Message(machine.MachineName, machine.IsOnline)", forget);
+        Assert.Contains("ForgetPc.Forget(machine.MachineName, machine.Address)", forget);
+        // An IPv6 address has colons in its host, so the part before the first colon is not the host.
+        Assert.DoesNotContain("Split(':')", forget);
+        Assert.Equal(new[] { "[fd7a:115c::5]:47821" },
+            ForgetPc.ManualAddressesFor(new[] { "[fd7a:115c::5]:47821", "[fd7a:115c::6]:47821" }, new[] { "[fd7a:115c::5]:47821" }));
+    }
+
+    // ----- 8: the fleet agent task -----
+
+    [Fact]
+    public void RepairingTheAgentTask_SaysItHasTheCurrentSettings()
+    {
+        // The repair registers the task again with every current setting, so the line does not name only some of them.
+        var check = MethodBody("MainWindow.xaml.cs", "private async Task EnsureAgentTaskSettingsAsync(");
+        Assert.Contains(@"AddActivity(""Updated the fleet agent task to the current settings."");", check);
+        Assert.DoesNotContain("3-day", check);
+    }
+
+    // ----- 12: finishing joining from Settings -----
+
+    [Fact]
+    public void Settings_CanFinishJoiningTheFleet()
+    {
+        // Without it, Settings hides "Finish joining" and sends the user to the sidebar.
+        var open = MethodBody("MainWindow.Fleet.cs", "new SettingsWindow(");
+        Assert.Contains("finishJoining: () => SetUpFleetAsync(FleetStart.Ask)", open);
+    }
+
+    // ----- 9: GitHub problems for what is on screen -----
+
+    [Fact]
+    public void GitHubNote_SaysWhyAndWhenItIsTriedAgain()
+    {
+        var now = new DateTime(2026, 11, 12, 13, 0, 0, DateTimeKind.Utc);
+        var limit = new GitHubProblem("GitHub's request limit is reached.", now.AddMinutes(20), RateLimited: true, Detail: "");
+        Assert.Equal($"Could not read the job from GitHub. GitHub's request limit is reached. Trying again at {TimeFormat.WithSeconds(now.AddMinutes(20).ToLocalTime())}.",
+            GitHubNotes.Describe(GitHubNotes.JobLead, limit, now));
+        // Its pause has ended, and nothing asked again yet: no time in the past.
+        Assert.Equal("Could not read the job from GitHub. GitHub's request limit is reached. Trying again.",
+            GitHubNotes.Describe(GitHubNotes.JobLead, limit, now.AddMinutes(21)));
+        // No reason is known.
+        Assert.Equal("Could not read the job from GitHub. Trying again.", GitHubNotes.Describe(GitHubNotes.JobLead, null, now));
+    }
+
+    [Fact]
+    public void OpenRunner_ShowsWhyGitHubCouldNotBeReadForIt()
+    {
+        var now = DateTime.UtcNow;
+        var runner = new MachineRunnerStatus { ServiceName = "actions.runner.api", DisplayName = "api", Scope = "repos/octo/api" };
+        var problem = new GitHubProblem("GitHub did not find this, or the sign-in has no access to it.", now.AddSeconds(40), false, "HTTP 404: Not Found");
+
+        runner.SetGitHubProblem(problem, now);
+        Assert.Equal(Visibility.Collapsed, runner.GitHubNoteVisibility);
+        runner.IsExpanded = true;
+        Assert.Equal(Visibility.Visible, runner.GitHubNoteVisibility);
+        Assert.StartsWith(GitHubNotes.RunnerLead + " GitHub did not find this", runner.GitHubNote);
+        Assert.Equal("HTTP 404: Not Found", runner.GitHubNoteTip);
+        // The note takes the place of "No job is running, and there are no recent runs to show."
+        Assert.Equal(Visibility.Collapsed, runner.NoJobsVisibility);
+
+        runner.SetGitHubProblem(null, now);
+        Assert.Equal(Visibility.Collapsed, runner.GitHubNoteVisibility);
+        Assert.Null(runner.GitHubNoteTip);
+        Assert.Equal(Visibility.Visible, runner.NoJobsVisibility);
+        Assert.Contains(@"Visibility=""{Binding GitHubNoteVisibility}""", Xaml("MainWindow.xaml"));
+    }
+
+    [Fact]
+    public void GitHubProblems_AreThoseOfTheThingOnScreen()
+    {
+        var code = string.Join("\n", new[] { "MainWindow.xaml.cs", "MainWindow.Fleet.cs", "MainWindow.Health.cs", "MachineViewModels.cs" }
+            .Select(file => File.ReadAllText(Path.Combine(SourceDir, file))));
+        // Not the problem of any endpoint: CurrentProblem would show one repository's failure on every runner.
+        Assert.DoesNotContain("CurrentProblem", code);
+        Assert.Contains("GitHubApi.ProblemFor(runner.RepositoryPath)", MethodBody("MainWindow.Fleet.cs", "private async Task RefreshLiveJobAsync("));
+        Assert.Contains("GitHubCli.ProblemFor(runner.Scope)", MethodBody("MainWindow.Health.cs", "internal static GitHubProblem? GitHubProblemFor("));
+        Assert.Contains("GitHubCli.ProblemFor(null)", MethodBody("MainWindow.xaml.cs", "private void ShowIdleStatus("));
+    }
+
+    [Fact]
+    public void ManualRefreshAndConnectingGitHub_AskGitHubAgainAtOnce()
+    {
+        // After the user fixed the cause, they do not wait out the pause.
+        var manual = MethodBody("MainWindow.xaml.cs", "private async Task ManualRefreshAsync(");
+        var forget = manual.IndexOf("GitHubCli.ForgetProblems();", StringComparison.Ordinal);
+        Assert.True(forget > 0 && forget < manual.IndexOf("await RefreshAsync(", StringComparison.Ordinal));
+        // A sign-in check that finds GitHub connected now.
+        Assert.Contains("if (authenticated) GitHubCli.ForgetProblems();", MethodBody("MainWindow.xaml.cs", "private async Task CheckGitHubAsync("));
+    }
+
+    // ----- 10: the owner's names, no contractions -----
+
+    /// <summary>The text a user can see in the dashboard's files: string literals in code, and text attributes in XAML.</summary>
+    private static IEnumerable<(string File, string Text)> DashboardUserText()
+    {
+        var files = Directory.GetFiles(SourceDir, "MainWindow*").Select(Path.GetFileName)
+            .Concat(new[] { "MachineViewModels.cs", "Ui.cs", "GitHubNotes.cs" }).Select(f => f!);
+        foreach (var file in files)
+        {
+            var text = File.ReadAllText(Path.Combine(SourceDir, file));
+            if (file.EndsWith(".xaml", StringComparison.OrdinalIgnoreCase))
+            {
+                foreach (Match m in Regex.Matches(text, @"\b(?:Text|ToolTip|Header|Content|AutomationProperties\.Name)=""([^""]*)"""))
+                    yield return (file, m.Groups[1].Value);
+                continue;
+            }
+            foreach (var line in text.Split('\n').Where(l => !l.TrimStart().StartsWith("//", StringComparison.Ordinal)))
+                foreach (Match m in Regex.Matches(line, @"""(?:[^""\\]|\\.)*"""))
+                    yield return (file, m.Value);
+        }
+    }
+
+    [Fact]
+    public void DashboardText_UsesTheOwnersNamesAndNoContractions()
+    {
+        var contraction = new Regex(@"\b\w+n['’]t\b|\b(?:it|that|there|what|here|who|let)['’]s\b|\b\w+['’](?:re|ll|ve|m|d)\b", RegexOptions.IgnoreCase);
+        var text = DashboardUserText().ToList();
+        Assert.True(text.Count > 200);
+        Assert.Empty(text.Where(t => contraction.IsMatch(t.Text)).Select(t => $"{t.File}: {t.Text}"));
+        Assert.Empty(text.Where(t => t.Text.Contains("pairing code", StringComparison.OrdinalIgnoreCase)).Select(t => $"{t.File}: {t.Text}"));
+    }
+
+    [Fact]
+    public void PcCard_SaysWhichCodeEncryptsItsConnections()
+    {
+        var paired = MachineInfo.FromPayload("build-01", new MachineStatusPayload { MachineName = "BUILD-01", SigningKeyId = "a1b2c3" });
+        Assert.Equal("Paired. Connections to other PCs are encrypted with the fleet code (fingerprint a1b2c3).", paired.SignedTip);
+        var managed = MachineInfo.Placeholder("build-02", "BUILD-02", DateTime.UtcNow, "10.0.0.2", string.Empty, managed: true);
+        Assert.Contains("its own access code", managed.SignedTip);
+        Assert.Contains("cannot use", managed.SignedTip);
+    }
+
+    [Fact]
+    public void LeavingTheFleet_SaysWhichCodeIsRemoved()
+    {
+        Assert.Equal("BUILD-02, BUILD-03 will forget this PC. The fleet agent and the fleet code are removed from this PC. "
+                     + "Runners keep running. You can add this PC again later.",
+            MainWindow.LeaveFleetMessage(new[] { "BUILD-02", "BUILD-03" }, managed: false));
+        Assert.Equal("The fleet agent and this PC's access code are removed from this PC. Runners keep running. You can add this PC again later.",
+            MainWindow.LeaveFleetMessage(Array.Empty<string>(), managed: true));
+    }
+
+    // ----- 11: Add runner on another PC -----
+
+    [Fact]
+    public void AddRunner_OnAnotherPc_GoesToThatPcAsTheDashboardKnowsItNow()
+    {
+        var local = PcWith(Environment.MachineName);
+        var opened = PcWith("BUILD-30");
+        var newer = PcWith("BUILD-30", RunnerWith("api"));
+        Assert.Null(MainWindow.OtherPcToAddOn(null, new[] { local, newer }));
+        Assert.Null(MainWindow.OtherPcToAddOn(local, new[] { local, newer }));
+        // A refresh replaced the reading the window was opened with.
+        Assert.Same(newer, MainWindow.OtherPcToAddOn(opened, new[] { local, newer }));
+        Assert.Same(opened, MainWindow.OtherPcToAddOn(opened, new[] { local }));
+    }
+
+    [Fact]
+    public void AddRunner_OnAnotherPc_SaysFirstThatNoProgressComes()
+    {
+        Assert.Equal("BUILD-30 downloads and sets up the runner. It reports no progress until it is done, which can take several minutes.",
+            MainWindow.RemoteAddRunnerNote("BUILD-30"));
+        var click = MethodBody("MainWindow.xaml.cs", "private async void AddRunner_Click(");
+        Assert.Contains("new AddRunnerWindow(null, Machines, selected)", click);
+        Assert.Contains("if (!CanSendTo(pc.MachineKey)) return;", click);
+        var note = click.IndexOf("log(RemoteAddRunnerNote(pc.MachineName));", StringComparison.Ordinal);
+        var create = click.IndexOf("_fleetActions.CreateRunnerAsync(pc, setup.RepositoryUrl, setup.RunnerName, setup.Labels, log)", StringComparison.Ordinal);
+        Assert.True(note > 0 && note < create);
+        // Before the first sign-in check has answered, the sign-in is not known yet.
+        Assert.True(click.IndexOf("await check;", StringComparison.Ordinal) < click.IndexOf("if (!_githubAuthenticated)", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void PcCard_OffersAddRunner_OnAPcThatCanCreateOne()
+    {
+        Assert.Equal(Visibility.Visible, PcWith(Environment.MachineName).AddRunnerVisibility);
+        var online = PcWith("BUILD-31");
+        Assert.Equal(Visibility.Visible, online.AddRunnerVisibility);
+        Assert.Equal("Add a self-hosted runner on BUILD-31", online.AddRunnerTip);
+        var offline = MachineInfo.Placeholder("build-32", "BUILD-32", DateTime.UtcNow.AddHours(-1), "10.0.0.32", "No answer.");
+        Assert.Equal(Visibility.Collapsed, offline.AddRunnerVisibility);
+        var old = MachineInfo.FromPayload("build-33", new MachineStatusPayload
+        {
+            MachineName = "BUILD-33", AgentProtocolVersion = 8, UpdatedUtc = DateTime.UtcNow, FleetAgentRunning = true
+        });
+        Assert.Equal(Visibility.Collapsed, old.AddRunnerVisibility);
+    }
+
+    // ----- 13: the Needs attention tile -----
+
+    private static readonly RunnerHealth StuckJob = new(RunnerConcern.Stuck, "Stuck", "The job has used no CPU and printed no output for 30 min.");
+    private static readonly RunnerHealth WaitingJobs = new(RunnerConcern.IdleWithWaitingJobs, "Idle · jobs waiting", "A job it can run has waited 20 min.");
+
+    private static MachineRunnerStatus RunnerNamed(string name, string state) => new()
+    {
+        ServiceName = $"actions.runner.{name}", DisplayName = name,
+        IsRunning = state != "stopped", ActivityText = state == "busy" ? "Busy" : "Idle"
+    };
+
+    /// <summary>
+    /// BUILD-40: all well. BUILD-41: one stopped runner, one stuck job, one idle while jobs wait, one well.
+    /// BUILD-42: offline, with a stopped runner that is not counted. BUILD-43: not answered yet.
+    /// </summary>
+    private static List<MachineInfo> FleetNeedingAttention()
+    {
+        var well = PcWith("BUILD-40", RunnerNamed("web", "idle"));
+        var mixed = PcWith("BUILD-41", RunnerNamed("api", "stopped"), RunnerNamed("build", "busy"), RunnerNamed("docs", "idle"), RunnerNamed("lint", "idle"));
+        mixed.Runners.Single(r => r.DisplayName == "build").Health = StuckJob;
+        mixed.Runners.Single(r => r.DisplayName == "docs").Health = WaitingJobs;
+        var offline = MachineInfo.FromPayload("build-42", new MachineStatusPayload
+        {
+            MachineName = "BUILD-42", AgentProtocolVersion = 14, UpdatedUtc = DateTime.UtcNow.AddHours(-3), FleetAgentRunning = true,
+            Runners = new[] { RunnerNamed("gpu", "stopped") }
+        });
+        var unknown = MachineInfo.Placeholder("build-43", "BUILD-43", DateTime.UtcNow.AddDays(-1), "10.0.0.43", "No answer.");
+        return new List<MachineInfo> { well, mixed, offline, unknown };
+    }
+
+    [Fact]
+    public void NeedsAttention_CountsOfflinePcsOnce_AndStoppedAndStuckRunnersOnPcsThatAreOnline()
+    {
+        var fleet = FleetNeedingAttention();
+        Assert.False(fleet[2].IsReachable);
+        Assert.False(fleet[1].Runners.Single(r => r.DisplayName == "api").IsRunning);
+
+        var attention = FleetAttention.Count(fleet);
+        Assert.Equal(new FleetAttention(OfflinePcs: 2, StoppedRunners: 1, StuckJobs: 1, LongJobs: 0, IdleRunners: 1), attention);
+        Assert.Equal(5, attention.Total);
+        Assert.Equal("2 PCs are offline, 1 runner is stopped, 1 job looks stuck, 1 runner is idle while jobs wait for it.", attention.Summary);
+        Assert.Equal("2 offline · 1 stopped · 1 stuck · 1 idle, jobs waiting", attention.SubText);
+
+        var single = FleetAttention.Count(new[] { fleet[0], fleet[2] });
+        Assert.Equal("1 PC is offline.", single.Summary);
+        Assert.Equal(0, FleetAttention.Count(new[] { fleet[0] }).Total);
+        Assert.Equal("Nothing needs attention.", FleetAttention.Count(new[] { fleet[0] }).Summary);
+    }
+
+    [Fact]
+    public void NeedsAttention_ShowsOnlyThosePcsAndRunners()
+    {
+        var fleet = FleetNeedingAttention();
+        Assert.Equal(new[] { false, true, true, true }, fleet.Select(FleetAttention.PcNeedsAttention));
+        var mixed = fleet[1];
+        Assert.Equal(new[] { "api", "build", "docs" },
+            mixed.Runners.Where(r => FleetAttention.ShowsRunner(mixed, r)).Select(r => r.DisplayName));
+        // An offline PC's runners are all shown with it: their state is not known.
+        Assert.All(fleet[2].Runners, r => Assert.True(FleetAttention.ShowsRunner(fleet[2], r)));
+    }
+
+    [Fact]
+    public void NeedsAttentionTile_FiltersTheView_WithTheSearch_AndLetsGoAtZero()
+    {
+        var window = NewDashboard();
+        var fleet = FleetNeedingAttention();
+        WpfTestApp.Run(() =>
+        {
+            foreach (var pc in fleet) window.Machines.Add(pc);
+            window.UpdateSummary();
+            Assert.Equal(Visibility.Visible, window.AttentionTile.Visibility);
+            Assert.Equal("5", window.TileAttention.Text);
+            Assert.StartsWith("2 PCs are offline, 1 runner is stopped", (string)window.AttentionTile.ToolTip);
+            Assert.Equal("Needs attention, 5", AutomationProperties.GetName(window.AttentionTile));
+            var runnersTile = window.TileRunners.Text;
+
+            // Pressed: only those PCs and runners, and the other tiles still count the whole fleet.
+            window.AttentionTile.IsChecked = true;
+            window.AttentionTile.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent, window.AttentionTile));
+            Assert.True(window.AttentionOnly);
+            Assert.Equal(new[] { "BUILD-41", "BUILD-42", "BUILD-43" }, window.MachinesView.Cast<MachineInfo>().Select(m => m.MachineName));
+            Assert.Equal(new[] { "api", "build", "docs" }, fleet[1].Runners.Where(r => r.MatchesFilter).Select(r => r.DisplayName));
+            Assert.Equal(Visibility.Collapsed, fleet[1].Runners.Single(r => r.DisplayName == "lint").RowVisibility);
+            window.UpdateSummary();
+            Assert.Equal(runnersTile, window.TileRunners.Text);
+            Assert.EndsWith("Click to show everything again.", (string)window.AttentionTile.ToolTip);
+
+            // With the search: both must hold.
+            window.SearchBox.Text = "lint";
+            Assert.Equal(Visibility.Visible, window.NoResultsPanel.Visibility);
+            Assert.Equal("Nothing that needs attention matches “lint”.", window.NoResultsText.Text);
+            window.SearchBox.Text = "docs";
+            Assert.Equal(new[] { "BUILD-41" }, window.MachinesView.Cast<MachineInfo>().Select(m => m.MachineName));
+            Assert.Equal(new[] { "docs" }, fleet[1].Runners.Where(r => r.MatchesFilter).Select(r => r.DisplayName));
+            window.SearchBox.Text = string.Empty;
+
+            // A second click shows everything again.
+            window.AttentionTile.IsChecked = false;
+            window.AttentionTile.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent, window.AttentionTile));
+            Assert.False(window.AttentionOnly);
+            Assert.Equal(4, window.MachinesView.Cast<MachineInfo>().Count());
+            Assert.All(fleet.SelectMany(m => m.Runners), r => Assert.True(r.MatchesFilter));
+
+            // Pressed when the count reaches zero: it lets go by itself and hides.
+            window.ShowAttentionOnly(true);
+            foreach (var pc in fleet.Skip(1)) window.Machines.Remove(pc);
+            window.UpdateSummary();
+            Assert.False(window.AttentionOnly);
+            Assert.False(window.AttentionTile.IsChecked);
+            Assert.Equal(Visibility.Collapsed, window.AttentionTile.Visibility);
+            Assert.Equal(new[] { "BUILD-40" }, window.MachinesView.Cast<MachineInfo>().Select(m => m.MachineName));
+        });
+    }
+
+    [Fact]
+    public void NeedsAttentionTile_WithOnePcSelected_SaysWhetherOtherPcsNeedAttention()
+    {
+        var window = NewDashboard();
+        var fleet = FleetNeedingAttention();
+        WpfTestApp.Run(() =>
+        {
+            foreach (var pc in fleet)
+            {
+                window.Machines.Add(pc);
+                window.NavItems.Add(pc);
+            }
+        });
+        WpfTestApp.Flush();
+        WpfTestApp.Run(() =>
+        {
+            window.UpdateSummary();
+            window.MachineNav.SelectedItem = fleet[0];
+            window.ShowAttentionOnly(true);
+            Assert.Equal(Visibility.Visible, window.NoResultsPanel.Visibility);
+            Assert.Equal("Nothing on BUILD-40 needs attention. Other PCs do. Select All PCs to see them.", window.NoResultsText.Text);
+            window.ShowAttentionOnly(false);
+            Assert.Equal(Visibility.Collapsed, window.NoResultsPanel.Visibility);
+        });
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void NeedsAttentionTile_LooksPressedWhileItFilters_InBothThemes(bool light)
+        => WpfTestApp.Run(() =>
+        {
+            try
+            {
+                WpfTestApp.UseColors(light);
+                var window = new MainWindow();
+                var tile = WpfTestApp.Layout(new ToggleButton { Style = (Style)window.FindResource("ToggleTile"), Content = new TextBlock { Text = "5" } });
+                var chrome = (Border)tile.Template.FindName("Chrome", tile);
+                Assert.Equal(WpfTestApp.Resource("Bg1Brush"), WpfTestApp.ColorOf(chrome.Background));
+                Assert.Equal(WpfTestApp.Resource("BorderSubtleBrush"), WpfTestApp.ColorOf(chrome.BorderBrush));
+
+                tile.IsChecked = true;
+                WpfTestApp.Layout(tile);
+                var pressed = WpfTestApp.ColorOf(chrome.Background);
+                Assert.Equal(WpfTestApp.Resource("BadgeWarnBgBrush"), pressed);
+                Assert.Equal(WpfTestApp.Resource("WarningBrush"), WpfTestApp.ColorOf(chrome.BorderBrush));
+                Assert.NotEqual(WpfTestApp.Resource("Bg1Brush"), pressed);
+                // The tile's number, caption and second line stay readable on it.
+                foreach (var text in new[] { "TextBrush", "TextMutedBrush", "WarningBrush" })
+                    Assert.True(Palette.Contrast(WpfTestApp.Resource(text), pressed) >= Palette.MinContrast, text);
+                // The other tiles' look when not pressed.
+                Assert.Equal(new CornerRadius(10), chrome.CornerRadius);
+            }
+            finally { WpfTestApp.UseColors(light: false); }
+        });
 }

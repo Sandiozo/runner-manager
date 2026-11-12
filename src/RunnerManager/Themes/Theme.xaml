@@ -381,6 +381,31 @@
         </Setter>
     </Style>
 
+    <!-- A button with no look of its own, for a card header or a row that is clicked to show, hide or open something.
+         Its content gives the look; the button gives Enter and Space, and a name for screen readers and UI automation
+         (set AutomationProperties.Name). A button inside it keeps its own clicks. Its text color is the window's, so
+         text and icons in it look as they do outside it, and its text keeps the app-wide TextBlock style. -->
+    <Style x:Key="FlatButton" TargetType="Button">
+        <Setter Property="Foreground" Value="{DynamicResource TextBrush}"/>
+        <Setter Property="Background" Value="Transparent"/>
+        <Setter Property="BorderThickness" Value="0"/>
+        <Setter Property="Padding" Value="0"/>
+        <Setter Property="Cursor" Value="Hand"/>
+        <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+        <Setter Property="VerticalContentAlignment" Value="Stretch"/>
+        <Setter Property="FocusVisualStyle" Value="{StaticResource SubtleFocus}"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Button">
+                    <Border Background="{TemplateBinding Background}" CornerRadius="6" Padding="{TemplateBinding Padding}">
+                        <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                          VerticalAlignment="{TemplateBinding VerticalContentAlignment}"/>
+                    </Border>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
     <!-- Dashed "add" row, e.g. "+ Add a PC" under the machine list -->
     <Style x:Key="DashedRow" TargetType="Button">
         <Style.Resources>
@@ -454,6 +479,11 @@
                             <Setter TargetName="Chrome" Property="Background" Value="{DynamicResource SelectedBrush}"/>
                             <Setter TargetName="Ring" Property="Stroke" Value="{DynamicResource AccentBrush}"/>
                             <Setter TargetName="Dot" Property="Visibility" Value="Visible"/>
+                        </Trigger>
+                        <!-- Faded like a disabled button, on the theme's own colors, so it looks the same in both themes. -->
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter TargetName="Chrome" Property="Opacity" Value="0.45"/>
+                            <Setter Property="Cursor" Value="Arrow"/>
                         </Trigger>
                     </ControlTemplate.Triggers>
                 </ControlTemplate>
