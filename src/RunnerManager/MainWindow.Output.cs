@@ -27,19 +27,25 @@ public partial class MainWindow
     /// <summary>Newer output waits because text is selected.</summary>
     private bool _outputHeld;
 
-    private MachineRunnerStatus? OutputRunner => _outputTabKey == null ? null
-        : Machines.SelectMany(m => m.Runners).FirstOrDefault(r => RunnerKey(r) == _outputTabKey && r.OutputText.Length > 0);
+    /// <summary>The runner of the selected live output tab, while it runs its job.</summary>
+    private MachineRunnerStatus? OutputRunner => _outputTabKey == null || !_liveOutputs.ContainsKey(_outputTabKey) ? null
+        : Machines.SelectMany(m => m.Runners).FirstOrDefault(r => RunnerKey(r) == _outputTabKey && r.IsBusy);
 
     /// <summary>The selected tab's output and whether its job has finished, or null for Activity.</summary>
     private (string Text, bool Finished)? SelectedOutput
-        => OutputRunner is { } runner ? (runner.OutputText, false)
-            : _outputTabKey != null && _finishedOutputs.TryGetValue(_outputTabKey, out var copy) ? (copy.Text, true)
+        => _outputTabKey == null ? null
+            : _liveOutputs.TryGetValue(_outputTabKey, out var live) ? (live.Text, false)
+            : _finishedOutputs.TryGetValue(_outputTabKey, out var copy) ? (copy.Text, true)
             : null;
 
     /// <summary>
-    /// Keeps the output of a job that ended, until the runner runs a job again. Output that goes because a busy runner
-    /// was closed is not kept.
+    /// Keeps the output of a job that ended, until the runner runs a job again. It is kept only while the runner is
+    /// listed and idle: output that goes because a busy runner was closed, or because the runner is gone, is not kept.
     /// </summary>
+    /// <remarks>
+    /// The output ends when the job's worker process exits, often a moment before the runner stops showing the job. Until
+    /// then the last output stays in its live tab, so it is not lost.
+    /// </remarks>
     internal static void KeepFinishedOutput(IReadOnlyCollection<MachineRunnerStatus> runners,
         Dictionary<string, OutputCopy> live, Dictionary<string, OutputCopy> finished)
     {
@@ -47,10 +53,12 @@ public partial class MainWindow
             .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
         foreach (var (key, copy) in live.ToList())
         {
-            if (byKey.TryGetValue(key, out var runner) && runner.OutputText.Length > 0) continue;
+            byKey.TryGetValue(key, out var runner);
+            if (runner is { OutputText.Length: > 0 } or { IsBusy: true, IsExpanded: true }) continue;
             live.Remove(key);
-            if (runner is not { IsBusy: true }) finished[key] = copy;
+            if (runner is { IsBusy: false }) finished[key] = copy;
         }
+        foreach (var gone in finished.Keys.Where(key => !byKey.ContainsKey(key)).ToList()) finished.Remove(gone);
         foreach (var runner in runners)
         {
             var key = RunnerKey(runner);

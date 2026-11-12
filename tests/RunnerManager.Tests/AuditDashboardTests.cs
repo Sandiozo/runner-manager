@@ -894,6 +894,59 @@ public class AuditDashboardTests
         Assert.Equal(shown ? health : RunnerHealth.Healthy, applied);
     }
 
+    // ----- 3: output of a job that ended -----
+
+    private static (Dictionary<string, MainWindow.OutputCopy> Live, Dictionary<string, MainWindow.OutputCopy> Finished) Outputs()
+        => (new(StringComparer.OrdinalIgnoreCase), new(StringComparer.OrdinalIgnoreCase));
+
+    [Fact]
+    public void JobOutput_OfARunnerThatIsGone_IsNotKept()
+    {
+        var (live, finished) = Outputs();
+        MainWindow.KeepFinishedOutput(new[] { JobRunner("api", "error CS1002: ; expected") }, live, finished);
+        // The runner was deleted, or its PC is no longer listed.
+        MainWindow.KeepFinishedOutput(Array.Empty<MachineRunnerStatus>(), live, finished);
+        Assert.Empty(live);
+        Assert.Empty(finished);
+    }
+
+    [Fact]
+    public void FinishedOutput_GoesWithItsRunner()
+    {
+        var (live, finished) = Outputs();
+        MainWindow.KeepFinishedOutput(new[] { JobRunner("api", "Build failed") }, live, finished);
+        MainWindow.KeepFinishedOutput(new[] { JobRunner("api", "", busy: false) }, live, finished);
+        Assert.Single(finished);
+        MainWindow.KeepFinishedOutput(new[] { JobRunner("web", "", busy: false) }, live, finished);
+        Assert.Empty(finished);
+    }
+
+    [Fact]
+    public void JobOutput_IsKeptWhenTheWorkerEndsBeforeTheRunnerIsIdle()
+    {
+        var (live, finished) = Outputs();
+        MainWindow.KeepFinishedOutput(new[] { JobRunner("api", "error MSB3073: exited with code 1") }, live, finished);
+        // The job's process has exited, so there is no output, but the runner still shows the job.
+        MainWindow.KeepFinishedOutput(new[] { JobRunner("api", "") }, live, finished);
+        Assert.Equal("error MSB3073: exited with code 1", Assert.Single(live).Value.Text);
+        Assert.Empty(finished);
+        // Then the runner is idle.
+        MainWindow.KeepFinishedOutput(new[] { JobRunner("api", "", busy: false) }, live, finished);
+        Assert.Empty(live);
+        Assert.Equal("error MSB3073: exited with code 1", Assert.Single(finished).Value.Text);
+    }
+
+    [Fact]
+    public void JobOutput_IsNotKeptWhenTheRunnerIsClosedAfterItsWorkerEnded()
+    {
+        var (live, finished) = Outputs();
+        MainWindow.KeepFinishedOutput(new[] { JobRunner("api", "Compiling") }, live, finished);
+        MainWindow.KeepFinishedOutput(new[] { JobRunner("api", "") }, live, finished);
+        MainWindow.KeepFinishedOutput(new[] { JobRunner("api", "", open: false) }, live, finished);
+        Assert.Empty(live);
+        Assert.Empty(finished);
+    }
+
     // ----- 6: no fleet read while this PC joins or leaves the fleet -----
 
     [Theory]
