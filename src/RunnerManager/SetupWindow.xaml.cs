@@ -15,10 +15,11 @@ public partial class SetupWindow : Window
     private bool _installed;
     private bool _installing;
     private string _installedExe = string.Empty;
-    /// <summary>The folder setup offers: this user's install where it is, the install that is on this PC, or Program Files.</summary>
-    private readonly string _proposedFolder;
-    /// <summary>The offered folder may be this user's install, but setup could not confirm it (see <see cref="SetupOffer"/>).</summary>
-    private readonly bool _proposedUnconfirmed;
+    /// <summary>
+    /// The folder setup offers: this user's install where it is, the install that is on this PC, or Program Files. When
+    /// setup could not confirm the install in it (see <see cref="SetupOffer"/>), it starts with Program Files instead.
+    /// </summary>
+    private readonly SetupOffer _offer;
     private string _installFolder;
     private readonly Task _presetDone;
 
@@ -27,8 +28,8 @@ public partial class SetupWindow : Window
         InitializeComponent();
         WindowTheme.Apply(this);
         VersionText.Text = $"Setup · version {AppUpdater.CurrentVersion}";
-        (_proposedFolder, _proposedUnconfirmed) = MachineInstall.SetupProposal();
-        _installFolder = _proposedFolder;
+        _offer = MachineInstall.SetupProposal();
+        _installFolder = InitialFolder(_offer, MachineInstall.ProgramFilesDir);
         // Also says what setup does with a copy that is already in the folder it offers.
         ShowInstallFolder();
         _presetDone = PresetFromInstallAsync();
@@ -250,23 +251,40 @@ public partial class SetupWindow : Window
     }
 
     /// <summary>
-    /// The button beside the folder: shown once the folder differs from the one setup offered, to go back to it. It says
-    /// "Default" when that is Program Files, and "Current folder" when it is where Runner Manager is installed now.
+    /// The folder setup starts with: the offered folder, or Program Files when setup could not confirm the install in the
+    /// offered folder. Any program of the user can make setup find a folder that it cannot confirm, so it is only one click
+    /// away, behind the "Current folder" button (see <see cref="FolderResetButton"/>).
     /// </summary>
-    internal static (bool Visible, string Label) FolderResetButton(string folder, string proposed, string programFilesDir)
-        => (!AppUpdater.SameFolder(folder, proposed), AppUpdater.SameFolder(proposed, programFilesDir) ? "Default" : "Current folder");
+    internal static string InitialFolder(SetupOffer offer, string programFilesDir) => offer.Unconfirmed ? programFilesDir : offer.Folder;
 
     /// <summary>
-    /// A note under the folder when it is outside Program Files, which Windows does not protect by itself: a folder the
-    /// user chose, or the offered folder when setup could not confirm the install in it (<paramref name="proposedUnconfirmed"/>).
+    /// The button beside the folder, and the folder it goes to. For a confirmed offer, it is shown once the folder differs
+    /// from the offered one, to go back to it: "Default" when that is Program Files, "Current folder" when it is where
+    /// Runner Manager is installed now. For an unconfirmed offer, it goes from Program Files to the found folder ("Current
+    /// folder"), and from any other folder to Program Files ("Default").
     /// </summary>
-    internal static string? FolderNote(string folder, string proposed, string programFilesDir, bool proposedUnconfirmed)
+    internal static (bool Visible, string Label, string Target) FolderResetButton(string folder, SetupOffer offer, string programFilesDir)
     {
-        if (AppUpdater.SameFolder(folder, programFilesDir)) return null;
-        var offered = AppUpdater.SameFolder(folder, proposed);
-        if (offered && !proposedUnconfirmed) return null;
-        return (offered ? "Setup could not confirm that Runner Manager is installed in this folder. " : string.Empty) +
-               "Runner Manager runs with administrator rights. Outside Program Files, check that only administrators can change the files in this folder.";
+        if (!offer.Unconfirmed || AppUpdater.SameFolder(offer.Folder, programFilesDir))
+            return (!AppUpdater.SameFolder(folder, offer.Folder), AppUpdater.SameFolder(offer.Folder, programFilesDir) ? "Default" : "Current folder", offer.Folder);
+        return AppUpdater.SameFolder(folder, programFilesDir) ? (true, "Current folder", offer.Folder) : (true, "Default", programFilesDir);
+    }
+
+    /// <summary>
+    /// A note under the folder. For any folder outside Program Files, which Windows does not protect by itself (also the
+    /// offered one): that only administrators should be able to change its files. And when setup could not confirm the
+    /// install in the offered folder: that it could not, and that setup leaves that folder as it is when another is chosen.
+    /// </summary>
+    internal static string? FolderNote(string folder, SetupOffer offer, string programFilesDir)
+    {
+        var notes = new List<string>();
+        if (offer.Unconfirmed)
+            notes.Add(AppUpdater.SameFolder(folder, offer.Folder)
+                ? "Setup could not confirm that Runner Manager is installed in this folder."
+                : $"Setup found {offer.Folder}, but could not confirm that Runner Manager is installed there. Setup leaves that folder as it is.");
+        if (!AppUpdater.SameFolder(folder, programFilesDir))
+            notes.Add("Runner Manager runs with administrator rights. Outside Program Files, check that only administrators can change the files in this folder.");
+        return notes.Count == 0 ? null : string.Join(" ", notes);
     }
 
     private void ShowInstallFolder()
@@ -275,11 +293,11 @@ public partial class SetupWindow : Window
         AppUpdater.UseInstallDir(_installFolder);
         _ = ShowExistingInstallAsync();
         InstallPathText.Text = _installFolder;
-        var (visible, label) = FolderResetButton(_installFolder, _proposedFolder, MachineInstall.ProgramFilesDir);
+        var (visible, label, target) = FolderResetButton(_installFolder, _offer, MachineInstall.ProgramFilesDir);
         DefaultInstallFolderButton.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
         DefaultInstallFolderButton.Content = label;
-        DefaultInstallFolderButton.ToolTip = _proposedFolder;
-        var note = FolderNote(_installFolder, _proposedFolder, MachineInstall.ProgramFilesDir, _proposedUnconfirmed);
+        DefaultInstallFolderButton.ToolTip = target;
+        var note = FolderNote(_installFolder, _offer, MachineInstall.ProgramFilesDir);
         FolderNoteText.Text = note ?? string.Empty;
         FolderNoteText.Visibility = note == null ? Visibility.Collapsed : Visibility.Visible;
     }
@@ -305,7 +323,7 @@ public partial class SetupWindow : Window
 
     private void DefaultInstallFolder_Click(object sender, RoutedEventArgs e)
     {
-        _installFolder = _proposedFolder;
+        _installFolder = FolderResetButton(_installFolder, _offer, MachineInstall.ProgramFilesDir).Target;
         ShowInstallFolder();
     }
 

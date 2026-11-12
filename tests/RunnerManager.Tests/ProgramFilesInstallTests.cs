@@ -75,11 +75,39 @@ public class ProgramFilesInstallTests
         // the first setup. Setup still offers the folder, so that an install without a record is not moved by surprise,
         // but says that it could not confirm it.
         Assert.Equal(new SetupOffer(Chosen, Unconfirmed: true), Offer(null, Chosen, _ => true));
-        Assert.Equal(new SetupOffer(OldDefault, Unconfirmed: true), Offer(null, null, f => f == ExeIn(OldDefault)));
-        var note = SetupWindow.FolderNote(OldDefault, OldDefault, ProgramFiles, proposedUnconfirmed: true);
+        var offer = Offer(null, null, f => f == ExeIn(OldDefault));
+        Assert.Equal(new SetupOffer(OldDefault, Unconfirmed: true), offer);
+        // Setup starts with Program Files then; the found folder is behind the "Current folder" button.
+        Assert.Equal(ProgramFiles, SetupWindow.InitialFolder(offer, ProgramFiles));
+        Assert.Equal((true, "Current folder", OldDefault), SetupWindow.FolderResetButton(ProgramFiles, offer, ProgramFiles));
+        Assert.Equal((true, "Default", ProgramFiles), SetupWindow.FolderResetButton(OldDefault, offer, ProgramFiles));
+        Assert.Equal((true, "Default", ProgramFiles), SetupWindow.FolderResetButton(Chosen, offer, ProgramFiles));
+        // A confirmed offer is where setup starts.
+        Assert.Equal(Chosen, SetupWindow.InitialFolder(new SetupOffer(Chosen, Unconfirmed: false), ProgramFiles));
+
+        var note = SetupWindow.FolderNote(OldDefault, offer, ProgramFiles);
         Assert.NotNull(note);
         Assert.StartsWith("Setup could not confirm that Runner Manager is installed in this folder.", note);
         Assert.Contains("only administrators", note);
+        // With Program Files selected, the page says that the found folder is left as it is.
+        var left = SetupWindow.FolderNote(ProgramFiles, offer, ProgramFiles);
+        Assert.Equal($"Setup found {OldDefault}, but could not confirm that Runner Manager is installed there. Setup leaves that folder as it is.", left);
+        Assert.DoesNotContain("n't", left);
+    }
+
+    [Theory]
+    [InlineData(@"\\server\share\RunnerManager")]
+    [InlineData(@"Apps\RunnerManager")]
+    [InlineData("windows")]
+    public void Setup_NeverOffersAFolderThatItCannotInstallTo(string folder)
+    {
+        if (folder == "windows") folder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "RunnerManager");
+        // The exe is in the folder, but not in the old default.
+        bool hasExe(string file) => !file.StartsWith(OldDefault, StringComparison.OrdinalIgnoreCase);
+        // From the Settings → Apps entry, this user's record, or another user's record.
+        Assert.Equal(new SetupOffer(ProgramFiles, Unconfirmed: false), Offer(null, folder, hasExe));
+        Assert.Equal(new SetupOffer(ProgramFiles, Unconfirmed: false), Offer(folder, null, hasExe));
+        Assert.Equal(new SetupOffer(ProgramFiles, Unconfirmed: false), Offer(null, null, hasExe, new[] { new InstallRecord(OtherSid, folder) }));
     }
 
     [Fact]
@@ -95,28 +123,33 @@ public class ProgramFilesInstallTests
     public void Setup_FolderButton_GoesBackToTheOfferedFolder_AndOffersNoMove()
     {
         // A new install: no button until the folder is changed, and then it is "Default".
-        Assert.Equal((false, "Default"), SetupWindow.FolderResetButton(ProgramFiles, ProgramFiles, ProgramFiles));
-        Assert.Equal((true, "Default"), SetupWindow.FolderResetButton(Chosen, ProgramFiles, ProgramFiles));
-        // An install in the old default: setup shows it where it is, with no button that would move it.
-        Assert.Equal((false, "Current folder"), SetupWindow.FolderResetButton(OldDefault, OldDefault, ProgramFiles));
-        Assert.Equal((true, "Current folder"), SetupWindow.FolderResetButton(ProgramFiles, OldDefault, ProgramFiles));
+        var programFiles = new SetupOffer(ProgramFiles, Unconfirmed: false);
+        Assert.Equal((false, "Default", ProgramFiles), SetupWindow.FolderResetButton(ProgramFiles, programFiles, ProgramFiles));
+        Assert.Equal((true, "Default", ProgramFiles), SetupWindow.FolderResetButton(Chosen, programFiles, ProgramFiles));
+        // A recorded install in the old default: setup shows it where it is, with no button that would move it.
+        var recorded = new SetupOffer(OldDefault, Unconfirmed: false);
+        Assert.Equal((false, "Current folder", OldDefault), SetupWindow.FolderResetButton(OldDefault, recorded, ProgramFiles));
+        Assert.Equal((true, "Current folder", OldDefault), SetupWindow.FolderResetButton(ProgramFiles, recorded, ProgramFiles));
     }
 
     [Fact]
-    public void Setup_FolderNote_ForAChosenFolderOutsideProgramFiles_AndForAnUnconfirmedInstall()
+    public void Setup_FolderNote_ForEveryFolderOutsideProgramFiles_AndForAnUnconfirmedInstall()
     {
-        // Program Files, and a confirmed install where it is: no note.
-        Assert.Null(SetupWindow.FolderNote(ProgramFiles, ProgramFiles, ProgramFiles, proposedUnconfirmed: false));
-        Assert.Null(SetupWindow.FolderNote(ProgramFiles, OldDefault, ProgramFiles, proposedUnconfirmed: true));
-        Assert.Null(SetupWindow.FolderNote(OldDefault, OldDefault, ProgramFiles, proposedUnconfirmed: false));
+        var programFiles = new SetupOffer(ProgramFiles, Unconfirmed: false);
+        // Program Files: no note.
+        Assert.Null(SetupWindow.FolderNote(ProgramFiles, programFiles, ProgramFiles));
         // A folder the user chose outside Program Files.
-        var note = SetupWindow.FolderNote(Chosen, ProgramFiles, ProgramFiles, proposedUnconfirmed: false);
-        Assert.NotNull(note);
-        Assert.Contains("only administrators", note);
-        Assert.DoesNotContain("could not confirm", note);
+        var note = SetupWindow.FolderNote(Chosen, programFiles, ProgramFiles);
+        Assert.Equal("Runner Manager runs with administrator rights. Outside Program Files, check that only administrators can change the files in this folder.", note);
+        // Also the offered folder when setup confirmed the install in it: a recorded install in the old default, or
+        // another Windows user's install that a second user is offered.
+        Assert.Equal(note, SetupWindow.FolderNote(OldDefault, new SetupOffer(OldDefault, Unconfirmed: false), ProgramFiles));
+        Assert.Equal(note, SetupWindow.FolderNote(Chosen, new SetupOffer(Chosen, Unconfirmed: false), ProgramFiles));
         // The offered folder when setup could not confirm the install in it.
-        Assert.Contains("could not confirm", SetupWindow.FolderNote(Chosen, Chosen, ProgramFiles, proposedUnconfirmed: true));
-        foreach (var text in new[] { note, SetupWindow.FolderNote(Chosen, Chosen, ProgramFiles, proposedUnconfirmed: true)! })
+        var unconfirmed = SetupWindow.FolderNote(Chosen, new SetupOffer(Chosen, Unconfirmed: true), ProgramFiles)!;
+        Assert.Contains("could not confirm", unconfirmed);
+        Assert.Contains("only administrators", unconfirmed);
+        foreach (var text in new[] { note!, unconfirmed })
             Assert.DoesNotContain("n't", text);
     }
 

@@ -242,18 +242,22 @@ public static class MachineInstall
     /// install another Windows user of this PC has outside the user profiles (see <see cref="SharedInstall"/>); otherwise
     /// Program Files. The Settings → Apps entry and the default of earlier versions are offered too, so that an install
     /// without a record is not moved by surprise, but as <see cref="SetupOffer.Unconfirmed"/>: any program of the user can
-    /// change them. An install that this user's own tasks start is recorded before setup opens.
+    /// change them, and setup starts with Program Files selected (see <see cref="SetupWindow.InitialFolder"/>). An install
+    /// that this user's own tasks start is recorded before setup opens. A folder that setup cannot install to (see
+    /// <see cref="Installer.InstallFolderProblem"/>, such as a network folder) is never offered.
     /// <paramref name="fileExists"/> tells whether a file exists.
     /// </summary>
     internal static SetupOffer SetupProposal(string? ownRecord, string? userEntry, IEnumerable<InstallRecord> otherRecords, string? profilesRoot,
         string programFilesDir, string oldDefaultDir, Func<string, bool> fileExists)
     {
-        if (ownRecord != null) return new SetupOffer(ownRecord, Unconfirmed: false);
-        if (userEntry != null) return new SetupOffer(userEntry, Unconfirmed: true);
-        if (fileExists(Path.Combine(oldDefaultDir, AppPaths.ExeName)) || fileExists(Path.Combine(oldDefaultDir, AppPaths.LegacyExeName)))
+        static bool Usable(string? folder) => folder != null && Installer.InstallFolderProblem(folder) == null;
+        if (Usable(ownRecord)) return new SetupOffer(ownRecord!, Unconfirmed: false);
+        if (Usable(userEntry)) return new SetupOffer(userEntry!, Unconfirmed: true);
+        if (Usable(oldDefaultDir)
+            && (fileExists(Path.Combine(oldDefaultDir, AppPaths.ExeName)) || fileExists(Path.Combine(oldDefaultDir, AppPaths.LegacyExeName))))
             return new SetupOffer(oldDefaultDir, Unconfirmed: true);
-        return new SetupOffer(SharedInstall(otherRecords, profilesRoot, programFilesDir, f => fileExists(Path.Combine(f, AppPaths.ExeName)))
-                              ?? programFilesDir, Unconfirmed: false);
+        return new SetupOffer(SharedInstall(otherRecords.Where(r => Usable(r.Folder)), profilesRoot, programFilesDir,
+                                  f => fileExists(Path.Combine(f, AppPaths.ExeName))) ?? programFilesDir, Unconfirmed: false);
     }
 
     /// <summary>The folder setup offers on this PC (see <see cref="SetupProposal(string?, string?, IEnumerable{InstallRecord}, string?, string, string, Func{string, bool})"/>).</summary>
