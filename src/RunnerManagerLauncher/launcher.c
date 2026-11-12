@@ -9,7 +9,8 @@
  * one, which holds exactly:
  *   - the system variables from CreateEnvironmentBlock(NULL), less the names in IsLeftOutSystemName;
  *   - USERNAME, USERDOMAIN, USERPROFILE, HOMEDRIVE, HOMEPATH, APPDATA and LOCALAPPDATA, from the process token and
- *     Windows functions, never from the environment;
+ *     Windows functions, never from the environment; USERNAME and USERDOMAIN only when the account's name can be
+ *     looked up (see AddIdentity);
  *   - PSModulePath=<System32>\WindowsPowerShell\v1.0\Modules, so that Windows PowerShell started by the app does not
  *     load modules from the user's Documents folder (see AddModulePath);
  *   - DOTNET_EnableDiagnostics=0 and DOTNET_BUNDLE_EXTRACT_BASE_DIR=<launcher folder>\.net;
@@ -31,7 +32,8 @@
  *   0x524C0002  out of memory
  *   0x524C0003  the DLL search could not be limited to System32
  *   0x524C0004  the system variables could not be read (the Windows or System32 folder, or CreateEnvironmentBlock)
- *   0x524C0005  the user's name, profile folder or AppData folders could not be read
+ *   0x524C0005  the token's user, the user's profile folder or the AppData folders could not be read (the user's name
+ *               may be missing: see AddIdentity)
  *   0x524C0006  the environment block could not be put together (a size overflowed, or a name came twice)
  *   0x524C0007  the child's command line would be longer than 32,767 characters
  *   0x524C0008  RunnerManager.exe is not in the launcher's folder
@@ -122,9 +124,12 @@ static const WCHAR *const LeftOutPrefixes[] = { L"DOTNET_", L"COMPlus_", L"COREC
 /*
  * The test build only: bin\LauncherTestBuild.exe, which build.ps1 -TestStub compiles from this file with
  * LAUNCHER_TEST_BUILD defined, for LauncherTests. It is never embedded or shipped, and RunnerManagerLauncher.exe is
- * compiled without the define. These strings are added to the system variables as if CreateEnvironmentBlock had
- * returned them, so the tests can check the filter with names that a test cannot set machine-wide. Only
- * RM_LAUNCHER_TEST_BUILD=kept may reach the app.
+ * compiled without the define. It acts as on a PC that a test cannot set up, in three places: these system variables,
+ * a machine value of PSModulePath equal to the launcher's own (AddModulePath), and an account whose name cannot be
+ * looked up (AddIdentity).
+ * These strings are added to the system variables as if CreateEnvironmentBlock had returned them, so the tests can
+ * check the filter with names that only an administrator can set machine-wide. Only RM_LAUNCHER_TEST_BUILD=kept may
+ * reach the app.
  */
 static const WCHAR TestSystemEntries[] =
     L"DOTNET_ROOT=C:\\RM_LAUNCHER_TEST_BUILD\\dotnet\0"
@@ -306,16 +311,30 @@ static DWORD AddSystemEntries(EntryList *list, const WCHAR *block)
     return 0;
 }
 
+#ifdef LAUNCHER_TEST_BUILD
+/* The test build looks up the name of S-1-5-21-1-2-3-1001 instead of the user's: shaped like a domain account's SID,
+   but no account has it, so the lookup fails as it does for a domain account whose name cannot be found. */
+__declspec(align(4)) static const BYTE TestUnknownSid[] = {
+    1, 5,                                                                 /* revision 1, 5 subauthorities */
+    0, 0, 0, 0, 0, 5,                                                     /* SECURITY_NT_AUTHORITY */
+    21, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 0xE9, 0x03, 0, 0     /* 21, 1, 2, 3, 1001 */
+};
+#endif
+
 /*
  * The user's identity, from the token and from Windows, never from the environment: USERNAME and USERDOMAIN from the
  * token's account, USERPROFILE from the profile list, HOMEDRIVE and HOMEPATH split from USERPROFILE, APPDATA and
  * LOCALAPPDATA from the known folders. The token is passed to SHGetKnownFolderPath so that it resolves the folders for
  * that user's profile rather than with this process's environment.
+ * Only the account's name may be missing: looking it up fails for a domain account whose domain controller cannot be
+ * reached and whose name Windows has not cached. The child then gets neither USERNAME nor USERDOMAIN (the system
+ * block's are left out all the same) rather than not being started. Everything else here must work, or the launch stops.
  */
 static DWORD AddIdentity(EntryList *list, HANDLE token)
 {
     DWORD result = EXIT_IDENTITY;
     TOKEN_USER *user = NULL;
+    PSID sid = NULL;
     WCHAR *name = NULL;
     WCHAR *domain = NULL;
     WCHAR *profile = NULL;
@@ -325,6 +344,7 @@ static DWORD AddIdentity(EntryList *list, HANDLE token)
     DWORD nameChars = 0;
     DWORD domainChars = 0;
     SIZE_T profileLength = 0;
+    BOOL named = FALSE;
     SID_NAME_USE use;
 
     /* Each of these Windows functions is called first without a buffer to learn the size it needs. */
@@ -333,13 +353,18 @@ static DWORD AddIdentity(EntryList *list, HANDLE token)
     if (user == NULL) { result = EXIT_OUT_OF_MEMORY; goto done; }
     if (!GetTokenInformation(token, TokenUser, user, size, &size)) goto done;
 
-    if (LookupAccountSidW(NULL, user->User.Sid, NULL, &nameChars, NULL, &domainChars, &use)
-        || GetLastError() != ERROR_INSUFFICIENT_BUFFER) goto done;
-    /* The sizes include the terminating null; one more character keeps a zero at the end whatever the call writes. */
-    name = Allocate((SIZE_T)nameChars + 1, sizeof(WCHAR));
-    domain = Allocate((SIZE_T)domainChars + 1, sizeof(WCHAR));
-    if (name == NULL || domain == NULL) { result = EXIT_OUT_OF_MEMORY; goto done; }
-    if (!LookupAccountSidW(NULL, user->User.Sid, name, &nameChars, domain, &domainChars, &use)) goto done;
+    sid = user->User.Sid;
+#ifdef LAUNCHER_TEST_BUILD
+    sid = (PSID)TestUnknownSid;
+#endif
+    /* Any other failure than a too small buffer means there is no name to be had. */
+    if (!LookupAccountSidW(NULL, sid, NULL, &nameChars, NULL, &domainChars, &use) && GetLastError() == ERROR_INSUFFICIENT_BUFFER) {
+        /* The sizes include the terminating null; one more character keeps a zero at the end whatever the call writes. */
+        name = Allocate((SIZE_T)nameChars + 1, sizeof(WCHAR));
+        domain = Allocate((SIZE_T)domainChars + 1, sizeof(WCHAR));
+        if (name == NULL || domain == NULL) { result = EXIT_OUT_OF_MEMORY; goto done; }
+        named = LookupAccountSidW(NULL, sid, name, &nameChars, domain, &domainChars, &use);
+    }
 
     size = 0;
     if (GetUserProfileDirectoryW(token, NULL, &size) || GetLastError() != ERROR_INSUFFICIENT_BUFFER) goto done;
@@ -352,8 +377,10 @@ static DWORD AddIdentity(EntryList *list, HANDLE token)
     if (FAILED(SHGetKnownFolderPath(&FOLDERID_LocalAppData, KF_FLAG_DONT_VERIFY, token, &local))) goto done;
 
     profileLength = TextLength(profile);
-    if ((result = AddOwnEntry(list, L"USERNAME", name, TextLength(name))) != 0) goto done;
-    if ((result = AddOwnEntry(list, L"USERDOMAIN", domain, TextLength(domain))) != 0) goto done;
+    if (named) {
+        if ((result = AddOwnEntry(list, L"USERNAME", name, TextLength(name))) != 0) goto done;
+        if ((result = AddOwnEntry(list, L"USERDOMAIN", domain, TextLength(domain))) != 0) goto done;
+    }
     if ((result = AddOwnEntry(list, L"USERPROFILE", profile, profileLength)) != 0) goto done;
     /* "C:\Users\Name" gives HOMEDRIVE=C: and HOMEPATH=\Users\Name. A profile not on a drive letter (a network path)
        has no such split, and the child then gets neither: better none than a wrong one. */

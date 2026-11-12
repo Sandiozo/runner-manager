@@ -186,9 +186,26 @@ public class LauncherTests
             && entry != "RM_LAUNCHER_TEST_BUILD=kept");
         foreach (var name in new[] { "DOTNET_ROOT", "DOTNET_gcServer", "COMPlus_EnableDiagnostics", "CORECLR_PROFILER_PATH", "COR_ENABLE_PROFILING", "COREHOST_TRACE", "__COMPAT_LAYER", "GH_TOKEN" })
             Assert.Null(child.Value(name));
-        Assert.Equal(ExpectedNames([.. IdentityNames, "PSModulePath", "DOTNET_EnableDiagnostics", "DOTNET_BUNDLE_EXTRACT_BASE_DIR", "RM_LAUNCHER_TEST_BUILD"]),
+        Assert.Equal(ExpectedNames([.. IdentityNames.Except(["USERNAME", "USERDOMAIN"]), "PSModulePath", "DOTNET_EnableDiagnostics", "DOTNET_BUNDLE_EXTRACT_BASE_DIR", "RM_LAUNCHER_TEST_BUILD"]),
             child.Names.OrderBy(name => name, StringComparer.OrdinalIgnoreCase));
-        AssertIdentity(child);
+        AssertIdentity(child, withName: false);
+    }
+
+    /// <summary>
+    /// Looking up the account's name fails for a domain account whose domain controller cannot be reached and whose name
+    /// Windows has not cached. The app must start all the same: without USERNAME and USERDOMAIN (and not with the system
+    /// variables' ones), with the rest of the user's identity. The test build looks up the name of a SID that no account
+    /// has (see AddIdentity in launcher.c).
+    /// </summary>
+    [Fact]
+    public void AnAccountNameThatCannotBeLookedUp_DoesNotStopTheApp()
+    {
+        using var folder = new LauncherFolder(testBuild: true);
+        folder.Control("RunnerManager", "exit 7");
+        var run = folder.Launch();
+
+        Assert.Equal(7, run.ExitCode);
+        AssertIdentity(run.ChildOrFail(), withName: false);
     }
 
     [Fact]
@@ -625,10 +642,11 @@ public class LauncherTests
 
     // ---- Helpers.
 
-    private static void AssertIdentity(StubRun child)
+    /// <param name="withName">False: as from the test build, whose account name cannot be looked up.</param>
+    private static void AssertIdentity(StubRun child, bool withName = true)
     {
-        Assert.Equal(Environment.UserName, child.Value("USERNAME"));
-        Assert.Equal(Environment.UserDomainName, child.Value("USERDOMAIN"));
+        Assert.Equal(withName ? Environment.UserName : null, child.Value("USERNAME"));
+        Assert.Equal(withName ? Environment.UserDomainName : null, child.Value("USERDOMAIN"));
         var profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         Assert.Equal(profile, child.Value("USERPROFILE"));
         Assert.Equal(profile[..2], child.Value("HOMEDRIVE"));
