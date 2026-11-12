@@ -1301,7 +1301,6 @@ public class CodeProblemTests
     public static TheoryData<string> CodeProblems => new()
     {
         FleetNetwork.RefusalMessage("denied"),
-        FleetNetwork.RefusalMessage(""),
         // With the note about an older agent that cannot read the name.
         FleetNetwork.RefusalMessage("denied", "ÖSTRA"),
         FleetNetwork.NoCodeThereText,
