@@ -43,6 +43,8 @@ public partial class MainWindow : Window
     private bool _operationRunning;
     private string _operationTitle = string.Empty;
     private bool _githubAuthenticated;
+    /// <summary>gh has been asked once; until then the dashboard does not say that GitHub is not connected.</summary>
+    private bool _githubChecked;
     private string _githubLogin = string.Empty;
     private bool _isEnrolled;
     private bool _agentTaskChecked;
@@ -67,6 +69,9 @@ public partial class MainWindow : Window
         InitializeComponent();
         WindowTheme.Apply(this);
         DataContext = this;
+        WindowPlacement.Restore(this, _settings.MainWindowPlacement, SystemParameters.WorkArea);
+        _shownState = WindowState;
+        TrackPlacement();
 
         NavItems.Add(_allMachines);
         MachineNav.SelectedIndex = 0;
@@ -87,13 +92,22 @@ public partial class MainWindow : Window
             if (IsVisible && _started && !_refreshing) await RefreshAsync();
         };
         Loaded += async (_, _) => await StartAsync();
+        // Coming back from the GitHub sign-in in a browser or console window.
+        Activated += async (_, _) => await CheckGitHubSignInAsync();
         ThemeManager.Changed += OnThemeChanged;
         Closing += OnClosing;
         PreviewKeyDown += OnPreviewKeyDown;
+        SizeChanged += ContentArea_SizeChanged;
+        SizeChanged += NavArea_SizeChanged;
     }
 
     public void ReportError(string message)
     {
+        if (!Dispatcher.CheckAccess())
+        {
+            Dispatcher.BeginInvoke(() => ReportError(message));
+            return;
+        }
         AddActivity($"Error: {message}");
         DialogWindow.Error(this, "An error occurred", message);
     }
@@ -110,15 +124,27 @@ public partial class MainWindow : Window
             _refreshQueuedForceAuth |= forceAuthCheck;
             return;
         }
-        if (_operationRunning) return;
         _refreshing = true;
         try
         {
+            // Other PCs are read directly from their agents on the network; GitHub isn't involved, so they never
+            // wait for it.
+            var machinesTask = MachineRelay.ReadFleetAsync(_forceDiscovery);
+            _forceDiscovery = false;
+            // While an operation runs on this PC, only the other PCs are refreshed: this PC's runners, fleet agent and
+            // fleet membership are what operations change, and everything is refreshed when the operation ends.
+            if (_operationRunning)
+            {
+                ApplyFleet(await machinesTask, Runners.ToList(), localRunnersRead: false);
+                LastUpdatedText.Text = $"Updated {TimeFormat.WithSeconds(DateTime.Now)}  ·  Refreshes every {_settings.RefreshSeconds}s";
+                return;
+            }
             var enrollmentTask = MachineRelay.IsAgentInstalledAsync();
             if (forceAuthCheck || DateTime.Now - _lastAuthCheck > AuthCheckInterval)
             {
                 var wasAuthenticated = _githubAuthenticated;
                 _githubAuthenticated = await GitHubCli.IsAuthenticatedAsync();
+                _githubChecked = true;
                 _lastAuthCheck = DateTime.Now;
                 if (_githubAuthenticated && (!wasAuthenticated || string.IsNullOrEmpty(_githubLogin)))
                 {
@@ -145,48 +171,39 @@ public partial class MainWindow : Window
             var runnersTask = refreshLocalRunners
                 ? RunnerService.ReadSnapshotAsync(_githubAuthenticated)
                 : Task.FromResult(Runners.ToList());
-            // Other PCs are read directly from their agents on the network; GitHub isn't involved.
-            var machinesTask = MachineRelay.ReadFleetAsync(_forceDiscovery);
-            _forceDiscovery = false;
-            await Task.WhenAll(runnersTask, machinesTask);
+            // This PC's runners wait for GitHub, which can be slow: show the other PCs first, with this PC's last readings.
+            if (await Task.WhenAny(runnersTask, machinesTask) == machinesTask && !runnersTask.IsCompleted)
+                ApplyFleet(await machinesTask, Runners.ToList(), localRunnersRead: false);
             var runners = await runnersTask;
             var machines = await machinesTask;
-            var localIndex = machines.FindIndex(m => m.IsLocal);
-            if (localIndex >= 0) machines[localIndex] = machines[localIndex].WithLocalRunners(runners);
-
-            if (refreshLocalRunners)
+            // An operation may have started while this refresh waited.
+            if (_operationRunning)
             {
-                _lastLocalRunnerRefresh = DateTime.Now;
-                ApplyLocalRunners(runners);
+                ApplyFleet(machines, Runners.ToList(), localRunnersRead: false);
+                return;
             }
-            ApplyMachines(machines);
-            UpdateNavShape();
-            ApplyEnrollmentStatus();
-            ScheduleLocalAgentUpdate(machines.FirstOrDefault(m => m.IsLocal));
-            StartStoppedLocalAgent(machines.FirstOrDefault(m => m.IsLocal));
-            ApplyPendingStates();
-            ApplyFilter();
-            UpdateSummary();
-            DetectChanges();
-            ReportAgentEvents();
+            ApplyFleet(machines, runners, refreshLocalRunners);
             await CheckRunnerHealthAsync();
             await RefreshFleetExtrasAsync();
-            LastUpdatedText.Text = $"Updated {DateTime.Now:HH:mm:ss}  ·  Refreshes every {_settings.RefreshSeconds}s";
-            if (!_operationRunning)
+            LastUpdatedText.Text = $"Updated {TimeFormat.WithSeconds(DateTime.Now)}  ·  Refreshes every {_settings.RefreshSeconds}s";
+            if (!_operationRunning && DateTime.UtcNow >= _noticeUntilUtc)
             {
                 if (_agentOwner != null) SetStatus($"The fleet agent on this PC runs for {_agentOwner}.", StatusKind.Warning);
-                else SetStatus(_githubAuthenticated ? "Ready" : "GitHub not connected. Showing this PC only.",
+                else SetStatus(_githubAuthenticated ? "Ready" : "GitHub is not connected. Jobs, queues and recent runs are not shown.",
                     _githubAuthenticated ? StatusKind.Ok : StatusKind.Warning);
             }
         }
         catch (Exception ex)
         {
             AddActivity($"Refresh failed: {ex.Message}");
-            SetStatus($"Refresh failed: {ex.Message}", StatusKind.Error);
+            // An operation shows its progress there.
+            if (!_operationRunning) SetStatus($"Refresh failed: {ex.Message}", StatusKind.Error);
         }
         finally
         {
             _refreshing = false;
+            // A first refresh that failed says so in the status bar.
+            LoadingPanel.Visibility = Visibility.Collapsed;
             if (_refreshQueued)
             {
                 var force = _refreshQueuedForceAuth;
@@ -194,6 +211,38 @@ public partial class MainWindow : Window
                 await RefreshAsync(force);
             }
         }
+    }
+
+    /// <summary>
+    /// Shows a reading of the fleet, with <paramref name="runners"/> as this PC's runners. While an operation runs on this
+    /// PC, nothing on this PC is started or changed, and cards that show a pending action are kept as they are.
+    /// </summary>
+    private void ApplyFleet(List<MachineInfo> machines, List<RunnerInfo> runners, bool localRunnersRead)
+    {
+        LoadingPanel.Visibility = Visibility.Collapsed;
+        machines = machines.ToList();
+        var localIndex = machines.FindIndex(m => m.IsLocal);
+        if (localIndex >= 0) machines[localIndex] = machines[localIndex].WithLocalRunners(runners);
+        var duringOperation = _operationRunning;
+        if (localRunnersRead)
+        {
+            _lastLocalRunnerRefresh = DateTime.Now;
+            ApplyLocalRunners(runners);
+        }
+        ApplyMachines(machines, duringOperation);
+        UpdateNavShape();
+        if (!duringOperation)
+        {
+            ApplyEnrollmentStatus();
+            ScheduleLocalAgentUpdate(machines.FirstOrDefault(m => m.IsLocal));
+            StartStoppedLocalAgent(machines.FirstOrDefault(m => m.IsLocal));
+        }
+        ApplyPendingStates(clearOthers: !duringOperation);
+        ReportRemoteResults();
+        ApplyFilter();
+        UpdateSummary();
+        DetectChanges();
+        ReportAgentEvents();
     }
 
     private async Task EnsureAgentTaskSettingsAsync()
@@ -274,7 +323,7 @@ public partial class MainWindow : Window
     {
         if (IsAgentWorkBusy)
         {
-            AddActivity($"{title} skipped: “{_agentWorkTitle}” is still running.");
+            AddActivity($"{title} skipped: “{_agentWorkTitle}” is still running.", ActivityKind.Warning);
             return;
         }
         _agentWorkTitle = title;
@@ -282,7 +331,7 @@ public partial class MainWindow : Window
 
         async Task RunAsync()
         {
-            AddActivity($"{title} started. The fleet agent restarts when it is not busy.");
+            AddActivity($"{title} started. The fleet agent restarts when it is not busy.", ActivityKind.Info);
             var waiting = new DispatcherTimer { Interval = TimeSpan.FromMinutes(2) };
             waiting.Tick += (_, _) =>
             {
@@ -293,7 +342,7 @@ public partial class MainWindow : Window
             try
             {
                 await work(AddActivity);
-                AddActivity($"{title} completed.");
+                AddActivity($"{title} completed.", ActivityKind.Success);
             }
             catch (Exception ex)
             {
@@ -340,7 +389,11 @@ public partial class MainWindow : Window
     /// Updates the Machines list in place: unchanged machines keep their existing cards (so hover,
     /// expansion and scroll position survive the 5-second refresh) and only get their time-based text updated.
     /// </summary>
-    private void ApplyMachines(List<MachineInfo> machines)
+    /// <param name="keepBusy">
+    /// An operation runs on this PC: this PC's card, and cards with a pending action that the operation may have set, are
+    /// kept; a PC that came or went waits for the refresh at the end of the operation.
+    /// </param>
+    private void ApplyMachines(List<MachineInfo> machines, bool keepBusy = false)
     {
         foreach (var machine in machines)
         {
@@ -360,6 +413,7 @@ public partial class MainWindow : Window
             && Machines.Zip(machines).All(pair => pair.First.MachineKey == pair.Second.MachineKey);
         // "All PCs" is only in the sidebar when there are several PCs (see UpdateNavShape).
         var offset = NavItems.Contains(_allMachines) ? 1 : 0;
+        if (!sameShape && keepBusy) return;
         if (!sameShape)
         {
             _suppressNavSelection = true;
@@ -379,6 +433,11 @@ public partial class MainWindow : Window
         {
             var existing = Machines[i];
             var incoming = machines[i];
+            if (keepBusy && (existing.IsLocal || existing.PendingAction.Length > 0 || existing.Runners.Any(r => r.PendingAction.Length > 0)))
+            {
+                existing.Touch(incoming);
+                continue;
+            }
             if (existing.Fingerprint == incoming.Fingerprint)
             {
                 existing.SetPending(incoming.PendingAction);
@@ -458,7 +517,11 @@ public partial class MainWindow : Window
     }
 
     /// <summary>Shows "Stopping…"-style states on runners until the agent reports the result.</summary>
-    private void ApplyPendingStates()
+    /// <param name="clearOthers">
+    /// Clear the pending state of runners without a queued command; false while an operation on this PC runs, since it
+    /// shows its own (for example "Move").
+    /// </param>
+    private void ApplyPendingStates(bool clearOthers = true)
     {
         foreach (var machine in Machines)
         foreach (var runner in machine.Runners)
@@ -466,14 +529,16 @@ public partial class MainWindow : Window
             var key = RunnerKey(runner);
             if (!_pendingRunnerCommands.TryGetValue(key, out var pending))
             {
-                runner.SetPending(string.Empty);
+                if (clearOthers) runner.SetPending(string.Empty);
                 continue;
             }
+            var result = machine.CommandResult(pending.CommandId);
             var done = DateTime.UtcNow - pending.QueuedUtc > PendingCommandTimeout
+                // A failed start or stop does not change the state, so it ends with the agent's result (shown by ReportRemoteResults).
+                || (result != null && MachineRelay.IsFailedResult(result))
                 || (pending.Action == "Start" && runner.IsRunning)
                 || (pending.Action == "Stop" && !runner.IsRunning)
-                || (pending.Action is "Restart" or "Edit" or "CleanWork" or "Remove" or "Convert" or "Startup" or "StopJob" && !string.IsNullOrEmpty(pending.CommandId)
-                    && machine.HasFinished(pending.CommandId));
+                || (pending.Action is not ("Start" or "Stop") && result != null);
             if (done) _pendingRunnerCommands.Remove(key);
             runner.SetPending(done ? string.Empty : pending.Action);
         }
@@ -483,6 +548,8 @@ public partial class MainWindow : Window
         => $"{runner.MachineKey}|{(string.IsNullOrEmpty(runner.CommandKey) ? runner.RepositoryPath + "/" + runner.AgentName : runner.CommandKey)}";
 
     // ================= Summary, filter, navigation =================
+
+    private static string Plural(int count, string word) => $"{count} {word}{(count == 1 ? "" : "s")}";
 
     private void UpdateSummary()
     {
@@ -504,11 +571,11 @@ public partial class MainWindow : Window
         TileBusySub.Text = busy.Count > 0 ? string.Join(", ", busy.Select(r => r.TitleText))
             : queued > 0 ? $"{queued} job{(queued == 1 ? "" : "s")} queued on this PC" : "No jobs running";
 
-        _allMachines.Update($"{machines.Count} PC{(machines.Count == 1 ? "" : "s")}  ·  {runners.Count} runners");
+        _allMachines.Update($"{Plural(machines.Count, "PC")}  ·  {Plural(runners.Count, "runner")}");
         ApplyOptionalSections(machines);
         UpdateOutputTabs();
         UpdatePageHeader();
-        _tray?.SetTooltip($"Runner Manager — {running}/{runners.Count} runners running, {busy.Count} busy");
+        _tray?.SetTooltip($"Runner Manager — {running} of {Plural(runners.Count, "runner")} running, {busy.Count} busy");
     }
 
     private void UpdatePageHeader()
@@ -516,8 +583,8 @@ public partial class MainWindow : Window
         var selected = Machines.FirstOrDefault(m => m.MachineKey == _selectedMachineKey)
                        ?? (IsSinglePc ? Machines.FirstOrDefault() : null);
         PageTitle.Text = selected?.MachineName ?? "All PCs";
-        PageSubtitle.Text = !_githubAuthenticated
-            ? "Connect GitHub in the account menu (bottom left) to add runners and see job status"
+        PageSubtitle.Text = _githubChecked && !_githubAuthenticated
+            ? "Connect GitHub to add runners and see job status"
             : selected != null
                 ? selected.RunnerSummary
                 : "GitHub runners on all PCs";
@@ -527,10 +594,13 @@ public partial class MainWindow : Window
     {
         if (item is not MachineInfo machine) return false;
         if (_selectedMachineKey != null && machine.MachineKey != _selectedMachineKey) return false;
-        if (string.IsNullOrWhiteSpace(_filter)) return true;
-        return machine.MachineName.Contains(_filter, StringComparison.OrdinalIgnoreCase)
-               || machine.Runners.Any(r => r.MatchesFilter);
+        return MatchesSearch(machine);
     }
+
+    private bool MatchesSearch(MachineInfo machine)
+        => string.IsNullOrWhiteSpace(_filter)
+           || machine.MachineName.Contains(_filter, StringComparison.OrdinalIgnoreCase)
+           || machine.Runners.Any(r => r.MatchesFilter);
 
     private void ApplyFilter()
     {
@@ -538,8 +608,15 @@ public partial class MainWindow : Window
         {
             var machineMatch = !string.IsNullOrWhiteSpace(_filter)
                 && machine.MachineName.Contains(_filter, StringComparison.OrdinalIgnoreCase);
+            var runnerMatch = false;
             foreach (var runner in machine.Runners)
-                runner.MatchesFilter = machineMatch || runner.Matches(_filter);
+            {
+                var match = runner.Matches(_filter);
+                runnerMatch |= match;
+                runner.MatchesFilter = machineMatch || match;
+            }
+            // A match in a runner's own details is otherwise hidden in a collapsed card.
+            machine.SetOpenForSearch(runnerMatch && !string.IsNullOrWhiteSpace(_filter));
         }
         // Refreshing the view rebuilds every card, so only do it when the visible set actually changes.
         var visible = MachinesView.Cast<MachineInfo>().Select(m => m.MachineKey);
@@ -547,7 +624,17 @@ public partial class MainWindow : Window
         if (!visible.SequenceEqual(wanted)) MachinesView.Refresh();
         var empty = MachinesView.IsEmpty && !string.IsNullOrWhiteSpace(_filter);
         NoResultsPanel.Visibility = empty ? Visibility.Visible : Visibility.Collapsed;
-        NoResultsText.Text = $"No runners or PCs match “{_filter}”.";
+        NoResultsText.Text = NoResultsMessage();
+    }
+
+    /// <summary>With one PC selected in the sidebar, the search covers only that PC: say so, and whether others match.</summary>
+    private string NoResultsMessage()
+    {
+        if (_selectedMachineKey == null || Machines.FirstOrDefault(m => m.MachineKey == _selectedMachineKey) is not { } selected)
+            return $"No runners or PCs match “{_filter}”.";
+        return Machines.Any(m => m != selected && MatchesSearch(m))
+            ? $"Nothing on {selected.MachineName} matches “{_filter}”. Other PCs have matches. Select All PCs to see them."
+            : $"Nothing on {selected.MachineName} matches “{_filter}”.";
     }
 
     private void SearchBox_TextChanged(object sender, TextChangedEventArgs e)
@@ -616,9 +703,9 @@ public partial class MainWindow : Window
         _refreshTimer.Interval = IsVisible || interval > HiddenRefreshInterval ? interval : HiddenRefreshInterval;
     }
 
-    private void RaiseAlert(string message, bool warning)
+    private void RaiseAlert(string message, bool warning, ActivityKind? kind = null)
     {
-        AddActivity(message);
+        AddActivity(message, kind ?? ActivityEntry.Classify(message));
         // AI assistants read the alerts with recent_alerts.
         AlertLog.Append(message, warning);
         if (_settings.Notifications && !IsActive)
@@ -632,8 +719,10 @@ public partial class MainWindow : Window
         GitHubAccountText.Text = _githubAuthenticated
             ? string.IsNullOrEmpty(_githubLogin) ? "GitHub" : _githubLogin
             : "GitHub";
-        GitHubStatusText.Text = _githubAuthenticated ? "Connected" : "Not connected";
-        GitHubStatusText.Foreground = _githubAuthenticated ? Palette.Success : Palette.Warning;
+        GitHubStatusText.Text = _githubAuthenticated ? "Connected" : WaitingForSignIn ? "Waiting for sign-in"
+            : _githubChecked ? "Not connected" : "Checking…";
+        GitHubStatusText.Foreground = _githubAuthenticated ? Palette.Success : _githubChecked ? Palette.Warning : Palette.TextMuted;
+        ConnectGitHubButton.Visibility = _githubChecked && !_githubAuthenticated ? Visibility.Visible : Visibility.Collapsed;
         AvatarText.Text = _githubAuthenticated && _githubLogin.Length > 0 ? _githubLogin[..1].ToUpperInvariant() : "?";
         AvatarBadge.Background = _githubAuthenticated ? Palette.Tint(Palette.Info) : (Brush)FindResource("Bg3Brush");
         ConnectMenuItem.Visibility = _githubAuthenticated ? Visibility.Collapsed : Visibility.Visible;
@@ -660,8 +749,9 @@ public partial class MainWindow : Window
     {
         if (_githubAuthenticated)
         {
+            if (IsOperationRunning("Disconnect GitHub")) return;
             if (!DialogWindow.Confirm(this, "Disconnect GitHub?",
-                    "The GitHub CLI on this PC is signed out. Runner Manager stops showing other PCs and GitHub job status until you connect again.",
+                    "The GitHub CLI on this PC is signed out. Until you connect again, Runner Manager does not show jobs, queues and recent runs from GitHub, and cannot add runners. Other PCs in the fleet are still shown.",
                     "Disconnect", danger: true)) return;
             await RunOperationAsync("Disconnect GitHub", async log =>
             {
@@ -672,8 +762,24 @@ public partial class MainWindow : Window
         }
         GitHubCli.LaunchLogin();
         AddActivity("Opened GitHub sign-in. Complete it in the browser or terminal window.");
-        await Task.Delay(1500);
-        await RefreshAsync(forceAuthCheck: true);
+        WatchGitHubSignIn();
+    }
+
+    /// <summary>With many PCs, the list scrolls so that "Add a PC" under it stays in view.</summary>
+    private void NavArea_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        // The slot, not ActualHeight: an overfull panel is arranged at the size it wants.
+        var height = LayoutInformation.GetLayoutSlot(NavArea).Height;
+        if (height <= 0) return;
+        var others = NavHeader.ActualHeight + NavHeader.Margin.Top + NavHeader.Margin.Bottom
+                     + AddPcRow.ActualHeight + AddPcRow.Margin.Top + AddPcRow.Margin.Bottom;
+        MachineNav.MaxHeight = Math.Max(0, height - others);
+    }
+
+    private void ConnectGitHubButton_Click(object sender, RoutedEventArgs e)
+    {
+        // The account menu's item also disconnects; this button only connects.
+        if (!_githubAuthenticated) GitHubConnect_Click(sender, e);
     }
 
     private async void GitHubReconnect_Click(object sender, RoutedEventArgs e)
@@ -686,8 +792,7 @@ public partial class MainWindow : Window
             AddActivity("Reconnecting GitHub. Complete sign-in in the browser or terminal window.");
             _githubAuthenticated = false;
             _githubLogin = string.Empty;
-            ApplyGitHubStatus();
-            await Task.Delay(1500);
+            WatchGitHubSignIn();
             await RefreshAsync(forceAuthCheck: true);
         }
         catch (Exception ex)
@@ -695,6 +800,52 @@ public partial class MainWindow : Window
             AddActivity($"GitHub reconnect failed: {ex.Message}");
             DialogWindow.Error(this, "Could not reconnect GitHub", ex.Message);
         }
+    }
+
+    // Sign-in ends in a browser or console window, at a time the dashboard cannot see. So after the sign-in window
+    // opens, check for it every few seconds for a while, and whenever the user comes back to this window.
+    private static readonly TimeSpan SignInWatchTime = TimeSpan.FromMinutes(3);
+    private static readonly TimeSpan SignInCheckInterval = TimeSpan.FromSeconds(4);
+    private DispatcherTimer? _signInTimer;
+    private DateTime _signInWatchUntilUtc = DateTime.MinValue;
+    private DateTime _lastSignInCheckUtc = DateTime.MinValue;
+    private bool _checkingSignIn;
+
+    private bool WaitingForSignIn => !_githubAuthenticated && DateTime.UtcNow < _signInWatchUntilUtc;
+
+    internal void WatchGitHubSignIn()
+    {
+        _signInWatchUntilUtc = DateTime.UtcNow + SignInWatchTime;
+        if (_signInTimer == null)
+        {
+            _signInTimer = new DispatcherTimer { Interval = SignInCheckInterval };
+            _signInTimer.Tick += async (_, _) => await CheckGitHubSignInAsync();
+        }
+        _signInTimer.Start();
+        ApplyGitHubStatus();
+    }
+
+    /// <summary>Refreshes as soon as gh has a sign-in, instead of at the refresh's next GitHub check.</summary>
+    private async Task CheckGitHubSignInAsync()
+    {
+        if (_signInTimer is { IsEnabled: true } && !WaitingForSignIn)
+        {
+            _signInTimer.Stop();
+            ApplyGitHubStatus();
+        }
+        if (_githubAuthenticated || _checkingSignIn || !_started
+            || DateTime.UtcNow - _lastSignInCheckUtc < TimeSpan.FromSeconds(2)) return;
+        _checkingSignIn = true;
+        _lastSignInCheckUtc = DateTime.UtcNow;
+        try
+        {
+            if (await GitHubCli.IsAuthenticatedAsync()) await RefreshAsync(forceAuthCheck: true);
+        }
+        catch
+        {
+            // The refresh reports problems with gh; this check only makes it come sooner.
+        }
+        finally { _checkingSignIn = false; }
     }
 
     private async void AddRunner_Click(object sender, RoutedEventArgs e)
@@ -707,6 +858,7 @@ public partial class MainWindow : Window
                 GitHubConnect_Click(sender, e);
             return;
         }
+        if (IsOperationRunning("Add runner")) return;
         var dialog = new AddRunnerWindow { Owner = this };
         if (dialog.ShowDialog() != true || dialog.Setup == null) return;
         await RunOperationAsync("Add runner", log => RunnerService.CreateRunnerAsync(dialog.Setup, log));
@@ -721,31 +873,24 @@ public partial class MainWindow : Window
     /// </summary>
     private async Task<bool> RunOperationAsync(string title, Func<Action<string>, Task> operation)
     {
-        if (_operationRunning)
-        {
-            AddActivity($"{title} skipped: another operation is still running.");
-            return false;
-        }
+        if (IsOperationRunning(title)) return false;
         _operationRunning = true;
         _operationTitle = title;
+        var operationId = ++_operationId;
         SetStatus($"{title}…", StatusKind.Busy);
         var succeeded = false;
         try
         {
-            AddActivity($"{title} started.");
-            await operation(message =>
-            {
-                AddActivity(message);
-                SetStatus($"{title}: {message}", StatusKind.Busy);
-            });
+            AddActivity($"{title} started.", ActivityKind.Info);
+            await operation(OperationLog(title, operationId));
             succeeded = true;
-            AddActivity($"{title} completed.");
+            AddActivity($"{title} completed.", ActivityKind.Success);
             if (!IsActive && _settings.Notifications) _tray?.Notify("Runner Manager", $"{title} completed.");
         }
         catch (Exception ex)
         {
-            AddActivity($"{title} failed: {ex.Message}");
-            SetStatus($"{title} failed", StatusKind.Error);
+            AddActivity($"{title} failed: {ex.Message}", ActivityKind.Error);
+            ShowNotice($"{title} failed: {ex.Message}", StatusKind.Error);
             DialogWindow.Error(this, $"{title} failed", ex.Message);
         }
         finally
@@ -754,6 +899,43 @@ public partial class MainWindow : Window
             await RefreshAsync(forceAuthCheck: true);
         }
         return succeeded;
+    }
+
+    private int _operationId;
+
+    /// <summary>
+    /// Tells the user when an operation on this PC is still running, since only one runs at a time. Called before a
+    /// dialog is filled in, so the work is not lost. Returns true when one is running.
+    /// </summary>
+    private bool IsOperationRunning(string title)
+    {
+        if (!_operationRunning) return false;
+        AddActivity($"{title} skipped: “{_operationTitle}” is still running.", ActivityKind.Warning);
+        DialogWindow.Info(this, "Another operation is running",
+            $"“{_operationTitle}” is still running on this PC. Try “{title}” again when it is done. Its progress is shown in the status bar.");
+        return true;
+    }
+
+    /// <summary>Like <see cref="IsOperationRunning"/>, for an action on a runner: only actions on this PC wait for each other.</summary>
+    private bool IsOperationRunning(MachineRunnerStatus runner, string title) => runner.IsLocalMachine && IsOperationRunning(title);
+
+    /// <summary>
+    /// What an operation logs to: the activity list and the status bar. Operations log from background threads
+    /// (Task.Run), where touching the window throws and would stop the operation halfway, for example after a runner was
+    /// unregistered but before its files were deleted. So the messages go to the window's thread.
+    /// </summary>
+    internal Action<string> OperationLog(string title, int operationId) => message => OnUiThread(() =>
+    {
+        AddActivity(message);
+        // A late message must not turn the status bar back to busy after the operation ended.
+        if (_operationRunning && _operationId == operationId) SetStatus($"{title}: {message}", StatusKind.Busy);
+    });
+
+    /// <summary>Runs window work now when on the window's thread, or queues it there from any other thread.</summary>
+    private void OnUiThread(Action action)
+    {
+        if (Dispatcher.CheckAccess()) action();
+        else Dispatcher.BeginInvoke(action);
     }
 
     private enum StatusKind { Ok, Busy, Warning, Error }
@@ -772,24 +954,124 @@ public partial class MainWindow : Window
         };
     }
 
-    private async Task QueueRunnerCommandAsync(MachineRunnerStatus runner, string action,
+    private static readonly TimeSpan NoticeTime = TimeSpan.FromSeconds(30);
+    private DateTime _noticeUntilUtc = DateTime.MinValue;
+
+    /// <summary>Shows a result in the status bar and keeps it there for a while, instead of "Ready" on the next refresh.</summary>
+    private void ShowNotice(string text, StatusKind kind)
+    {
+        SetStatus(text, kind);
+        _noticeUntilUtc = DateTime.UtcNow + NoticeTime;
+    }
+
+    private async Task QueueRunnerCommandAsync(MachineRunnerStatus runner, string action, string title,
         string runnerName = "", string[]? labels = null, string value = "")
     {
         var key = RunnerKey(runner);
         if (!CanSendTo(runner.MachineKey)) return;
+        var what = $"{title} on {runner.MachineName}";
         try
         {
             MarkUserAction(key);
             runner.SetPending(action);
             var id = await MachineRelay.SendCommandAsync(runner.MachineKey, "runner", runner.CommandKey, action, runnerName, labels, value);
             _pendingRunnerCommands[key] = new PendingCommand(id, action, DateTime.UtcNow);
-            AddActivity($"{runner.TitleText}: {action.ToLowerInvariant()} queued on {runner.MachineName}.");
-            SetStatus($"{action} queued on {runner.MachineName}. Waiting for its fleet agent.", StatusKind.Ok);
+            AwaitResult(id, runner.MachineKey, runner.MachineName, what);
+            AddActivity($"{what}: sent. Waiting for its fleet agent.", ActivityKind.Info);
+            ShowNotice($"{what}: sent. Waiting for its fleet agent.", StatusKind.Ok);
         }
         catch (Exception ex)
         {
             runner.SetPending(string.Empty);
-            AddActivity($"{runner.TitleText}: {action} failed: {ex.Message}");
+            ReportSendFailure(what, runner.MachineName, ex);
+        }
+    }
+
+    /// <summary>A command could not be sent to another PC: the user just asked for it, so say so plainly.</summary>
+    private void ReportSendFailure(string what, string machineName, Exception ex)
+    {
+        AddActivity($"{what} failed: {ex.Message}");
+        ShowNotice($"{what} failed: {ex.Message}", StatusKind.Error);
+        DialogWindow.Error(this, $"Could not reach {machineName}", $"“{what}” was not sent. {ex.Message}");
+    }
+
+    // ================= Results of commands sent to other PCs =================
+
+    /// <summary>How long a PC may take to report a result after it last showed the command as running.</summary>
+    internal static readonly TimeSpan RemoteResultWait = TimeSpan.FromSeconds(75);
+    /// <summary>After this, a command is forgotten without a message (its PC may be offline for a long time).</summary>
+    private static readonly TimeSpan RemoteResultMemory = TimeSpan.FromHours(1);
+
+    internal sealed class AwaitedCommand
+    {
+        public string CommandId { get; init; } = string.Empty;
+        public string MachineKey { get; init; } = string.Empty;
+        public string MachineName { get; init; } = string.Empty;
+        /// <summary>What the command does, for messages: "Start build-01 on BUILD-01".</summary>
+        public string What { get; init; } = string.Empty;
+        public DateTime QueuedUtc { get; init; }
+        /// <summary>When the command was last known to be queued or running on its PC.</summary>
+        public DateTime ActiveUtc { get; set; }
+    }
+
+    internal enum RemoteOutcome { Waiting, Succeeded, Failed, NoAnswer, Forgotten }
+
+    private readonly Dictionary<string, AwaitedCommand> _awaitedCommands = new(StringComparer.OrdinalIgnoreCase);
+
+    private void AwaitResult(string commandId, string machineKey, string machineName, string what)
+    {
+        if (string.IsNullOrEmpty(commandId)) return;
+        _awaitedCommands[commandId] = new AwaitedCommand
+        {
+            CommandId = commandId, MachineKey = machineKey, MachineName = machineName, What = what,
+            QueuedUtc = DateTime.UtcNow, ActiveUtc = DateTime.UtcNow
+        };
+    }
+
+    /// <summary>
+    /// How a command sent to another PC ended, as far as its PC's status shows, with the agent's result or the reason it
+    /// failed.
+    /// </summary>
+    internal static (RemoteOutcome Outcome, string Detail) CheckRemoteCommand(MachineInfo? machine, AwaitedCommand command, DateTime nowUtc)
+    {
+        if (machine?.CommandResult(command.CommandId) is { } result)
+        {
+            if (!MachineRelay.IsFailedResult(result)) return (RemoteOutcome.Succeeded, result.Trim().TrimEnd('.'));
+            var reason = result.IndexOf("failed: ", StringComparison.OrdinalIgnoreCase) is var at and >= 0 ? result[(at + 8)..] : result;
+            return (RemoteOutcome.Failed, reason.Trim());
+        }
+        if (machine != null && machine.IsRunningCommand(command.CommandId)) command.ActiveUtc = nowUtc;
+        if (nowUtc - command.QueuedUtc > RemoteResultMemory) return (RemoteOutcome.Forgotten, string.Empty);
+        // Only agents that list the commands they run (protocol 12) show that a command was lost; an offline PC may still
+        // report the result once it is back.
+        if (machine is { IsOnline: true, AgentProtocolVersion: >= 12 } && nowUtc - command.ActiveUtc > RemoteResultWait)
+            return (RemoteOutcome.NoAnswer, string.Empty);
+        return (RemoteOutcome.Waiting, string.Empty);
+    }
+
+    /// <summary>Reports how commands sent to other PCs ended: failures in the status bar, as alerts and in the activity list.</summary>
+    private void ReportRemoteResults()
+    {
+        foreach (var command in _awaitedCommands.Values.ToList())
+        {
+            var (outcome, detail) = CheckRemoteCommand(Machines.FirstOrDefault(m => m.MachineKey == command.MachineKey), command, DateTime.UtcNow);
+            if (outcome == RemoteOutcome.Waiting) continue;
+            _awaitedCommands.Remove(command.CommandId);
+            switch (outcome)
+            {
+                case RemoteOutcome.Succeeded:
+                    AddActivity($"{command.What}: {detail}.", ActivityKind.Success);
+                    break;
+                case RemoteOutcome.Failed:
+                    RaiseAlert($"{command.What} failed: {detail}", warning: true, ActivityKind.Error);
+                    ShowNotice($"{command.What} failed: {detail}", StatusKind.Error);
+                    break;
+                case RemoteOutcome.NoAnswer:
+                    var text = $"{command.What}: the fleet agent on {command.MachineName} did not report a result. Check its fleet agent log.";
+                    AddActivity(text, ActivityKind.Warning);
+                    ShowNotice(text, StatusKind.Warning);
+                    break;
+            }
         }
     }
 
@@ -803,7 +1085,7 @@ public partial class MainWindow : Window
     {
         if (!runner.IsLocalMachine)
         {
-            await QueueRunnerCommandAsync(runner, action, runnerName, labels, value);
+            await QueueRunnerCommandAsync(runner, action, title, runnerName, labels, value);
             return;
         }
         await RunOperationAsync(title, log =>
@@ -830,7 +1112,36 @@ public partial class MainWindow : Window
                 ? VisualTreeHelper.GetParent(current)
                 : LogicalTreeHelper.GetParent(current);
         }
-        if (ItemFrom<MachineRunnerStatus>(sender) is not { } runner) return;
+        if (ItemFrom<MachineRunnerStatus>(sender) is { } runner) ToggleRunner(runner);
+    }
+
+    // Enter or Space on a focused card header, runner row or link does what a click does.
+    private static bool IsActivation(object sender, KeyEventArgs e)
+        => e.Key is Key.Enter or Key.Space && Keyboard.Modifiers == ModifierKeys.None && ReferenceEquals(e.OriginalSource, sender);
+
+    private void RunnerRow_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (!IsActivation(sender, e) || ItemFrom<MachineRunnerStatus>(sender) is not { } runner) return;
+        ToggleRunner(runner);
+        e.Handled = true;
+    }
+
+    private void MachineHeader_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (!IsActivation(sender, e) || ItemFrom<MachineInfo>(sender) is not { } machine) return;
+        ToggleCollapsed(machine);
+        e.Handled = true;
+    }
+
+    private void Link_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (!IsActivation(sender, e) || sender is not FrameworkElement { Tag: string { Length: > 0 } url }) return;
+        OpenUrl(url);
+        e.Handled = true;
+    }
+
+    private void ToggleRunner(MachineRunnerStatus runner)
+    {
         runner.IsExpanded = !runner.IsExpanded;
         _machineRunnerExpansionStates[RunnerKey(runner)] = runner.IsExpanded;
         // Opening a runner that is running a job shows its output in the bottom panel once it arrives.
@@ -862,7 +1173,11 @@ public partial class MainWindow : Window
             // The update badge, the ⋯ menu and other buttons keep working without collapsing the card.
             if (current is ButtonBase) return;
         }
-        if (ItemFrom<MachineInfo>(sender) is not { } machine) return;
+        if (ItemFrom<MachineInfo>(sender) is { } machine) ToggleCollapsed(machine);
+    }
+
+    private void ToggleCollapsed(MachineInfo machine)
+    {
         var collapsed = machine.ToggleCollapsed();
         _settings.CollapsedPcs.RemoveAll(n => n.Equals(machine.MachineName, StringComparison.OrdinalIgnoreCase));
         if (collapsed) _settings.CollapsedPcs.Add(machine.MachineName);
@@ -873,6 +1188,7 @@ public partial class MainWindow : Window
     {
         if (ItemFrom<MachineRunnerStatus>(sender) is not { } runner) return;
         var action = runner.IsRunning ? "Stop" : "Start";
+        if (IsOperationRunning(runner, $"{action} {runner.TitleText}")) return;
         if (action == "Stop" && runner.IsBusy && !DialogWindow.Confirm(this, $"Stop {runner.TitleText}?",
                 "This runner is running a job. Stopping it cancels the job.", "Stop runner", danger: true))
             return;
@@ -887,6 +1203,7 @@ public partial class MainWindow : Window
     private async void RunnerRestart_Click(object sender, RoutedEventArgs e)
     {
         if (ItemFrom<MachineRunnerStatus>(sender) is not { } runner) return;
+        if (IsOperationRunning(runner, $"Restart {runner.TitleText}")) return;
         if (runner.IsBusy && !DialogWindow.Confirm(this, $"Restart {runner.TitleText}?",
                 "This runner is running a job. Restarting it cancels the job.", "Restart runner", danger: true))
             return;
@@ -902,6 +1219,7 @@ public partial class MainWindow : Window
             DialogWindow.Info(this, "Cannot edit this runner", "Wait for the current job to finish, then try again.");
             return;
         }
+        if (IsOperationRunning(runner, $"Edit {runner.TitleText}")) return;
         var dialog = new EditRunnerWindow(runner) { Owner = this };
         if (dialog.ShowDialog() != true || dialog.Edit == null) return;
         var edit = dialog.Edit;
@@ -913,6 +1231,7 @@ public partial class MainWindow : Window
     private async void RunnerRepair_Click(object sender, RoutedEventArgs e)
     {
         if (ItemFrom<MachineRunnerStatus>(sender)?.LocalRunner is not { } runner) return;
+        if (IsOperationRunning($"Repair {runner.AgentName}")) return;
         if (!DialogWindow.Confirm(this, $"Repair {runner.AgentName}?",
                 "The runner is unregistered and registered again with the same name and labels. It is then installed as a Windows service.",
                 "Repair")) return;
@@ -922,6 +1241,7 @@ public partial class MainWindow : Window
     private async void RunnerWorkflow_Click(object sender, RoutedEventArgs e)
     {
         if (ItemFrom<MachineRunnerStatus>(sender)?.LocalRunner is not { } runner) return;
+        if (IsOperationRunning("Check workflows")) return;
         if (!DialogWindow.Confirm(this, "Check workflows?",
                 $"Jobs in {runner.RepositoryPath} that use a GitHub-hosted Windows runner (windows-latest, windows-2022, …) are switched to this runner. Changes are committed directly to the repository.",
                 "Check and update")) return;
@@ -967,7 +1287,7 @@ public partial class MainWindow : Window
     /// <summary>Takes this PC out of the fleet (the other PCs are told to forget it).</summary>
     public async Task LeaveFleetAsync()
     {
-        if (!InFleet || IsAgentWorkRunning()) return;
+        if (!InFleet || IsAgentWorkRunning() || IsOperationRunning("Leave fleet")) return;
         var others = Machines.Where(m => !m.IsLocal && !m.IsManaged).Select(m => m.MachineName).ToList();
         if (!DialogWindow.Confirm(this, $"Remove {Environment.MachineName} from the fleet?",
                 (others.Count > 0 ? $"{string.Join(", ", others)} will forget this PC. " : string.Empty) +
@@ -997,7 +1317,7 @@ public partial class MainWindow : Window
             DialogWindow.Info(this, "Another Windows user runs the fleet agent", AgentOwnership.Describe(owner));
             return;
         }
-        if (IsAgentWorkRunning()) return;
+        if (IsAgentWorkRunning() || IsOperationRunning("Join fleet")) return;
         var newFleet = false;
         if (start == FleetStart.New && FleetConfig.Current.FleetKey == null)
         {
@@ -1058,6 +1378,7 @@ public partial class MainWindow : Window
     {
         if (_operationRunning || !RefreshButton.IsEnabled) return;
         RefreshButton.IsEnabled = false;
+        _noticeUntilUtc = DateTime.MinValue;
         SetStatus("Refreshing…", StatusKind.Busy);
         try
         {
@@ -1098,10 +1419,46 @@ public partial class MainWindow : Window
     public void ShowFromTray()
     {
         Show();
-        if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
+        // Back to how it was before it was minimized, which may be maximized.
+        if (WindowState == WindowState.Minimized) WindowState = _shownState;
         // A screen may have been unplugged while the window was hidden.
         WindowPlacement.EnsureOnScreen(this);
         Activate();
+    }
+
+    /// <summary>The window's state when it was last not minimized.</summary>
+    private WindowState _shownState;
+    /// <summary>The window's place and size when it was last neither minimized nor maximized.</summary>
+    private Rect _normalBounds = Rect.Empty;
+
+    private void TrackPlacement()
+    {
+        StateChanged += (_, _) =>
+        {
+            if (WindowState != WindowState.Minimized) _shownState = WindowState;
+        };
+        SizeChanged += (_, _) => NoteNormalBounds();
+        LocationChanged += (_, _) => NoteNormalBounds();
+        // Fit the window on its screen when it first shows (from the tray, ShowFromTray does it).
+        ContentRendered += (_, _) => WindowPlacement.EnsureOnScreen(this);
+    }
+
+    private void NoteNormalBounds()
+    {
+        if (WindowState == WindowState.Normal && IsVisible) _normalBounds = new Rect(Left, Top, ActualWidth, ActualHeight);
+    }
+
+    private void SaveWindowPlacement()
+    {
+        if (_normalBounds.IsEmpty || _normalBounds.Width <= 0 || _normalBounds.Height <= 0) return;
+        _settings.MainWindowPlacement = new SavedWindowPlacement
+        {
+            Left = _normalBounds.Left,
+            Top = _normalBounds.Top,
+            Width = _normalBounds.Width,
+            Height = _normalBounds.Height,
+            Maximized = (WindowState == WindowState.Minimized ? _shownState : WindowState) == WindowState.Maximized
+        };
     }
 
     private void OnClosing(object? sender, CancelEventArgs e)
@@ -1109,6 +1466,8 @@ public partial class MainWindow : Window
         if (_settings.CloseToTray && !_exiting)
         {
             e.Cancel = true;
+            SaveWindowPlacement();
+            _settings.Save();
             Hide();
             if (!_trayHintShown)
             {
@@ -1125,6 +1484,7 @@ public partial class MainWindow : Window
         _refreshTimer.Stop();
         ThemeManager.Changed -= OnThemeChanged;
         SaveActivityPanelHeight();
+        SaveWindowPlacement();
         _settings.Save();
         _tray?.Dispose();
         _tray = null;
@@ -1142,7 +1502,8 @@ public partial class MainWindow : Window
 
     private void OnPreviewKeyDown(object sender, KeyEventArgs e)
     {
-        var ctrl = Keyboard.Modifiers.HasFlag(ModifierKeys.Control);
+        // Only Ctrl on its own: AltGr counts as Ctrl+Alt, and with it the same keys type characters such as @ or {.
+        var ctrl = Keyboard.Modifiers == ModifierKeys.Control;
         if (e.Key == Key.F5)
         {
             _ = ManualRefreshAsync();
@@ -1169,13 +1530,19 @@ public partial class MainWindow : Window
             SearchBox.Clear();
             e.Handled = true;
         }
-        else if (ctrl && e.Key is >= Key.D0 and <= Key.D9)
+        else if (NavShortcutIndex(e.Key, Keyboard.Modifiers) is { } index)
         {
-            var index = e.Key - Key.D0;
             if (index < NavItems.Count) MachineNav.SelectedIndex = index;
             e.Handled = true;
         }
     }
+
+    /// <summary>The sidebar entry that Ctrl and a digit, on the main keys or the number pad, selects (0 is all PCs); otherwise null.</summary>
+    internal static int? NavShortcutIndex(Key key, ModifierKeys modifiers)
+        => modifiers != ModifierKeys.Control ? null
+            : key is >= Key.D0 and <= Key.D9 ? key - Key.D0
+            : key is >= Key.NumPad0 and <= Key.NumPad9 ? key - Key.NumPad0
+            : null;
 
     private void ToggleActivity_Click(object sender, RoutedEventArgs e)
     {
@@ -1194,6 +1561,21 @@ public partial class MainWindow : Window
         ActivityChevron.Text = open ? "" : "";
     }
 
+    /// <summary>
+    /// The bottom panel keeps the height it was given, but never takes more than leaves the cards their minimum height,
+    /// for example after the window was made smaller. Also called when the window or its header changes size.
+    /// </summary>
+    private void ContentArea_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        // The height the window gives the content. Rows that want more make the grid itself taller (and cut off), so
+        // its own height cannot be used.
+        if (ContentArea.Parent is not FrameworkElement root) return;
+        var height = LayoutInformation.GetLayoutSlot(root).Height;
+        if (height <= 0) return;
+        var others = ContentArea.RowDefinitions.Where(r => r != CardsRow && r != ActivityRow).Sum(r => r.ActualHeight);
+        ActivityRow.MaxHeight = Math.Max(ActivityRow.MinHeight, height - others - CardsRow.MinHeight);
+    }
+
     private void SaveActivityPanelHeight()
     {
         if (_settings.ActivityPanelOpen && ActivityRow.ActualHeight > 60)
@@ -1210,9 +1592,9 @@ public partial class MainWindow : Window
     {
         try
         {
-            if (OutputRunner is { } runner)
+            if (SelectedOutput is { } output)
             {
-                Clipboard.SetText(OutputBox.SelectionLength > 0 ? OutputBox.SelectedText : runner.OutputText.Replace("\n", Environment.NewLine));
+                Clipboard.SetText(OutputBox.SelectionLength > 0 ? OutputBox.SelectedText : output.Text.Replace("\n", Environment.NewLine));
                 SetStatus("Output copied to clipboard", StatusKind.Ok);
                 return;
             }
@@ -1228,14 +1610,22 @@ public partial class MainWindow : Window
         ActivityCount.Text = ActivityTabCount.Text = string.Empty;
     }
 
-    public void AddActivity(string message)
+    /// <summary>Adds a line to the activity list, with an icon chosen from its words.</summary>
+    public void AddActivity(string message) => AddActivity(message, ActivityEntry.Classify(message));
+
+    /// <summary>
+    /// Adds a line whose kind is known. Words alone mislead: "Turn off auto-recovery completed" is a success, and an
+    /// agent's "Stopped build-01" answers a stop the user asked for.
+    /// </summary>
+    public void AddActivity(string message, ActivityKind kind)
     {
         if (!Dispatcher.CheckAccess())
         {
-            Dispatcher.Invoke(() => AddActivity(message));
+            // Queued, not waited for: a background step must not wait for a busy window.
+            Dispatcher.BeginInvoke(() => AddActivity(message, kind));
             return;
         }
-        ActivityLog.Insert(0, new ActivityEntry { Message = message, Kind = ActivityEntry.Classify(message) });
+        ActivityLog.Insert(0, new ActivityEntry { Message = message, Kind = kind });
         while (ActivityLog.Count > 300) ActivityLog.RemoveAt(ActivityLog.Count - 1);
         ActivityCount.Text = ActivityTabCount.Text = ActivityLog.Count.ToString();
     }
@@ -1266,6 +1656,8 @@ public sealed class AllMachinesEntry : INotifyPropertyChanged
 {
     public event PropertyChangedEventHandler? PropertyChanged;
     public string Subtitle { get; private set; } = "Loading…";
+    /// <summary>What a screen reader says for the sidebar entry.</summary>
+    public override string ToString() => $"All PCs, {Subtitle}";
 
     public void Update(string subtitle)
     {

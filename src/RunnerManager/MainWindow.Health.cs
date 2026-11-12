@@ -74,7 +74,7 @@ public partial class MainWindow
     {
         if (ItemFrom<MachineRunnerStatus>(sender) is not { CanStopJob: true } runner) return;
         var machine = Machines.FirstOrDefault(m => m.MachineKey == runner.MachineKey);
-        if (machine == null) return;
+        if (machine == null || IsOperationRunning(runner, $"Stop the job's processes on {runner.TitleText}")) return;
         // The processes as they are now, so the dialog says what will be stopped.
         var processes = string.Empty;
         try

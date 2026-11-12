@@ -32,6 +32,7 @@ public partial class MainWindow
     {
         if (_started) return;
         _started = true;
+        SetStatus("Loading…", StatusKind.Busy);
         CreateTray();
         AddActivity($"Runner Manager v{AppUpdater.CurrentVersion} started.");
         try
@@ -78,10 +79,7 @@ public partial class MainWindow
                 MachineInfo.LatestAppVersion = latest;
                 foreach (var machine in Machines) machine.Refresh();
             }
-            var showBanner = latest.Length > 0 && AppUpdater.IsNewer(latest, AppUpdater.CurrentVersion)
-                && latest != _settings.DismissedUpdateVersion;
-            UpdateBanner.Visibility = showBanner ? Visibility.Visible : Visibility.Collapsed;
-            if (showBanner) UpdateBannerText.Text = $"Runner Manager v{latest} is available. Current version: v{AppUpdater.CurrentVersion}.";
+            ShowUpdateBanner(latest);
 
             // Not while this dashboard restarts the agent itself; the agent counts as down from the next check after that.
             if (IsAgentWorkBusy) UpdateGuard.ForgetAgentDown();
@@ -320,7 +318,7 @@ public partial class MainWindow
         ApplyRefreshInterval();
         UpdateSummary();
         _tray?.SyncSettings(_settings);
-        LastUpdatedText.Text = $"Updated {DateTime.Now:HH:mm:ss}  ·  Refreshes every {_settings.RefreshSeconds}s";
+        LastUpdatedText.Text = $"Updated {TimeFormat.WithSeconds(DateTime.Now)}  ·  Refreshes every {_settings.RefreshSeconds}s";
     }
 
     private async Task OnFleetSettingsChangedAsync()
@@ -331,7 +329,40 @@ public partial class MainWindow
         await RefreshAsync(forceAuthCheck: true);
     }
 
-    private async void InstallUpdate_Click(object sender, RoutedEventArgs e) => await InstallUpdateAsync();
+    /// <summary>The version the update banner shows, or null while it is hidden.</summary>
+    private string? _bannerVersion;
+
+    /// <summary>
+    /// Shows a newer release, or, once a newer version is installed (after "Later", or by the fleet agent), that only a
+    /// restart is left. Offering to install it again would download the same version.
+    /// </summary>
+    private void ShowUpdateBanner(string latest)
+    {
+        var installed = InstalledUpdate();
+        var version = installed ?? (latest.Length > 0 && AppUpdater.IsNewer(latest, AppUpdater.CurrentVersion) ? latest : null);
+        _bannerVersion = version != null && version != _settings.DismissedUpdateVersion ? version : null;
+        UpdateBanner.Visibility = _bannerVersion != null ? Visibility.Visible : Visibility.Collapsed;
+        if (_bannerVersion == null) return;
+        UpdateBannerText.Text = installed != null
+            ? $"Runner Manager v{installed} is installed. Restart Runner Manager to finish the update."
+            : $"Runner Manager v{latest} is available. Current version: v{AppUpdater.CurrentVersion}.";
+        UpdateBannerButton.Content = installed != null ? "Restart now" : "Install update";
+    }
+
+    /// <summary>The installed version when it is newer than this dashboard, which then only needs a restart; otherwise null.</summary>
+    private static string? InstalledUpdate()
+        => AppUpdater.InstalledVersion is { } installed && AppUpdater.IsNewer(installed, AppUpdater.CurrentVersion) ? installed : null;
+
+    private async void InstallUpdate_Click(object sender, RoutedEventArgs e)
+    {
+        if (InstalledUpdate() == null)
+        {
+            await InstallUpdateAsync();
+            return;
+        }
+        if (IsOperationRunning("Restart Runner Manager")) return;
+        ((App)Application.Current).RestartDashboard();
+    }
 
     /// <summary>Installs the newest release on this PC, then offers to restart the dashboard with it.</summary>
     private async Task InstallUpdateAsync()
@@ -353,15 +384,15 @@ public partial class MainWindow
             async log => restartAgent = await AppUpdater.InstallReleaseAsync(release, log));
         if (!installed) return;
         if (restartAgent) RestartLocalAgentInBackground();
-        UpdateBanner.Visibility = Visibility.Collapsed;
         if (DialogWindow.Show(this, DialogTone.Question, $"Runner Manager {release.Tag} is installed",
                 "Restart Runner Manager now to use the new version?", "Restart now", cancel: "Later") == "Restart now")
             ((App)Application.Current).RestartDashboard();
+        else ShowUpdateBanner(MachineInfo.LatestAppVersion);
     }
 
     private void DismissUpdateBanner_Click(object sender, RoutedEventArgs e)
     {
-        _settings.DismissedUpdateVersion = MachineInfo.LatestAppVersion;
+        _settings.DismissedUpdateVersion = _bannerVersion ?? MachineInfo.LatestAppVersion;
         _settings.Save();
         UpdateBanner.Visibility = Visibility.Collapsed;
     }
@@ -411,11 +442,19 @@ public partial class MainWindow
                 $"The fleet agent on {machine.MachineName} downloads, verifies and installs Runner Manager v{MachineInfo.LatestAppVersion}, then restarts. Runners keep running.",
                 "Update")) return;
         await QueueMachineCommandAsync(machine, "agent", "Update", string.Empty, "Update",
-            $"{machine.MachineName}: update to v{MachineInfo.LatestAppVersion} queued.");
+            $"Update {machine.MachineName} to v{MachineInfo.LatestAppVersion}");
     }
+
+    /// <summary>
+    /// A checkable menu item turns its check on or off when clicked. Puts the bound state back, so the check shows what
+    /// is true until the change has really happened.
+    /// </summary>
+    internal static void KeepBoundCheck(object sender)
+        => (sender as MenuItem)?.GetBindingExpression(MenuItem.IsCheckedProperty)?.UpdateTarget();
 
     private async void MachineWatchdog_Click(object sender, RoutedEventArgs e)
     {
+        KeepBoundCheck(sender);
         if (ItemFrom<MachineInfo>(sender) is not { } machine) return;
         var enable = !machine.WatchdogEnabled;
         if (machine.IsLocal)
@@ -426,7 +465,7 @@ public partial class MainWindow
             return;
         }
         await QueueMachineCommandAsync(machine, "agent", "Watchdog", enable ? "on" : "off", string.Empty,
-            $"{machine.MachineName}: auto-recovery {(enable ? "on" : "off")} queued.");
+            $"Turn {(enable ? "on" : "off")} auto-recovery on {machine.MachineName}");
     }
 
     private void MachineAgentLog_Click(object sender, RoutedEventArgs e) => ShowLog(ItemFrom<MachineInfo>(sender), "agent", null, FleetConfig.StateDir);
@@ -531,13 +570,16 @@ public partial class MainWindow
             }
             return;
         }
-        await QueueMachineCommandAsync(machine, "machine", "Reboot", Environment.MachineName, "Reboot",
-            $"{machine.MachineName}: restart queued. The PC restarts 60 seconds after it receives the command.");
+        await QueueMachineCommandAsync(machine, "machine", "Reboot", Environment.MachineName, "Reboot", $"Restart {machine.MachineName}",
+            "The PC restarts 60 seconds after it receives the command.");
     }
 
-    /// <summary>Sends a PC-level command ("agent" or "machine") to another PC and shows it as pending until it reports back.</summary>
+    /// <summary>
+    /// Sends a PC-level command ("agent" or "machine") to another PC, shows it as pending until it reports back, and
+    /// reports its result. <paramref name="what"/> names it in messages: "Restart BUILD-01".
+    /// </summary>
     private async Task QueueMachineCommandAsync(MachineInfo machine, string target, string action, string value,
-        string pendingLabel, string queuedMessage)
+        string pendingLabel, string what, string note = "")
     {
         if (!CanSendTo(machine.MachineKey)) return;
         try
@@ -546,14 +588,16 @@ public partial class MainWindow
             var id = await MachineRelay.SendCommandAsync(machine.MachineKey, target, string.Empty, action, value: value);
             if (pendingLabel.Length > 0)
                 _pendingMachineCommands[machine.MachineKey] = new PendingCommand(id, pendingLabel, DateTime.UtcNow);
-            AddActivity(queuedMessage);
-            SetStatus(queuedMessage, StatusKind.Ok);
+            AwaitResult(id, machine.MachineKey, machine.MachineName, what);
+            var sent = $"{what}: sent. Waiting for its fleet agent." + (note.Length > 0 ? $" {note}" : string.Empty);
+            AddActivity(sent, ActivityKind.Info);
+            ShowNotice(sent, StatusKind.Ok);
         }
         catch (Exception ex)
         {
             machine.SetPending(string.Empty);
             _pendingMachineCommands.Remove(machine.MachineKey);
-            AddActivity($"{machine.MachineName}: {action} failed: {ex.Message}");
+            ReportSendFailure(what, machine.MachineName, ex);
             await RefreshAsync();
         }
     }
@@ -563,6 +607,7 @@ public partial class MainWindow
     private async void RunnerCleanWork_Click(object sender, RoutedEventArgs e)
     {
         if (ItemFrom<MachineRunnerStatus>(sender) is not { CanCleanWork: true } runner) return;
+        if (IsOperationRunning(runner, $"Clean {runner.TitleText} work folder")) return;
         var size = runner.WorkFolderBytes == null ? "all" : $"{SystemHealth.FormatBytes(runner.WorkFolderBytes)} of";
         if (!DialogWindow.Confirm(this, $"Clean the work folder of {runner.TitleText}?",
                 $"This deletes {size} checkouts, tool caches and build output on {runner.MachineName}. The runner stops during cleanup and starts again afterwards. The next job starts with a fresh checkout.",
@@ -573,8 +618,10 @@ public partial class MainWindow
 
     private async void RunnerStartup_Click(object sender, RoutedEventArgs e)
     {
+        KeepBoundCheck(sender);
         if (ItemFrom<MachineRunnerStatus>(sender) is not { CanChangeStartup: true } runner) return;
         var start = !runner.StartsAutomatically;
+        if (IsOperationRunning(runner, $"{(start ? "Turn on" : "Turn off")} automatic start for {runner.TitleText}")) return;
         await RunRunnerActionAsync(runner, "Startup", $"{(start ? "Turn on" : "Turn off")} automatic start for {runner.TitleText}",
             log => RunnerService.SetStartAutomaticallyAsync(runner.CommandKey, start, log), value: start ? "on" : "off");
     }

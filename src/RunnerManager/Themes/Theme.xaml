@@ -17,11 +17,14 @@
         </Setter>
     </Style>
 
-    <!-- Text -->
+    <!-- Text. This app-wide style also reaches text inside control templates, and a style value beats the color a
+         TextBlock would take from its control. So every control style below that sets Foreground puts an empty TextBlock
+         style in its Style.Resources: text in that control then takes the control's color. -->
     <Style TargetType="TextBlock">
         <Setter Property="Foreground" Value="{DynamicResource TextBrush}"/>
     </Style>
-    <Style x:Key="Icon" TargetType="TextBlock" BasedOn="{StaticResource {x:Type TextBlock}}">
+    <!-- No Foreground: an icon takes the color of what it is in, such as a button. -->
+    <Style x:Key="Icon" TargetType="TextBlock">
         <Setter Property="FontFamily" Value="{StaticResource IconFont}"/>
         <Setter Property="FontSize" Value="14"/>
         <Setter Property="VerticalAlignment" Value="Center"/>
@@ -49,6 +52,9 @@
 
     <!-- Buttons -->
     <Style TargetType="Button">
+        <Style.Resources>
+            <Style TargetType="TextBlock"/>
+        </Style.Resources>
         <Setter Property="Foreground" Value="{DynamicResource TextBrush}"/>
         <Setter Property="Background" Value="{DynamicResource Bg3Brush}"/>
         <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
@@ -65,8 +71,13 @@
                     <Border x:Name="Chrome" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
                             BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="6" Padding="{TemplateBinding Padding}"
                             SnapsToDevicePixels="True">
+                        <!-- The text it makes for string content stops looking for its style here: see the TextBlock style. -->
                         <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
-                                          VerticalAlignment="{TemplateBinding VerticalContentAlignment}" RecognizesAccessKey="True"/>
+                                          VerticalAlignment="{TemplateBinding VerticalContentAlignment}" RecognizesAccessKey="True">
+                            <ContentPresenter.Resources>
+                                <Style TargetType="TextBlock"/>
+                            </ContentPresenter.Resources>
+                        </ContentPresenter>
                     </Border>
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsMouseOver" Value="True">
@@ -226,6 +237,9 @@
 
     <!-- MenuItem: Tag holds an icon glyph. -->
     <Style TargetType="MenuItem">
+        <Style.Resources>
+            <Style TargetType="TextBlock"/>
+        </Style.Resources>
         <Setter Property="Foreground" Value="{DynamicResource TextBrush}"/>
         <Setter Property="Cursor" Value="Hand"/>
         <Setter Property="Template">
@@ -242,7 +256,11 @@
                                        HorizontalAlignment="Left" Foreground="{TemplateBinding Foreground}"/>
                             <TextBlock x:Name="Check" Text="&#xE73E;" Style="{StaticResource Icon}" FontSize="12" HorizontalAlignment="Left"
                                        Foreground="{DynamicResource AccentBrush}" Visibility="Collapsed"/>
-                            <ContentPresenter Grid.Column="1" ContentSource="Header" VerticalAlignment="Center" RecognizesAccessKey="True"/>
+                            <ContentPresenter Grid.Column="1" ContentSource="Header" VerticalAlignment="Center" RecognizesAccessKey="True">
+                                <ContentPresenter.Resources>
+                                    <Style TargetType="TextBlock"/>
+                                </ContentPresenter.Resources>
+                            </ContentPresenter>
                             <TextBlock Grid.Column="2" Text="{TemplateBinding InputGestureText}" Foreground="{DynamicResource TextFaintBrush}"
                                        FontSize="12" Margin="24,0,0,0" VerticalAlignment="Center"/>
                         </Grid>
@@ -328,6 +346,9 @@
 
     <!-- Sidebar navigation list -->
     <Style x:Key="NavItem" TargetType="ListBoxItem">
+        <Style.Resources>
+            <Style TargetType="TextBlock"/>
+        </Style.Resources>
         <Setter Property="Foreground" Value="{DynamicResource TextBrush}"/>
         <Setter Property="Cursor" Value="Hand"/>
         <Setter Property="FocusVisualStyle" Value="{StaticResource SubtleFocus}"/>
@@ -337,7 +358,11 @@
                 <ControlTemplate TargetType="ListBoxItem">
                     <Grid>
                         <Border x:Name="Chrome" Background="Transparent" CornerRadius="6" Padding="9,6">
-                            <ContentPresenter/>
+                            <ContentPresenter>
+                                <ContentPresenter.Resources>
+                                    <Style TargetType="TextBlock"/>
+                                </ContentPresenter.Resources>
+                            </ContentPresenter>
                         </Border>
                         <Border x:Name="Indicator" Width="3" Height="16" CornerRadius="1.5" HorizontalAlignment="Left"
                                 Background="{DynamicResource AccentBrush}" Visibility="Collapsed"/>
@@ -358,6 +383,9 @@
 
     <!-- Dashed "add" row, e.g. "+ Add a PC" under the machine list -->
     <Style x:Key="DashedRow" TargetType="Button">
+        <Style.Resources>
+            <Style TargetType="TextBlock"/>
+        </Style.Resources>
         <Setter Property="Foreground" Value="{DynamicResource TextMutedBrush}"/>
         <Setter Property="Cursor" Value="Hand"/>
         <Setter Property="FocusVisualStyle" Value="{StaticResource SubtleFocus}"/>
@@ -369,7 +397,11 @@
                         <Rectangle x:Name="Outline" RadiusX="7" RadiusY="7" Stroke="{DynamicResource BorderBrush}" StrokeThickness="1"
                                    StrokeDashArray="4 3" SnapsToDevicePixels="True"/>
                         <Border x:Name="Fill" CornerRadius="7" Background="Transparent" Padding="10,6">
-                            <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="Center"/>
+                            <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="Center">
+                                <ContentPresenter.Resources>
+                                    <Style TargetType="TextBlock"/>
+                                </ContentPresenter.Resources>
+                            </ContentPresenter>
                         </Border>
                     </Grid>
                     <ControlTemplate.Triggers>
@@ -389,6 +421,9 @@
 
     <!-- Selectable option card (RadioButton), e.g. in the setup wizard -->
     <Style x:Key="OptionCard" TargetType="RadioButton">
+        <Style.Resources>
+            <Style TargetType="TextBlock"/>
+        </Style.Resources>
         <Setter Property="Foreground" Value="{DynamicResource TextBrush}"/>
         <Setter Property="Cursor" Value="Hand"/>
         <Setter Property="FocusVisualStyle" Value="{StaticResource SubtleFocus}"/>
@@ -403,7 +438,11 @@
                                 <Ellipse x:Name="Ring" Stroke="{DynamicResource HoverBorderBrush}" StrokeThickness="1.5"/>
                                 <Ellipse x:Name="Dot" Width="8" Height="8" Fill="{DynamicResource AccentBrush}" Visibility="Collapsed"/>
                             </Grid>
-                            <ContentPresenter VerticalAlignment="Center"/>
+                            <ContentPresenter VerticalAlignment="Center">
+                                <ContentPresenter.Resources>
+                                    <Style TargetType="TextBlock"/>
+                                </ContentPresenter.Resources>
+                            </ContentPresenter>
                         </DockPanel>
                     </Border>
                     <ControlTemplate.Triggers>
@@ -475,6 +514,9 @@
     </Style>
     <!-- Toggle switch (CheckBox) -->
     <Style x:Key="ToggleSwitch" TargetType="CheckBox">
+        <Style.Resources>
+            <Style TargetType="TextBlock"/>
+        </Style.Resources>
         <Setter Property="Foreground" Value="{DynamicResource TextBrush}"/>
         <Setter Property="Cursor" Value="Hand"/>
         <Setter Property="FocusVisualStyle" Value="{StaticResource SubtleFocus}"/>
@@ -486,7 +528,11 @@
                             <ColumnDefinition Width="*"/>
                             <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
-                        <ContentPresenter VerticalAlignment="Center" Margin="0,0,16,0"/>
+                        <ContentPresenter VerticalAlignment="Center" Margin="0,0,16,0">
+                            <ContentPresenter.Resources>
+                                <Style TargetType="TextBlock"/>
+                            </ContentPresenter.Resources>
+                        </ContentPresenter>
                         <Border x:Name="Track" Grid.Column="1" Width="40" Height="22" CornerRadius="11"
                                 Background="{DynamicResource Bg3Brush}" BorderBrush="{DynamicResource HoverBorderBrush}" BorderThickness="1">
                             <Ellipse x:Name="Knob" Width="14" Height="14" Margin="4,0" HorizontalAlignment="Left"
@@ -511,6 +557,9 @@
 
     <!-- Segmented choice (RadioButton) -->
     <Style x:Key="Segment" TargetType="RadioButton">
+        <Style.Resources>
+            <Style TargetType="TextBlock"/>
+        </Style.Resources>
         <Setter Property="Foreground" Value="{DynamicResource TextMutedBrush}"/>
         <Setter Property="Cursor" Value="Hand"/>
         <Setter Property="FocusVisualStyle" Value="{StaticResource SubtleFocus}"/>
@@ -519,7 +568,11 @@
             <Setter.Value>
                 <ControlTemplate TargetType="RadioButton">
                     <Border x:Name="Chrome" Background="Transparent" CornerRadius="5" Padding="{TemplateBinding Padding}" Margin="2">
-                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center">
+                            <ContentPresenter.Resources>
+                                <Style TargetType="TextBlock"/>
+                            </ContentPresenter.Resources>
+                        </ContentPresenter>
                     </Border>
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsMouseOver" Value="True">
