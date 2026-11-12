@@ -893,4 +893,27 @@ public class AuditDashboardTests
         var applied = MainWindow.StillApplies(health, RunnerIn(state));
         Assert.Equal(shown ? health : RunnerHealth.Healthy, applied);
     }
+
+    // ----- 6: no fleet read while this PC joins or leaves the fleet -----
+
+    [Theory]
+    [InlineData("Leave fleet", false)]
+    [InlineData("Join fleet", false)]
+    [InlineData("Add runner", true)]
+    [InlineData("Delete api", true)]
+    public void FleetIsNotRead_WhileThisPcJoinsOrLeaves(string operation, bool reads)
+        => Assert.Equal(reads, MainWindow.ReadsFleetDuring(operation));
+
+    [Fact]
+    public void JoiningAndLeaving_WaitForAFleetReadThatStartedBefore()
+    {
+        var code = File.ReadAllText(Path.Combine(SourceDir, "MainWindow.xaml.cs"));
+        foreach (var title in new[] { "RunOperationAsync(LeaveFleetTitle", "RunOperationAsync(JoinFleetTitle" })
+        {
+            var start = code.IndexOf(title, StringComparison.Ordinal);
+            Assert.True(start >= 0, title);
+            var wait = code.IndexOf("await WaitForFleetReadAsync();", start, StringComparison.Ordinal);
+            Assert.True(wait > start && wait - start < 300, title);
+        }
+    }
 }

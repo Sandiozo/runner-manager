@@ -124,7 +124,10 @@ public partial class MainWindow : Window
     /// This PC joins or leaves the fleet. The fleet is not read meanwhile: a read saves the PCs it finds, and could add a PC
     /// back to the list that leaving just cleared. The refresh at the end of the operation reads it again.
     /// </summary>
-    private bool FleetMembershipChanging => _operationRunning && _operationTitle is JoinFleetTitle or LeaveFleetTitle;
+    private bool FleetMembershipChanging => _operationRunning && !ReadsFleetDuring(_operationTitle);
+
+    /// <summary>Whether the fleet is read while the operation with this title runs on this PC.</summary>
+    internal static bool ReadsFleetDuring(string operationTitle) => operationTitle is not (JoinFleetTitle or LeaveFleetTitle);
 
     /// <summary>Waits until a fleet read that is still running has ended (it never throws).</summary>
     private Task WaitForFleetReadAsync()
@@ -145,6 +148,7 @@ public partial class MainWindow : Window
             _refreshQueuedForceAuth |= forceAuthCheck;
             return;
         }
+        if (FleetMembershipChanging) return;
         _refreshing = true;
         var completed = false;
         try
@@ -1381,6 +1385,8 @@ public partial class MainWindow : Window
                 "Leave fleet", danger: true)) return;
         await RunOperationAsync(LeaveFleetTitle, async log =>
         {
+            // A fleet read that started before could save a PC again after the list is cleared.
+            await WaitForFleetReadAsync();
             var told = await MachineRelay.LeaveFleetAsync(log);
             _isEnrolled = false;
             _agentTaskChecked = false;
@@ -1434,6 +1440,7 @@ public partial class MainWindow : Window
         }
         await RunOperationAsync(JoinFleetTitle, async log =>
         {
+            await WaitForFleetReadAsync();
             await AppUpdater.InstallCurrentBuildAsync(log);
             log("Starting the fleet agent and opening its ports for the local network and Tailscale…");
             await MachineRelay.InstallAndStartAgentTaskAsync();
