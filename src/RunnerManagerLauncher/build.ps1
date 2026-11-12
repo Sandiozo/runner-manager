@@ -183,7 +183,11 @@ function Build-Launcher($target, [string]$objFolder, [string]$defines) {
 
 if ($stale -contains $launcher) {
     Build-Launcher $launcher $obj ''
-    $hash = (Get-FileHash -LiteralPath $launcher.Exe -Algorithm SHA256).Hash
+    # Not Get-FileHash: Windows PowerShell started from PowerShell 7 (as on GitHub's build machines) inherits a
+    # PSModulePath with which it does not find that command.
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try { $hash = [System.BitConverter]::ToString($sha256.ComputeHash([System.IO.File]::ReadAllBytes($launcher.Exe))).Replace('-', '') }
+    finally { $sha256.Dispose() }
     Write-Host "RunnerManagerLauncher: built $($launcher.Exe) ($((Get-Item -LiteralPath $launcher.Exe).Length) bytes, SHA-256 $hash)."
 }
 
