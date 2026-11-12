@@ -115,16 +115,21 @@ public static class JobHealth
         => job.Status.Equals("in_progress", StringComparison.OrdinalIgnoreCase) || job.Status.Equals("queued", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>What the health checks read from GitHub. Tests replace it.</summary>
+    /// <param name="UsualDuration">See <see cref="GitHubApi.ReadUsualJobDurationAsync"/>: Read is false when GitHub could not be read.</param>
     internal sealed record GitHubReads(
         Func<string, Task<RepositoryWorkState?>> RepositoryJobs,
-        Func<string, string, string, Task<TimeSpan?>> UsualDuration,
+        Func<string, string, string, Task<(bool Read, TimeSpan? Usual)>> UsualDuration,
         Func<string, Task<IReadOnlyList<RegisteredRunner>?>> Runners)
     {
-        public static readonly GitHubReads Live = new(GitHubApi.GetRepositoryJobsAsync, GitHubApi.GetUsualJobDurationAsync, RegisteredRunners.GetAsync);
+        public static readonly GitHubReads Live = new(GitHubApi.GetRepositoryJobsAsync, GitHubApi.ReadUsualJobDurationAsync, RegisteredRunners.GetAsync);
     }
 
-    /// <summary>A busy runner's job as GitHub last listed it, by <see cref="Key"/>, with the start of the worker that runs it.</summary>
-    private sealed record KnownJob(DateTime? StartedUtc, TimeSpan? Usual, DateTime WorkerStartedUtc);
+    /// <summary>
+    /// A busy runner's job as GitHub last listed it, by <see cref="Key"/>, with the start of the worker that runs it.
+    /// <paramref name="UsualKnown"/> is false when the usual duration could not be read: then <paramref name="Usual"/>
+    /// is null without meaning "no history".
+    /// </summary>
+    private sealed record KnownJob(DateTime? StartedUtc, TimeSpan? Usual, bool UsualKnown, DateTime WorkerStartedUtc);
     private static readonly Dictionary<string, KnownJob> KnownJobs = new(StringComparer.OrdinalIgnoreCase);
     /// <summary>The last usual duration GitHub gave per "repository|workflow|job".</summary>
     private static readonly Dictionary<string, TimeSpan> KnownUsual = new(StringComparer.OrdinalIgnoreCase);
@@ -213,8 +218,9 @@ public static class JobHealth
     /// <summary>
     /// A busy runner's concern. The worker's start names the job on its PC whether GitHub answers or not, so a job is
     /// reported once. When GitHub does not list the job this time, the job it listed last is used if the same worker
-    /// still runs; when GitHub could not be read and nothing is known, only a stuck job is found, since the 2-hour
-    /// limit for jobs without history would report a normal long job as running long.
+    /// still runs. When GitHub could not be read (the jobs, or the job's usual duration) and nothing is known, only a
+    /// stuck job is found, since the 2-hour limit for jobs without history would report a normal long job as running
+    /// long.
     /// </summary>
     private static async Task<RunnerHealth> ForBusyRunnerAsync(MachineRunnerStatus runner, List<GitHubJobState>? active, bool unread,
         GitHubReads? github, TimeSpan quietLimit, DateTime nowUtc)
@@ -225,41 +231,51 @@ public static class JobHealth
                                                   && j.Status.Equals("in_progress", StringComparison.OrdinalIgnoreCase));
         KnownJob? known;
         lock (KnownJobs) known = KnownJobs.GetValueOrDefault(key);
+        var sameWorker = known != null && runner.JobStartedUtc == known.WorkerStartedUtc;
         DateTime? started;
         TimeSpan? usual = null;
         if (current != null && github != null)
         {
-            usual = await UsualDurationAsync(github, runner.RepositoryPath, current);
+            var (usualKnown, usualRead) = await UsualDurationAsync(github, runner.RepositoryPath, current);
+            if (!usualKnown && sameWorker && known!.UsualKnown) (usualKnown, usualRead) = (true, known.Usual);
+            usual = usualRead;
             started = current.StartedUtc ?? runner.JobStartedUtc;
             subject ??= current.Id.ToString();
-            if (runner.JobStartedUtc is { } worker) lock (KnownJobs) KnownJobs[key] = new KnownJob(started, usual, worker);
+            if (runner.JobStartedUtc is { } worker) lock (KnownJobs) KnownJobs[key] = new KnownJob(started, usual, usualKnown, worker);
+            // Without the usual duration the limit is not known: the 2-hour limit is for jobs without history only.
+            if (!usualKnown) started = null;
         }
-        else if (known != null && runner.JobStartedUtc == known.WorkerStartedUtc)
+        else if (sameWorker)
         {
-            started = known.StartedUtc;
+            started = known!.UsualKnown ? known.StartedUtc : null;
             usual = known.Usual;
         }
         else started = unread ? null : runner.JobStartedUtc;
         return ForBusyRunner(runner.QuietSinceUtc, started, usual, quietLimit, subject ?? $"{runner.CommandKey}@", nowUtc);
     }
 
-    /// <summary>The job's usual duration, or the last one GitHub gave when it cannot be read now.</summary>
-    private static async Task<TimeSpan?> UsualDurationAsync(GitHubReads github, string repository, GitHubJobState job)
+    /// <summary>
+    /// The job's usual duration, or the last one GitHub gave when it cannot be read now or has too few runs to go by.
+    /// Known is false when GitHub could not be read and no earlier duration is known: Usual is then null without
+    /// meaning that the job has no history.
+    /// </summary>
+    private static async Task<(bool Known, TimeSpan? Usual)> UsualDurationAsync(GitHubReads github, string repository, GitHubJobState job)
     {
         var key = $"{repository}|{job.WorkflowName}|{job.Name}";
-        TimeSpan? usual = null;
-        try { usual = await github.UsualDuration(repository, job.WorkflowName, job.Name); }
+        (bool Read, TimeSpan? Usual) read = (false, null);
+        try { read = await github.UsualDuration(repository, job.WorkflowName, job.Name); }
         catch { }
         lock (KnownUsual)
         {
-            if (usual is { } value)
+            if (read is { Read: true, Usual: { } value })
             {
                 if (KnownUsual.Count > 500) KnownUsual.Clear();
                 KnownUsual[key] = value;
+                return (true, value);
             }
-            else if (KnownUsual.TryGetValue(key, out var last)) usual = last;
+            if (KnownUsual.TryGetValue(key, out var last)) return (true, last);
         }
-        return usual;
+        return (read.Read, null);
     }
 
     /// <summary>A runner's labels as GitHub lists them, or else as its PC reports them.</summary>

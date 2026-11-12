@@ -78,18 +78,26 @@ public static class GitHubApi
 
     /// <summary>
     /// How long a job usually takes: the median of its successful runs among the workflow's latest successful runs
-    /// (null with fewer than three). Remembered for 10 minutes.
+    /// (null with fewer than three, or when GitHub could not be read). Remembered for 10 minutes.
     /// </summary>
     public static async Task<TimeSpan?> GetUsualJobDurationAsync(string repositoryPath, string workflowName, string jobName)
+        => (await ReadUsualJobDurationAsync(repositoryPath, workflowName, jobName)).Usual;
+
+    /// <summary>
+    /// How long a job usually takes, as <see cref="GetUsualJobDurationAsync"/>, and whether GitHub was read: Usual is
+    /// null with Read true when the job has fewer than three successful runs to go by, and with Read false when a
+    /// request failed and the runs that were read do not give three. Only a read that worked is remembered.
+    /// </summary>
+    public static async Task<(bool Read, TimeSpan? Usual)> ReadUsualJobDurationAsync(string repositoryPath, string workflowName, string jobName)
     {
-        if (!GitHubNames.IsRepositoryPath(repositoryPath)) return null;
+        if (!GitHubNames.IsRepositoryPath(repositoryPath)) return (false, null);
         var key = $"{repositoryPath}|{workflowName}|{jobName}";
         lock (CacheLock)
-            if (UsualDurations.TryGetValue(key, out var known) && DateTime.UtcNow < known.Until) return known.Usual;
+            if (UsualDurations.TryGetValue(key, out var known) && DateTime.UtcNow < known.Until) return (true, known.Usual);
 
         var endpoint = $"repos/{repositoryPath}/actions/runs?status=success&per_page=30";
         var body = await GetPolledAsync(endpoint);
-        if (body == null) return null;
+        if (body == null) return (false, null);
         List<WorkflowRunState> runs;
         try
         {
@@ -100,10 +108,11 @@ public static class GitHubApi
         catch
         {
             Unreadable(endpoint);
-            return null;
+            return (false, null);
         }
 
         var durations = new List<TimeSpan>();
+        var failed = false;
         foreach (var run in runs)
         {
             List<GitHubJobState>? jobs;
@@ -111,7 +120,11 @@ public static class GitHubApi
             if (jobs == null)
             {
                 jobs = await GetJobsAsync(repositoryPath, run);
-                if (jobs == null) continue;
+                if (jobs == null)
+                {
+                    failed = true;
+                    continue;
+                }
                 lock (CacheLock)
                 {
                     if (FinishedRunJobs.Count > 500) FinishedRunJobs.Clear();
@@ -123,8 +136,11 @@ public static class GitHubApi
                 .Select(j => j.CompletedUtc!.Value - j.StartedUtc!.Value));
         }
         var usual = JobHealth.Usual(durations);
+        // Too few durations because a run's jobs could not be read is not "no history". Not remembered, so the next
+        // check reads again (each failed request waits for its own pause).
+        if (usual == null && failed) return (false, null);
         lock (CacheLock) UsualDurations[key] = (DateTime.UtcNow + TimeSpan.FromMinutes(10), usual);
-        return usual;
+        return (true, usual);
     }
 
     private static Task<RepositoryWorkState?> GetRepositoryWorkAsync(string repositoryPath)

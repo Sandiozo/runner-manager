@@ -984,6 +984,27 @@ public class GitHubBackOffTests
     }
 
     [Fact]
+    public async Task UsualDuration_WithARunThatCouldNotBeRead_IsNotNoHistory()
+    {
+        var repository = NewRepository();
+        var failing = true;
+        using var gh = new FakeGh(arguments => arguments[1].Contains("/runs/93002/jobs", StringComparison.Ordinal) && failing
+            ? FakeGh.Http(502, error: "gh: Bad Gateway (HTTP 502)")
+            : arguments[1].Contains("/jobs?", StringComparison.Ordinal)
+                ? FakeGh.Http(200, """{"total_count":1,"jobs":[{"id":1,"name":"build","status":"completed","conclusion":"success","started_at":"2026-11-09T10:00:00Z","completed_at":"2026-11-09T10:20:00Z"}]}""")
+                : FakeGh.Http(200, """{"total_count":3,"workflow_runs":[{"id":93001,"name":"CI"},{"id":93002,"name":"CI"},{"id":93003,"name":"CI"}]}"""));
+
+        // Two of the three runs give too few durations, but only because the third could not be read.
+        Assert.Equal((false, (TimeSpan?)null), await GitHubApi.ReadUsualJobDurationAsync(repository, "CI", "build"));
+        Assert.Null(await GitHubApi.GetUsualJobDurationAsync(repository, "CI", "build"));
+
+        // Not remembered: once the run can be read, the usual duration is there.
+        failing = false;
+        gh.Now += TimeSpan.FromSeconds(46);
+        Assert.Equal((true, (TimeSpan?)TimeSpan.FromMinutes(20)), await GitHubApi.ReadUsualJobDurationAsync(repository, "CI", "build"));
+    }
+
+    [Fact]
     public async Task RunnerList_ThatCannotBeRead_IsAskedOncePerRunner_NotOnEveryRefresh()
     {
         var scope = $"repos/{NewRepository()}";

@@ -424,9 +424,10 @@ public class AuditRunnerTests
     private static GitHubJobState Queued(long id, DateTime nowUtc, params string[] labels)
         => new() { Id = id, Name = $"job{id}", WorkflowName = "CI", Status = "queued", CreatedUtc = nowUtc.AddMinutes(-10), Labels = labels };
 
+    /// <param name="usual">The usual duration read: Read is false when GitHub could not be read. Without it, the jobs have no history.</param>
     private static JobHealth.GitHubReads Reads(Func<string, RepositoryWorkState?> jobs, Func<string, IReadOnlyList<RegisteredRunner>?> runners,
-        Func<TimeSpan?>? usual = null)
-        => new(repository => Task.FromResult(jobs(repository)), (_, _, _) => Task.FromResult(usual?.Invoke()),
+        Func<(bool Read, TimeSpan? Usual)>? usual = null)
+        => new(repository => Task.FromResult(jobs(repository)), (_, _, _) => Task.FromResult(usual?.Invoke() ?? (true, null)),
             scope => Task.FromResult(runners(scope)));
 
     private static RepositoryWorkState Work(params GitHubJobState[] jobs)
@@ -444,7 +445,7 @@ public class AuditRunnerTests
         var machine = Pc("PC-LONG", Runner("audit/long", 11, busy: true, workerStarted: worker));
         var job = new GitHubJobState { Id = 501, Name = "build", WorkflowName = "CI", Status = "in_progress", RunnerId = 11, StartedUtc = worker, Labels = new[] { "self-hosted" } };
         var github = true;
-        var reads = Reads(_ => github ? Work(job) : null, _ => null, () => github ? TimeSpan.FromMinutes(90) : null);
+        var reads = Reads(_ => github ? Work(job) : null, _ => null, () => (github, github ? TimeSpan.FromMinutes(90) : (TimeSpan?)null));
         var key = JobHealth.Key(machine.Runners[0]);
 
         // GitHub knows it usually takes 90 minutes, so 130 minutes is fine.
@@ -466,7 +467,7 @@ public class AuditRunnerTests
         var machine = Pc("PC-SUBJECT", Runner("audit/subject", 12, busy: true, workerStarted: worker));
         var job = new GitHubJobState { Id = 502, Name = "build", WorkflowName = "CI", Status = "in_progress", RunnerId = 12, StartedUtc = worker, Labels = new[] { "self-hosted" } };
         var github = true;
-        var reads = Reads(_ => github ? Work(job) : null, _ => null, () => TimeSpan.FromMinutes(10));
+        var reads = Reads(_ => github ? Work(job) : null, _ => null, () => (true, TimeSpan.FromMinutes(10)));
         var key = JobHealth.Key(machine.Runners[0]);
 
         var first = (await JobHealth.EvaluateAsync(new[] { machine }, Quiet, null, reads, now)).Runners[key];
@@ -476,6 +477,28 @@ public class AuditRunnerTests
         Assert.Equal(RunnerConcern.RunningLong, first.Concern);
         Assert.Equal(first.Subject, second.Subject);
         Assert.Contains("usually takes 10 min", second.Detail);
+    }
+
+    [Fact]
+    public async Task FailedReadOfTheUsualDuration_IsNotTakenAsNoHistory()
+    {
+        var now = DateTime.UtcNow;
+        var worker = now.AddMinutes(-130);
+        var machine = Pc("PC-USUAL", Runner("audit/usual", 13, busy: true, workerStarted: worker));
+        var job = new GitHubJobState { Id = 503, Name = "build", WorkflowName = "CI", Status = "in_progress", RunnerId = 13, StartedUtc = worker, Labels = new[] { "self-hosted" } };
+        (bool Read, TimeSpan? Usual) usual = (false, null);
+        var reads = Reads(_ => Work(job), _ => null, () => usual);
+        var key = JobHealth.Key(machine.Runners[0]);
+
+        // The job is listed, but its earlier runs cannot be read: 130 minutes is not judged by the 2-hour limit.
+        Assert.False((await JobHealth.EvaluateAsync(new[] { machine }, Quiet, null, reads, now)).Runners[key].IsProblem);
+        Assert.False((await JobHealth.EvaluateAsync(new[] { machine }, Quiet, null, Reads(_ => null, _ => null), now)).Runners[key].IsProblem);
+
+        // GitHub answers that the job has no history: then the 2-hour limit is the right one.
+        usual = (true, null);
+        var health = (await JobHealth.EvaluateAsync(new[] { machine }, Quiet, null, reads, now)).Runners[key];
+        Assert.Equal(RunnerConcern.RunningLong, health.Concern);
+        Assert.Contains("longer than 2 h", health.Detail);
     }
 
     [Fact]
