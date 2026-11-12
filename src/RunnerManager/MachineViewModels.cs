@@ -29,28 +29,45 @@ public sealed class MachineRunnerStatus : INotifyPropertyChanged
     [JsonIgnore] public int AgentProtocolVersion { get; set; }
     [JsonIgnore] public bool IsLocalMachine { get; set; }
     [JsonIgnore] public bool MachineOnline { get; set; }
-    public string ServiceName { get; init; } = string.Empty;
-    public string InstallPath { get; init; } = string.Empty;
+
+    // Read from other PCs' status, where a value can be JSON null: the text and lists are never null here.
+    private readonly string _serviceName = string.Empty;
+    private readonly string _installPath = string.Empty;
+    private readonly string _displayName = string.Empty;
+    private readonly string _repositoryPath = string.Empty;
+    private readonly string _scope = string.Empty;
+    private readonly string _agentName = string.Empty;
+    private readonly string[] _customLabels = Array.Empty<string>();
+    private readonly string _activityText = string.Empty;
+    private readonly string _startsAt = RunnerStart.Unknown;
+    private readonly string _runnerVersion = string.Empty;
+
+    public string ServiceName { get => _serviceName; init => _serviceName = value ?? string.Empty; }
+    public string InstallPath { get => _installPath; init => _installPath = value ?? string.Empty; }
     /// <summary>Running from a console window (run.cmd) rather than as a Windows service.</summary>
     public bool IsInteractive { get; init; }
-    public string DisplayName { get; init; } = string.Empty;
-    public string RepositoryPath { get; init; } = string.Empty;
+    public string DisplayName { get => _displayName; init => _displayName = value ?? string.Empty; }
+    public string RepositoryPath { get => _repositoryPath; init => _repositoryPath = value ?? string.Empty; }
     /// <summary>"repos/owner/repo" or "orgs/name".</summary>
-    public string Scope { get; init; } = string.Empty;
-    public string AgentName { get; init; } = string.Empty;
+    public string Scope { get => _scope; init => _scope = value ?? string.Empty; }
+    public string AgentName { get => _agentName; init => _agentName = value ?? string.Empty; }
     public long AgentId { get; init; }
     /// <summary>Labels besides self-hosted, Windows and X64 (empty from older agents, or when GitHub could not be read).</summary>
-    public string[] CustomLabels { get; init; } = Array.Empty<string>();
+    public string[] CustomLabels
+    {
+        get => _customLabels;
+        init => _customLabels = value?.Where(label => label != null).ToArray() ?? Array.Empty<string>();
+    }
     /// <summary>Runner group, ephemeral and the other registration settings, kept when the runner moves (null from older agents).</summary>
     public RunnerRegistrationOptions? RegistrationOptions { get; init; }
     public bool IsRunning { get; init; }
-    public string ActivityText { get; init; } = string.Empty;
+    public string ActivityText { get => _activityText; init => _activityText = value ?? string.Empty; }
     public bool ServiceInstalled { get; init; }
     /// <summary>The old copy of a runner that was moved to another PC (false from agents before protocol 13).</summary>
     public bool MovedAway { get; init; }
     /// <summary>What starts the runner after a restart (a <see cref="RunnerStart"/> value; empty from agents before protocol 13).</summary>
-    public string StartsAt { get; init; } = RunnerStart.Unknown;
-    public string RunnerVersion { get; init; } = string.Empty;
+    public string StartsAt { get => _startsAt; init => _startsAt = value ?? RunnerStart.Unknown; }
+    public string RunnerVersion { get => _runnerVersion; init => _runnerVersion = value ?? string.Empty; }
     public long? WorkFolderBytes { get; init; }
     public bool ManuallyStopped { get; init; }
     /// <summary>When the running job started on its PC (protocol 14; null while idle and from older agents).</summary>
@@ -128,6 +145,7 @@ public sealed class MachineRunnerStatus : INotifyPropertyChanged
         : IsRunning ? Palette.Success
         : Palette.Danger;
     [JsonIgnore] public Brush StatusTint => Palette.Tint(StatusBrush);
+    [JsonIgnore] public Brush StatusTextBrush => Palette.OnTint(StatusBrush);
     [JsonIgnore] public string StatusTip => _health.IsProblem ? _health.Detail
         : IsInteractive && ServiceInstalled
         ? "Runs in a console window in your session. Its Windows service is not used; starting it would run the runner twice."
@@ -165,8 +183,15 @@ public sealed class MachineRunnerStatus : INotifyPropertyChanged
     [JsonIgnore] public Visibility LocalDetailsVisibility => IsExpanded && LocalRunner != null ? Visibility.Visible : Visibility.Collapsed;
     [JsonIgnore] public Visibility ManuallyStoppedVisibility => ManuallyStopped && !IsRunning ? Visibility.Visible : Visibility.Collapsed;
     [JsonIgnore] public string ExpandGlyph => IsExpanded ? "" : "";
-    [JsonIgnore] public string LabelsText => LocalRunner is { CustomLabels.Length: > 0 } local
-        ? string.Join("  ·  ", local.CustomLabels) : $"self-hosted, Windows, {(IsLocalMachine ? RunnerService.ArchitectureLabel : "X64")}";
+    /// <summary>The name of the header button for screen readers: the runner, its state and what a click does.</summary>
+    [JsonIgnore] public string HeaderName => $"{TitleText}, {StatusText}. {(IsExpanded ? "Hide details" : "Show details")}";
+    /// <summary>This PC's own reading of the labels when it has one, otherwise what the runner's agent reports.</summary>
+    [JsonIgnore] private string[] EffectiveCustomLabels => LocalRunner is { CustomLabels.Length: > 0 } local ? local.CustomLabels : CustomLabels;
+    [JsonIgnore] public string LabelsText => EffectiveCustomLabels is { Length: > 0 } labels
+        ? string.Join("  ·  ", labels) : $"self-hosted, Windows, {(IsLocalMachine ? RunnerService.ArchitectureLabel : "X64")}";
+    // Another PC's agent sends no labels when it is older or has not read them from GitHub yet, so the defaults are only
+    // shown for runners on this PC.
+    [JsonIgnore] public Visibility LabelsVisibility => LocalRunner != null || CustomLabels.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
     [JsonIgnore] public bool HasCurrentJob => !string.IsNullOrWhiteSpace(LocalRunner?.CurrentJobUrl);
     // Runners on this PC use the dashboard's own readings, so the details are complete even before the agent is updated.
     [JsonIgnore] private long? EffectiveWorkFolderBytes => LocalRunner?.WorkFolderBytes ?? WorkFolderBytes;
@@ -222,7 +247,9 @@ public sealed class MachineRunnerStatus : INotifyPropertyChanged
             Notify(nameof(Health));
             Notify(nameof(HealthVisibility));
             Notify(nameof(StatusText));
+            Notify(nameof(HeaderName));
             Notify(nameof(StatusBrush));
+            Notify(nameof(StatusTextBrush));
             Notify(nameof(StatusTint));
             Notify(nameof(StatusTip));
             Notify(nameof(StopJobVisibility));
@@ -264,15 +291,41 @@ public sealed class MachineRunnerStatus : INotifyPropertyChanged
             Notify(nameof(LiveJob));
             Notify(nameof(LiveJobVisibility));
             Notify(nameof(JobLineVisibility));
+            Notify(nameof(GitHubNoteVisibility));
             Notify(nameof(NoJobsVisibility));
         }
     }
     [JsonIgnore] public Visibility LiveJobVisibility => IsExpanded && IsBusy && _liveJob != null ? Visibility.Visible : Visibility.Collapsed;
+
+    private string _gitHubNote = string.Empty;
+    private string? _gitHubNoteTip;
+    /// <summary>Why GitHub could not be read for this runner's repository or organization, and when it is asked again.</summary>
+    [JsonIgnore] public string GitHubNote => _gitHubNote;
+    /// <summary>What gh said, when it said something.</summary>
+    [JsonIgnore] public string? GitHubNoteTip => _gitHubNoteTip;
+    /// <summary>In the details, unless the job panel says it already.</summary>
+    [JsonIgnore] public Visibility GitHubNoteVisibility => IsExpanded && _gitHubNote.Length > 0 && LiveJobVisibility != Visibility.Visible
+        ? Visibility.Visible : Visibility.Collapsed;
+
+    /// <summary>Sets why GitHub could not be read for this runner, or null when it could; set by the dashboard.</summary>
+    public void SetGitHubProblem(GitHubProblem? problem, DateTime nowUtc)
+    {
+        var note = problem == null ? string.Empty : GitHubNotes.Describe(GitHubNotes.RunnerLead, problem, nowUtc);
+        var tip = string.IsNullOrWhiteSpace(problem?.Detail) ? null : problem.Detail.Trim();
+        if (note == _gitHubNote && tip == _gitHubNoteTip) return;
+        _gitHubNote = note;
+        _gitHubNoteTip = tip;
+        Notify(nameof(GitHubNote));
+        Notify(nameof(GitHubNoteTip));
+        Notify(nameof(GitHubNoteVisibility));
+        Notify(nameof(NoJobsVisibility));
+    }
     [JsonIgnore] public Visibility JobLineVisibility => IsBusy && !string.IsNullOrEmpty(_liveJob?.Summary) ? Visibility.Visible : Visibility.Collapsed;
     /// <summary>The details' left column has no job, runs or note to show.</summary>
     [JsonIgnore] public Visibility NoJobsVisibility => IsExpanded && LiveJobVisibility != Visibility.Visible
         && RecentRunsVisibility != Visibility.Visible && ConsoleNoteVisibility != Visibility.Visible
-        && QueueVisibility != Visibility.Visible && HealthVisibility != Visibility.Visible ? Visibility.Visible : Visibility.Collapsed;
+        && QueueVisibility != Visibility.Visible && HealthVisibility != Visibility.Visible
+        && GitHubNoteVisibility != Visibility.Visible ? Visibility.Visible : Visibility.Collapsed;
     /// <summary>The live output shown in the dashboard's bottom panel while the runner is open (empty otherwise).</summary>
     [JsonIgnore] public string OutputText => LiveJobVisibility == Visibility.Visible ? _liveJob?.Output ?? string.Empty : string.Empty;
 
@@ -329,7 +382,7 @@ public sealed class MachineRunnerStatus : INotifyPropertyChanged
            || RepositoryText.Contains(filter, StringComparison.OrdinalIgnoreCase)
            || ServiceName.Contains(filter, StringComparison.OrdinalIgnoreCase)
            || StatusText.Contains(filter, StringComparison.OrdinalIgnoreCase)
-           || (LocalRunner?.CustomLabels.Any(l => l.Contains(filter, StringComparison.OrdinalIgnoreCase)) ?? false);
+           || EffectiveCustomLabels.Any(l => l.Contains(filter, StringComparison.OrdinalIgnoreCase));
 
     private void Notify(string? name = null)
         => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name ?? string.Empty));
@@ -367,9 +420,19 @@ public sealed class MachineInfo : INotifyPropertyChanged
     /// Whether the agent reported a result for a command. Several commands can finish between two refreshes, so the
     /// recent results are checked, not only the last command.
     /// </summary>
-    public bool HasFinished(string commandId)
-        => LastCommandId.Equals(commandId, StringComparison.OrdinalIgnoreCase)
-           || RecentCommands.Any(r => r.Id.Equals(commandId, StringComparison.OrdinalIgnoreCase));
+    public bool HasFinished(string commandId) => CommandResult(commandId) != null;
+
+    /// <summary>What the agent reported for a command ("runner Start failed: …" when it failed), or null while it has not.</summary>
+    public string? CommandResult(string commandId)
+    {
+        if (string.IsNullOrEmpty(commandId)) return null;
+        if (RecentCommands.FirstOrDefault(r => string.Equals(r.Id, commandId, StringComparison.OrdinalIgnoreCase)) is { } recent)
+            return recent.Result ?? string.Empty;
+        return string.Equals(LastCommandId, commandId, StringComparison.OrdinalIgnoreCase) ? LastCommandResult : null;
+    }
+
+    /// <summary>The agent has the command queued or is running it (protocol 12).</summary>
+    public bool IsRunningCommand(string commandId) => PendingCommandIds.Contains(commandId, StringComparer.OrdinalIgnoreCase);
     private int _cpuPercent;
     private int _memoryPercent;
     public int CpuPercent { get => _cpuPercent; init => _cpuPercent = value; }
@@ -449,18 +512,35 @@ public sealed class MachineInfo : INotifyPropertyChanged
     public Visibility ForgetVisibility => IsLocal ? Visibility.Collapsed : Visibility.Visible;
     /// <summary>This PC, reported by its own agent, i.e. it's in a fleet it can leave.</summary>
     public Visibility LeaveVisibility => IsLocal && !IsLocalOnly ? Visibility.Visible : Visibility.Collapsed;
-    public bool IsPairingProblem => ConnectionProblem.Contains("airing", StringComparison.OrdinalIgnoreCase);
+    public bool IsPairingProblem => FleetNetwork.IsCodeProblem(ConnectionProblem);
 
     // ----- Collapsed to its header -----
     public bool IsCollapsed => CollapsedPcs.Contains(MachineName);
     public string CollapseGlyph => IsCollapsed ? "\uE76C" : "\uE70D";
-    public Visibility BodyVisibility => IsCollapsed ? Visibility.Collapsed : Visibility.Visible;
+    /// <summary>The name of the header button for screen readers: the PC, its state and what a click does.</summary>
+    public string HeaderName => $"{MachineName}, {StatusText}. {(IsCollapsed ? "Show its runners" : "Hide its runners")}";
+    public Visibility BodyVisibility => IsCollapsed && !_openForSearch ? Visibility.Collapsed : Visibility.Visible;
+    /// <summary>With the runners hidden, the header says how they are and whether one needs attention.</summary>
+    public Visibility CollapsedSummaryVisibility => BodyVisibility == Visibility.Visible ? Visibility.Collapsed : Visibility.Visible;
+    internal MachineRunnerStatus[] ProblemRunners => Runners.Where(r => r.Health.IsProblem).ToArray();
+    public Visibility ProblemBadgeVisibility => ProblemRunners.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+    public string ProblemBadgeText => ProblemRunners.Length == 1 ? "1 runner needs attention" : $"{ProblemRunners.Length} runners need attention";
+    public string ProblemTip => string.Join("\n", ProblemRunners.Select(r => $"{r.TitleText}: {r.Health.Label}"));
+    private bool _openForSearch;
+
+    /// <summary>A search found runners on this PC: show them even when the card is collapsed, without changing that setting.</summary>
+    public void SetOpenForSearch(bool open)
+    {
+        if (_openForSearch == open) return;
+        _openForSearch = open;
+        Notify(new[] { nameof(BodyVisibility), nameof(CollapsedSummaryVisibility) });
+    }
 
     /// <summary>Collapses or expands the card; returns whether it is collapsed now.</summary>
     public bool ToggleCollapsed()
     {
         if (!CollapsedPcs.Remove(MachineName)) CollapsedPcs.Add(MachineName);
-        Notify(new[] { nameof(IsCollapsed), nameof(CollapseGlyph), nameof(BodyVisibility), nameof(HealthVisibility) });
+        Notify(new[] { nameof(IsCollapsed), nameof(CollapseGlyph), nameof(HeaderName), nameof(BodyVisibility), nameof(HealthVisibility), nameof(CollapsedSummaryVisibility) });
         return IsCollapsed;
     }
 
@@ -474,7 +554,10 @@ public sealed class MachineInfo : INotifyPropertyChanged
     public Brush StatusBrush => _pendingAction.Length > 0 ? Palette.Warning
         : IsLocalOnly ? Palette.Info : IsPairingProblem ? Palette.Warning : IsOnline ? Palette.Success : Palette.Danger;
     public Brush StatusTint => Palette.Tint(StatusBrush);
-    public string AgentText => ConnectionProblem.Length > 0 ? ConnectionProblem
+    public Brush StatusTextBrush => Palette.OnTint(StatusBrush);
+    public Visibility ProblemLineVisibility => ConnectionProblem.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+    // The reason is often a long sentence, so it has its own line and the caption keeps the sync time and version.
+    public string AgentText => ConnectionProblem.Length > 0 ? "Not connected"
         : IsLocalOnly
             ? (LocalAgentOutdated ? "Fleet agent outdated. Other PCs cannot reach this PC." : "This PC")
         : IsLocal ? "Visible to other PCs in the fleet"
@@ -490,7 +573,7 @@ public sealed class MachineInfo : INotifyPropertyChanged
             if (age.TotalMinutes < 1) return $"Updated {(int)age.TotalSeconds}s ago";
             if (age.TotalHours < 1) return $"Updated {(int)age.TotalMinutes}m ago";
             if (age.TotalDays < 1) return $"Updated {(int)age.TotalHours}h ago";
-            return $"Updated {UpdatedUtc.ToLocalTime():g}";
+            return $"Updated {TimeFormat.When(UpdatedUtc.ToLocalTime())}";
         }
     }
     public Visibility ThisPcVisibility => IsLocal ? Visibility.Visible : Visibility.Collapsed;
@@ -498,7 +581,9 @@ public sealed class MachineInfo : INotifyPropertyChanged
 
     // ----- Versions and updates -----
     public string VersionText => IsLocalOnly ? $"v{AppUpdater.CurrentVersion}"
-        : string.IsNullOrWhiteSpace(AppVersion) ? $"agent protocol {AgentProtocolVersion}" : $"v{AppVersion}";
+        : !string.IsNullOrWhiteSpace(AppVersion) ? $"v{AppVersion}"
+        // Older agents send only their protocol; a PC that was never reached has sent nothing.
+        : AgentProtocolVersion > 0 ? $"fleet agent protocol {AgentProtocolVersion}" : "Not reported";
     public bool UpdateAvailable => !IsLocalOnly && AppVersion.Length > 0 && AppUpdater.IsNewer(LatestAppVersion, AppVersion);
     public Visibility UpdateBadgeVisibility => LocalAgentOutdated || UpdateAvailable ? Visibility.Visible : Visibility.Collapsed;
     public string UpdateBadgeText => LocalAgentOutdated ? "Update fleet agent" : $"Runner Manager v{LatestAppVersion} available";
@@ -531,9 +616,11 @@ public sealed class MachineInfo : INotifyPropertyChanged
     public string WatchdogText => WatchdogEnabled ? "Auto-recovery on" : "Auto-recovery off";
     public Brush WatchdogBrush => WatchdogEnabled ? Palette.Success : Palette.TextMuted;
     public Visibility SignedVisibility => string.IsNullOrEmpty(SigningKeyId) ? Visibility.Collapsed : Visibility.Visible;
-    public string SignedTip => IsManaged
-        ? $"Managed one way. Connections to it are encrypted with its own pairing code {SigningKeyId}, which it can't use to reach the other PCs."
-        : $"Paired. Connections to other PCs are encrypted with pairing code {SigningKeyId}.";
+    public string SignedTip => IsManaged || IsLocalAndManaged
+        ? $"Managed one way. Connections to {(IsLocal ? "this PC" : "it")} are encrypted with its own access code (fingerprint {SigningKeyId}), which it cannot use to reach the other PCs."
+        : $"Paired. Connections to other PCs are encrypted with the fleet code (fingerprint {SigningKeyId}).";
+    /// <summary>This PC's own card, on a PC that a fleet manages one way (<see cref="IsManaged"/> is about other PCs).</summary>
+    private bool IsLocalAndManaged => IsLocal && FleetConfig.Current.ManagedBy.Length > 0;
     public Visibility ManagedVisibility => IsManaged ? Visibility.Visible : Visibility.Collapsed;
     public string ForgetHeader => IsManaged ? "Stop managing this PC…" : "Forget this PC…";
 
@@ -544,8 +631,25 @@ public sealed class MachineInfo : INotifyPropertyChanged
     public string RunnerSummary => Runners.Length == 0
         ? "No runners"
         : $"{RunningCount} of {Runners.Length} running" + (BusyCount > 0 ? $"  ·  {BusyCount} busy" : string.Empty);
-    public string SidebarSubtitle => $"{RunnerCountText} runners running";
+    public string SidebarSubtitle
+    {
+        get
+        {
+            var runners = Runners.Length == 0 ? "No runners" : $"{RunnerCountText} {(Runners.Length == 1 ? "runner" : "runners")} running";
+            // The status dot's color says the same, but not to everyone.
+            var unusual = _pendingAction.Length > 0 || (!IsLocalOnly && (IsPairingProblem || !IsOnline));
+            return unusual ? $"{StatusText}  ·  {runners}" : runners;
+        }
+    }
     public Visibility NoRunnersVisibility => Runners.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
+    /// <summary>What a screen reader says for the PC's sidebar entry.</summary>
+    public override string ToString() => $"{MachineName}, {SidebarSubtitle}";
+    public string NoRunnersText => IsLocal ? "No runners on this PC."
+        : IsReachable ? $"No runners on {MachineName}."
+        : $"{MachineName} is not connected, so its runners are not known.";
+    /// <summary>The dashboard adds runners on this PC, and through its fleet agent on another PC that is online.</summary>
+    public Visibility AddRunnerVisibility => SupportsFleetTools ? Visibility.Visible : Visibility.Collapsed;
+    public string AddRunnerTip => IsLocal ? "Add a self-hosted runner on this PC (Ctrl+N)" : $"Add a self-hosted runner on {MachineName}";
 
     public string LastResultText
     {
@@ -553,7 +657,7 @@ public sealed class MachineInfo : INotifyPropertyChanged
         {
             var latestEvent = RecentEvents.LastOrDefault();
             return latestEvent != null && DateTime.UtcNow - latestEvent.Utc < TimeSpan.FromHours(1)
-                ? $"{latestEvent.Text} ({latestEvent.Utc.ToLocalTime():HH:mm})"
+                ? $"{latestEvent.Text} ({TimeFormat.When(latestEvent.Utc.ToLocalTime())})"
                 : LastCommandResult;
         }
     }
@@ -565,14 +669,17 @@ public sealed class MachineInfo : INotifyPropertyChanged
         nameof(UpdatedUtc), nameof(SyncText), nameof(CpuPercent), nameof(CpuText), nameof(CpuBrush),
         nameof(MemoryPercent), nameof(MemoryText), nameof(MemoryBrush), nameof(UptimeText),
         nameof(LastResultText), nameof(LastResultVisibility),
-        nameof(IsOnline), nameof(IsReachable), nameof(StatusText), nameof(StatusBrush), nameof(StatusTint),
-        nameof(SupportsFleetTools), nameof(CanUpdateAgent)
+        nameof(IsOnline), nameof(IsReachable), nameof(StatusText), nameof(HeaderName), nameof(StatusBrush), nameof(StatusTint), nameof(StatusTextBrush),
+        nameof(SupportsFleetTools), nameof(CanUpdateAgent), nameof(SidebarSubtitle), nameof(NoRunnersText), nameof(AddRunnerVisibility),
+        // Runner health is read after the card is built.
+        nameof(ProblemBadgeVisibility), nameof(ProblemBadgeText), nameof(ProblemTip)
     };
 
     /// <summary>Properties that depend on the pending PC action (an update or a restart).</summary>
     private static readonly string[] PendingProperties =
     {
-        nameof(PendingAction), nameof(StatusText), nameof(StatusBrush), nameof(StatusTint), nameof(CanUpdateAgent)
+        nameof(PendingAction), nameof(StatusText), nameof(HeaderName), nameof(StatusBrush), nameof(StatusTint), nameof(StatusTextBrush), nameof(CanUpdateAgent),
+        nameof(SidebarSubtitle)
     };
 
     /// <summary>
@@ -633,31 +740,35 @@ public sealed class MachineInfo : INotifyPropertyChanged
     public static MachineInfo FromPayload(string key, MachineStatusPayload payload, bool localOnly = false,
         string address = "", string problem = "", bool localAgentOutdated = false, bool managed = false)
     {
-        var isLocal = payload.MachineName.Equals(Environment.MachineName, StringComparison.OrdinalIgnoreCase);
+        // Another PC's status can have JSON null where a list or text is expected. Its fleet agent's status is checked
+        // when it arrives as well; this keeps the cards from failing if something gets through.
+        var name = payload.MachineName ?? string.Empty;
+        var isLocal = name.Equals(Environment.MachineName, StringComparison.OrdinalIgnoreCase);
+        var runners = WithoutNulls(payload.Runners);
         var machine = new MachineInfo
         {
             MachineKey = key,
-            MachineName = payload.MachineName,
-            MachineId = payload.MachineId,
+            MachineName = name,
+            MachineId = payload.MachineId ?? string.Empty,
             AgentProtocolVersion = payload.AgentProtocolVersion,
-            AppVersion = payload.AppVersion,
+            AppVersion = payload.AppVersion ?? string.Empty,
             UpdatedUtc = payload.UpdatedUtc,
             FleetAgentRunning = payload.FleetAgentRunning,
-            LastCommandId = payload.LastCommandId,
-            LastCommandResult = payload.LastCommandResult,
-            RecentCommands = payload.RecentCommands,
-            PendingCommandIds = payload.PendingCommandIds,
+            LastCommandId = payload.LastCommandId ?? string.Empty,
+            LastCommandResult = payload.LastCommandResult ?? string.Empty,
+            RecentCommands = WithoutNulls(payload.RecentCommands),
+            PendingCommandIds = WithoutNulls(payload.PendingCommandIds),
             Busy = payload.Busy,
             CpuPercent = payload.CpuPercent,
             MemoryPercent = payload.MemoryPercent,
             MemoryTotalGb = payload.MemoryTotalGb,
             BootUtc = payload.BootUtc,
             RebootPending = payload.RebootPending,
-            Disks = payload.Disks,
+            Disks = WithoutNulls(payload.Disks),
             WatchdogEnabled = payload.WatchdogEnabled,
-            SigningKeyId = payload.SigningKeyId,
-            RecentEvents = payload.RecentEvents,
-            Runners = payload.Runners,
+            SigningKeyId = payload.SigningKeyId ?? string.Empty,
+            RecentEvents = WithoutNulls(payload.RecentEvents),
+            Runners = runners,
             IsLocalOnly = localOnly,
             Address = address,
             ConnectionProblem = problem,
@@ -665,16 +776,21 @@ public sealed class MachineInfo : INotifyPropertyChanged
             IsManaged = managed,
             Fingerprint = $"{(localOnly ? "local" : managed ? "managed" : "peer")}|{address}|{problem}|{localAgentOutdated}|" + payload.Fingerprint()
         };
-        foreach (var runner in payload.Runners)
+        foreach (var runner in runners)
         {
             runner.MachineKey = key;
-            runner.MachineName = payload.MachineName;
+            runner.MachineName = name;
             runner.AgentProtocolVersion = payload.AgentProtocolVersion;
             runner.IsLocalMachine = isLocal;
             runner.MachineOnline = machine.IsReachable;
         }
         return machine;
     }
+
+    /// <summary>A list from another PC's status without null entries, or an empty one when the list itself is null.</summary>
+    private static T[] WithoutNulls<T>(T[]? items) where T : class
+        // Declared without nulls, but JSON can put them there.
+        => items == null ? Array.Empty<T>() : Array.IndexOf(items, null) >= 0 ? items.Where(item => item != null).ToArray() : items;
 }
 
 /// <summary>What a busy runner is doing: its job and steps from GitHub, and its output and processes from its PC.</summary>

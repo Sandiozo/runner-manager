@@ -244,7 +244,7 @@ public static class ScheduledTasks
     <RunOnlyIfIdle>false</RunOnlyIfIdle>
     <WakeToRun>false</WakeToRun>
     <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
-    <Priority>7</Priority>
+    <Priority>{TaskPriority}</Priority>
     {restart}
   </Settings>
   <Actions Context="Author">
@@ -260,7 +260,24 @@ public static class ScheduledTasks
 
     private const string KeepAliveInterval = "PT5M";
 
-    /// <summary>Whether the agent task's definition has everything the current version registers (older ones lack the keep-alive trigger).</summary>
+    /// <summary>
+    /// Normal priority. Task Scheduler's default (7, which earlier versions registered) starts the task below normal,
+    /// with low I/O and memory priority, so a build that uses every core starves the fleet agent and the programs it starts.
+    /// </summary>
+    internal const string TaskPriority = "4";
+
+    /// <summary>Whether the task runs at <see cref="TaskPriority"/>. Task Scheduler leaves out the default priority, so a missing one is old.</summary>
+    internal static bool HasCurrentPriority(string xml)
+    {
+        if (ParseTask(xml) is not { } task) return false;
+        var ns = task.Name.Namespace;
+        return task.Element(ns + "Settings")?.Element(ns + "Priority")?.Value.Trim() == TaskPriority;
+    }
+
+    /// <summary>
+    /// Whether the agent task's definition has everything the current version registers (older ones lack the keep-alive
+    /// trigger, or run below normal priority).
+    /// </summary>
     internal static bool IsCurrentAgentDefinition(string xml)
     {
         if (ParseTask(xml) is not { } task) return false;
@@ -275,12 +292,14 @@ public static class ScheduledTasks
                && settings.Element(ns + "DisallowStartIfOnBatteries")?.Value == "false"
                && settings.Element(ns + "StopIfGoingOnBatteries")?.Value == "false"
                && settings.Element(ns + "ExecutionTimeLimit")?.Value == "PT0S"
-               && settings.Element(ns + "RestartOnFailure") != null;
+               && settings.Element(ns + "RestartOnFailure") != null
+               && HasCurrentPriority(xml);
     }
 
     /// <summary>
     /// Registers the agent task again when its definition is from an older version, keeping the exe it runs. Re-registering
     /// may end the running agent, so it is started again afterwards (by a helper when the agent does this itself).
+    /// Registrations take <see cref="LockAsync"/>, so the agent and the dashboard doing this at once register it one at a time.
     /// </summary>
     public static async Task<bool> UpdateAgentTaskIfOutdatedAsync(bool fromAgent)
     {
@@ -296,6 +315,54 @@ public static class ScheduledTasks
     }
 
     public static async Task<bool> ExistsAsync(string name) => (await RunAsync("schtasks.exe", $"/Query /TN \"{name}\"", ShortTimeout)).ExitCode == 0;
+
+    /// <summary>Whether the task exists: true, false, or null when that could not be read (so a failed read is never taken for "missing").</summary>
+    public static async Task<bool?> ExistsOrUnknownAsync(string name) => await ExistsAsync(name) ? true : IsRegistered(name);
+
+    /// <summary>Whether the task is in Task Scheduler's own list (in the registry), or null when that cannot be read.</summary>
+    internal static bool? IsRegistered(string name)
+    {
+        try
+        {
+            using var tree = Registry.LocalMachine.OpenSubKey($@"{TaskCacheKey}\Tree");
+            if (tree == null) return null;
+            using var task = tree.OpenSubKey(name);
+            return task != null;
+        }
+        catch (Exception ex) when (ex is SecurityException or UnauthorizedAccessException or IOException) { return null; }
+    }
+
+    /// <summary>
+    /// Whether an instance of the task runs: true, false, or null when that cannot be told. Registering a task again can
+    /// end its running instance, so a task is registered again only when this is false. Read through Task Scheduler's own
+    /// interface, because schtasks.exe words the status in the language of Windows.
+    /// </summary>
+    public static async Task<bool?> IsRunningAsync(string name)
+    {
+        var (code, output) = await RunAsync("powershell.exe", $"-NoLogo -NoProfile -NonInteractive -Command \"{TaskStateScript(name)}\"", ShortTimeout);
+        return code == 0 ? ParseTaskState(output) : null;
+    }
+
+    /// <summary>The COM error Task Scheduler gives for a task that does not exist (HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)).</summary>
+    internal const int TaskNotFound = unchecked((int)0x80070002);
+
+    /// <summary>
+    /// Prints the task's TASK_STATE; -1 when the task does not exist, and "unknown" for any other error (Task Scheduler
+    /// not reachable, access denied), so such an error is never taken for a missing task.
+    /// </summary>
+    internal static string TaskStateScript(string name)
+        => "$s = New-Object -ComObject Schedule.Service; " +
+           $"try {{ $s.Connect(); [int]$s.GetFolder('\\').GetTask('{name.Replace("'", "''")}').State }} " +
+           "catch { $e = $_.Exception; while ($e.InnerException) { $e = $e.InnerException }; " +
+           $"if ($e.HResult -eq {TaskNotFound}) {{ -1 }} else {{ 'unknown' }} }}";
+
+    /// <summary>
+    /// Task Scheduler's state of a task (TASK_STATE): 4 running and 2 queued count as running, 1 disabled and 3 ready do
+    /// not, and -1 stands for a task that does not exist. Anything else, "unknown" among it, is unknown.
+    /// </summary>
+    internal static bool? ParseTaskState(string output) => int.TryParse(output.Trim(), out var state)
+        ? state switch { 2 or 4 => true, -1 or 1 or 3 => false, _ => null }
+        : null;
 
     public static async Task<string> QueryXmlAsync(string name)
     {
@@ -412,7 +479,7 @@ public static class ScheduledTasks
 
 /// <summary>
 /// One Windows user per PC runs the fleet agent: its task name, ports and single-instance lock are shared by everyone
-/// on the PC, and it uses that user's pairing code. Other users of the PC can use the dashboard for this PC's runners,
+/// on the PC, and it uses that user's fleet code. Other users of the PC can use the dashboard for this PC's runners,
 /// but never take the agent over.
 /// </summary>
 public static class AgentOwnership

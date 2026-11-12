@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Threading.Channels;
 
 namespace RunnerManager;
@@ -40,14 +41,35 @@ public static class MachineRelay
 
     // Agent-process state
     private static readonly List<AgentEvent> RecentEvents = new();
-    private static readonly HashSet<string> WantRunning = new(StringComparer.OrdinalIgnoreCase);
-    private static readonly Dictionary<string, List<DateTime>> RecoveryAttempts = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly RunnerRecovery Recovery = new();
     private static StatusCache? _status;
     private static volatile bool _restartAgentAfterUpdate;
-    /// <summary>How long an update waits for the agent's work to finish before it restarts the agent anyway.</summary>
-    private static readonly TimeSpan UpdateRestartWait = TimeSpan.FromMinutes(15);
-    /// <summary>The longest a caller waits for a command its agent still reports as queued or running.</summary>
-    private static readonly TimeSpan MaxCommandWait = TimeSpan.FromMinutes(30);
+    /// <summary>
+    /// How long an update waits for the agent's work to finish before it restarts the agent anyway: as long as the
+    /// longest work, an AI assistant's call that waits for its approval and then creates a runner on another PC
+    /// (<see cref="AssistantHost.DrainLimit"/>, longer than a create alone), counted again each time the agent finishes
+    /// a command. So work that runs when the update asks is not cut off; only an agent that finishes nothing for that
+    /// long is, or one that is still busy after <see cref="UpdateRestartLimit"/>.
+    /// </summary>
+    /// <remarks>
+    /// Counted from when the update asked, not from when an AI assistant's call ends: the dashboard sees only the
+    /// agent's status, which tells when a command finished but not when such a call did.
+    /// </remarks>
+    internal static readonly TimeSpan UpdateRestartWait = AssistantHost.DrainLimit;
+
+    /// <summary>
+    /// The longest an update waits for the agent's work in all, from when it asked for the restart. Work that keeps
+    /// coming (commands that each finish in time, new AI assistant calls) cannot put the update off for longer, so the
+    /// PC does not stay half updated, with the new version on disk and the old one running.
+    /// </summary>
+    internal static readonly TimeSpan UpdateRestartLimit = TimeSpan.FromHours(3);
+
+    /// <summary>
+    /// The longest a caller waits for a command its agent still reports as queued or running: as long as the longest
+    /// command, a runner create (<see cref="FleetActions.CreateWait"/>), counted again each time the agent finishes a
+    /// command that was queued before it.
+    /// </summary>
+    internal static readonly TimeSpan MaxCommandWait = FleetActions.CreateWait;
 
     public static string LocalMachineKey => Sanitize(Environment.MachineName);
 
@@ -55,9 +77,15 @@ public static class MachineRelay
 
     /// <summary>
     /// This PC plus every paired PC: found by broadcast on the local network, remembered addresses, or addresses
-    /// added in Settings (e.g. Tailscale names). All traffic goes directly between the PCs, encrypted with the pairing code.
+    /// added in Settings (e.g. Tailscale names). All traffic goes directly between the PCs, encrypted with the fleet code.
     /// </summary>
-    public static async Task<List<MachineInfo>> ReadFleetAsync(bool forceDiscovery = false)
+    /// <remarks>
+    /// Runs on the thread pool, not on the caller's thread: decrypting and reading the answers and saving fleet.json
+    /// (which can wait for the agent's write) would otherwise run on the dashboard's UI thread and make it stutter.
+    /// </remarks>
+    public static Task<List<MachineInfo>> ReadFleetAsync(bool forceDiscovery = false) => Task.Run(() => ReadFleetOnPoolAsync(forceDiscovery));
+
+    private static async Task<List<MachineInfo>> ReadFleetOnPoolAsync(bool forceDiscovery)
     {
         var machines = new List<MachineInfo> { await ReadThisPcAsync() };
         var config = FleetConfig.Current;
@@ -149,7 +177,7 @@ public static class MachineRelay
         return await ReadLocalMachineAsync(outdated, running);
     }
 
-    /// <summary>Whether the agent task runs this exact build (used before a pairing code exists).</summary>
+    /// <summary>Whether the agent task runs this exact build (used before a fleet code exists).</summary>
     private static async Task<bool> LocalAgentIsCurrentAsync()
     {
         var exe = await AgentTaskExecutableAsync();
@@ -249,11 +277,68 @@ public static class MachineRelay
         }
     }
 
+    // How far each PC's clock is from this PC's, as used for its answers (guarded by LastStatus's lock).
+    private static readonly Dictionary<string, TimeSpan> ClockOffsets = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>
+    /// Clocks this close need no correction (the measurement includes the network's delay). A PC's correction changes
+    /// only when its clock moves by more than this, so the times of its jobs, which name their alerts, stay the same.
+    /// </summary>
+    private static readonly TimeSpan ClockTolerance = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// A PC's status by this PC's clock. The other PC stamps its times with its own clock, which may be off by up to the
+    /// two minutes the connection allows, and a dashboard compares them with its own (a PC is online while its status
+    /// is under 30 seconds old). The status counts as updated when the answer arrived, less the age the PC reports for
+    /// it; its start time and the times of its jobs move by how far its clock is off. Event times stay as the PC
+    /// reported them, since they name its alerts.
+    /// </summary>
+    internal static MachineStatusPayload ByLocalClock(string key, MachineStatusPayload payload, DateTime receivedUtc)
+    {
+        // Older agents send no AnsweredUtc: they stamp UpdatedUtc when they answer.
+        var answered = payload.AnsweredUtc != default ? payload.AnsweredUtc : payload.UpdatedUtc;
+        var measured = receivedUtc - answered;
+        // The connection refuses clocks further apart, so this is no answer time: keep the status as it is.
+        if (answered == default || measured.Duration() > FleetCrypto.MaxClockSkew + ClockTolerance) return payload;
+        var age = answered > payload.UpdatedUtc ? answered - payload.UpdatedUtc : TimeSpan.Zero;
+        var offset = ClockOffset(key, measured);
+        return payload with
+        {
+            UpdatedUtc = receivedUtc - age,
+            AnsweredUtc = receivedUtc,
+            BootUtc = payload.BootUtc + offset,
+            Runners = offset == TimeSpan.Zero ? payload.Runners : payload.Runners.Select(r => Shifted(r, offset)).ToArray()
+        };
+    }
+
+    private static TimeSpan ClockOffset(string key, TimeSpan measured)
+    {
+        lock (LastStatus)
+        {
+            var known = ClockOffsets.GetValueOrDefault(key);
+            if ((measured - known).Duration() <= ClockTolerance) return known;
+            var offset = TimeSpan.FromSeconds(Math.Round(measured.TotalSeconds));
+            ClockOffsets[key] = offset;
+            return offset;
+        }
+    }
+
+    /// <summary>A runner's job times moved by <paramref name="offset"/>. Its properties are init-only, so it is copied the way it arrived, as JSON.</summary>
+    private static MachineRunnerStatus Shifted(MachineRunnerStatus runner, TimeSpan offset)
+    {
+        if (runner.JobStartedUtc == null && runner.QuietSinceUtc == null) return runner;
+        var copy = JsonSerializer.SerializeToNode(runner)!.AsObject();
+        if (runner.JobStartedUtc is { } started) copy[nameof(MachineRunnerStatus.JobStartedUtc)] = started + offset;
+        if (runner.QuietSinceUtc is { } quiet) copy[nameof(MachineRunnerStatus.QuietSinceUtc)] = quiet + offset;
+        return copy.Deserialize<MachineRunnerStatus>() ?? runner;
+    }
+
     /// <summary>A PC answered at <paramref name="address"/>: remember it there, and list it (with a warning if its name is taken twice).</summary>
     private static MachineInfo Accept(MachineStatusPayload? payload, string address)
     {
         if (payload == null) throw new InvalidOperationException("The PC returned no status.");
+        payload = PeerStatus.Checked(payload, FleetNetwork.WithPort(address), AppendAgentLog);
         var machineKey = Sanitize(payload.MachineName);
+        payload = ByLocalClock(machineKey, payload, DateTime.UtcNow);
         NoteAnswer(machineKey, payload);
         NoteSighting(payload.MachineName, payload.MachineId, address);
         RememberPeer(payload.MachineName, FleetNetwork.WithPort(address), payload.AppVersion, payload.MachineId);
@@ -272,16 +357,20 @@ public static class MachineRelay
         // The same PC under its old name: it was renamed.
         var renamed = machineId.Length == 0 ? new List<PeerRecord>()
             : config.KnownPeers.Where(p => p.MachineId.Equals(machineId, StringComparison.OrdinalIgnoreCase) && Sanitize(p.Name) != Sanitize(name)).ToList();
+        // It answered with the fleet's code, so it is a fleet member now: an earlier one-way pairing of it is out of date.
+        var wasManaged = machineId.Length > 0 && config.ManagedPcs.Any(p => p.MachineId.Equals(machineId, StringComparison.OrdinalIgnoreCase));
         // Only write when something meaningful changed, not on every poll.
         var duplicates = config.KnownPeers.Count(p => Sanitize(p.Name) == Sanitize(name)) > 1;
-        if (!duplicates && renamed.Count == 0 && existing != null && existing.Name == name && existing.Address == address
+        if (!duplicates && renamed.Count == 0 && !wasManaged && existing != null && existing.Name == name && existing.Address == address
             && existing.Version == version && existing.MachineId == machineId
             && DateTime.UtcNow - existing.LastSeenUtc < TimeSpan.FromMinutes(10)) return;
         FleetConfig.Update(c =>
         {
             c.KnownPeers.RemoveAll(p => Sanitize(p.Name) == Sanitize(name) || renamed.Any(r => Sanitize(r.Name) == Sanitize(p.Name)));
             c.KnownPeers.Add(new PeerRecord { Name = name, Address = address, Version = version, MachineId = machineId, LastSeenUtc = DateTime.UtcNow });
+            if (wasManaged) c.ForgetManagedWhere(p => p.MachineId.Equals(machineId, StringComparison.OrdinalIgnoreCase));
         });
+        if (wasManaged) AppendAgentLog($"{name} joined the fleet, so it is no longer managed one way.");
         foreach (var old in renamed)
         {
             lock (LastStatus) LastStatus.Remove(Sanitize(old.Name));
@@ -289,8 +378,13 @@ public static class MachineRelay
         }
     }
 
-    /// <summary>Remembers a PC learned during pairing so it's contacted right away.</summary>
-    public static void AddKnownPeer(string name, string address) => RememberPeer(name, FleetNetwork.WithPort(address), string.Empty);
+    /// <summary>
+    /// Remembers a PC learned during pairing so it's contacted right away. With its machine ID, a one-way pairing of the
+    /// same PC ends here; a managed PC with only the same name is kept.
+    /// </summary>
+    /// <param name="machineId">The PC's machine ID, as its status reports it; null when the pairing did not say.</param>
+    public static void AddKnownPeer(string name, string address, string? machineId = null)
+        => RememberPeer(name, FleetNetwork.WithPort(address), string.Empty, machineId ?? string.Empty);
 
     public static void ForgetPeer(string name)
     {
@@ -304,6 +398,11 @@ public static class MachineRelay
     internal static string ManagedNameProblem(string name)
         => $"{name} is managed one way, and a PC in the fleet has the same name. Rename one of them in Windows Settings → System → About. " +
            $"Until then, commands to {name} are refused.";
+
+    /// <summary>Why a managed PC that was renamed isn't listed under its new name: another managed PC has that name.</summary>
+    internal static string ManagedNameTakenProblem(string name)
+        => $"{name} is managed one way, and another PC managed one way has the same name. Rename one of them in Windows Settings → System → About. " +
+           "Until then, its runners are not shown.";
 
     /// <summary>Finds managed PCs that moved to another address on the local network, by key fingerprint.</summary>
     private static async Task<Dictionary<string, List<DiscoveredPeer>>> DiscoverManagedAsync(IReadOnlyList<ManagedPcRecord> pcs)
@@ -329,8 +428,7 @@ public static class MachineRelay
         if (key == LocalMachineKey || FleetConfig.Current.KnownPeers.Any(p => Sanitize(p.Name) == key))
             return MachineInfo.Placeholder("MANAGED_" + key, pc.Name, pc.LastSeenUtc, pc.Address, ManagedNameProblem(pc.Name), managed: true);
         if (pc.Key is not { } pairingKey)
-            return MachineInfo.Placeholder(key, pc.Name, pc.LastSeenUtc, pc.Address,
-                $"This PC can't read the pairing code for {pc.Name}. Remove it and pair it again.", managed: true);
+            return MachineInfo.Placeholder(key, pc.Name, pc.LastSeenUtc, pc.Address, FleetNetwork.AccessCodeUnreadableText(pc.Name), managed: true);
 
         var addresses = new List<string> { pc.Address };
         if (candidates != null) addresses.AddRange(candidates.Select(c => c.Address).Where(a => !addresses.Any(b => SameEndpoint(a, b))));
@@ -359,9 +457,7 @@ public static class MachineRelay
             catch (PairingMismatchException ex)
             {
                 refused = true;
-                problem = ex.Reason is "" or "denied"
-                    ? $"{pc.Name} no longer accepts this fleet's requests. It may have been disconnected there. Remove it here, or pair it again."
-                    : ex.Message;
+                problem = ex.Reason is "" or "denied" ? FleetNetwork.AccessCodeRefusedText(pc.Name) : ex.Message;
             }
             catch (Exception) { if (problem.Length == 0) problem = $"Not reachable at {FleetNetwork.WithPort(attempt)}"; }
         }
@@ -374,9 +470,15 @@ public static class MachineRelay
     private static MachineInfo AcceptManaged(ManagedPcRecord pc, MachineStatusPayload? payload, string address)
     {
         if (payload == null) throw new InvalidOperationException("The PC returned no status.");
+        payload = PeerStatus.Checked(payload, "managed " + pc.KeyId, AppendAgentLog);
         var machineKey = Sanitize(payload.MachineName);
         if (machineKey != Sanitize(pc.Name) && (machineKey == LocalMachineKey || FleetConfig.Current.KnownPeers.Any(p => Sanitize(p.Name) == machineKey)))
             return MachineInfo.Placeholder("MANAGED_" + machineKey, payload.MachineName, DateTime.UtcNow, address, ManagedNameProblem(payload.MachineName), managed: true);
+        // Nor another managed PC's place: its status and record would be mixed up with this one's. The same PC paired twice is let through.
+        if (machineKey != Sanitize(pc.Name) && FleetConfig.Current.ManagedPcs.Any(p => p.KeyId != pc.KeyId && Sanitize(p.Name) == machineKey
+                && !(p.MachineId.Length > 0 && p.MachineId.Equals(payload.MachineId, StringComparison.OrdinalIgnoreCase))))
+            return MachineInfo.Placeholder("MANAGED_" + machineKey, payload.MachineName, DateTime.UtcNow, address, ManagedNameTakenProblem(payload.MachineName), managed: true);
+        payload = ByLocalClock(machineKey, payload, DateTime.UtcNow);
         NoteAnswer(machineKey, payload);
         NoteSighting(payload.MachineName, payload.MachineId, address);
         var at = FleetNetwork.WithPort(address);
@@ -526,7 +628,7 @@ public static class MachineRelay
         if (peer != null && managed != null) throw new InvalidOperationException(ManagedNameProblem(managed.Name));
         if (managed != null)
             return (managed.Address, managed.MachineId, managed.Key
-                ?? throw new InvalidOperationException($"This PC can't read the pairing code for {managed.Name}. Remove it and pair it again."));
+                ?? throw new InvalidOperationException(FleetNetwork.AccessCodeUnreadableText(managed.Name)));
         if (peer == null) throw new InvalidOperationException($"Could not reach {machineKey}. Check that it is on and on the same network.");
         return (peer.Address, peer.MachineId, null);
     }
@@ -612,16 +714,26 @@ public static class MachineRelay
     /// Waits until a machine's agent reports that it processed a command, and returns its result. Throws when the agent
     /// reports a failure, or when there is no result after <paramref name="timeout"/>. Agents that report what is
     /// queued and running (protocol 12) are waited for longer while the command still waits or runs, up to
-    /// <see cref="MaxCommandWait"/>; the exception then says that it is still running.
+    /// <see cref="MaxCommandWait"/> after the agent last finished a command queued before it; the exception then says
+    /// that it is still running.
     /// </summary>
-    public static async Task<string> WaitForCommandAsync(string machineKey, string commandId, TimeSpan timeout, CancellationToken cancellationToken = default)
+    public static Task<string> WaitForCommandAsync(string machineKey, string commandId, TimeSpan timeout, CancellationToken cancellationToken = default)
+        => WaitForCommandAsync(machineKey, commandId, timeout, () => DateTime.UtcNow, cancellationToken);
+
+    /// <param name="utcNow">The clock (tests pass their own).</param>
+    internal static async Task<string> WaitForCommandAsync(string machineKey, string commandId, TimeSpan timeout, Func<DateTime> utcNow,
+        CancellationToken cancellationToken = default)
     {
-        var started = DateTime.UtcNow;
+        var started = utcNow();
         var deadline = started + timeout;
-        var cap = started + (timeout > MaxCommandWait ? timeout : MaxCommandWait);
+        var longest = timeout > MaxCommandWait ? timeout : MaxCommandWait;
+        var cap = started + longest;
         var runningSeenUtc = DateTime.MinValue;
-        bool StillRunning() => DateTime.UtcNow - runningSeenUtc < TimeSpan.FromMinutes(1);
-        while (DateTime.UtcNow < cap && (DateTime.UtcNow < deadline || StillRunning()))
+        // The results the agent reported last time. A new one while this command still waits means the agent works
+        // through the commands queued before it, so this one may only now get its turn.
+        HashSet<string>? finished = null;
+        bool StillRunning() => utcNow() - runningSeenUtc < TimeSpan.FromMinutes(1);
+        while (utcNow() < cap && (utcNow() < deadline || StillRunning()))
         {
             await Task.Delay(CommandPollInterval, cancellationToken);
             MachineStatusPayload? status;
@@ -632,10 +744,13 @@ public static class MachineRelay
             }
             catch { continue; }
             if (status == null) continue;
-            var result = (status.RecentCommands ?? Array.Empty<FleetCommandResult>()).FirstOrDefault(r => r.Id.Equals(commandId, StringComparison.OrdinalIgnoreCase))?.Result;
-            if (result == null && (status.PendingCommandIds ?? Array.Empty<string>()).Contains(commandId, StringComparer.OrdinalIgnoreCase))
+            var result = status.RecentCommands.FirstOrDefault(r => r.Id.Equals(commandId, StringComparison.OrdinalIgnoreCase))?.Result;
+            if (result == null && status.PendingCommandIds.Contains(commandId, StringComparer.OrdinalIgnoreCase))
             {
-                runningSeenUtc = DateTime.UtcNow;
+                runningSeenUtc = utcNow();
+                var now = status.RecentCommands.Select(r => r.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                if (finished != null && !now.IsSubsetOf(finished)) cap = runningSeenUtc + longest;
+                finished = now;
                 continue;
             }
             // Older agents only report the last command.
@@ -644,7 +759,7 @@ public static class MachineRelay
             if (IsFailedResult(result)) throw new InvalidOperationException(result);
             return result;
         }
-        var minutes = Math.Max(1, (int)Math.Round((DateTime.UtcNow - started).TotalMinutes));
+        var minutes = Math.Max(1, (int)Math.Round((utcNow() - started).TotalMinutes));
         throw new TimeoutException(StillRunning()
             ? $"{machineKey} is still running the command after {minutes} minutes. Check its fleet agent log."
             : $"{machineKey} did not report a result within {minutes} minutes. Check its fleet agent log.");
@@ -691,15 +806,14 @@ public static class MachineRelay
             return command.Id;
         }
         // Several dashboards may poll at once; the (WMI-heavy) status is built at most every two seconds, in the background.
-        var status = _status = new StatusCache(async () => BuildPayload(await GatherLocalStateAsync(), state.LastCommandId, lastResult));
+        var status = _status = new StatusCache(async () => BuildPayload(await GatherLocalStateAsync(), state.LastCommandId, lastResult), AppendAgentLog);
         async Task<MachineStatusPayload> StatusAsync()
         {
             var cached = await status.GetAsync();
             // Pending before results: a command that finishes in between then shows in both, never in neither.
             var running = pending.Keys.ToArray();
-            return cached with
+            return AsAnswer(cached, DateTime.UtcNow) with
             {
-                UpdatedUtc = DateTime.UtcNow,
                 PendingCommandIds = running,
                 RecentCommands = state.Results,
                 Busy = running.Length > 0 || !AgentWork.IsIdle
@@ -721,7 +835,12 @@ public static class MachineRelay
         RemoveRemoteDesktopLeftovers();
 
         var lastWatchdogUtc = DateTime.MinValue;
-        DateTime? restartByUtc = null;
+        // A hung read of this PC's state (WMI) must not hold up the commands this loop runs.
+        var watchdogRead = new GuardedRead<LocalState>(() => GatherLocalStateAsync(), StatusCache.DefaultBuildTimeout, AppendAgentLog,
+            $"Auto-recovery skipped its check: reading this PC's runners took more than {(int)StatusCache.DefaultBuildTimeout.TotalSeconds} seconds.",
+            "Auto-recovery can read this PC's runners again.");
+        var restart = new UpdateRestartClock(() => DateTime.UtcNow, UpdateRestartWait, UpdateRestartLimit);
+        var toldRestart = false;
         while (!cancellationToken.IsCancellationRequested)
         {
             try
@@ -755,6 +874,7 @@ public static class MachineRelay
                     lastResult = result;
                     state.MarkProcessed(command.Id, result);
                     pending.TryRemove(command.Id, out _);
+                    restart.WorkFinished();
                     InvalidateStatus();
                     try { SaveAgentState(state); }
                     catch (Exception ex) { AppendAgentLog($"Could not save the agent state: {ex.Message}"); }
@@ -762,14 +882,18 @@ public static class MachineRelay
 
                 if (_restartAgentAfterUpdate)
                 {
-                    // Exit once queued commands and other work (AI assistant calls) are done, or after a generous wait.
+                    // Exit once queued commands and other work (AI assistant calls) are done. Commands run in this loop, so
+                    // a queued one always runs first; other work is waited for until nothing finished for a long time,
+                    // or at most UpdateRestartLimit in all.
                     var quiet = pending.IsEmpty && AgentWork.IsIdle;
-                    if (restartByUtc == null && !quiet) AppendAgentLog("Restarting to finish the update once the current work is done.");
-                    restartByUtc ??= DateTime.UtcNow + UpdateRestartWait;
-                    if (quiet || DateTime.UtcNow >= restartByUtc)
+                    if (!toldRestart && !quiet) AppendAgentLog("Restarting to finish the update once the current work is done.");
+                    toldRestart = true;
+                    if (restart.Due(quiet))
                     {
                         AppendAgentLog(quiet ? "Restarting to finish the update."
-                            : $"Restarting to finish the update, although work is still running after {(int)UpdateRestartWait.TotalMinutes} minutes.");
+                            : restart.PastLimit
+                                ? $"Restarting to finish the update, although work is still running. The update has waited {(int)UpdateRestartLimit.TotalHours} hours for it."
+                                : $"Restarting to finish the update, although work is still running. Nothing finished in {(int)UpdateRestartWait.TotalMinutes} minutes.");
                         await Task.Delay(TimeSpan.FromSeconds(3), CancellationToken.None); // let the dashboard read the result
                         // The helper started with the update gives up after two minutes; this one starts the new agent.
                         AppUpdater.ScheduleAgentTaskRestart(ScheduledTasks.AgentTaskName);
@@ -780,7 +904,7 @@ public static class MachineRelay
                 if (DateTime.UtcNow - lastWatchdogUtc >= WatchdogInterval)
                 {
                     lastWatchdogUtc = DateTime.UtcNow;
-                    if (await RunWatchdogAsync(await GatherLocalStateAsync())) InvalidateStatus();
+                    if (await watchdogRead.ReadAsync() is { } local && await RunWatchdogAsync(local)) InvalidateStatus();
                 }
             }
             catch (Exception ex)
@@ -805,6 +929,17 @@ public static class MachineRelay
     }
 
     private static void InvalidateStatus() => _status?.Invalidate();
+
+    /// <summary>
+    /// A built status as the answer to a request: stamped with the time it is sent, as agents always did, unless no
+    /// status could be built for <see cref="StatusCache.StaleAfter"/>. Then it keeps the time it was built, so it does
+    /// not look current. <see cref="MachineStatusPayload.AnsweredUtc"/> gives newer dashboards this PC's clock.
+    /// </summary>
+    internal static MachineStatusPayload AsAnswer(MachineStatusPayload built, DateTime nowUtc) => built with
+    {
+        UpdatedUtc = nowUtc - built.UpdatedUtc <= StatusCache.StaleAfter ? nowUtc : built.UpdatedUtc,
+        AnsweredUtc = nowUtc
+    };
 
     private static async Task<string> ExecuteCommandAsync(MachineCommand command)
     {
@@ -855,7 +990,7 @@ public static class MachineRelay
                 case "Stop" when command.Value == "disable":
                     // Step 1 of a move: the runner leaves this PC.
                     await FleetActions.StopForMoveAsync(command.TargetKey);
-                    WantRunning.Remove(command.TargetKey);
+                    Recovery.Forget(command.TargetKey);
                     return "Runner stopped for the move";
                 case "Start" when command.Value == "enable":
                     // The move failed: this copy keeps the runner.
@@ -868,9 +1003,13 @@ public static class MachineRelay
                     await RunnerService.SetStartAutomaticallyAsync(command.TargetKey, command.Value == "on", message => AppendAgentLog($"Runner startup: {message}"));
                     return command.Value == "on" ? "The runner starts automatically after a restart" : "The runner no longer starts automatically after a restart";
                 case "Start" or "Stop" or "Restart":
+                    // Dashboards don't offer these for such a runner, but a command can be sent from an older status.
+                    if (await RunnerService.FindRunnerAsync(command.TargetKey) is { } target
+                        && FleetActions.ConsoleRunnerProblem(target.IsInteractive, target.ServiceInstalled, command.Action) is { } problem)
+                        throw new InvalidOperationException(problem);
                     await RunnerService.ControlServiceAsync(command.TargetKey, command.Action);
                     FleetConfig.SetManuallyStopped(command.TargetKey, command.Action == "Stop");
-                    if (command.Action == "Stop") WantRunning.Remove(command.TargetKey);
+                    if (command.Action == "Stop") Recovery.Forget(command.TargetKey);
                     return $"Runner {command.Action.ToLowerInvariant()} completed";
                 default:
                     throw new InvalidOperationException($"Unsupported runner action: {command.Action}");
@@ -938,20 +1077,13 @@ public static class MachineRelay
         var acted = false;
         foreach (var runner in local.Runners.Where(r => r.ServiceInstalled))
         {
-            // It runs from a console window: when that closes (sign-out), starting the service would run it twice
-            // at the next sign-in.
-            if (runner.IsInteractive)
-            {
-                WantRunning.Remove(runner.Name);
-                continue;
-            }
-            if (runner.IsRunning)
-            {
-                WantRunning.Add(runner.Name);
-                continue;
-            }
-            if (!config.Watchdog || !WantRunning.Contains(runner.Name) || IsManuallyStopped(runner.Name)) continue;
-            if (!TryUseRecoveryAttempt(runner.Name, $"runner {runner.AgentName}")) continue;
+            // A runner that runs from a console window is left alone: when that closes (sign-out), starting the
+            // service would run it twice at the next sign-in.
+            var step = Recovery.Check(runner.Name, runner.IsInteractive, runner.IsRunning, IsPending(runner),
+                watchdogOn: config.Watchdog, held: IsManuallyStopped(runner.Name), DateTime.UtcNow);
+            if (step == RunnerRecovery.Step.GiveUp)
+                AddEvent($"Auto-recovery stopped for runner {runner.AgentName} after {RunnerRecovery.MaxAttempts} attempts in one hour", warning: true);
+            if (step != RunnerRecovery.Step.Start) continue;
             try
             {
                 await RunnerService.ControlServiceAsync(runner.Name, "Start");
@@ -964,22 +1096,9 @@ public static class MachineRelay
         return acted;
     }
 
-    private static bool TryUseRecoveryAttempt(string key, string label)
-    {
-        if (!RecoveryAttempts.TryGetValue(key, out var attempts)) RecoveryAttempts[key] = attempts = new List<DateTime>();
-        attempts.RemoveAll(t => DateTime.UtcNow - t > TimeSpan.FromHours(1));
-        if (attempts.Count >= 3)
-        {
-            if (attempts.Count == 3)
-            {
-                AddEvent($"Auto-recovery stopped for {label} after 3 attempts in one hour", warning: true);
-                attempts.Add(DateTime.UtcNow); // remember that we already reported it
-            }
-            return false;
-        }
-        attempts.Add(DateTime.UtcNow);
-        return true;
-    }
+    /// <summary>Its service is starting or stopping (Win32_Service.State "Start Pending", "Stop Pending" and so on).</summary>
+    internal static bool IsPending(RunnerInfo runner)
+        => runner.StatusText.EndsWith("Pending", StringComparison.OrdinalIgnoreCase);
 
     private static bool IsManuallyStopped(string key)
         => FleetConfig.Current.ManuallyStopped.Contains(key, StringComparer.OrdinalIgnoreCase);
@@ -1061,7 +1180,7 @@ public static class MachineRelay
     }
 
     /// <summary>
-    /// Leaves the fleet: tells the other PCs to forget this one, removes the agent, and clears the pairing code and
+    /// Leaves the fleet: tells the other PCs to forget this one, removes the agent, and clears the fleet code and
     /// remembered PCs, so adding it again goes through pairing. Returns the PCs that were told.
     /// </summary>
     public static async Task<List<string>> LeaveFleetAsync(Action<string> log)
@@ -1107,7 +1226,7 @@ public static class MachineRelay
         return told;
     }
 
-    /// <summary>The first protocol whose agents can receive a new pairing code from Change fleet code.</summary>
+    /// <summary>The first protocol whose agents can receive a new fleet code from Change fleet code.</summary>
     public const int RekeyProtocolVersion = 12;
 
     /// <summary>What Change fleet code did, by PC name.</summary>
@@ -1121,7 +1240,7 @@ public static class MachineRelay
         List<string> ManagedSwitched, List<string> ManagedFailed);
 
     /// <summary>
-    /// Change fleet code: makes a new pairing code and gives it to the PCs in <paramref name="keep"/>, encrypted with
+    /// Change fleet code: makes a new fleet code and gives it to the PCs in <paramref name="keep"/>, encrypted with
     /// the current code and a fresh key exchange. This PC switches only after at least one of them confirmed it (or
     /// when there are none to give it to). Each of them switches at the first request that uses the new code; this
     /// sends one to each right away. PCs that are left out, offline or too old keep the old code, so they can no
@@ -1129,7 +1248,7 @@ public static class MachineRelay
     /// </summary>
     public static async Task<FleetCodeChange> ChangeFleetCodeAsync(IReadOnlyList<MachineInfo> keep, IReadOnlyList<MachineInfo> leaveOut, Action<string> log)
     {
-        var oldKey = FleetConfig.Current.FleetKey ?? throw new InvalidOperationException("This PC has no pairing code.");
+        var oldKey = FleetConfig.Current.FleetKey ?? throw new InvalidOperationException("This PC has no fleet code.");
         var newKey = CommandSigner.NewKey();
         var prepared = new List<MachineInfo>();
         var failed = new List<string>();
@@ -1185,7 +1304,7 @@ public static class MachineRelay
         {
             try
             {
-                var oldManaged = pc.Key ?? throw new InvalidOperationException("This PC can't read its pairing code.");
+                var oldManaged = pc.Key ?? throw new InvalidOperationException("Its access code cannot be read on this PC. Remove it and pair it again.");
                 var newManaged = CommandSigner.NewKey();
                 await SendNewKeyAsync(pc.Address, Sanitize(pc.Name), pc.MachineId, oldManaged, newManaged);
                 FleetConfig.ReplaceManagedKey(pc.KeyId, newManaged);
@@ -1258,7 +1377,7 @@ public static class MachineRelay
 
     /// <summary>
     /// Restarts the local agent (after an update or a settings change that needs it). Unless <paramref name="force"/>
-    /// is set, it first waits (up to 15 minutes) for the agent to finish commands and AI assistant calls.
+    /// is set, it first waits for the agent to finish commands and AI assistant calls (see <see cref="WaitWhileBusyAsync"/>).
     /// </summary>
     public static async Task RestartLocalAgentAsync(bool force = false, Action<string>? log = null)
     {
@@ -1269,31 +1388,46 @@ public static class MachineRelay
         await ScheduledTasks.RunTaskAsync(ScheduledTasks.AgentTaskName);
     }
 
-    /// <summary>
-    /// Waits while this PC's agent reports that it is busy (protocol 12), at most <see cref="UpdateRestartWait"/>.
-    /// Returns right away when the agent doesn't answer or is older, since there is then nothing to wait for.
-    /// </summary>
-    private static async Task WaitForLocalAgentIdleAsync(Action<string>? log)
+    private static Task WaitForLocalAgentIdleAsync(Action<string>? log)
     {
-        if (FleetConfig.Current.FleetKey == null) return;
-        var deadline = DateTime.UtcNow + UpdateRestartWait;
+        if (FleetConfig.Current.FleetKey == null) return Task.CompletedTask;
+        return WaitWhileBusyAsync(async () => (await FleetNetwork.CallAsync("127.0.0.1", LocalMachineKey, new FleetRequest { Op = "status" })).Status,
+            () => DateTime.UtcNow, () => Task.Delay(TimeSpan.FromSeconds(3)), log);
+    }
+
+    /// <summary>
+    /// Waits while this PC's agent reports that it is busy (protocol 12): until it is done, or until it finished no
+    /// command for <see cref="UpdateRestartWait"/>, so a runner create or an AI assistant's call that is running is not
+    /// cut off, but for at most <see cref="UpdateRestartLimit"/> in all.
+    /// Returns right away when the agent does not answer or is older, since there is then nothing to wait for.
+    /// </summary>
+    internal static async Task WaitWhileBusyAsync(Func<Task<MachineStatusPayload?>> readStatus, Func<DateTime> utcNow, Func<Task> pause,
+        Action<string>? log)
+    {
+        var restart = new UpdateRestartClock(utcNow, UpdateRestartWait, UpdateRestartLimit);
+        HashSet<string>? finished = null;
         var told = false;
         while (true)
         {
             MachineStatusPayload? status;
-            try { status = (await FleetNetwork.CallAsync("127.0.0.1", LocalMachineKey, new FleetRequest { Op = "status" })).Status; }
+            try { status = await readStatus(); }
             catch { return; }
             if (status is not { Busy: true }) return;
-            if (DateTime.UtcNow >= deadline)
+            var now = status.RecentCommands.Select(r => r.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            if (finished != null && !now.IsSubsetOf(finished)) restart.WorkFinished();
+            finished = now;
+            if (restart.Due(quiet: false))
             {
-                var message = $"The fleet agent is still busy after {(int)UpdateRestartWait.TotalMinutes} minutes. Restarting it anyway.";
+                var message = restart.PastLimit
+                    ? $"The fleet agent is still busy after {(int)UpdateRestartLimit.TotalHours} hours. Restarting it anyway."
+                    : $"The fleet agent is still busy, and it finished nothing in {(int)UpdateRestartWait.TotalMinutes} minutes. Restarting it anyway.";
                 log?.Invoke(message);
                 AppendAgentLog(message);
                 return;
             }
             if (!told) log?.Invoke("Waiting for the fleet agent to finish its current work…");
             told = true;
-            await Task.Delay(TimeSpan.FromSeconds(3));
+            await pause();
         }
     }
 
@@ -1470,7 +1604,7 @@ public static class MachineRelay
     private static void SaveAgentState(AgentState state)
     {
         Directory.CreateDirectory(FleetConfig.StateDir);
-        File.WriteAllText(AgentStatePath, JsonSerializer.Serialize(new
+        WriteAtomically(AgentStatePath, JsonSerializer.Serialize(new
         {
             lastCommandId = state.LastCommandId,
             processed = state.Recent,
@@ -1478,17 +1612,67 @@ public static class MachineRelay
         }));
     }
 
+    /// <summary>
+    /// Writes a file so a reader finds the old text or the new one, never a part: also after a crash or power cut while
+    /// writing. A broken agent-state.json would make the agent forget which commands it ran, and run a resent one twice.
+    /// </summary>
+    internal static void WriteAtomically(string path, string text)
+    {
+        var temp = $"{path}.{Environment.ProcessId}.tmp";
+        for (var attempt = 0; ; attempt++)
+        {
+            try
+            {
+                using (var stream = new FileStream(temp, FileMode.Create, FileAccess.Write, FileShare.None))
+                {
+                    stream.Write(Encoding.UTF8.GetBytes(text));
+                    stream.Flush(flushToDisk: true);
+                }
+                File.Move(temp, path, overwrite: true);
+                return;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException && attempt < 5) { Thread.Sleep(100); }
+            catch
+            {
+                try { File.Delete(temp); } catch { }
+                throw;
+            }
+        }
+    }
+
+    private static readonly object AgentLogGate = new();
+    /// <summary>Called when an append finds the log in use, before it tries again (tests free the log here).</summary>
+    internal static Action? AgentLogInUse { get; set; }
+
     public static void AppendAgentLog(string message)
     {
-        try
+        var line = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss}  {message}{Environment.NewLine}";
+        lock (AgentLogGate)
         {
-            Directory.CreateDirectory(FleetConfig.StateDir);
-            var log = new FileInfo(AgentLogPath);
-            if (log.Exists && log.Length > MaxAgentLogBytes)
-                File.Move(AgentLogPath, AgentLogPath + ".1", overwrite: true);
-            File.AppendAllText(AgentLogPath, $"{DateTime.Now:yyyy-MM-dd HH:mm:ss}  {message}{Environment.NewLine}");
+            try
+            {
+                Directory.CreateDirectory(FleetConfig.StateDir);
+                var log = new FileInfo(AgentLogPath);
+                if (log.Exists && log.Length > MaxAgentLogBytes)
+                    File.Move(AgentLogPath, AgentLogPath + ".1", overwrite: true);
+            }
+            catch { } // The other process has the log open: it is rotated at a later line.
+            // The dashboard and the agent both write the log; while one appends, the other waits a moment.
+            for (var attempt = 0; attempt < 5; attempt++)
+            {
+                try
+                {
+                    File.AppendAllText(AgentLogPath, line);
+                    return;
+                }
+                catch (IOException)
+                {
+                    AgentLogInUse?.Invoke();
+                    Thread.Sleep(25);
+                }
+                catch { return; }
+            }
         }
-        catch { }
     }
 
     /// <summary>The commands an agent processed (so one sent again is not run twice) and their latest results.</summary>
@@ -1611,6 +1795,43 @@ public static class LogReader
     }
 }
 
+/// <summary>
+/// When an agent restarts for an update although it still has work: once it finished nothing for <c>wait</c>, or
+/// once <c>limit</c> passed since the update asked. Each finished command starts the wait again, so work that moves on
+/// (a long runner create, or several queued) is not cut off; only work that seems stuck is, or work that keeps the
+/// agent busy for longer than the limit. Both begin at the first <see cref="Due"/>, which comes right after the
+/// update asked for the restart.
+/// </summary>
+internal sealed class UpdateRestartClock(Func<DateTime> utcNow, TimeSpan wait, TimeSpan limit)
+{
+    private DateTime? _byUtc;
+    private DateTime? _limitUtc;
+
+    /// <summary>A command finished: the wait, once it began, starts again from now. The limit stays.</summary>
+    public void WorkFinished()
+    {
+        if (_byUtc != null) _byUtc = utcNow() + wait;
+    }
+
+    /// <summary>
+    /// Set by <see cref="Due"/>: the restart is due only because the limit passed, while the work still moves on.
+    /// </summary>
+    public bool PastLimit { get; private set; }
+
+    /// <summary>Whether to restart now. <paramref name="quiet"/>: no work is left.</summary>
+    public bool Due(bool quiet)
+    {
+        PastLimit = false;
+        if (quiet) return true;
+        var now = utcNow();
+        _byUtc ??= now + wait;
+        _limitUtc ??= now + limit;
+        if (now >= _byUtc) return true;
+        PastLimit = now >= _limitUtc;
+        return PastLimit;
+    }
+}
+
 public sealed record LogPayload
 {
     public string Title { get; init; } = string.Empty;
@@ -1618,21 +1839,34 @@ public sealed record LogPayload
     public DateTime CreatedUtc { get; init; }
 }
 
+/// <summary>
+/// A PC's status. Another PC may send a null where a text or a list belongs (an older or odd agent): it reads as empty,
+/// so the status still shows. Its values are checked before use (see <see cref="PeerStatus"/>).
+/// </summary>
 public sealed record MachineStatusPayload
 {
-    public string MachineName { get; init; } = string.Empty;
+    public string MachineName { get; init => field = value ?? string.Empty; } = string.Empty;
     /// <summary>The PC's own ID (protocol 12; empty from older agents).</summary>
-    public string MachineId { get; init; } = string.Empty;
+    public string MachineId { get; init => field = value ?? string.Empty; } = string.Empty;
     public int AgentProtocolVersion { get; init; }
-    public string AppVersion { get; init; } = string.Empty;
+    public string AppVersion { get; init => field = value ?? string.Empty; } = string.Empty;
+    /// <summary>
+    /// When the status was current. The agent stamps it when it answers (unless it could not build a status for a
+    /// while); dashboards replace it with their own clock's time (see <see cref="MachineRelay.ByLocalClock"/>).
+    /// </summary>
     public DateTime UpdatedUtc { get; init; }
+    /// <summary>
+    /// The agent's clock when it answered, so a dashboard can tell a clock that is off from a status that is old.
+    /// Older agents don't send it; their <see cref="UpdatedUtc"/> is always that time. Older dashboards ignore it.
+    /// </summary>
+    public DateTime AnsweredUtc { get; init; }
     public bool FleetAgentRunning { get; init; }
-    public string LastCommandId { get; init; } = string.Empty;
-    public string LastCommandResult { get; init; } = string.Empty;
+    public string LastCommandId { get; init => field = value ?? string.Empty; } = string.Empty;
+    public string LastCommandResult { get; init => field = value ?? string.Empty; } = string.Empty;
     /// <summary>Results of the last commands, oldest first (protocol 12; empty from older agents).</summary>
-    public FleetCommandResult[] RecentCommands { get; init; } = Array.Empty<FleetCommandResult>();
+    public FleetCommandResult[] RecentCommands { get; init => field = value?.OfType<FleetCommandResult>().ToArray() ?? []; } = [];
     /// <summary>Commands that are queued or running (protocol 12).</summary>
-    public string[] PendingCommandIds { get; init; } = Array.Empty<string>();
+    public string[] PendingCommandIds { get; init => field = value?.Where(id => !string.IsNullOrEmpty(id)).ToArray() ?? []; } = [];
     /// <summary>The agent is running a command or other work, which a restart would cut off (protocol 12).</summary>
     public bool Busy { get; init; }
     public int CpuPercent { get; init; }
@@ -1640,12 +1874,37 @@ public sealed record MachineStatusPayload
     public double MemoryTotalGb { get; init; }
     public DateTime? BootUtc { get; init; }
     public bool RebootPending { get; init; }
-    public DiskStatus[] Disks { get; init; } = Array.Empty<DiskStatus>();
+    public DiskStatus[] Disks
+    {
+        get;
+        init => field = value?.OfType<DiskStatus>().Select(d => d.Name == null ? d with { Name = string.Empty } : d).ToArray() ?? [];
+    } = [];
     public bool WatchdogEnabled { get; init; }
-    /// <summary>Short fingerprint of this PC's pairing code, so dashboards can spot a PC with a different code.</summary>
-    public string SigningKeyId { get; init; } = string.Empty;
-    public AgentEvent[] RecentEvents { get; init; } = Array.Empty<AgentEvent>();
-    public MachineRunnerStatus[] Runners { get; init; } = Array.Empty<MachineRunnerStatus>();
+    /// <summary>Short fingerprint of this PC's code, so dashboards can spot a PC with a different code.</summary>
+    public string SigningKeyId { get; init => field = value ?? string.Empty; } = string.Empty;
+    public AgentEvent[] RecentEvents
+    {
+        get;
+        init => field = value?.OfType<AgentEvent>().Select(e => e.Text == null ? e with { Text = string.Empty } : e).ToArray() ?? [];
+    } = [];
+
+    /// <summary>The runners. An entry that could not be read is left out, and counted in <see cref="UnreadableRunners"/>.</summary>
+    [JsonConverter(typeof(RunnerListConverter))]
+    public MachineRunnerStatus[] Runners
+    {
+        get;
+        init
+        {
+            var runners = value ?? [];
+            var unreadable = runners.Count(r => r == null || ReferenceEquals(r, RunnerListConverter.Unreadable));
+            field = unreadable == 0 ? runners : runners.Where(r => r != null && !ReferenceEquals(r, RunnerListConverter.Unreadable)).ToArray();
+            if (unreadable > 0) UnreadableRunners = unreadable;
+        }
+    } = [];
+
+    /// <summary>How many runner entries in the status as it arrived could not be read.</summary>
+    [JsonIgnore]
+    internal int UnreadableRunners { get; init; }
 
     /// <summary>
     /// Everything except values that tick on their own (our heartbeat, the relay's last_seen, CPU and memory load),
@@ -1654,6 +1913,7 @@ public sealed record MachineStatusPayload
     public string Fingerprint() => JsonSerializer.Serialize(this with
     {
         UpdatedUtc = default,
+        AnsweredUtc = default,
         Busy = false,
         CpuPercent = 0,
         MemoryPercent = 0
@@ -1663,8 +1923,8 @@ public sealed record MachineStatusPayload
 /// <summary>What a finished command reported.</summary>
 public sealed record FleetCommandResult
 {
-    public string Id { get; init; } = string.Empty;
-    public string Result { get; init; } = string.Empty;
+    public string Id { get; init => field = value ?? string.Empty; } = string.Empty;
+    public string Result { get; init => field = value ?? string.Empty; } = string.Empty;
     public DateTime CompletedUtc { get; init; }
 }
 

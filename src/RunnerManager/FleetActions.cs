@@ -13,6 +13,15 @@ public sealed class FleetActions
 
     public FleetActions(bool viaLocalAgent) => _viaLocalAgent = viaLocalAgent;
 
+    /// <summary>
+    /// The longest a runner create may take on a PC, and so how long a create on another PC (also the one of a move) is
+    /// waited for. RunnerService gives the download up to 45 minutes and config.cmd up to 10; finding the runner
+    /// package, the checksum, unpacking, the registration token and the workflow check take a few minutes more. No other
+    /// command takes longer, so the waits for commands and for an update restart are as long (see
+    /// <see cref="MachineRelay.MaxCommandWait"/>).
+    /// </summary>
+    internal static readonly TimeSpan CreateWait = TimeSpan.FromMinutes(60);
+
     /// <summary>Runs an action on this PC directly, or sends it to a fleet agent and waits for its result.</summary>
     public async Task RunOnMachineAsync(MachineInfo machine, string target, string targetKey, string action, Action<string> log,
         Func<Task> local, TimeSpan timeout, string runnerName = "", string[]? labels = null, string value = "",
@@ -50,13 +59,24 @@ public sealed class FleetActions
                 InstallPath = RunnerService.SuggestInstallPath(url),
                 Labels = labels
             }, log),
-            TimeSpan.FromMinutes(10), runnerName: name, labels: labels);
+            CreateWait, runnerName: name, labels: labels);
+
+    /// <summary>
+    /// Why Start, Stop or Restart can't be used on a runner, or null. A runner can have a Windows service and still run in
+    /// a console window instead: starting the service would run it twice, and stopping it would not stop the runner.
+    /// </summary>
+    internal static string? ConsoleRunnerProblem(bool interactive, bool serviceInstalled, string action)
+        => !interactive || !serviceInstalled ? null
+            : action == "Stop" ? "This runner runs in a console window, not as its Windows service. Close the console window to stop it."
+            : "This runner runs in a console window. Starting its Windows service would run it twice. Close the console window first.";
 
     /// <param name="action">"Start", "Stop" or "Restart".</param>
     public Task ControlRunnerAsync(MachineInfo machine, MachineRunnerStatus runner, string action, Action<string> log)
         => RunOnMachineAsync(machine, "runner", runner.CommandKey, action, log,
             async () =>
             {
+                if (ConsoleRunnerProblem(runner.IsInteractive, runner.ServiceInstalled, action) is { } problem)
+                    throw new InvalidOperationException(problem);
                 await RunnerService.ControlServiceAsync(runner.CommandKey, action);
                 FleetConfig.SetManuallyStopped(runner.CommandKey, action == "Stop");
             },
@@ -96,7 +116,7 @@ public sealed class FleetActions
         // 2. Register it on the target, replacing the old registration.
         try
         {
-            log($"Installing and registering the runner on {target.MachineName}. The download takes about 1–3 minutes…");
+            log($"Installing and registering the runner on {target.MachineName}. The download usually takes 1–3 minutes, and longer on a slow connection…");
             await RunOnMachineAsync(target, "runner", url, "Create", log,
                 () => RunnerService.CreateRunnerAsync(new RunnerSetup
                 {
@@ -107,7 +127,7 @@ public sealed class FleetActions
                     ReplaceExisting = true,
                     Options = options
                 }, log),
-                TimeSpan.FromMinutes(10), runnerName: runner.AgentName, labels: labels, value: "replace", options: options);
+                CreateWait, runnerName: runner.AgentName, labels: labels, value: "replace", options: options);
         }
         catch (Exception ex) when (!RunsHere(target) && ex is TimeoutException or OperationCanceledException)
         {
@@ -117,7 +137,7 @@ public sealed class FleetActions
                 $"If {runner.TitleText} appears on {target.MachineName}, remove the old copy from {source.MachineName}; otherwise move it again.");
             throw;
         }
-        catch
+        catch (Exception ex)
         {
             if (!runner.IsInteractive)
             {
@@ -129,6 +149,11 @@ public sealed class FleetActions
                 }
                 catch (Exception restartError) { log($"Could not start the runner again: {restartError.Message}"); }
             }
+            // config.cmd on the target replaced the registration before the install failed. The old copy is still enabled
+            // and started, so it can be edited, but GitHub no longer accepts it.
+            if (ex.Message.Contains(RunnerService.ReplacedRegistrationNote, StringComparison.Ordinal))
+                log($"{runner.TitleText} on {source.MachineName} must be registered again before it can take jobs. " +
+                    "Move it again, or edit it and change its name or labels.");
             throw;
         }
 
@@ -156,7 +181,7 @@ public sealed class FleetActions
 
     /// <summary>What to tell the user when the old copy of a moved runner is still there.</summary>
     internal static string RetireByHand(string source, string target)
-        => $"Delete its Windows service and folder on {source} by hand. Don't unregister it from GitHub: the registration now belongs to {target}.";
+        => $"Delete its Windows service and folder on {source} by hand. Do not unregister it from GitHub: the registration now belongs to {target}.";
 
     /// <summary>
     /// The labels to register a moved runner with. They are read from GitHub when not known; when GitHub can't be read
@@ -217,7 +242,13 @@ public sealed class FleetActions
     internal static async Task SetServiceEnabledAsync(string key, bool enabled, bool manualStart = false)
     {
         if (!key.StartsWith("actions.runner.", StringComparison.OrdinalIgnoreCase)) return;
-        await RunnerService.SetServiceStartModeAsync(key,
-            !enabled ? ServiceStart.Disabled : manualStart ? ServiceStart.Manual : ServiceStart.Automatic);
+        await RunnerService.SetServiceStartModeAsync(key, StartMode(enabled, manualStart));
     }
+
+    /// <summary>
+    /// The sc.exe start= value for <see cref="SetServiceEnabledAsync"/>. Starting with Windows is "delayed-auto", as
+    /// config.cmd installs runner services, so turning a service on again leaves it as it was installed.
+    /// </summary>
+    internal static string StartMode(bool enabled, bool manualStart)
+        => !enabled ? ServiceStart.Disabled : manualStart ? ServiceStart.Manual : ServiceStart.Automatic;
 }

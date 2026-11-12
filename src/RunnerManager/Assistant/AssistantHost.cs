@@ -22,8 +22,11 @@ public static class AssistantHost
     /// <summary>An approval nobody answers in this time counts as declined.</summary>
     public static readonly TimeSpan ApprovalTimeout = TimeSpan.FromMinutes(10);
 
-    /// <summary>After stdin closes, requests still running get this long to finish.</summary>
-    private static readonly TimeSpan DrainLimit = TimeSpan.FromMinutes(15);
+    /// <summary>
+    /// After stdin closes, requests still running get this long to finish: enough for a change that waits for its
+    /// approval and then creates a runner (<see cref="FleetActions.CreateWait"/>).
+    /// </summary>
+    internal static readonly TimeSpan DrainLimit = ApprovalTimeout + FleetActions.CreateWait;
 
     /// <summary>The fleet agent's approvals, shown one at a time in the order they came in.</summary>
     public static ApprovalQueue Approvals { get; } = new(ShowApprovalAsync, ApprovalTimeout);
@@ -32,9 +35,15 @@ public static class AssistantHost
         => args.Length > 0 && (args[0].Equals(McpArgument, StringComparison.OrdinalIgnoreCase) || args[0].Equals(CliArgument, StringComparison.OrdinalIgnoreCase));
 
     public static Task<int> RunAsync(string[] args)
-        => args[0].Equals(McpArgument, StringComparison.OrdinalIgnoreCase) ? RunStdioAsync() : RunCliAsync(args.Skip(1).ToArray());
+    {
+        // The AI tool starts this process, and may give it administrator rights. The fleet agent alone decides what
+        // the AI assistant switches allow, so this process never reads them, and never moves or writes them.
+        AssistantSwitches.LeaveToFleetAgent();
+        return args[0].Equals(McpArgument, StringComparison.OrdinalIgnoreCase) ? RunStdioAsync() : RunCliAsync(args.Skip(1).ToArray());
+    }
 
     /// <summary>Asks the user in a Runner Manager window in front of other windows, after any approval asked before.</summary>
+    /// <param name="client">How to name the client (see <see cref="McpServer.ClientLabel"/>).</param>
     public static async Task<bool> ApproveAsync(string client, string title, string message, CancellationToken cancellationToken = default)
     {
         try
@@ -60,11 +69,18 @@ public static class AssistantHost
         var destructive = title.StartsWith("Delete", StringComparison.Ordinal) || title.StartsWith("Move", StringComparison.Ordinal);
         const string allow = "Allow";
         var choice = await Application.Current.Dispatcher.InvokeAsync(() => DialogWindow.ShowApprovalAsync(
-            destructive ? DialogTone.Danger : DialogTone.Question, title, message.Replace("An AI assistant", client, StringComparison.Ordinal),
+            destructive ? DialogTone.Danger : DialogTone.Question, title, NameClient(message, client),
             allow, "Decline", cancellationToken)).Task.Unwrap();
         cancellationToken.ThrowIfCancellationRequested();
         return choice == allow;
     }
+
+    /// <summary>
+    /// An approval message with the client named: messages start with "An AI assistant", and only that start is
+    /// replaced, never the same words in a name further on.
+    /// </summary>
+    internal static string NameClient(string message, string client)
+        => message.StartsWith(McpServer.UnnamedClient, StringComparison.Ordinal) ? client + message[McpServer.UnnamedClient.Length..] : message;
 
     // ----- MCP over stdio -----
 
@@ -164,7 +180,11 @@ public static class AssistantHost
     private static async Task<int> RunCliAsync(string[] args)
     {
         AttachToParentConsole();
-        var stdout = Console.Out;
+        // Read by another program, the output is UTF-8, as for --mcp. Console.Out would write the PC's own code page
+        // there, which has no "→" and loses names with letters outside it. A terminal gets Console.Out, which follows
+        // the terminal's code page.
+        var stdout = Console.IsOutputRedirected ? Utf8Writer(Console.OpenStandardOutput()) : Console.Out;
+        var stderr = Console.IsErrorRedirected ? Utf8Writer(Console.OpenStandardError()) : Console.Error;
         if (args.Length == 0 || args[0] is "help" or "--help" or "-h" or "/?")
         {
             stdout.WriteLine(Usage());
@@ -181,7 +201,7 @@ public static class AssistantHost
         try { arguments = ParseArguments(AssistantTools.Find(args[0]), args.Skip(1)); }
         catch (AssistantException ex)
         {
-            Console.Error.WriteLine(ex.Message);
+            stderr.WriteLine(ex.Message);
             return 2;
         }
         try
@@ -193,7 +213,8 @@ public static class AssistantHost
                 ["params"] = new JsonObject
                 {
                     ["protocolVersion"] = McpServer.SupportedVersions[0],
-                    ["clientInfo"] = new JsonObject { ["name"] = "An AI assistant (command line)" }
+                    // Shown as: An AI assistant ("command line").
+                    ["clientInfo"] = new JsonObject { ["name"] = "command line" }
                 }
             }.ToJsonString());
             var answer = await link.SendAsync(new JsonObject
@@ -211,7 +232,7 @@ public static class AssistantHost
                 try
                 {
                     if (JsonNode.Parse(notification)?["params"]?["message"] is JsonValue progress && progress.TryGetValue<string>(out var text))
-                        Console.Error.WriteLine(text);
+                        stderr.WriteLine(text);
                 }
                 catch (JsonException) { }
                 return Task.CompletedTask;
@@ -323,6 +344,10 @@ public static class AssistantHost
         text.Append("Turn on access in Runner Manager → Settings → AI assistants first.");
         return text.ToString();
     }
+
+    /// <summary>UTF-8 without a byte order mark, written at once and from any thread, like <see cref="Console.Out"/>.</summary>
+    private static TextWriter Utf8Writer(Stream stream)
+        => TextWriter.Synchronized(new StreamWriter(stream, new UTF8Encoding(false)) { AutoFlush = true });
 
     private const int AttachParentProcess = -1;
     private const int StdOutputHandle = -11;

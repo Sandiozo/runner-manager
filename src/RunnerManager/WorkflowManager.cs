@@ -126,27 +126,40 @@ public static class WorkflowManager
     }
 }
 
-/// <summary>The labels every runner registered by Runner Manager has, and how GitHub matches jobs to runners.</summary>
+/// <summary>The labels runners registered by Runner Manager get, and how GitHub matches jobs to runners.</summary>
 internal static class RunnerLabels
 {
     /// <summary>The architecture label is ARM64 for runners on ARM64 Windows.</summary>
     internal static readonly string[] Defaults = { "self-hosted", "Windows", RunnerService.ArchitectureLabel };
 
-    /// <summary>The default labels plus the runner's custom labels.</summary>
+    /// <summary>The default labels of a runner on this PC plus its custom labels.</summary>
     internal static HashSet<string> Available(IEnumerable<string> customLabels)
+        => Available(customLabels, defaultLabels: true, new[] { RunnerService.ArchitectureLabel });
+
+    /// <param name="defaultLabels">False for a runner registered with --no-default-labels.</param>
+    /// <param name="architectures">The runner's architecture label; both X64 and ARM64 when it is not known.</param>
+    internal static HashSet<string> Available(IEnumerable<string> customLabels, bool defaultLabels, IEnumerable<string> architectures)
     {
-        var labels = new HashSet<string>(Defaults, StringComparer.OrdinalIgnoreCase);
+        var labels = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (defaultLabels)
+        {
+            labels.Add("self-hosted");
+            labels.Add("Windows");
+            labels.UnionWith(architectures);
+        }
         foreach (var label in customLabels.Where(x => !string.IsNullOrWhiteSpace(x)))
             labels.Add(label.Trim());
         return labels;
     }
 
-    /// <summary>A job can run on a runner when it asks for a self-hosted runner and the runner has every label it needs.</summary>
-    internal static bool CanRun(IEnumerable<string> required, ISet<string> available)
+    /// <summary>
+    /// GitHub gives a job to a runner that has every label in its runs-on, also when it does not ask for self-hosted
+    /// (runs-on: gpu). Hosted runner labels such as windows-latest are not labels of the fleet's runners.
+    /// </summary>
+    internal static bool CanRun(IEnumerable<string> required, IReadOnlySet<string> available)
     {
-        var labels = required.Where(x => !string.IsNullOrWhiteSpace(x)).ToArray();
-        return labels.Any(x => x.Equals("self-hosted", StringComparison.OrdinalIgnoreCase))
-               && labels.All(available.Contains);
+        var labels = required.Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => x.Trim()).ToArray();
+        return labels.Length > 0 && labels.All(available.Contains);
     }
 }
 

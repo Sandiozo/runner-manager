@@ -22,12 +22,22 @@
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
         <StackPanel Margin="28,24,28,24">
-            <TextBlock Text="Add a self-hosted runner" FontSize="20" FontWeight="SemiBold"/>
-            <TextBlock Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,6,0,20"
+            <TextBlock x:Name="HeadingText" Text="Add a self-hosted runner" FontSize="20" FontWeight="SemiBold" TextWrapping="Wrap"/>
+            <TextBlock x:Name="DescriptionText" Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,6,0,20"
                        Text="Downloads the latest GitHub Actions runner, verifies its checksum, registers it with GitHub and installs it as a Windows service on this PC."/>
 
+            <!-- Shown when the runner can be added on more than one PC; only the hint when the dashboard's PC cannot be chosen. -->
+            <StackPanel x:Name="PcPanel" Visibility="Collapsed" Margin="0,0,0,16">
+                <TextBlock x:Name="PcFieldLabel" Text="PC" Style="{StaticResource FieldLabel}"/>
+                <Border x:Name="PcChoicesHost" Style="{StaticResource SegmentHost}">
+                    <WrapPanel x:Name="PcChoices" AutomationProperties.Name="PC"/>
+                </Border>
+                <TextBlock x:Name="PcHint" Style="{StaticResource FieldHint}" Visibility="Collapsed"/>
+            </StackPanel>
+
             <TextBlock Text="Repository or organization" Style="{StaticResource FieldLabel}"/>
-            <TextBox x:Name="RepositoryUrlBox" Tag="https://github.com/owner/repository" TextChanged="RepositoryUrlBox_TextChanged"/>
+            <TextBox x:Name="RepositoryUrlBox" Tag="https://github.com/owner/repository" TextChanged="RepositoryUrlBox_TextChanged"
+                     AutomationProperties.Name="Repository or organization" AutomationProperties.HelpText="A repository URL, owner/repo, or an organization URL"/>
             <TextBlock x:Name="RepositoryHint" Style="{StaticResource FieldHint}" Text="Enter a repository URL or owner/repo. For an organization runner, enter the organization URL."/>
 
             <Grid Margin="0,16,0,0">
@@ -38,11 +48,13 @@
                 </Grid.ColumnDefinitions>
                 <StackPanel>
                     <TextBlock Text="Runner name" Style="{StaticResource FieldLabel}"/>
-                    <TextBox x:Name="RunnerNameBox"/>
+                    <TextBox x:Name="RunnerNameBox" AutomationProperties.Name="Runner name"/>
+                    <TextBlock x:Name="NameHint" Style="{StaticResource FieldHint}" Visibility="Collapsed"/>
                 </StackPanel>
                 <StackPanel Grid.Column="2">
                     <TextBlock Text="Custom labels" Style="{StaticResource FieldLabel}"/>
-                    <TextBox x:Name="LabelsBox" Tag="Optional, comma-separated"/>
+                    <TextBox x:Name="LabelsBox" Tag="Optional, comma-separated" AutomationProperties.Name="Custom labels"
+                             AutomationProperties.HelpText="Optional, comma-separated"/>
                 </StackPanel>
             </Grid>
             <TextBlock x:Name="LabelsHint" Style="{StaticResource FieldHint}" Text="The labels self-hosted, Windows and X64 are always added."/>
@@ -53,12 +65,14 @@
                     <ColumnDefinition Width="*"/>
                     <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
-                <TextBox x:Name="InstallPathBox"/>
-                <Button Grid.Column="1" Content="Browse…" Margin="8,0,0,0" Click="Browse_Click"/>
+                <TextBox x:Name="InstallPathBox" AutomationProperties.Name="Install folder"/>
+                <Button x:Name="BrowseButton" Grid.Column="1" Content="Browse…" Margin="8,0,0,0" Click="Browse_Click" AutomationProperties.Name="Browse for the install folder"/>
             </Grid>
             <TextBlock x:Name="InstallHint" Style="{StaticResource FieldHint}" Text="The folder must be empty or new."/>
 
-            <CheckBox x:Name="CheckWorkflowsToggle" Style="{StaticResource ToggleSwitch}" Margin="0,18,0,0">
+            <CheckBox x:Name="CheckWorkflowsToggle" Style="{StaticResource ToggleSwitch}" Margin="0,18,0,0"
+                      AutomationProperties.Name="Run hosted Windows jobs on this runner"
+                      AutomationProperties.HelpText="Changes runs-on: windows-latest in the repository workflows and commits the change.">
                 <StackPanel>
                     <TextBlock Text="Run hosted Windows jobs on this runner"/>
                     <TextBlock Style="{StaticResource FieldHint}"
@@ -69,7 +83,8 @@
         <Border Grid.Row="1" Background="{DynamicResource Bg0Brush}" BorderBrush="{DynamicResource BorderSubtleBrush}" BorderThickness="0,1,0,0" Padding="28,14">
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
                 <Button Content="Cancel" Style="{StaticResource GhostButton}" IsCancel="True" Click="Cancel_Click" MinWidth="88"/>
-                <Button x:Name="CreateButton" Content="Create runner" Style="{StaticResource PrimaryButton}" IsDefault="True"
+                <!-- Enabled once every field can be used, so nothing fails after the download. -->
+                <Button x:Name="CreateButton" Content="Create runner" Style="{StaticResource PrimaryButton}" IsDefault="True" IsEnabled="False"
                         Click="Create_Click" Margin="8,0,0,0" MinWidth="120"/>
             </StackPanel>
         </Border>

@@ -17,17 +17,17 @@ public class PairingProtocolTests
         return (client, client.GetStream());
     }
 
-    private static readonly TimeSpan Step = TimeSpan.FromSeconds(5);
+    // How long a test waits for what should happen at once: a step that hangs fails the test, a slow machine does not.
+    private static readonly TimeSpan Step = TimeSpan.FromSeconds(30);
 
     [Fact]
     public async Task HostAndJoiner_OnLoopback_ShowTheSameCode_AndTheRequestEnds()
     {
         var key = CommandSigner.NewKey();
-        var port = TestPorts.FreeRange(2);
-        using var host = new Pairing.PairingHost(key, "HOSTPC", port, port + 1);
+        var port = 0;
+        using var host = FreePorts.Listen(2, p => new Pairing.PairingHost(key, "HOSTPC", port = p, p + 1), h => h.Start());
         Pairing.JoinRequest? seen = null;
         host.JoinRequested += request => { seen = request; request.Allow(); };
-        host.Start();
 
         string? joinerCode = null;
         var result = await Pairing.JoinAsync($"127.0.0.1:{port}", "NEWPC", code => joinerCode = code, CancellationToken.None);
@@ -43,11 +43,10 @@ public class PairingProtocolTests
     [Fact]
     public async Task JoinerRevealingAnotherKey_ThanItCommittedTo_IsRefused()
     {
-        var port = TestPorts.FreeRange(2);
-        using var host = new Pairing.PairingHost(CommandSigner.NewKey(), "HOSTPC", port, port + 1);
+        var port = 0;
+        using var host = FreePorts.Listen(2, p => new Pairing.PairingHost(CommandSigner.NewKey(), "HOSTPC", port = p, p + 1), h => h.Start());
         var requested = false;
         host.JoinRequested += request => { requested = true; request.Allow(); };
-        host.Start();
 
         var (client, stream) = await ConnectAsync(port);
         using (client)
@@ -80,10 +79,9 @@ public class PairingProtocolTests
     [Fact]
     public async Task OlderJoiner_IsToldToUpdate()
     {
-        var port = TestPorts.FreeRange(2);
-        using var host = new Pairing.PairingHost(CommandSigner.NewKey(), "HOSTPC", port, port + 1);
+        var port = 0;
+        using var host = FreePorts.Listen(2, p => new Pairing.PairingHost(CommandSigner.NewKey(), "HOSTPC", port = p, p + 1), h => h.Start());
         host.JoinRequested += request => request.Allow();
-        host.Start();
 
         var (client, stream) = await ConnectAsync(port);
         using (client)
@@ -144,11 +142,10 @@ public class PairingProtocolTests
     [Fact]
     public async Task StoppingTheHost_TellsWaitingPcsNo()
     {
-        var port = TestPorts.FreeRange(2);
-        var host = new Pairing.PairingHost(CommandSigner.NewKey(), "HOSTPC", port, port + 1);
+        var port = 0;
+        var host = FreePorts.Listen(2, p => new Pairing.PairingHost(CommandSigner.NewKey(), "HOSTPC", port = p, p + 1), h => h.Start());
         var requested = new TaskCompletionSource<Pairing.JoinRequest>();
         host.JoinRequested += request => requested.TrySetResult(request);
-        host.Start();
 
         var join = Pairing.JoinAsync($"127.0.0.1:{port}", "NEWPC", _ => { }, CancellationToken.None);
         var request = await requested.Task.WaitAsync(Step);
@@ -162,9 +159,8 @@ public class PairingProtocolTests
     [Fact]
     public async Task Host_TurnsAwayConnectionsBeyondItsLimit()
     {
-        var port = TestPorts.FreeRange(2);
-        using var host = new Pairing.PairingHost(CommandSigner.NewKey(), "HOSTPC", port, port + 1);
-        host.Start();
+        var port = 0;
+        using var host = FreePorts.Listen(2, p => new Pairing.PairingHost(CommandSigner.NewKey(), "HOSTPC", port = p, p + 1), h => h.Start());
         var waiting = new List<TcpClient>();
         try
         {
@@ -208,7 +204,7 @@ public class HostPortTests
 internal sealed class TestAgent : IDisposable
 {
     public byte[] Key { get; } = CommandSigner.NewKey();
-    public int Port { get; } = TestPorts.FreeRange(2);
+    public int Port { get; }
     public AgentServer Server { get; }
     public string Address => $"localhost:{Port}";
 
@@ -224,7 +220,7 @@ internal sealed class TestAgent : IDisposable
         if (key != null) Key = key;
         Name = name;
         MachineId = machineId;
-        Server = new AgentServer(
+        AgentServer NewServer(int port) => new(
             () => Task.FromResult(Status(new MachineStatusPayload
             {
                 MachineName = name, MachineId = machineId, AgentProtocolVersion = MachineRelay.ProtocolVersion, FleetAgentRunning = true,
@@ -232,8 +228,12 @@ internal sealed class TestAgent : IDisposable
             })),
             command => { lock (Commands) Commands.Add(command); return command.Id; },
             _ => Task.FromResult(new LogPayload()),
-            () => Key, $"http://localhost:{Port}/rw/", Port + 1, name, machineId: machineId);
-        if (start) Server.Start();
+            () => Key, $"http://localhost:{port}/rw/", port + 1, name, machineId: machineId);
+        var chosen = 0;
+        Server = start
+            ? FreePorts.Listen(2, port => NewServer(chosen = port), server => server.Start())
+            : NewServer(chosen = TestPorts.FreeRange(2));
+        Port = chosen;
     }
 
     /// <summary>Posts a request sealed for <paramref name="target"/> at <paramref name="time"/>, as CallAsync would.</summary>
@@ -388,6 +388,8 @@ public class FleetConfigRobustnessTests
     [Fact]
     public void NullsInAHandEditedFile_BecomeDefaults()
     {
+        // Its own switches, so turning "Ask before changes" off below does not stay for the next test.
+        using var switches = new TestSwitches();
         try
         {
             WriteRaw("{\"Assistant\":null,\"KnownPeers\":[null,{\"Name\":\"PC2\",\"Address\":null}],\"ManualAddresses\":null}");
@@ -652,7 +654,7 @@ public class RunnerMoveTests
 {
     /// <summary>Runs a move between two test agents that answer each command with <paramref name="answer"/>.</summary>
     private static async Task<(List<MachineCommand> Source, List<MachineCommand> Target, Exception? Error)> MoveAsync(
-        Func<MachineCommand, string> answer)
+        Func<MachineCommand, string> answer, List<string>? log = null)
     {
         var key = CommandSigner.NewKey();
         var previous = MachineRelay.CommandPollInterval;
@@ -686,7 +688,8 @@ public class RunnerMoveTests
             try
             {
                 await new FleetActions(viaLocalAgent: true).MoveRunnerAsync(new MachineInfo { MachineKey = "SOURCEPC", MachineName = "SOURCEPC" }, runner,
-                    new MachineInfo { MachineKey = "TARGETPC", MachineName = "TARGETPC" }, deleteOldFiles: false, null, _ => { });
+                    new MachineInfo { MachineKey = "TARGETPC", MachineName = "TARGETPC" }, deleteOldFiles: false, null,
+                    line => log?.Add(line));
             }
             catch (Exception ex) { error = ex; }
             return (source.Commands, target.Commands, error);
@@ -702,7 +705,14 @@ public class RunnerMoveTests
         }
     }
 
-    private static string Steps(IEnumerable<MachineCommand> commands) => string.Join(" ", commands.Select(c => $"{c.Action}:{c.Value}"));
+    /// <summary>
+    /// The steps the PC ran. A command whose answer was slow is sent again with the same ID, and a fleet agent runs it
+    /// once, so it counts once here too.
+    /// </summary>
+    private static string Steps(IEnumerable<MachineCommand> commands)
+    {
+        lock (commands) return string.Join(" ", commands.DistinctBy(c => c.Id).Select(c => $"{c.Action}:{c.Value}"));
+    }
 
     [Fact]
     public async Task AMove_DisablesTheOldCopy_KeepsTheLabels_AndRetiresIt()
@@ -710,7 +720,7 @@ public class RunnerMoveTests
         var (source, target, error) = await MoveAsync(c => $"Runner {c.Action} completed");
         Assert.Null(error);
         Assert.Equal("Stop:disable Retire:keep", Steps(source));
-        var create = Assert.Single(target);
+        var create = Assert.Single(target.DistinctBy(c => c.Id));
         Assert.Equal("Create", create.Action);
         Assert.Equal(new[] { "gpu" }, create.RunnerLabels);
     }
@@ -724,11 +734,28 @@ public class RunnerMoveTests
     }
 
     [Fact]
+    public async Task WhenTheTargetReplacedTheRegistrationAndFailed_TheOldCopyIsStartedAgain_AndTheLogSaysToRegisterItAgain()
+    {
+        var log = new List<string>();
+        var (source, _, error) = await MoveAsync(c => c.Action == "Create"
+            ? $"runner Create failed: config.cmd exited with code 1\n{RunnerService.ReplacedRegistrationNote}"
+            : $"Runner {c.Action} completed", log);
+        Assert.Contains(RunnerService.ReplacedRegistrationNote, error!.Message);
+        Assert.Equal("Stop:disable Start:enable", Steps(source));
+        Assert.Contains(log, line => line.Contains("must be registered again before it can take jobs"));
+
+        // Any other failure: started again, nothing more to do.
+        log.Clear();
+        await MoveAsync(c => c.Action == "Create" ? "runner Create failed: no token" : $"Runner {c.Action} completed", log);
+        Assert.DoesNotContain(log, line => line.Contains("registered again"));
+    }
+
+    [Fact]
     public async Task WhenRetiringFails_TheErrorSaysToDeleteTheOldCopyByHand()
     {
         var (source, _, error) = await MoveAsync(c => c.Action == "Retire" ? "runner Retire failed: in use" : $"Runner {c.Action} completed");
         Assert.Contains("now runs on TARGETPC", error!.Message);
-        Assert.Contains("Don't unregister it from GitHub", error.Message);
+        Assert.Contains("Do not unregister it from GitHub", error.Message);
         Assert.Equal("Stop:disable Retire:keep", Steps(source));
     }
 }

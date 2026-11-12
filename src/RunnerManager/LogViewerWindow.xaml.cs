@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.IO;
 using System.Windows;
+using System.Windows.Input;
 using Microsoft.Win32;
 
 namespace RunnerManager;
@@ -12,6 +13,7 @@ public partial class LogViewerWindow : Window
     private readonly string? _folder;
     private readonly string _waitingText;
     private CancellationTokenSource? _cts;
+    /// <summary>The log shown, or empty while it loads, after a failed refresh and when the log is empty.</summary>
     private string _fullText = string.Empty;
 
     public LogViewerWindow(string title, string waitingText, Func<CancellationToken, Task<LogPayload>> load, string? folder = null)
@@ -42,10 +44,14 @@ public partial class LogViewerWindow : Window
             if (token.IsCancellationRequested) return;
             TitleText.Text = log.Title;
             SubtitleText.Text = $"Last {CountLines(log.Text)} lines  ·  captured {log.CreatedUtc.ToLocalTime():HH:mm:ss}";
-            _fullText = log.Text;
-            ApplyFilter();
-            StatePanel.Visibility = string.IsNullOrWhiteSpace(log.Text) ? Visibility.Visible : Visibility.Collapsed;
-            if (string.IsNullOrWhiteSpace(log.Text)) ShowState("", "The log is empty.");
+            if (!string.IsNullOrWhiteSpace(log.Text))
+            {
+                _fullText = log.Text;
+                StatePanel.Visibility = Visibility.Collapsed;
+                CopyButton.IsEnabled = SaveButton.IsEnabled = true;
+                ApplyFilter();
+            }
+            else ShowState("", "The log is empty.");
         }
         catch (OperationCanceledException) { }
         catch (Exception ex)
@@ -59,16 +65,20 @@ public partial class LogViewerWindow : Window
         }
     }
 
+    /// <summary>Shows a message instead of the log, and forgets the log, so the filter, Copy and Save do not use an old one.</summary>
     private void ShowState(string glyph, string text)
     {
         StateGlyph.Text = glyph;
         StateText.Text = text;
         StatePanel.Visibility = Visibility.Visible;
+        _fullText = string.Empty;
         LogText.Text = string.Empty;
+        CopyButton.IsEnabled = SaveButton.IsEnabled = false;
     }
 
     private void ApplyFilter()
     {
+        if (_fullText.Length == 0) return;
         var filter = FilterBox.Text.Trim();
         LogText.Text = filter.Length == 0
             ? _fullText
@@ -79,6 +89,23 @@ public partial class LogViewerWindow : Window
     private static int CountLines(string text) => string.IsNullOrEmpty(text) ? 0 : text.Count(c => c == '\n') + 1;
 
     private void FilterBox_TextChanged(object sender, System.Windows.Controls.TextChangedEventArgs e) => ApplyFilter();
+
+    private void Window_PreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.F && Keyboard.Modifiers == ModifierKeys.Control)
+        {
+            FilterBox.Focus();
+            FilterBox.SelectAll();
+            e.Handled = true;
+        }
+        else if (e.Key == Key.Escape)
+        {
+            // Esc clears the filter first, then closes.
+            if (FilterBox.IsKeyboardFocused && FilterBox.Text.Length > 0) FilterBox.Clear();
+            else Close();
+            e.Handled = true;
+        }
+    }
 
     private async void Refresh_Click(object sender, RoutedEventArgs e) => await LoadAsync();
 
@@ -94,7 +121,12 @@ public partial class LogViewerWindow : Window
             FileName = $"{string.Concat(TitleText.Text.Split(Path.GetInvalidFileNameChars()))}.log".Replace(' ', '-'),
             Filter = "Log files (*.log)|*.log|Text files (*.txt)|*.txt|All files|*.*"
         };
-        if (dialog.ShowDialog(this) == true) File.WriteAllText(dialog.FileName, _fullText);
+        if (dialog.ShowDialog(this) != true) return;
+        try { File.WriteAllText(dialog.FileName, _fullText); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+        {
+            DialogWindow.Error(this, "Could not save the log", ex.Message);
+        }
     }
 
     private void Folder_Click(object sender, RoutedEventArgs e)

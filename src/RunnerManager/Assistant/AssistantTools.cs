@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Globalization;
 using System.IO;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
@@ -78,12 +79,25 @@ public sealed class AssistantCall
         };
     }
 
+    /// <summary>How often a call that waits for an approval says so to the client (tests shorten it).</summary>
+    internal TimeSpan ApprovalProgressInterval { get; init; } = TimeSpan.FromSeconds(20);
+
     /// <summary>Asks the user when the rules in Settings → AI assistants require it. Throws when the user declines.</summary>
     public async Task ConfirmAsync(AssistantToolKind kind, string title, string message)
     {
         var ask = kind == AssistantToolKind.Destructive || (kind == AssistantToolKind.Change && FleetConfig.Current.Assistant.AskBeforeChanges);
         if (!ask) return;
-        if (!await _approve(title, message))
+        // The user may take minutes to answer. Progress now and then keeps a client with a short timeout for tool
+        // calls from giving up while the user reads the window.
+        Log("Waiting for the user to answer in a Runner Manager window.");
+        var answer = _approve(title, message);
+        using (var waiting = CancellationTokenSource.CreateLinkedTokenSource(CancellationToken))
+        {
+            while (await Task.WhenAny(answer, Task.Delay(ApprovalProgressInterval, waiting.Token)) != answer && !waiting.IsCancellationRequested)
+                Log("Still waiting for the user to answer in Runner Manager.");
+            waiting.Cancel();
+        }
+        if (!await answer)
             throw new AssistantException("The user declined this action in Runner Manager.");
         CancellationToken.ThrowIfCancellationRequested();
     }
@@ -118,22 +132,26 @@ public static class AssistantTools
             AssistantToolKind.Read, Schema(), ListPcsAsync),
         new AssistantTool("list_runners",
             "Lists the GitHub Actions self-hosted runners on every PC (or one PC): state (busy, idle, stopped), repository or organization, labels and version. " +
-            "problem says when a runner needs attention: its job is stuck (no CPU use or output for a while) or runs far longer than usual, or it is idle while jobs it can take wait.",
+            "problem says when a runner needs attention: its job is stuck (no CPU use or output for a while) or runs far longer than usual, or it is idle while jobs it can take wait. " +
+            "pc_online is false for a runner on a PC that cannot be reached now: its state is unknown, and last_known_state is what the PC reported last.",
             AssistantToolKind.Read, Schema(("pc", "string", "Only this PC. Optional.", false)), ListRunnersAsync),
         new AssistantTool("find_runner_for_repo",
-            "Checks whether a GitHub repository already has a self-hosted runner in the fleet (its own, or an organization runner). Call this before create_runner. Also returns the runs-on labels to use in workflows.",
+            "Checks whether a GitHub repository already has a self-hosted runner in the fleet (its own, or an organization runner). Call this before create_runner. Also returns the runs-on labels to use in workflows. " +
+            "runners_online counts the runners on PCs that can be reached now; a runner on an offline PC takes no jobs until its PC is back.",
             AssistantToolKind.Read, Schema(("repository", "string", "owner/name or a https://github.com/owner/name URL.", true)), FindRunnerAsync),
         new AssistantTool("create_runner",
-            "Creates a self-hosted runner for a GitHub repository or organization on a PC in the fleet: downloads the official runner, verifies it, and installs it as a Windows service. Picks the least busy PC when pc is omitted. Refuses when the repository already has a runner unless even_if_exists is true.",
+            "Creates a self-hosted runner for a GitHub repository or organization on a PC in the fleet: downloads the official runner, verifies it, and installs it as a Windows service. " +
+            "When pc is omitted, picks the PC with the fewest runners, and a managed PC (list_pcs: managed) only when no other PC can take it. " +
+            "Refuses when the repository already has a runner unless even_if_exists is true.",
             AssistantToolKind.Change, Schema(
                 ("repository", "string", "owner/name or a https://github.com/owner/name URL. Use an organization URL for an organization runner.", true),
-                ("pc", "string", "The PC to install it on. Optional; the least busy online PC is used.", false),
+                ("pc", "string", "The PC to install it on. Optional; the online PC with the fewest runners is used, a managed PC only as a last choice.", false),
                 ("name", "string", "Runner name. Optional; up to 64 letters, digits, '-', '_' and '.'.", false),
                 ("labels", "array", "Extra labels besides self-hosted, Windows and X64. Optional.", false),
                 ("even_if_exists", "boolean", "Create another runner even if the repository already has one.", false)),
             CreateRunnerAsync),
         new AssistantTool("control_runner",
-            "Starts, stops or restarts a runner's Windows service.",
+            "Starts, stops or restarts a runner's Windows service. Not for a runner that runs in a console window (list_runners: console).",
             AssistantToolKind.Change, Schema(
                 ("pc", "string", PcArgument, true),
                 ("runner", "string", RunnerArgument, true),
@@ -215,22 +233,42 @@ public static class AssistantTools
         catch (Exception ex)
         {
             var reason = ex is OperationCanceledException && cancellationToken.IsCancellationRequested ? "Cancelled by the assistant." : ex.Message;
-            if (tool.Kind != AssistantToolKind.Read) AssistantLog.Append($"{tool.Name}: {reason} {Summarize(arguments)}");
+            if (tool.Kind != AssistantToolKind.Read) AssistantLog.Append($"{tool.Name}: {AssistantLog.OneLine(reason, 200)} {Summarize(arguments)}");
             throw;
         }
     }
 
     // ----- Read tools -----
 
+    /// <summary>The fleet as this PC knows it, and the stuck and waiting checks, which ask GitHub. A test replaces them.</summary>
+    internal sealed record FleetReads(Func<Task<List<MachineInfo>>> Fleet, Func<List<MachineInfo>, Task<FleetHealth>> Health)
+    {
+        public static readonly FleetReads Live = new(() => MachineRelay.ReadFleetAsync(), EvaluateHealthAsync);
+    }
+
+    /// <summary>
+    /// The PCs that can be reached, as of now. <see cref="MachineInfo.IsReachable"/> goes by the clock: a PC counts as
+    /// online for 30 seconds after its last report. So a tool asks once, right after it read the fleet, and uses that
+    /// answer from then on. The reads from GitHub that follow can take longer than 30 seconds, and asked again after
+    /// them every PC would look offline.
+    /// </summary>
+    internal static HashSet<MachineInfo> ReachableNow(IEnumerable<MachineInfo> machines)
+        => machines.Where(m => m.IsReachable).ToHashSet<MachineInfo>(ReferenceEqualityComparer.Instance);
+
+    /// <summary>The PCs that changes can be sent to, as of now. Read once, like <see cref="ReachableNow"/> and for the same reason.</summary>
+    private static HashSet<MachineInfo> ManageableNow(IEnumerable<MachineInfo> machines)
+        => machines.Where(CanManage).ToHashSet<MachineInfo>(ReferenceEqualityComparer.Instance);
+
     private static async Task<object> ListPcsAsync(AssistantCall call)
     {
         var machines = await MachineRelay.ReadFleetAsync();
+        var online = ReachableNow(machines);
         return machines.Select(m => new
         {
             name = m.MachineName,
             this_pc = m.IsLocal,
             managed = m.IsManaged,
-            online = m.IsReachable,
+            online = online.Contains(m),
             problem = m.ConnectionProblem.Length > 0 ? m.ConnectionProblem : null,
             version = m.AppVersion,
             cpu_percent = m.CpuPercent,
@@ -238,67 +276,82 @@ public static class AssistantTools
             memory_gb = Math.Round(m.MemoryTotalGb, 1),
             disks = m.Disks.Select(d => new { drive = d.Name, free_gb = Math.Round(d.FreeGb), total_gb = Math.Round(d.TotalGb) }),
             runners = m.Runners.Length,
-            runners_running = m.Runners.Count(r => r.IsRunning),
-            runners_busy = m.Runners.Count(r => r.IsBusy),
+            // Left out for a PC that cannot be reached: what it reported last may no longer be true.
+            runners_running = online.Contains(m) ? m.Runners.Count(r => r.IsRunning) : (int?)null,
+            runners_busy = online.Contains(m) ? m.Runners.Count(r => r.IsBusy) : (int?)null,
             can_manage = CanManage(m)
         }).ToList();
     }
 
-    private static async Task<object> ListRunnersAsync(AssistantCall call)
+    private static Task<object> ListRunnersAsync(AssistantCall call) => ListRunnersAsync(call, FleetReads.Live);
+
+    internal static async Task<object> ListRunnersAsync(AssistantCall call, FleetReads reads)
     {
-        var machines = await MachineRelay.ReadFleetAsync();
+        var machines = await reads.Fleet();
+        var online = ReachableNow(machines);
         if (call.Text("pc") is { } pc) machines = new List<MachineInfo> { FindPc(machines, pc) };
-        var health = await EvaluateHealthAsync(machines);
-        return machines.SelectMany(m => m.Runners.Select(r => DescribeRunner(m, r, health))).ToList();
+        var health = await reads.Health(machines);
+        return machines.SelectMany(m => m.Runners.Select(r => DescribeRunner(m, r, online.Contains(m), health))).ToList();
     }
 
-    private static async Task<object> FindRunnerAsync(AssistantCall call)
+    private static Task<object> FindRunnerAsync(AssistantCall call) => FindRunnerAsync(call, FleetReads.Live);
+
+    internal static async Task<object> FindRunnerAsync(AssistantCall call, FleetReads reads)
     {
         var target = await ResolveTargetAsync(call.RequiredText("repository"));
-        var machines = await MachineRelay.ReadFleetAsync();
+        var machines = await reads.Fleet();
+        var online = ReachableNow(machines);
         var matches = await RunnersForAsync(machines, target);
-        var health = await EvaluateHealthAsync(matches.Select(x => x.Machine).Distinct().ToList());
+        var health = await reads.Health(matches.Select(x => x.Machine).Distinct().ToList());
         (string[] Labels, string Note)? runsOn = matches.Count > 0 ? RunsOn(matches) : null;
         return new
         {
             target = target.Display,
             has_runner = matches.Count > 0,
-            runners = matches.Select(x => DescribeRunner(x.Machine, x.Runner, health)),
+            runners_online = matches.Count(x => online.Contains(x.Machine)),
+            runners = matches.Select(x => DescribeRunner(x.Machine, x.Runner, online.Contains(x.Machine), health)).ToList(),
             runs_on = runsOn?.Labels,
-            next_step = runsOn is { } labels
-                ? $"Use runs-on: [{string.Join(", ", labels.Labels)}] in the workflow.{labels.Note}"
-                : "No runner yet. Call create_runner to add one."
+            next_step = FindNextStep(target, matches, runsOn, online)
         };
     }
 
-    private static async Task<object> JobStatusAsync(AssistantCall call)
+    /// <summary>What to do with the answer of find_runner_for_repo. A runner on a PC that cannot be reached is not one to count on.</summary>
+    /// <param name="online">The PCs that could be reached when the fleet was read (<see cref="ReachableNow"/>).</param>
+    internal static string FindNextStep(Target target, IReadOnlyCollection<(MachineInfo Machine, MachineRunnerStatus Runner)> matches,
+        (string[] Labels, string Note)? runsOn, IReadOnlySet<MachineInfo> online)
     {
-        var (machine, runner) = await LocateRunnerAsync(call);
-        var health = await EvaluateHealthAsync(new List<MachineInfo> { machine });
+        if (runsOn is not { } labels) return "No runner yet. Call create_runner to add one.";
+        var use = $"runs-on: [{string.Join(", ", labels.Labels)}]";
+        if (matches.Any(x => online.Contains(x.Machine))) return $"Use {use} in the workflow.{labels.Note}";
+        var pcs = string.Join(", ", matches.Select(x => x.Machine.MachineName).Distinct(StringComparer.OrdinalIgnoreCase));
+        return $"{(matches.Count == 1 ? "The runner" : "Every runner")} for {target.Display} is on a PC that is offline now ({pcs}), so jobs wait until it is back. " +
+               $"Tell the user. With {use} the workflow runs when the PC is online again; " +
+               $"to add a runner on a PC that is online, call create_runner with even_if_exists=true.{labels.Note}";
+    }
+
+    private static Task<object> JobStatusAsync(AssistantCall call) => JobStatusAsync(call, FleetReads.Live);
+
+    internal static async Task<object> JobStatusAsync(AssistantCall call, FleetReads reads)
+    {
+        var machines = await reads.Fleet();
+        var online = ReachableNow(machines);
+        var (machine, runner) = await LocateRunnerAsync(machines, call);
+        var health = await reads.Health(new List<MachineInfo> { machine });
         var problem = ProblemOf(runner, health);
         var queue = QueueOf(runner, health);
+        // What an offline PC reported last says nothing about now, and it cannot be asked for output. GitHub may
+        // still know a job that the runner took.
+        if (!online.Contains(machine))
+            return new
+            {
+                notice = UntrustedNotice, pc = machine.MachineName, pc_online = false, runner = runner.TitleText, target = TargetOf(runner),
+                state = UnknownState, last_known_state = StateOf(runner), job = await CurrentJobAsync(runner), queue,
+                note = $"{machine.MachineName} cannot be reached now, so what the runner is doing is not known. {machine.ConnectionProblem}".TrimEnd()
+            };
         if (!runner.IsBusy)
-            return new { notice = UntrustedNotice, pc = machine.MachineName, runner = runner.TitleText, target = TargetOf(runner), busy = false, state = StateOf(runner), problem, queue };
+            return new { notice = UntrustedNotice, pc = machine.MachineName, pc_online = true, runner = runner.TitleText, target = TargetOf(runner), busy = false, state = StateOf(runner), problem, queue };
 
-        object? job = null;
-        if (!string.IsNullOrEmpty(runner.RepositoryPath) && runner.AgentId != 0)
-        {
-            var (read, current) = await GitHubApi.GetCurrentJobAsync(runner.RepositoryPath, runner.AgentId);
-            if (read && current != null)
-                job = new
-                {
-                    workflow = Bounded(current.WorkflowName, 200),
-                    name = Bounded(current.Name, 200),
-                    run_number = current.RunNumber,
-                    url = current.HtmlUrl,
-                    started_utc = current.StartedUtc,
-                    steps = current.Steps.Take(100).Select(s =>
-                    {
-                        var view = LiveStepView.From(s, DateTime.UtcNow);
-                        return new { name = Bounded(s.Name, 200), state = view.State, duration = view.DurationText };
-                    })
-                };
-        }
+        var job = await CurrentJobAsync(runner);
 
         RunnerJobActivity? activity = null;
         string? note = null;
@@ -313,6 +366,7 @@ public static class AssistantTools
         {
             notice = UntrustedNotice,
             pc = machine.MachineName,
+            pc_online = true,
             runner = runner.TitleText,
             target = TargetOf(runner),
             busy = true,
@@ -328,6 +382,27 @@ public static class AssistantTools
                 memory_mb = p.MemoryBytes / (1024 * 1024)
             }),
             note
+        };
+    }
+
+    /// <summary>The job GitHub says the runner is running now, or null.</summary>
+    private static async Task<object?> CurrentJobAsync(MachineRunnerStatus runner)
+    {
+        if (string.IsNullOrEmpty(runner.RepositoryPath) || runner.AgentId == 0) return null;
+        var (read, current) = await GitHubApi.GetCurrentJobAsync(runner.RepositoryPath, runner.AgentId, runner.AgentName, runner.JobStartedUtc);
+        if (!read || current == null) return null;
+        return new
+        {
+            workflow = Bounded(current.WorkflowName, 200),
+            name = Bounded(current.Name, 200),
+            run_number = current.RunNumber,
+            url = current.HtmlUrl,
+            started_utc = current.StartedUtc,
+            steps = current.Steps.Take(100).Select(s =>
+            {
+                var view = LiveStepView.From(s, DateTime.UtcNow);
+                return new { name = Bounded(s.Name, 200), state = view.State, duration = view.DurationText };
+            })
         };
     }
 
@@ -367,17 +442,20 @@ public static class AssistantTools
         return new { notice = UntrustedNotice, pc = machine.MachineName, runner = runner.TitleText, target = TargetOf(runner), log = log.Title, text };
     }
 
-    private static async Task<object> RecentAlertsAsync(AssistantCall call)
+    private static Task<object> RecentAlertsAsync(AssistantCall call) => RecentAlertsAsync(call, FleetReads.Live);
+
+    internal static async Task<object> RecentAlertsAsync(AssistantCall call, FleetReads reads)
     {
-        var machines = await MachineRelay.ReadFleetAsync();
-        var health = await EvaluateHealthAsync(machines);
+        var machines = await reads.Fleet();
+        var online = ReachableNow(machines);
+        var health = await reads.Health(machines);
         var hours = call.Number("hours", 24, 1, 168);
         var problems = machines.SelectMany(m => m.Runners.Select(r => (Machine: m, Runner: r)))
             .Select(x => (x.Machine, x.Runner, Health: health.Runners.GetValueOrDefault(JobHealth.Key(x.Runner))))
             .Where(x => x.Health is { IsProblem: true })
             .Select(x => (object)new { pc = x.Machine.MachineName, runner = x.Runner.TitleText, target = TargetOf(x.Runner), problem = x.Health!.Label, detail = Bounded(x.Health.Detail, 500) })
             .Concat(health.Unserved.Select(j => (object)new { repository = j.Repository, problem = "Job waiting for a runner", detail = Bounded(j.Text, 500) }))
-            .Concat(machines.Where(m => !m.IsReachable).Select(m => (object)new { pc = m.MachineName, problem = "PC offline", detail = m.ConnectionProblem.Length > 0 ? m.ConnectionProblem : "Its fleet agent is not reporting." }))
+            .Concat(machines.Where(m => !online.Contains(m)).Select(m => (object)new { pc = m.MachineName, problem = "PC offline", detail = m.ConnectionProblem.Length > 0 ? m.ConnectionProblem : "Its fleet agent is not reporting." }))
             .ToList();
         return new
         {
@@ -403,42 +481,75 @@ public static class AssistantTools
         (machine, runner) = await RecheckAsync(machine, runner, mustBeIdle: false);
         if (!runner.IsBusy) throw new AssistantException($"{runner.TitleText} finished its job while the approval was open, so nothing was changed.");
         call.CancellationToken.ThrowIfCancellationRequested();
-        var stopped = new List<string>();
-        await Actions.RunOnMachineAsync(machine, "runner", runner.CommandKey, "StopJob", call.Log,
-            async () => stopped = await RunnerActivity.StopJobProcessesAsync(runner.CommandKey), TimeSpan.FromMinutes(2));
-        return new { done = true, pc = machine.MachineName, runner = runner.TitleText, target = TargetOf(runner), stopped = stopped.Count > 0 ? stopped : null };
+        // The PC's fleet agent does it and says what it did, also on this PC: which processes it stopped, or that
+        // the job had none. That answer comes back as the last progress line, after the PC's name.
+        string? result = null;
+        var prefix = $"{machine.MachineName}: ";
+        await Actions.RunOnMachineAsync(machine, "runner", runner.CommandKey, "StopJob",
+            message =>
+            {
+                if (message.StartsWith(prefix, StringComparison.Ordinal)) result = message[prefix.Length..];
+                call.Log(message);
+            },
+            async () =>
+            {
+                var stopped = await RunnerActivity.StopJobProcessesAsync(runner.CommandKey);
+                result = stopped.Count == 0 ? "The job had no processes to stop" : $"Stopped the job's processes: {string.Join(", ", stopped)}";
+            },
+            TimeSpan.FromMinutes(2));
+        return StopJobResult(machine, runner, result);
     }
+
+    /// <summary>
+    /// What stop_job_processes answers once the fleet agent ran the command; a failure, or no answer in time, is an
+    /// error and not this. <c>done</c> is what AI tools read from the other change tools and from earlier versions
+    /// of this one. What the agent stopped is in <c>result</c>.
+    /// </summary>
+    /// <param name="result">The agent's own text, or null when it sent none.</param>
+    internal static object StopJobResult(MachineInfo machine, MachineRunnerStatus runner, string? result) => new
+    {
+        done = true,
+        pc = machine.MachineName,
+        runner = runner.TitleText,
+        target = TargetOf(runner),
+        result = Bounded(result ?? $"{machine.MachineName} did not say what it stopped.", 1000)
+    };
 
     private static async Task<object> CreateRunnerAsync(AssistantCall call)
     {
         var target = await ResolveTargetAsync(call.RequiredText("repository"));
         var evenIfExists = call.Flag("even_if_exists");
         var machines = await MachineRelay.ReadFleetAsync();
-        if (!evenIfExists && await RunnersForAsync(machines, target) is { Count: > 0 } existing) throw AlreadyHasRunner(target, existing);
+        // Asked now, before the names below are looked up on GitHub: see ReachableNow.
+        var online = ReachableNow(machines);
+        var manageable = ManageableNow(machines);
+        if (!evenIfExists && await RunnersForAsync(machines, target) is { Count: > 0 } existing) throw AlreadyHasRunner(target, existing, online);
 
-        var machine = call.Text("pc") is { } pc ? FindPc(machines, pc) : PickPc(machines);
-        RequireAgent(machine);
+        var machine = call.Text("pc") is { } pc ? FindPc(machines, pc) : PickPc(machines, manageable.Contains);
+        RequireAgent(machine, manageable.Contains(machine));
         var name = call.Text("name") ?? DefaultRunnerName(target, machine);
         var labels = call.TextList("labels");
         if (RunnerService.RunnerNameProblem(name) is { } nameProblem) throw new AssistantException(nameProblem);
-        if (name.Length > MaxRunnerNameLength) throw new AssistantException($"The runner name is too long: GitHub allows at most {MaxRunnerNameLength} characters.");
+        if (name.Length > MaxRunnerNameLength) throw new AssistantException($"The runner name is too long. Use at most {MaxRunnerNameLength} characters.");
         if (RunnerService.LabelsProblem(labels) is { } labelProblem) throw new AssistantException(labelProblem);
 
         // One create per repository and PC at a time, so a client that gives up and asks again gets no duplicate.
         using var claim = CreateClaims.Claim(target, machine, evenIfExists);
         await call.ConfirmAsync(AssistantToolKind.Change, "Create a runner?",
-            $"An AI assistant wants to create the runner “{name}” for {target.Display} on {machine.MachineName}" +
+            $"An AI assistant wants to create the runner “{name}” for {target.Display} on {PcText(machine)}" +
             (labels.Length > 0 ? $", with the labels {string.Join(", ", labels)}." : "."));
 
         // The approval may have waited a while: check again with the fleet as it is now.
         machines = await MachineRelay.ReadFleetAsync();
-        if (!evenIfExists && await RunnersForAsync(machines, target) is { Count: > 0 } added) throw AlreadyHasRunner(target, added);
+        online = ReachableNow(machines);
+        manageable = ManageableNow(machines);
+        if (!evenIfExists && await RunnersForAsync(machines, target) is { Count: > 0 } added) throw AlreadyHasRunner(target, added, online);
         machine = machines.FirstOrDefault(m => m.MachineKey == machine.MachineKey)
                   ?? throw new AssistantException($"{machine.MachineName} is no longer in the fleet. Nothing was changed.");
-        RequireAgent(machine);
+        RequireAgent(machine, manageable.Contains(machine));
         call.CancellationToken.ThrowIfCancellationRequested();
 
-        call.Log($"Creating {name} for {target.Display} on {machine.MachineName}. The download takes about 1–3 minutes…");
+        call.Log($"Creating {name} for {target.Display} on {machine.MachineName}. The download usually takes 1–3 minutes, and longer on a slow connection…");
         await Actions.CreateRunnerAsync(machine, target.Url, name, labels, call.Log);
         claim.Succeeded();
         var runsOn = DefaultLabels.Concat(labels).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
@@ -447,6 +558,7 @@ public static class AssistantTools
             created = true,
             runner = name,
             pc = machine.MachineName,
+            managed_pc = machine.IsManaged ? true : (bool?)null,
             target = target.Display,
             runs_on = runsOn,
             next_step = $"Use runs-on: [{string.Join(", ", runsOn)}] in the repository's workflows."
@@ -464,13 +576,31 @@ public static class AssistantTools
         };
         var (machine, runner) = await LocateRunnerAsync(call);
         RequireAgent(machine);
-        if (!runner.ServiceInstalled) throw new AssistantException($"{runner.TitleText} has no Windows service, so it cannot be controlled.");
+        RequireService(machine, runner, action);
         await call.ConfirmAsync(AssistantToolKind.Change, $"{action} a runner?",
             $"An AI assistant wants to {action.ToLowerInvariant()} the runner “{runner.TitleText}” for {TargetText(runner)} on {machine.MachineName}.");
         (machine, runner) = await RecheckAsync(machine, runner, mustBeIdle: false);
+        // It may have been opened in a console window while the approval waited.
+        RequireService(machine, runner, action);
         call.CancellationToken.ThrowIfCancellationRequested();
         await Actions.ControlRunnerAsync(machine, runner, action, call.Log);
         return new { done = true, pc = machine.MachineName, runner = runner.TitleText, target = TargetOf(runner), action = action.ToLowerInvariant() };
+    }
+
+    /// <summary>
+    /// control_runner works on the runner's Windows service, as the dashboard's Start, Stop and Restart do. A runner
+    /// that has a service but runs in a console window now is refused, as the dashboard does: starting the service
+    /// would run the runner twice, and stopping it would leave the console runner running.
+    /// </summary>
+    internal static void RequireService(MachineInfo machine, MachineRunnerStatus runner, string action)
+    {
+        if (!runner.ServiceInstalled || string.IsNullOrWhiteSpace(runner.ServiceName))
+            throw new AssistantException($"{runner.TitleText} has no Windows service, so it cannot be controlled.");
+        if (!runner.IsInteractive) return;
+        var where = $"{runner.TitleText} runs in a console window on {machine.MachineName} now, and its Windows service is not used.";
+        throw new AssistantException(action == "Stop"
+            ? $"{where} Stopping the service would not stop the runner. To stop it, close its console window on {machine.MachineName}. Nothing was changed."
+            : $"{where} Starting the service would run the runner twice. To run it as a service, close its console window on {machine.MachineName} first. Nothing was changed.");
     }
 
     private static async Task<object> MoveRunnerAsync(AssistantCall call)
@@ -484,7 +614,7 @@ public static class AssistantTools
         if (runner.IsBusy) throw new AssistantException($"{runner.TitleText} is running a job. Try again when it is idle.");
         var deleteOld = call.Flag("delete_old_files");
         await call.ConfirmAsync(AssistantToolKind.Destructive, "Move a runner?",
-            $"An AI assistant wants to move the runner “{runner.TitleText}” for {TargetText(runner)} from {source.MachineName} to {target.MachineName}" +
+            $"An AI assistant wants to move the runner “{runner.TitleText}” for {TargetText(runner)} from {source.MachineName} to {PcText(target)}" +
             (deleteOld ? ", and delete its folder on the old PC." : "."));
         (source, runner) = await RecheckAsync(source, runner, mustBeIdle: true);
         target = (await MachineRelay.ReadFleetAsync()).FirstOrDefault(m => m.MachineKey == target.MachineKey)
@@ -545,33 +675,61 @@ public static class AssistantTools
         var target = ParseTarget(text);
         if (target.IsOrganization) return target;
         // The current name, so a renamed repository matches its runners and registers correctly.
-        return target with { Path = await CurrentNameAsync(target.Path) ?? throw new AssistantException(
-            $"Could not find {target.Path} on GitHub. Check the name, and that GitHub is connected in Runner Manager with access to it.") };
+        return target with { Path = CurrentNameOrThrow(target.Path, await LookUpRepositoryAsync(target.Path)) };
     }
 
-    /// <summary>Repository names as GitHub knows them now (it follows renames and transfers), for a while.</summary>
-    private static readonly ConcurrentDictionary<string, (string? Current, DateTime Until)> CurrentNames = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>The repository's current name. Says whether GitHub does not know the repository or could not be asked.</summary>
+    internal static string CurrentNameOrThrow(string path, RepositoryLookup lookup)
+        => lookup.Current ?? throw new AssistantException(lookup.NotFound
+            ? $"Could not find {path} on GitHub. Check the name, and that GitHub is connected in Runner Manager with access to it."
+            : $"GitHub could not be reached to check {path}. {lookup.Problem}".TrimEnd());
+
+    /// <summary>
+    /// What GitHub answered about a repository name: its current "owner/name", that there is no such repository
+    /// (a 404), or nothing, with the reason in <paramref name="Problem"/>.
+    /// </summary>
+    internal readonly record struct RepositoryLookup(string? Current, bool NotFound, string Problem);
+
+    /// <summary>What GitHub knows about repository names (it follows renames and transfers), for a while.</summary>
+    private static readonly ConcurrentDictionary<string, (RepositoryLookup Lookup, DateTime Until)> RepositoryLookups = new(StringComparer.OrdinalIgnoreCase);
     private static readonly SemaphoreSlim LookupGate = new(4, 4);
 
-    /// <summary>The repository's current "owner/name", or null when GitHub does not know it (or cannot be asked).</summary>
-    private static async Task<string?> CurrentNameAsync(string path)
+    /// <summary>Asks GitHub for a repository's current name. Only GitHub's own answers are remembered.</summary>
+    /// <param name="api">Runs "gh api" with an endpoint and its options, as <see cref="GitHubCli.ApiAsync(string, string[])"/>; a test replaces it.</param>
+    internal static async Task<RepositoryLookup> LookUpRepositoryAsync(string path, Func<string, string[], Task<CommandResult>>? api = null)
     {
-        if (CurrentNames.TryGetValue(path, out var known) && DateTime.UtcNow < known.Until) return known.Current;
+        if (RepositoryLookups.TryGetValue(path, out var known) && DateTime.UtcNow < known.Until) return known.Lookup;
         await LookupGate.WaitAsync();
         try
         {
-            var result = await GitHubCli.RunAsync($"api repos/{path} --jq .full_name");
-            string? current = null;
-            if (result.ExitCode == 0)
-            {
-                try { current = ParseTarget(result.Output.Trim()) is { IsOrganization: false } parsed ? parsed.Path : null; }
-                catch (AssistantException) { }
-            }
-            CurrentNames[path] = (current, DateTime.UtcNow + (current != null ? TimeSpan.FromMinutes(30) : TimeSpan.FromMinutes(2)));
-            return current;
+            // Each argument on its own, so nothing in the path can become another option of gh.
+            var endpoint = $"repos/{path}";
+            string[] options = ["--jq", ".full_name"];
+            var lookup = ReadLookup(await (api ?? GitHubCli.ApiAsync)(endpoint, options));
+            // A timeout, a rate limit or a missing sign-in says nothing about the repository, so the next call asks again.
+            if (lookup.Current != null) RepositoryLookups[path] = (lookup, DateTime.UtcNow + TimeSpan.FromMinutes(30));
+            else if (lookup.NotFound) RepositoryLookups[path] = (lookup, DateTime.UtcNow + TimeSpan.FromMinutes(2));
+            return lookup;
         }
         finally { LookupGate.Release(); }
     }
+
+    internal static RepositoryLookup ReadLookup(CommandResult result)
+    {
+        if (result.ExitCode != 0)
+            return GitHubCli.IsNotFound(result.Error)
+                ? new RepositoryLookup(null, NotFound: true, string.Empty)
+                : new RepositoryLookup(null, NotFound: false, AssistantLog.OneLine(result.Error, 300));
+        try
+        {
+            if (ParseTarget(result.Output.Trim()) is { IsOrganization: false } parsed) return new RepositoryLookup(parsed.Path, NotFound: false, string.Empty);
+        }
+        catch (AssistantException) { }
+        return new RepositoryLookup(null, NotFound: false, "GitHub sent an answer that could not be read.");
+    }
+
+    /// <summary>The repository's current "owner/name", or null when GitHub does not know it (or cannot be asked).</summary>
+    private static async Task<string?> CurrentNameAsync(string path) => (await LookUpRepositoryAsync(path)).Current;
 
     /// <summary>The runners that serve a repository or organization, comparing repositories by their current names.</summary>
     private static async Task<List<(MachineInfo Machine, MachineRunnerStatus Runner)>> RunnersForAsync(IEnumerable<MachineInfo> machines, Target target)
@@ -605,12 +763,17 @@ public static class AssistantTools
         catch (AssistantException) { return false; }
     }
 
-    private static AssistantException AlreadyHasRunner(Target target, List<(MachineInfo Machine, MachineRunnerStatus Runner)> existing)
+    /// <param name="online">The PCs that could be reached when the fleet was read (<see cref="ReachableNow"/>).</param>
+    internal static AssistantException AlreadyHasRunner(Target target, List<(MachineInfo Machine, MachineRunnerStatus Runner)> existing, IReadOnlySet<MachineInfo> online)
     {
         var runsOn = RunsOn(existing);
-        return new AssistantException($"{target.Display} already has a runner: " +
-                                      string.Join(", ", existing.Select(x => $"{x.Runner.TitleText} on {x.Machine.MachineName}")) +
-                                      $". Use it with runs-on: [{string.Join(", ", runsOn.Labels)}], or pass even_if_exists=true to add another.{runsOn.Note}");
+        var list = string.Join(", ", existing.Select(x => $"{x.Runner.TitleText} on {x.Machine.MachineName}{(online.Contains(x.Machine) ? string.Empty : " (offline)")}"));
+        var use = $"runs-on: [{string.Join(", ", runsOn.Labels)}]";
+        // A runner on a PC that cannot be reached takes no jobs now: say so, instead of sending the assistant to it.
+        return new AssistantException(existing.Any(x => online.Contains(x.Machine))
+            ? $"{target.Display} already has a runner: {list}. Use it with {use}, or pass even_if_exists=true to add another.{runsOn.Note}"
+            : $"{target.Display} already has a runner, but its PC is offline now: {list}. Jobs with {use} wait until the PC is back. " +
+              $"Tell the user, or pass even_if_exists=true to add a runner on a PC that is online.{runsOn.Note}");
     }
 
     /// <summary>
@@ -658,15 +821,21 @@ public static class AssistantTools
             ? queue.Take(30).Select(q => new { job = Bounded(q.Title, 300), state = Bounded(q.Detail, 200), running = q.Running, url = q.Url })
             : null;
 
-    private static object DescribeRunner(MachineInfo machine, MachineRunnerStatus runner, FleetHealth? health = null)
+    /// <summary>The state of a runner on a PC that cannot be reached: what the PC reported last may no longer be true.</summary>
+    internal const string UnknownState = "unknown";
+
+    /// <param name="online">Whether the PC could be reached when the fleet was read (<see cref="ReachableNow"/>).</param>
+    internal static object DescribeRunner(MachineInfo machine, MachineRunnerStatus runner, bool online, FleetHealth? health = null)
     {
         var labels = LabelsOf(machine, runner);
         return new
         {
             pc = machine.MachineName,
+            pc_online = online,
             name = runner.TitleText,
             target = TargetOf(runner),
-            state = StateOf(runner),
+            state = online ? StateOf(runner) : UnknownState,
+            last_known_state = online ? null : StateOf(runner),
             problem = health == null ? null : ProblemOf(runner, health),
             console = runner.IsInteractive,
             // "windows", "signin" or "signin-shared" (a console runner opened at sign-in), "off", "disabled", "none"; null from older agents.
@@ -780,18 +949,29 @@ public static class AssistantTools
             ? FleetConfig.Current.FleetKey != null && (!machine.IsLocalOnly || machine.LocalAgentOutdated)
             : machine.IsOnline && machine.AgentProtocolVersion >= 9;
 
-    private static void RequireAgent(MachineInfo machine)
+    private static void RequireAgent(MachineInfo machine) => RequireAgent(machine, CanManage(machine));
+
+    /// <param name="canManage">What <see cref="CanManage"/> said when the fleet was read, where slow work lies between.</param>
+    private static void RequireAgent(MachineInfo machine, bool canManage)
     {
-        if (CanManage(machine)) return;
+        if (canManage) return;
         throw new AssistantException(machine.IsLocal
             ? "This PC's fleet agent is not running, so Runner Manager cannot make changes for an assistant. Open Runner Manager, which starts it again."
             : $"{machine.MachineName} cannot be reached or runs an older Runner Manager. {machine.ConnectionProblem}".Trim());
     }
 
-    /// <summary>The PC for a new runner when the assistant does not name one: online, then fewest runners, then most free space.</summary>
-    internal static MachineInfo PickPc(IEnumerable<MachineInfo> machines)
-        => machines.Where(CanManage)
-               .OrderBy(m => m.Runners.Length)
+    /// <summary>A PC's name for an approval, which says when the PC is managed one way: it usually belongs to someone else.</summary>
+    internal static string PcText(MachineInfo machine) => machine.IsManaged ? $"the managed PC {machine.MachineName}" : machine.MachineName;
+
+    /// <summary>
+    /// The PC for a new runner when the assistant does not name one: online, then the fleet's own PCs before PCs it
+    /// manages one way (which usually belong to someone else), then fewest runners, then most free space.
+    /// </summary>
+    /// <param name="canManage">What <see cref="CanManage"/> said when the fleet was read; asked now when null.</param>
+    internal static MachineInfo PickPc(IEnumerable<MachineInfo> machines, Func<MachineInfo, bool>? canManage = null)
+        => machines.Where(canManage ?? CanManage)
+               .OrderBy(m => m.IsManaged)
+               .ThenBy(m => m.Runners.Length)
                .ThenByDescending(m => m.Disks.FirstOrDefault(d => d.Name.StartsWith("C", StringComparison.OrdinalIgnoreCase))?.FreeGb ?? 0)
                .FirstOrDefault()
            ?? throw new AssistantException("No PC can take a new runner right now. Check that the fleet agents are running.");
@@ -803,8 +983,9 @@ public static class AssistantTools
         return name.Length > MaxRunnerNameLength ? name[..MaxRunnerNameLength].TrimEnd('-') : name;
     }
 
+    /// <summary>The call's arguments for the action log: on one line and cut short, however large the client made them.</summary>
     private static string Summarize(JsonElement arguments)
-        => arguments.ValueKind == JsonValueKind.Object ? arguments.GetRawText() : string.Empty;
+        => arguments.ValueKind == JsonValueKind.Object ? AssistantLog.OneLine(arguments.GetRawText(), 240) : string.Empty;
 
     private static JsonObject Schema(params (string Name, string Type, string Description, bool Required)[] properties)
     {
@@ -880,10 +1061,16 @@ public static class AssistantTools
     }
 }
 
-/// <summary>A record of what assistants changed, shown in Settings → AI assistants.</summary>
+/// <summary>
+/// A record of what assistants changed, shown in Settings → AI assistants. Every entry is one line of limited length
+/// that starts with its time, so text an assistant chose (its name, a call's arguments) cannot pass for an entry of
+/// its own. Like agent.log, the file starts again when it is large, and one older file is kept.
+/// </summary>
 public static class AssistantLog
 {
-    private static readonly string LogPath = Path.Combine(FleetConfig.StateDir, "assistant.log");
+    internal static readonly string LogPath = Path.Combine(FleetConfig.StateDir, "assistant.log");
+    internal const long MaxLogBytes = 1024 * 1024;
+    internal const int MaxEntryLength = 500;
     private static readonly object Gate = new();
 
     public static void Append(string message)
@@ -893,15 +1080,50 @@ public static class AssistantLog
             lock (Gate)
             {
                 Directory.CreateDirectory(FleetConfig.StateDir);
-                File.AppendAllText(LogPath, $"{DateTime.Now:yyyy-MM-dd HH:mm:ss}  {message}{Environment.NewLine}");
+                try
+                {
+                    var log = new FileInfo(LogPath);
+                    if (log.Exists && log.Length > MaxLogBytes) File.Move(LogPath, LogPath + ".1", overwrite: true);
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+                File.AppendAllText(LogPath, $"{DateTime.Now:yyyy-MM-dd HH:mm:ss}  {OneLine(message, MaxEntryLength)}{Environment.NewLine}");
             }
         }
         catch { }
     }
 
+    /// <summary>The newest entries, newest first.</summary>
     public static IReadOnlyList<string> Recent(int count)
     {
-        try { return File.Exists(LogPath) ? File.ReadLines(LogPath).TakeLast(count).Reverse().ToList() : Array.Empty<string>(); }
+        try
+        {
+            var lines = ReadLines(LogPath).TakeLast(count).ToList();
+            // Right after the file started again, the rest comes from the older one.
+            if (lines.Count < count) lines.InsertRange(0, ReadLines(LogPath + ".1").TakeLast(count - lines.Count));
+            lines.Reverse();
+            return lines;
+        }
         catch { return Array.Empty<string>(); }
+    }
+
+    private static IEnumerable<string> ReadLines(string path) => File.Exists(path) ? File.ReadLines(path) : Array.Empty<string>();
+
+    /// <summary>
+    /// Text on one line, at most <paramref name="max"/> characters and then "…". Line breaks, tabs, runs of spaces and
+    /// characters that are not shown (such as those that change the reading direction) each become one space.
+    /// </summary>
+    internal static string OneLine(string? text, int max)
+    {
+        var line = new StringBuilder();
+        foreach (var rune in (text ?? string.Empty).EnumerateRunes())
+        {
+            var blank = Rune.GetUnicodeCategory(rune) is UnicodeCategory.Control or UnicodeCategory.Format or UnicodeCategory.LineSeparator
+                or UnicodeCategory.ParagraphSeparator or UnicodeCategory.SpaceSeparator or UnicodeCategory.PrivateUse or UnicodeCategory.OtherNotAssigned;
+            if (blank && (line.Length == 0 || line[^1] == ' ')) continue;
+            if (line.Length + (blank ? 1 : rune.Utf16SequenceLength) > max) return line.ToString().TrimEnd() + "…";
+            if (blank) line.Append(' ');
+            else line.Append(rune.ToString());
+        }
+        return line.ToString().TrimEnd();
     }
 }

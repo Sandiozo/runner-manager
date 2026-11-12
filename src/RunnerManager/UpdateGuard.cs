@@ -14,6 +14,8 @@ public sealed record PendingUpdate
     public int FailedStarts { get; init; }
     /// <summary>An agent of this version has started and has not yet become healthy or exited cleanly.</summary>
     public bool Running { get; init; }
+    /// <summary>Agent starts of this version so far, so a rollback can say whether it ever started.</summary>
+    public int Starts { get; init; }
 }
 
 public sealed record UpdateState
@@ -33,8 +35,9 @@ public enum DashboardUpdateDecision { Nothing, MarkHealthy, RollBack, Forget }
 /// <summary>
 /// Undoes an update that does not work on this PC. Installing a release keeps the exe it replaces as
 /// RunnerManager.exe.previous and marks the update as pending. Each start of the new fleet agent is counted; when it
-/// keeps ending before it ran for <see cref="HealthyAfter"/>, or never starts at all, the previous exe is put back.
-/// Once an agent has run that long, the version is recorded as good.
+/// keeps ending before it worked, or never starts at all, the previous exe is put back. Once an agent has run for
+/// <see cref="HealthyAfter"/> and answered a status request on this PC, the version is recorded as good; one that runs on
+/// for <see cref="AnswerWaitLimit"/> more without answering is kept and no longer watched.
 /// </summary>
 public static class UpdateGuard
 {
@@ -69,8 +72,31 @@ public static class UpdateGuard
         var failed = pending.FailedStarts + (pending.Running ? 1 : 0);
         return failed >= MaxFailedStarts
             ? (AgentStartDecision.RollBack, pending with { FailedStarts = failed, Running = false })
-            : (AgentStartDecision.Watch, pending with { FailedStarts = failed, Running = true });
+            : (AgentStartDecision.Watch, pending with { FailedStarts = failed, Running = true, Starts = pending.Starts + 1 });
     }
+
+    /// <summary>
+    /// Why the agent undoes an update after <paramref name="stops"/> starts that ended before it worked. With a fleet code
+    /// it works once it answers a status request on this PC; without one, once it has run for <see cref="HealthyAfter"/>.
+    /// </summary>
+    internal static string AgentStopsReason(int stops, bool answersStatus) => answersStatus
+        ? $"the fleet agent stopped {stops} times before it answered a status request on this PC"
+        : $"the fleet agent stopped {stops} times within {HealthyAfter.TotalMinutes:0} minutes of starting";
+
+    /// <summary>Why the dashboard undoes an update whose agent is not running: it never started, or it stopped and did not start again.</summary>
+    internal static string DashboardRollbackReason(PendingUpdate pending)
+        => pending.Starts > 0 || pending.Running || pending.FailedStarts > 0
+            ? $"its fleet agent stopped before it worked and was not running again for {AgentDownLimit.TotalMinutes:0} minutes"
+            : $"its fleet agent did not start within {AgentStartDeadline.TotalMinutes:0} minutes";
+
+    /// <summary>
+    /// Stops watching <paramref name="version"/>: its agent ran for the whole wait without stopping, so later stops (a
+    /// restart of the PC, a sign-out) are not failed starts of the update. Another version's pending update stays.
+    /// </summary>
+    internal static UpdateState StopWatching(UpdateState state, string version)
+        => state.Pending is { } pending && AppUpdater.CompareVersions(pending.Version, version) == 0
+            ? state with { Pending = null }
+            : state;
 
     /// <summary>
     /// What a dashboard does about a pending update: forget it when another version was installed since, mark it healthy
@@ -156,15 +182,60 @@ public static class UpdateGuard
         if (decision == AgentStartDecision.Nothing) return true;
         Save(state with { Pending = pending });
         if (decision == AgentStartDecision.RollBack)
-            return !RollBack($"the fleet agent stopped {pending!.FailedStarts} times within {HealthyAfter.TotalMinutes:0} minutes of starting");
+            return !RollBack(AgentStopsReason(pending!.FailedStarts, answersStatus: FleetConfig.Current.FleetKey != null));
 
         var version = AppUpdater.CurrentVersion;
         _ = Task.Run(async () =>
         {
-            await Task.Delay(HealthyAfter);
-            MarkHealthy(version);
+            if (await WaitUntilAnsweringAsync(AgentAnswersStatusAsync, HealthyAfter, AnswerRetryInterval, AnswerWaitLimit))
+            {
+                MarkHealthy(version);
+                return;
+            }
+            // It stayed up all this time, so this version starts and runs. A status request can fail for reasons that
+            // another version would not fix (for example another program on the fleet port), so the update is kept.
+            Change(s => StopWatching(s, version));
+            MachineRelay.AppendAgentLog($"The fleet agent of v{version} has run for {(HealthyAfter + AnswerWaitLimit).TotalMinutes:0} minutes " +
+                                        "but does not answer status requests on this PC. The update is kept and is no longer watched.");
         });
         return true;
+    }
+
+    /// <summary>After <see cref="HealthyAfter"/>, how often the agent asks itself for its status until it answers.</summary>
+    internal static readonly TimeSpan AnswerRetryInterval = TimeSpan.FromSeconds(30);
+    /// <summary>How long after <see cref="HealthyAfter"/> the agent keeps asking.</summary>
+    internal static readonly TimeSpan AnswerWaitLimit = TimeSpan.FromMinutes(30);
+
+    /// <summary>
+    /// Waits <paramref name="after"/>, then asks until <paramref name="answers"/> is true (answered) or null (nothing to ask),
+    /// for at most <paramref name="limit"/>. Returns false when it never answered.
+    /// </summary>
+    internal static async Task<bool> WaitUntilAnsweringAsync(Func<Task<bool?>> answers, TimeSpan after, TimeSpan retry, TimeSpan limit)
+    {
+        await Task.Delay(after);
+        var deadline = DateTime.UtcNow + limit;
+        while (true)
+        {
+            if (await answers() != false) return true;
+            if (DateTime.UtcNow >= deadline) return false;
+            await Task.Delay(retry);
+        }
+    }
+
+    /// <summary>
+    /// Whether this PC's fleet agent answers a status request over the fleet connection, as the dashboard asks it: true when
+    /// it answered, false when not, null without a pairing code (nothing can ask it then, so staying up is all it can show).
+    /// </summary>
+    private static async Task<bool?> AgentAnswersStatusAsync()
+    {
+        if (FleetConfig.Current.FleetKey == null) return null;
+        try
+        {
+            var response = await FleetNetwork.CallAsync("127.0.0.1", MachineRelay.LocalMachineKey, new FleetRequest { Op = "status" },
+                TimeSpan.FromSeconds(30));
+            return response.Status != null;
+        }
+        catch { return false; }
     }
 
     /// <summary>Called when the fleet agent ends normally, so the exit does not count as a crash.</summary>
@@ -181,6 +252,8 @@ public static class UpdateGuard
     /// <summary>Checks a pending update from the dashboard (see <see cref="DecideForDashboard"/>). Returns a message to show, if any.</summary>
     public static async Task<string?> CheckFromDashboardAsync(bool agentInstalled)
     {
+        // A swap cut off by a crash of the agent leaves no exe for the tasks to start; this dashboard still runs.
+        if (await Task.Run(() => RepairMissingExe(tellUser: true)) is { } missing) return missing;
         var state = Load();
         if (state.Pending == null) return null;
         var running = !agentInstalled || await MachineRelay.IsAgentRunningAsync();
@@ -197,13 +270,58 @@ public static class UpdateGuard
                 MarkHealthy(state.Pending.Version);
                 return null;
             case DashboardUpdateDecision.RollBack:
-                if (!await Task.Run(() => RollBack($"its fleet agent did not start within {AgentStartDeadline.TotalMinutes:0} minutes"))) return null;
+                var reason = DashboardRollbackReason(state.Pending);
+                if (!await Task.Run(() => RollBack(reason))) return null;
                 await ScheduledTasks.RunTaskAsync(ScheduledTasks.AgentTaskName);
                 return TakeRollbackNotice();
             default:
                 return null;
         }
     }
+
+    private static bool _missingLogged;
+    private static bool _missingTold;
+
+    /// <summary>
+    /// Finishes a swap that was cut off while the exe was renamed away (see <see cref="AppUpdater.RepairMissingExe()"/>) and
+    /// records it: a finished update is watched like any other, a finished rollback blocks its version. An exe that went
+    /// missing otherwise is logged once, and with <paramref name="tellUser"/> a message for the user is returned once.
+    /// </summary>
+    public static string? RepairMissingExe(bool tellUser)
+    {
+        var repair = AppUpdater.RepairMissingExe();
+        var swap = repair.Marker;
+        var exe = AppPaths.ExeName;
+        switch (repair.Source)
+        {
+            case RepairSource.New:
+                MachineRelay.AppendAgentLog($"{exe} was missing after an interrupted update. Put the new version{VersionText(swap?.To)} in its place.");
+                if (swap is { Kind: SwapKind.Update, To.Length: > 0 }) MarkPending(swap.To, swap.From);
+                return null;
+            case RepairSource.Previous:
+                MachineRelay.AppendAgentLog($"{exe} was missing after an interrupted {(swap?.Kind is SwapKind.Rollback or SwapKind.Undo ? "rollback" : "update")}. " +
+                                            $"Put the previous version{VersionText(swap?.Kind is SwapKind.Rollback or SwapKind.Undo ? swap.To : swap?.From)} back in its place.");
+                if (swap is { Kind: SwapKind.Rollback, From.Length: > 0 })
+                    Change(s => s with { Pending = null, RolledBackFrom = swap.From, RolledBackTo = swap.To, RollbackReported = false });
+                return null;
+            case RepairSource.Unexplained:
+                if (!_missingLogged)
+                {
+                    _missingLogged = true;
+                    MachineRelay.AppendAgentLog(swap == null
+                        ? $"{exe} is missing from {AppUpdater.InstallDir}. No update was being installed, so no other version was put in its place."
+                        : $"{exe} is missing from {AppUpdater.InstallDir} after an interrupted update, and no copy was left to put in its place.");
+                }
+                if (!tellUser || _missingTold) return null;
+                _missingTold = true;
+                return $"{exe} is missing from {AppUpdater.InstallDir}, so Runner Manager and its fleet agent cannot start from there. " +
+                       "Run Runner Manager setup again to repair it.";
+            default:
+                return null;
+        }
+    }
+
+    private static string VersionText(string? version) => string.IsNullOrEmpty(version) ? string.Empty : $" (v{version})";
 
     /// <summary>A message about an update that was undone, once.</summary>
     public static string? TakeRollbackNotice()
@@ -238,7 +356,7 @@ public static class UpdateGuard
         catch { previousVersion = state.Pending?.PreviousVersion ?? string.Empty; }
         try
         {
-            AppUpdater.RestorePrevious();
+            AppUpdater.RestorePrevious(new SwapMarker(SwapKind.Rollback, bad, previousVersion));
         }
         catch (Exception ex)
         {

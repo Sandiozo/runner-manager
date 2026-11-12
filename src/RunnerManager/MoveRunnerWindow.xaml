@@ -16,8 +16,15 @@
 
             <TextBlock Text="Move to" FontWeight="SemiBold" FontSize="12" Margin="0,0,0,6"/>
             <Border Background="{DynamicResource Bg0Brush}" BorderBrush="{DynamicResource BorderSubtleBrush}" BorderThickness="1" CornerRadius="8" Padding="4">
-                <ListBox x:Name="TargetList" Background="Transparent" BorderThickness="0" ItemContainerStyle="{StaticResource NavItem}"
+                <ListBox x:Name="TargetList" Background="Transparent" BorderThickness="0" AutomationProperties.Name="Move to"
                          MaxHeight="220" SelectionChanged="TargetList_SelectionChanged">
+                    <!-- Without a name, screen readers read each PC as its type name. -->
+                    <ListBox.ItemContainerStyle>
+                        <Style TargetType="ListBoxItem" BasedOn="{StaticResource NavItem}">
+                            <Setter Property="AutomationProperties.Name" Value="{Binding MachineName}"/>
+                            <Setter Property="AutomationProperties.HelpText" Value="{Binding RunnerSummary}"/>
+                        </Style>
+                    </ListBox.ItemContainerStyle>
                     <ListBox.ItemTemplate>
                         <DataTemplate DataType="{x:Type local:MachineInfo}">
                             <DockPanel>
@@ -35,7 +42,8 @@
                 </ListBox>
             </Border>
 
-            <CheckBox x:Name="DeleteOldToggle" Style="{StaticResource ToggleSwitch}" IsChecked="True" Margin="0,16,0,0">
+            <CheckBox x:Name="DeleteOldToggle" Style="{StaticResource ToggleSwitch}" IsChecked="True" Margin="0,16,0,0"
+                      AutomationProperties.HelpText="When off, the old folder is kept without its registration, so its files can still be copied.">
                 <StackPanel>
                     <TextBlock x:Name="DeleteOldText"/>
                     <TextBlock Style="{StaticResource Caption}" FontSize="11" TextWrapping="Wrap" Margin="0,3,0,0"

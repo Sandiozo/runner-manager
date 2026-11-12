@@ -14,10 +14,11 @@
             <TextBlock x:Name="SubtitleText" Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,6,0,20"/>
 
             <TextBlock Text="Runner name" FontWeight="SemiBold" FontSize="12" Margin="0,0,0,6"/>
-            <TextBox x:Name="RunnerNameBox"/>
+            <TextBox x:Name="RunnerNameBox" AutomationProperties.Name="Runner name"/>
+            <TextBlock x:Name="NameHint" Style="{StaticResource Caption}" FontSize="11" Margin="0,5,0,0" TextWrapping="Wrap" Visibility="Collapsed"/>
 
             <TextBlock Text="Custom labels" FontWeight="SemiBold" FontSize="12" Margin="0,16,0,6"/>
-            <TextBox x:Name="LabelsBox" Tag="Comma-separated"/>
+            <TextBox x:Name="LabelsBox" Tag="Comma-separated" AutomationProperties.Name="Custom labels" AutomationProperties.HelpText="Comma-separated"/>
             <TextBlock x:Name="LabelsHint" Style="{StaticResource Caption}" FontSize="11" Margin="0,5,0,0" TextWrapping="Wrap"/>
 
             <Border Background="{DynamicResource BadgeWarnBgBrush}" BorderBrush="{DynamicResource BadgeWarnBorderBrush}" BorderThickness="1" CornerRadius="6" Padding="10,8" Margin="0,18,0,0">
@@ -31,7 +32,9 @@
         <Border Grid.Row="1" Background="{DynamicResource Bg0Brush}" BorderBrush="{DynamicResource BorderSubtleBrush}" BorderThickness="0,1,0,0" Padding="28,14">
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
                 <Button Content="Cancel" Style="{StaticResource GhostButton}" IsCancel="True" MinWidth="88"/>
-                <Button Content="Save changes" Style="{StaticResource PrimaryButton}" IsDefault="True" Click="Save_Click" Margin="8,0,0,0" MinWidth="120"/>
+                <!-- Enabled once something changed: saving registers the runner again. -->
+                <Button x:Name="SaveButton" Content="Save changes" Style="{StaticResource PrimaryButton}" IsDefault="True" IsEnabled="False"
+                        Click="Save_Click" Margin="8,0,0,0" MinWidth="120"/>
             </StackPanel>
         </Border>
     </Grid>

@@ -14,6 +14,7 @@ public partial class MoveRunnerWindow : Window
         HeadingText.Text = $"Move {runner.TitleText}";
         SubtitleText.Text = $"{runner.RepositoryText}  ·  currently on {runner.MachineName}";
         DeleteOldText.Text = $"Delete the runner files on {runner.MachineName}";
+        System.Windows.Automation.AutomationProperties.SetName(DeleteOldToggle, DeleteOldText.Text);
         TargetList.ItemsSource = candidates;
         if (candidates.Count == 1) TargetList.SelectedIndex = 0;
     }

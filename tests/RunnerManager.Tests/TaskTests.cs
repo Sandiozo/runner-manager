@@ -25,6 +25,8 @@ public class ScheduledTaskXmlTests
         var settings = task.Element(Ns + "Settings")!;
         Assert.Equal("IgnoreNew", settings.Element(Ns + "MultipleInstancesPolicy")!.Value);
         Assert.NotNull(settings.Element(Ns + "RestartOnFailure"));
+        // Normal priority: Task Scheduler's default (7) runs the agent below normal.
+        Assert.Equal("4", settings.Element(Ns + "Priority")!.Value);
         // Signed-in only: the fleet key is protected for the user, so the logon type stays interactive.
         Assert.Equal("InteractiveToken", task.Element(Ns + "Principals")!.Element(Ns + "Principal")!.Element(Ns + "LogonType")!.Value);
         Assert.Equal("Fleet agent & co", task.Element(Ns + "RegistrationInfo")!.Element(Ns + "Description")!.Value);
@@ -49,6 +51,7 @@ public class ScheduledTaskXmlTests
         var withoutKeepAlive = System.Text.RegularExpressions.Regex.Replace(current, "<TimeTrigger>.*?</TimeTrigger>", string.Empty);
         Assert.False(ScheduledTasks.IsCurrentAgentDefinition(withoutKeepAlive));
         Assert.False(ScheduledTasks.IsCurrentAgentDefinition(current.Replace("<ExecutionTimeLimit>PT0S", "<ExecutionTimeLimit>PT72H")));
+        Assert.False(ScheduledTasks.IsCurrentAgentDefinition(current.Replace("<Priority>4</Priority>", "<Priority>7</Priority>")));
         Assert.False(ScheduledTasks.IsCurrentAgentDefinition(string.Empty));
         Assert.False(ScheduledTasks.IsCurrentAgentDefinition("not xml"));
     }
@@ -116,5 +119,40 @@ public class ScheduledTaskXmlTests
         Assert.Contains(Environment.UserName, ScheduledTasks.DashboardTaskName);
         Assert.NotEqual(ScheduledTasks.SharedLaunchTaskName, ScheduledTasks.LaunchTaskName);
         Assert.Equal("Runner Manager Fleet Agent", ScheduledTasks.AgentTaskName);
+    }
+}
+
+/// <summary>Whether a task runs is read through Task Scheduler. An error there must not read as "no such task".</summary>
+public class TaskStateTests
+{
+    [Theory]
+    [InlineData("4", true)]
+    [InlineData("-1", false)]
+    [InlineData("unknown", null)]
+    [InlineData("unknown\r\n", null)]
+    public void AnErrorIsUnknown_OnlyAMissingTaskIsNotRunning(string output, bool? running)
+        => Assert.Equal(running, ScheduledTasks.ParseTaskState(output));
+
+    [Fact]
+    public void TheScript_SaysMinusOneOnlyForATaskThatDoesNotExist()
+    {
+        var script = ScheduledTasks.TaskStateScript("Runner Manager's task");
+        // Only Task Scheduler's "not found" gives -1; everything else, also a failed Connect, gives "unknown".
+        Assert.Contains("try { $s.Connect();", script);
+        Assert.Contains($"if ($e.HResult -eq {ScheduledTasks.TaskNotFound}) {{ -1 }} else {{ 'unknown' }}", script);
+        Assert.Equal(-2147024894, ScheduledTasks.TaskNotFound);
+        Assert.DoesNotContain("catch { -1 }", script);
+        // A quote in the name is doubled, as PowerShell reads it inside single quotes.
+        Assert.Contains("GetTask('Runner Manager''s task')", script);
+        // Inside the double quotes of -Command.
+        Assert.DoesNotContain("\"", script);
+    }
+
+    [Fact]
+    public async Task AMissingTask_ReadsAsNotRunning_SoItIsRegistered()
+    {
+        // The task name cannot exist, so this only reads Task Scheduler.
+        var missing = $"RunnerManagerTests-NoSuchTask-{Guid.NewGuid():N}";
+        Assert.False(await ScheduledTasks.IsRunningAsync(missing));
     }
 }

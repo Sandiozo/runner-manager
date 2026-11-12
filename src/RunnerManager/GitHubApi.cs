@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text;
 using System.Text.Json;
 
@@ -8,25 +9,40 @@ public static class GitHubApi
     private const int RecentRunCount = 6;
     private static readonly TimeSpan WorkCacheLifetime = TimeSpan.FromSeconds(8);
     private static readonly object CacheLock = new();
+
+    /// <summary>A read of a repository's jobs, and when its answer was known (until then, when it started).</summary>
+    private sealed class WorkRead
+    {
+        public DateTime Time;
+        public Task<RepositoryWorkState?> State = Task.FromResult<RepositoryWorkState?>(null);
+        /// <summary>The requests of this read that GitHub did not answer, or that were not sent because of an earlier failure.</summary>
+        public readonly ConcurrentBag<string> Unanswered = new();
+    }
+
+    /// <summary>One request per repository and refresh: runners of the same repository share the same task.</summary>
+    private static readonly Dictionary<string, WorkRead> WorkCache = new(StringComparer.OrdinalIgnoreCase);
+
     /// <summary>
-    /// One request per repository and refresh: runners of the same repository share the same task.
-    /// A task that failed (null) is not reused.
+    /// Why the jobs and runs of a repository ("owner/repo") could not be read, or null when the last reads worked.
+    /// For the UI, which otherwise only knows that they are unavailable. See <see cref="GitHubCli.ProblemFor"/>.
     /// </summary>
-    private static readonly Dictionary<string, (DateTime Time, Task<RepositoryWorkState?> State)> WorkCache
-        = new(StringComparer.OrdinalIgnoreCase);
+    public static GitHubProblem? ProblemFor(string? repositoryPath)
+        => GitHubCli.ProblemFor(GitHubNames.IsRepositoryPath(repositoryPath) ? $"repos/{repositoryPath}" : null);
 
     /// <returns>The runner's current job and queue, or null when GitHub could not be read.</returns>
+    /// <param name="runnerName">The runner's name, so a job of another runner with the same ID is not taken (see <see cref="RunningJobOf"/>).</param>
     public static async Task<RunnerWorkState?> GetRunnerWorkAsync(
-        string repositoryPath, long runnerId, IEnumerable<string> customLabels)
+        string repositoryPath, long runnerId, IEnumerable<string> customLabels, string? runnerName = null)
     {
         var state = await GetRepositoryWorkAsync(repositoryPath);
         if (state == null) return null;
         var labels = RunnerLabels.Available(customLabels);
 
-        var current = state.Jobs.FirstOrDefault(j =>
-            j.Status.Equals("in_progress", StringComparison.OrdinalIgnoreCase) && j.RunnerId == runnerId);
+        var current = RunningJobOf(state.Jobs, runnerId, runnerName);
+        // Longest wait first, so the job named as next is the one that waited longest.
         var queued = state.Jobs.Where(j =>
-            j.Status.Equals("queued", StringComparison.OrdinalIgnoreCase) && RunnerLabels.CanRun(j.Labels, labels)).ToList();
+                j.Status.Equals("queued", StringComparison.OrdinalIgnoreCase) && RunnerLabels.CanRun(j.Labels, labels))
+            .OrderBy(j => j.CreatedUtc ?? DateTime.MaxValue).ToList();
 
         return new RunnerWorkState
         {
@@ -43,15 +59,50 @@ public static class GitHubApi
 
     /// <summary>
     /// The job a runner is running now, with its steps. Read is false when GitHub could not be read; Job is null when
-    /// GitHub does not (yet) report a running job for this runner. Shares the few-second cache of the queue view.
+    /// GitHub does not (yet) report a running job for this runner, or only jobs that started well before its worker
+    /// (see <see cref="RunningJobOf"/>). Shares the few-second cache of the queue view.
     /// </summary>
-    public static async Task<(bool Read, GitHubJobState? Job)> GetCurrentJobAsync(string repositoryPath, long runnerId)
+    /// <param name="runnerName">The runner's name, and <paramref name="workerStartedUtc"/> when its Runner.Worker
+    /// started: they tell the right job apart from another one with the same runner ID (see <see cref="RunningJobOf"/>).</param>
+    public static async Task<(bool Read, GitHubJobState? Job)> GetCurrentJobAsync(string repositoryPath, long runnerId,
+        string? runnerName = null, DateTime? workerStartedUtc = null)
     {
         var state = await GetRepositoryWorkAsync(repositoryPath);
         if (state == null) return (false, null);
-        return (true, state.Jobs.FirstOrDefault(j =>
-            j.Status.Equals("in_progress", StringComparison.OrdinalIgnoreCase) && j.RunnerId == runnerId));
+        return (true, RunningJobOf(state.Jobs, runnerId, runnerName, workerStartedUtc));
     }
+
+    /// <summary>
+    /// The job that GitHub lists as running on a runner, among a repository's jobs.
+    /// - Runner IDs are numbered per repository and per organization, so an organization runner that runs a job of the
+    ///   repository can have the same ID as the repository's own runner. When GitHub and the caller both give the
+    ///   runner's name, it must match too.
+    /// - GitHub keeps listing a job as running for a while after its runner gave it up (the runner or the PC was
+    ///   restarted), also when the runner already runs its next job. When the start of the runner's Runner.Worker is
+    ///   known, a job that started more than <see cref="WorkerStartSlack"/> before it is not the worker's, also when
+    ///   it is the only one listed (with many runs in progress, the run of the worker's job may not be read), and of
+    ///   several the job that started closest to the worker is taken. Without the worker's start, the one that started
+    ///   last is taken.
+    /// </summary>
+    internal static GitHubJobState? RunningJobOf(IEnumerable<GitHubJobState> jobs, long runnerId, string? runnerName = null,
+        DateTime? workerStartedUtc = null)
+    {
+        if (runnerId <= 0) return null;
+        var running = jobs.Where(j => j.RunnerId == runnerId && j.Status.Equals("in_progress", StringComparison.OrdinalIgnoreCase)
+                                      && (string.IsNullOrEmpty(runnerName) || j.RunnerName.Length == 0
+                                          || j.RunnerName.Equals(runnerName, StringComparison.OrdinalIgnoreCase)))
+            .ToList();
+        if (workerStartedUtc is not { } worker) return running.MaxBy(j => j.StartedUtc ?? DateTime.MinValue);
+        return running.Where(j => j.StartedUtc is not { } started || worker - started <= WorkerStartSlack)
+            .MinBy(j => j.StartedUtc is { } started ? Math.Abs((started - worker).Ticks) : long.MaxValue);
+    }
+
+    /// <summary>
+    /// How much earlier than the runner's Runner.Worker its job can have started on GitHub: the runner starts the worker
+    /// right after GitHub gives it the job, but the worker's start is read on the PC and GitHub's on its own clock, and
+    /// clocks differ a little.
+    /// </summary>
+    internal static readonly TimeSpan WorkerStartSlack = TimeSpan.FromMinutes(5);
 
     /// <summary>The jobs of a repository's queued and running workflow runs, or null when GitHub could not be read.</summary>
     public static Task<RepositoryWorkState?> GetRepositoryJobsAsync(string repositoryPath) => GetRepositoryWorkAsync(repositoryPath);
@@ -62,16 +113,26 @@ public static class GitHubApi
 
     /// <summary>
     /// How long a job usually takes: the median of its successful runs among the workflow's latest successful runs
-    /// (null with fewer than three). Remembered for 10 minutes.
+    /// (null with fewer than three, or when GitHub could not be read). Remembered for 10 minutes.
     /// </summary>
     public static async Task<TimeSpan?> GetUsualJobDurationAsync(string repositoryPath, string workflowName, string jobName)
+        => (await ReadUsualJobDurationAsync(repositoryPath, workflowName, jobName)).Usual;
+
+    /// <summary>
+    /// How long a job usually takes, as <see cref="GetUsualJobDurationAsync"/>, and whether GitHub was read: Usual is
+    /// null with Read true when the job has fewer than three successful runs to go by, and with Read false when a
+    /// request failed and the runs that were read do not give three. Only a read that worked is remembered.
+    /// </summary>
+    public static async Task<(bool Read, TimeSpan? Usual)> ReadUsualJobDurationAsync(string repositoryPath, string workflowName, string jobName)
     {
+        if (!GitHubNames.IsRepositoryPath(repositoryPath)) return (false, null);
         var key = $"{repositoryPath}|{workflowName}|{jobName}";
         lock (CacheLock)
-            if (UsualDurations.TryGetValue(key, out var known) && DateTime.UtcNow < known.Until) return known.Usual;
+            if (UsualDurations.TryGetValue(key, out var known) && DateTime.UtcNow < known.Until) return (true, known.Usual);
 
-        var body = await GetPolledAsync($"repos/{repositoryPath}/actions/runs?status=success&per_page=30");
-        if (body == null) return null;
+        var endpoint = $"repos/{repositoryPath}/actions/runs?status=success&per_page=30";
+        var body = await GetPolledAsync(endpoint);
+        if (body == null) return (false, null);
         List<WorkflowRunState> runs;
         try
         {
@@ -79,9 +140,14 @@ public static class GitHubApi
             runs = json.RootElement.GetProperty("workflow_runs").EnumerateArray().Select(ReadRun)
                 .Where(r => r.WorkflowName.Equals(workflowName, StringComparison.Ordinal)).Take(6).ToList();
         }
-        catch { return null; }
+        catch
+        {
+            Unreadable(endpoint);
+            return (false, null);
+        }
 
         var durations = new List<TimeSpan>();
+        var failed = false;
         foreach (var run in runs)
         {
             List<GitHubJobState>? jobs;
@@ -89,7 +155,11 @@ public static class GitHubApi
             if (jobs == null)
             {
                 jobs = await GetJobsAsync(repositoryPath, run);
-                if (jobs == null) continue;
+                if (jobs == null)
+                {
+                    failed = true;
+                    continue;
+                }
                 lock (CacheLock)
                 {
                     if (FinishedRunJobs.Count > 500) FinishedRunJobs.Clear();
@@ -101,38 +171,75 @@ public static class GitHubApi
                 .Select(j => j.CompletedUtc!.Value - j.StartedUtc!.Value));
         }
         var usual = JobHealth.Usual(durations);
+        // Too few durations because a run's jobs could not be read is not "no history". Not remembered, so the next
+        // check reads again (each failed request waits for its own pause).
+        if (usual == null && failed) return (false, null);
         lock (CacheLock) UsualDurations[key] = (DateTime.UtcNow + TimeSpan.FromMinutes(10), usual);
-        return usual;
+        return (true, usual);
     }
 
     private static Task<RepositoryWorkState?> GetRepositoryWorkAsync(string repositoryPath)
     {
+        // Other PCs report the repository of their runners. A name GitHub would not allow is answered like a failed
+        // read, before anything is cached or started.
+        if (!GitHubNames.IsRepositoryPath(repositoryPath)) return Task.FromResult<RepositoryWorkState?>(null);
         lock (CacheLock)
         {
-            if (WorkCache.TryGetValue(repositoryPath, out var cached)
-                && DateTime.UtcNow - cached.Time < WorkCacheLifetime
-                && !HasFailed(cached.State))
-                return cached.State;
-            var task = Task.Run(() => ReadRepositoryWorkAsync(repositoryPath));
-            WorkCache[repositoryPath] = (DateTime.UtcNow, task);
-            return task;
+            var now = GitHubFailures.UtcNow();
+            if (WorkCache.TryGetValue(repositoryPath, out var cached) && IsUsable(cached, now)) return cached.State;
+            var read = new WorkRead { Time = now };
+            read.State = Task.Run(async () =>
+            {
+                try { return await ReadRepositoryWorkAsync(repositoryPath, read.Unanswered); }
+                // The lifetime counts from when the answer was known: gh can take long to give up.
+                finally { lock (CacheLock) read.Time = GitHubFailures.UtcNow(); }
+            });
+            WorkCache[repositoryPath] = read;
+            return read.State;
         }
     }
 
-    private static bool HasFailed(Task<RepositoryWorkState?> task)
-        => task.IsFaulted || task.IsCanceled || (task.IsCompletedSuccessfully && task.Result == null);
+    /// <summary>
+    /// A read is shared while it runs and for a few seconds after it worked. One that failed (null) is kept exactly
+    /// as long as one of its requests is not sent again anyway (see <see cref="GitHubFailures"/>): the job view asks
+    /// every 3 seconds for every busy runner, and reading again would start all the other requests of the repository
+    /// only to fail at the same one. Once that request is sent again, or the failures are forgotten, the next tick
+    /// reads again. One that threw is not kept.
+    /// </summary>
+    private static bool IsUsable(WorkRead read, DateTime now)
+    {
+        if (!read.State.IsCompleted) return true;
+        if (!read.State.IsCompletedSuccessfully) return false;
+        if (read.State.Result != null) return now - read.Time < WorkCacheLifetime;
+        return read.Unanswered.Any(endpoint => GitHubFailures.Blocking(endpoint) != null);
+    }
 
     /// <returns>All jobs of the repository's active runs, or null when any request failed.</returns>
-    private static async Task<RepositoryWorkState?> ReadRepositoryWorkAsync(string repositoryPath)
+    /// <param name="unanswered">Gets the endpoints that were not answered.</param>
+    private static async Task<RepositoryWorkState?> ReadRepositoryWorkAsync(string repositoryPath, ConcurrentBag<string> unanswered)
     {
-        var lists = await Task.WhenAll(GetRunsAsync(repositoryPath, "in_progress"), GetRunsAsync(repositoryPath, "queued"));
+        var lists = await Task.WhenAll(
+            GetRunsAsync(repositoryPath, "in_progress", unanswered), GetRunsAsync(repositoryPath, "queued", unanswered));
         if (lists.Any(list => list == null)) return null;
         var runs = lists.SelectMany(list => list!).GroupBy(r => r.Id).Select(g => g.First()).ToList();
 
-        var jobs = await Task.WhenAll(runs.Select(run => GetJobsAsync(repositoryPath, run)));
-        if (jobs.Any(list => list == null)) return null;
+        var first = await Task.WhenAll(runs.Select(run => GetJobPageAsync(repositoryPath, run, 1, unanswered)));
+        if (first.Any(page => page == null)) return null;
+
+        // A run with more than a page of jobs gets its further pages from the requests the runs did not use,
+        // the oldest run first (run IDs grow).
+        var further = new List<(WorkflowRunState Run, int Page)>();
+        foreach (var (run, page) in runs.Zip(first, (run, page) => (run, page!.Value)).OrderBy(r => r.run.Id))
+        {
+            var pages = page.Jobs.Count < JobPageSize ? 1 : Math.Min((page.Total + JobPageSize - 1) / JobPageSize, MaxJobPages);
+            for (var number = 2; number <= pages && runs.Count + further.Count < MaxJobRequests; number++)
+                further.Add((run, number));
+        }
+        var rest = await Task.WhenAll(further.Select(next => GetJobPageAsync(repositoryPath, next.Run, next.Page, unanswered)));
+        if (rest.Any(page => page == null)) return null;
+
         var state = new RepositoryWorkState();
-        foreach (var list in jobs) state.Jobs.AddRange(list!);
+        foreach (var page in first.Concat(rest)) state.Jobs.AddRange(page!.Value.Jobs);
         return state;
     }
 
@@ -142,25 +249,85 @@ public static class GitHubApi
     /// GET with an ETag for the queue view's requests: while a run and its jobs don't change, GitHub answers 304, which
     /// does not count against the rate limit, and the last answer is reused. Null when the request failed.
     /// </summary>
-    private static async Task<string?> GetPolledAsync(string endpoint)
+    /// <param name="unanswered">Gets the endpoint when the request failed or was not sent.</param>
+    private static async Task<string?> GetPolledAsync(string endpoint, ConcurrentBag<string>? unanswered = null)
     {
         (string ETag, string Body)? cached;
         lock (CacheLock) cached = PolledBodies.TryGetValue(endpoint, out var entry) ? entry : null;
         var response = await GitHubCli.GetConditionalAsync(endpoint, cached?.ETag);
         if (response.NotModified && cached != null) return cached.Value.Body;
-        if (!response.Ok) return null;
+        if (!response.Ok)
+        {
+            unanswered?.Add(endpoint);
+            return null;
+        }
         lock (CacheLock)
         {
             // Job lists are per run, so old runs' entries are dropped now and then.
-            if (PolledBodies.Count > 500) PolledBodies.Clear();
+            if (PolledBodies.Count > MaxPolledBodies) PolledBodies.Clear();
             PolledBodies[endpoint] = (response.ETag, response.Body);
         }
         return response.Body;
     }
 
-    private static async Task<List<WorkflowRunState>?> GetRunsAsync(string repositoryPath, string status)
+    /// <summary>
+    /// GitHub answered a poll with something that could not be read. The answer is not kept (its ETag would bring the
+    /// same answer back as 304), and the request is paused like a failed one, so the job view does not start the
+    /// whole read of the repository again on every tick only to fail at the same answer.
+    /// </summary>
+    /// <param name="unanswered">Gets the endpoint, so the failed read is kept while the request is paused.</param>
+    private static void Unreadable(string endpoint, ConcurrentBag<string>? unanswered = null)
     {
-        var body = await GetPolledAsync($"repos/{repositoryPath}/actions/runs?status={status}&per_page=20");
+        lock (CacheLock) PolledBodies.Remove(endpoint);
+        GitHubFailures.Unreadable(endpoint);
+        unanswered?.Add(endpoint);
+    }
+
+    /// <summary>Room for the run and job lists of several busy repositories, so their ETags are not dropped at every refresh.</summary>
+    private const int MaxPolledBodies = 1000;
+    /// <summary>
+    /// How many queued and how many running runs of a repository are read. Every run costs one more request for its
+    /// jobs at every refresh, so this is not "all of them". With more runs, the oldest are kept.
+    /// </summary>
+    internal const int RunPageSize = 20;
+    /// <summary>GitHub lists at most 1000 runs for a status.</summary>
+    private const int MaxRunPages = 1000 / RunPageSize;
+    private const int JobPageSize = 100;
+    /// <summary>
+    /// One matrix has at most 256 jobs, so three pages hold the jobs of nearly every run. A run with more (several
+    /// large matrices) is read up to here.
+    /// </summary>
+    private const int MaxJobPages = 3;
+    /// <summary>
+    /// How many requests for jobs one read of a repository makes: one for every run that is read, and what is left
+    /// for the further pages of runs with more than <see cref="JobPageSize"/> jobs. A run whose further pages do not
+    /// fit is read up to its first page.
+    /// </summary>
+    internal const int MaxJobRequests = 2 * RunPageSize;
+
+    /// <summary>
+    /// The runs of a repository with this status, or null when a request failed. GitHub lists the newest first; with
+    /// more than <see cref="RunPageSize"/> the oldest are read from the last pages, because those matter most: the
+    /// queued runs that waited longest, and the running ones that may be stuck.
+    /// </summary>
+    private static async Task<List<WorkflowRunState>?> GetRunsAsync(string repositoryPath, string status, ConcurrentBag<string> unanswered)
+    {
+        if (await GetRunPageAsync(repositoryPath, status, 1, unanswered) is not { } first) return null;
+        var lastPage = Math.Clamp((first.Total + RunPageSize - 1) / RunPageSize, 1, MaxRunPages);
+        if (lastPage == 1) return first.Runs;
+
+        if (await GetRunPageAsync(repositoryPath, status, lastPage, unanswered) is not { } last) return null;
+        if (last.Runs.Count >= RunPageSize) return last.Runs;
+        // The last page is not full: the other oldest runs are at the end of the page before it.
+        if ((lastPage == 2 ? first : await GetRunPageAsync(repositoryPath, status, lastPage - 1, unanswered)) is not { } before) return null;
+        return before.Runs.TakeLast(RunPageSize - last.Runs.Count).Concat(last.Runs).ToList();
+    }
+
+    private static async Task<(int Total, List<WorkflowRunState> Runs)?> GetRunPageAsync(
+        string repositoryPath, string status, int page, ConcurrentBag<string> unanswered)
+    {
+        var endpoint = $"repos/{repositoryPath}/actions/runs?status={status}&per_page={RunPageSize}{PageParameter(page)}";
+        var body = await GetPolledAsync(endpoint, unanswered);
         if (body == null) return null;
         try
         {
@@ -168,10 +335,21 @@ public static class GitHubApi
             var list = new List<WorkflowRunState>();
             foreach (var run in json.RootElement.GetProperty("workflow_runs").EnumerateArray())
                 list.Add(ReadRun(run));
-            return list;
+            return (TotalCount(json.RootElement, list.Count), list);
         }
-        catch { return null; }
+        catch
+        {
+            Unreadable(endpoint, unanswered);
+            return null;
+        }
     }
+
+    /// <summary>Empty for the first page, which needs no page number.</summary>
+    private static string PageParameter(int page) => page <= 1 ? string.Empty : $"&page={GitHubNames.Id(page)}";
+
+    private static int TotalCount(JsonElement root, int fallback)
+        => root.TryGetProperty("total_count", out var count) && count.ValueKind == JsonValueKind.Number && count.TryGetInt32(out var total)
+            ? total : fallback;
     private static WorkflowRunState ReadRun(JsonElement run)
     {
         return new WorkflowRunState
@@ -183,9 +361,25 @@ public static class GitHubApi
         };
     }
 
+    /// <summary>The jobs of a finished run, read page by page, or null when a request failed.</summary>
     private static async Task<List<GitHubJobState>?> GetJobsAsync(string repositoryPath, WorkflowRunState run)
     {
-        var body = await GetPolledAsync($"repos/{repositoryPath}/actions/runs/{run.Id}/jobs?filter=latest&per_page=100");
+        var list = new List<GitHubJobState>();
+        for (var number = 1; number <= MaxJobPages; number++)
+        {
+            if (await GetJobPageAsync(repositoryPath, run, number) is not { } page) return null;
+            list.AddRange(page.Jobs);
+            if (page.Jobs.Count < JobPageSize || list.Count >= page.Total) break;
+        }
+        return list;
+    }
+
+    /// <summary>One page of a run's jobs and how many jobs the run has, or null when the request failed.</summary>
+    private static async Task<(int Total, List<GitHubJobState> Jobs)?> GetJobPageAsync(
+        string repositoryPath, WorkflowRunState run, int page, ConcurrentBag<string>? unanswered = null)
+    {
+        var endpoint = $"repos/{repositoryPath}/actions/runs/{GitHubNames.Id(run.Id)}/jobs?filter=latest&per_page={JobPageSize}{PageParameter(page)}";
+        var body = await GetPolledAsync(endpoint, unanswered);
         if (body == null) return null;
         try
         {
@@ -193,9 +387,14 @@ public static class GitHubApi
             var list = new List<GitHubJobState>();
             foreach (var job in json.RootElement.GetProperty("jobs").EnumerateArray())
                 list.Add(ReadJob(job, run));
-            return list;
+            // Without a count, the jobs read so far are taken as all of them.
+            return (TotalCount(json.RootElement, (page - 1) * JobPageSize + list.Count), list);
         }
-        catch { return null; }
+        catch
+        {
+            Unreadable(endpoint, unanswered);
+            return null;
+        }
     }
     private static DateTime? ReadTime(JsonElement element, string property)
         => element.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.String && value.TryGetDateTime(out var time)
@@ -252,12 +451,13 @@ public static class GitHubApi
     /// </summary>
     public static async Task<List<WorkflowRunSummary>?> GetRecentRunsAsync(string repositoryPath)
     {
+        if (!GitHubNames.IsRepositoryPath(repositoryPath)) return null;
         (string ETag, List<WorkflowRunSummary> Runs) cached;
         lock (CacheLock)
             cached = RecentRunsCache.TryGetValue(repositoryPath, out var entry) ? entry : (string.Empty, new List<WorkflowRunSummary>());
 
-        var response = await GitHubCli.GetConditionalAsync(
-            $"repos/{repositoryPath}/actions/runs?per_page={RecentRunCount}&exclude_pull_requests=true", cached.ETag);
+        var endpoint = $"repos/{repositoryPath}/actions/runs?per_page={RecentRunCount}&exclude_pull_requests=true";
+        var response = await GitHubCli.GetConditionalAsync(endpoint, cached.ETag);
         if (response.NotModified) return cached.Runs;
         if (!response.Ok) return null;
         try
@@ -284,12 +484,18 @@ public static class GitHubApi
             lock (CacheLock) RecentRunsCache[repositoryPath] = (response.ETag, runs);
             return runs;
         }
-        catch { return null; }
+        catch
+        {
+            GitHubFailures.Unreadable(endpoint);
+            return null;
+        }
     }
 
     public static async Task RerunFailedJobsAsync(string repositoryPath, long runId)
     {
-        var result = await GitHubCli.RunAsync($"api --method POST repos/{repositoryPath}/actions/runs/{runId}/rerun-failed-jobs");
+        if (!GitHubNames.IsRepositoryPath(repositoryPath)) throw new InvalidOperationException(GitHubCli.InvalidNameMessage);
+        if (runId <= 0) throw new InvalidOperationException("The workflow run is not known, so GitHub was not asked to run it again.");
+        var result = await GitHubCli.ApiAsync($"repos/{repositoryPath}/actions/runs/{GitHubNames.Id(runId)}/rerun-failed-jobs", "--method", "POST");
         if (result.ExitCode != 0)
             throw new InvalidOperationException(string.IsNullOrWhiteSpace(result.Error) ? "GitHub did not accept the re-run request." : result.Error.Trim());
     }
@@ -303,7 +509,8 @@ public static class GitHubApi
     /// </summary>
     public static async Task<WorkflowFileList> GetWorkflowFilesAsync(string repositoryPath)
     {
-        var result = await GitHubCli.RunAsync($"api repos/{repositoryPath}/contents/.github/workflows");
+        if (!GitHubNames.IsRepositoryPath(repositoryPath)) throw new InvalidOperationException(GitHubCli.InvalidNameMessage);
+        var result = await GitHubCli.ApiAsync($"repos/{repositoryPath}/contents/.github/workflows");
         if (result.ExitCode != 0)
         {
             if (GitHubCli.IsNotFound(result.Error)) return new WorkflowFileList();
@@ -343,8 +550,9 @@ public static class GitHubApi
 
     private static async Task<RepositoryFile?> GetRepositoryFileAsync(string repositoryPath, string path)
     {
-        var endpoint = $"repos/{repositoryPath}/contents/{EscapePath(path)}";
-        var result = await GitHubCli.RunAsync($"api {endpoint}");
+        if (!GitHubNames.IsRepositoryPath(repositoryPath)) return null;
+        // A path with "." or ".." segments is refused by the endpoint check, and the file is then listed as skipped.
+        var result = await GitHubCli.ApiAsync($"repos/{repositoryPath}/contents/{EscapePath(path)}");
         if (result.ExitCode != 0) return null;
         using var json = JsonDocument.Parse(result.Output);
         var root = json.RootElement;
@@ -359,6 +567,7 @@ public static class GitHubApi
     public static async Task UpdateRepositoryFileAsync(
         string repositoryPath, RepositoryFile file, string newContent, string commitMessage)
     {
+        if (!GitHubNames.IsRepositoryPath(repositoryPath)) throw new InvalidOperationException(GitHubCli.InvalidNameMessage);
         var endpoint = $"repos/{repositoryPath}/contents/{EscapePath(file.Path)}";
         // Sent on stdin: a base64 workflow file can easily exceed Windows' 32K command-line limit.
         var body = JsonSerializer.Serialize(new
@@ -367,7 +576,7 @@ public static class GitHubApi
             content = Convert.ToBase64String(Encoding.UTF8.GetBytes(newContent)),
             sha = file.Sha
         });
-        var result = await GitHubCli.RunAsync($"api --method PUT {endpoint} --input -", body);
+        var result = await GitHubCli.ApiAsync(endpoint, new[] { "--method", "PUT", "--input", "-" }, standardInput: body);
         if (result.ExitCode != 0)
             throw new InvalidOperationException(string.IsNullOrWhiteSpace(result.Error)
                 ? $"Could not update {file.Path}."

@@ -44,17 +44,12 @@ public partial class MainWindow
             foreach (var (key, value) in health.Queues) _runnerQueues[key] = value;
             // Cards may have been rebuilt meanwhile; the results are kept by runner key.
             foreach (var runner in Machines.SelectMany(m => m.Runners)) ApplyHealth(runner);
+            // A concern found or gone changes what the Needs attention tile counts and shows.
+            ApplyFilter();
+            UpdateAttentionTile(Machines.ToList());
 
             if (!_settings.NotifyOnJobProblems) return;
-            foreach (var machine in Machines)
-            {
-                foreach (var runner in machine.Runners)
-                {
-                    if (!_runnerHealth.TryGetValue(JobHealth.Key(runner), out var problem) || !problem.IsProblem) continue;
-                    if (_reportedProblems.Add($"{JobHealth.Key(runner)}|{problem.Subject}"))
-                        RaiseAlert($"{machine.MachineName}: {runner.TitleText} — {problem.Label}. {problem.Detail}", warning: true);
-                }
-            }
+            foreach (var alert in NewProblemAlerts(Machines, _reportedProblems)) RaiseAlert(alert, warning: true);
             foreach (var job in health.Unserved)
                 if (_reportedProblems.Add($"unserved|{job.JobId}")) RaiseAlert(job.Text, warning: true);
             if (_reportedProblems.Count > 2000) _reportedProblems.Clear();
@@ -63,18 +58,55 @@ public partial class MainWindow
         finally { _healthChecking = false; }
     }
 
+    /// <summary>
+    /// The alerts for concerns that were not reported before, as the cards show them (<see cref="ApplyHealth"/>): the
+    /// check runs beside the refreshes, so a job that ended while it asked GitHub is no longer stuck and is not reported.
+    /// Each concern reported is added to <paramref name="reported"/>, so it is reported once.
+    /// </summary>
+    internal static List<string> NewProblemAlerts(IEnumerable<MachineInfo> machines, ISet<string> reported)
+    {
+        var alerts = new List<string>();
+        foreach (var machine in machines)
+        foreach (var runner in machine.Runners)
+        {
+            var problem = runner.Health;
+            if (problem.IsProblem && reported.Add($"{JobHealth.Key(runner)}|{problem.Subject}"))
+                alerts.Add($"{machine.MachineName}: {runner.TitleText} — {problem.Label}. {problem.Detail}");
+        }
+        return alerts;
+    }
+
     private void ApplyHealth(MachineRunnerStatus runner)
     {
         var key = JobHealth.Key(runner);
-        runner.Health = _runnerHealth.GetValueOrDefault(key) ?? RunnerHealth.Healthy;
+        runner.Health = StillApplies(_runnerHealth.GetValueOrDefault(key) ?? RunnerHealth.Healthy, runner);
         runner.Queue = _runnerQueues.GetValueOrDefault(key) ?? (IReadOnlyList<QueueEntry>)Array.Empty<QueueEntry>();
+        runner.SetGitHubProblem(_githubAuthenticated ? GitHubProblemFor(runner) : null, DateTime.UtcNow);
     }
+
+    /// <summary>
+    /// Why GitHub could not be read for the runner: for its repository or organization, or a pause of every request.
+    /// A runner from an older agent may have no scope; its repository then says where it is.
+    /// </summary>
+    internal static GitHubProblem? GitHubProblemFor(MachineRunnerStatus runner)
+        => runner.Scope.Length > 0 ? GitHubCli.ProblemFor(runner.Scope) : GitHubApi.ProblemFor(runner.RepositoryPath);
+
+    /// <summary>
+    /// A concern found on an earlier reading, if it still fits the runner as it is now. The check runs beside the
+    /// refresh, so a newer reading can arrive while it asks GitHub: a job that ended meanwhile is no longer stuck.
+    /// </summary>
+    internal static RunnerHealth StillApplies(RunnerHealth health, MachineRunnerStatus runner) => health.Concern switch
+    {
+        RunnerConcern.Stuck or RunnerConcern.RunningLong when !runner.IsBusy => RunnerHealth.Healthy,
+        RunnerConcern.IdleWithWaitingJobs when !runner.IsRunning || runner.IsBusy => RunnerHealth.Healthy,
+        _ => health
+    };
 
     private async void RunnerStopJob_Click(object sender, RoutedEventArgs e)
     {
         if (ItemFrom<MachineRunnerStatus>(sender) is not { CanStopJob: true } runner) return;
         var machine = Machines.FirstOrDefault(m => m.MachineKey == runner.MachineKey);
-        if (machine == null) return;
+        if (machine == null || IsOperationRunning(runner, $"Stop the job's processes on {runner.TitleText}")) return;
         // The processes as they are now, so the dialog says what will be stopped.
         var processes = string.Empty;
         try

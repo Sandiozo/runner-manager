@@ -26,7 +26,11 @@ public static class RunnerStart
 /// <summary>The sc.exe start= values.</summary>
 public static class ServiceStart
 {
-    public const string Automatic = "auto";
+    /// <summary>
+    /// Delayed automatic start, as config.cmd installs runner services: they start shortly after Windows, once the
+    /// network is more likely to be up. WMI reports these services as "Auto" too.
+    /// </summary>
+    public const string Automatic = "delayed-auto";
     public const string Manual = "demand";
     public const string Disabled = "disabled";
 }

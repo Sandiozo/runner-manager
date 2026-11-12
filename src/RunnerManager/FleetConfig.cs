@@ -32,7 +32,7 @@ public sealed class FleetConfig
     /// </summary>
     private static readonly Lazy<Mutex?> FileMutex = new(CreateFileMutex);
 
-    /// <summary>The fleet pairing code, encrypted for this Windows user with DPAPI.</summary>
+    /// <summary>The fleet code (on a managed PC, its access code), encrypted for this Windows user with DPAPI.</summary>
     public string ProtectedFleetKey { get; set; } = string.Empty;
     /// <summary>Other PCs in the fleet and where they were last reached.</summary>
     public List<PeerRecord> KnownPeers { get; set; } = new();
@@ -54,7 +54,7 @@ public sealed class FleetConfig
     /// </summary>
     public string MachineId { get; set; } = string.Empty;
     /// <summary>
-    /// PCs this fleet manages one way: each has its own pairing code, which only this fleet knows. They answer this
+    /// PCs this fleet manages one way: each has its own access code, which only this fleet knows. They answer this
     /// fleet's requests but never get the fleet's code, so they can't see or control its PCs.
     /// </summary>
     public List<ManagedPcRecord> ManagedPcs { get; set; } = new();
@@ -110,7 +110,7 @@ public sealed class FleetConfig
                     _readFailedUtc = null;
                     if (hasPlainKey)
                     {
-                        // Earlier builds also wrote the decrypted pairing code; save once without it.
+                        // Earlier builds also wrote the decrypted fleet code; save once without it.
                         // Write never reads the config back, so this cannot recurse.
                         try
                         {
@@ -136,11 +136,18 @@ public sealed class FleetConfig
         }
     }
 
+    private static FleetConfig Read(out bool hasPlainKey)
+    {
+        var config = ReadFile(out hasPlainKey);
+        AssistantSwitches.MoveFromFile(config.Assistant);
+        return config;
+    }
+
     /// <summary>
     /// Reads fleet.json. Only a missing file gives defaults; a file that cannot be read or parsed (for example while
     /// another process writes it) is retried briefly and then reported, so callers never mistake it for empty settings.
     /// </summary>
-    private static FleetConfig Read(out bool hasPlainKey)
+    private static FleetConfig ReadFile(out bool hasPlainKey)
     {
         for (var attempt = 0; ; attempt++)
         {
@@ -162,12 +169,11 @@ public sealed class FleetConfig
             }
             catch (JsonException) when (attempt >= ReadAttempts - 1)
             {
-                // Writes are atomic, so a file that stays invalid is damaged rather than half-written. Keep a copy for
-                // inspection and continue with what can still be read, instead of blocking every later save.
                 hasPlainKey = false;
-                try { File.Move(ConfigPath, $"{ConfigPath}.damaged-{DateTime.Now:yyyyMMdd-HHmmss}", overwrite: true); }
-                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
-                return Salvage(json);
+                if (SaveSalvage(json) is { } salvaged) return salvaged;
+                // Another process replaced the file meanwhile: read that one.
+                if (attempt >= ReadAttempts + 2)
+                    throw new IOException($"Could not read the fleet settings in {ConfigPath}: the file keeps changing.");
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
             {
@@ -285,6 +291,31 @@ public sealed class FleetConfig
         }
     }
 
+    /// <summary>
+    /// Writes are atomic, so a file that stays invalid is damaged rather than half-written. Keeps a copy for inspection
+    /// and saves what can still be read in its place, so the fleet code is still there at the next read and later
+    /// saves aren't blocked. Returns null when the file changed meanwhile.
+    /// </summary>
+    private static FleetConfig? SaveSalvage(string? json)
+    {
+        FleetConfig? salvaged = null;
+        WithFileLock(() =>
+        {
+            // Reads don't take the lock: another process may have dealt with it already.
+            string? now;
+            try { now = File.Exists(ConfigPath) ? File.ReadAllText(ConfigPath) : null; }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { now = json; }
+            if (now != json) return;
+            salvaged = Salvage(json);
+            try { File.Copy(ConfigPath, $"{ConfigPath}.damaged-{DateTime.Now:yyyyMMdd-HHmmss}", overwrite: true); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+            // When this fails, the damaged file stays, and the next read salvages it again.
+            try { Write(salvaged); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+        });
+        return salvaged;
+    }
+
     /// <summary>A setting's string value, found in text that is not valid JSON.</summary>
     private static string? StringValue(string json, string name)
         => Regex.Match(json, "\"" + name + "\"\\s*:\\s*\"([A-Za-z0-9+/=]+)\"") is { Success: true } match ? match.Groups[1].Value : null;
@@ -311,7 +342,7 @@ public sealed class FleetConfig
         }
         catch (JsonException)
         {
-            // Not even valid JSON (cut off, for example): the pairing code may still be in it.
+            // Not even valid JSON (cut off, for example): the fleet code may still be in it.
             config.ProtectedFleetKey = StringValue(json, nameof(ProtectedFleetKey)) ?? string.Empty;
             config.MachineId = StringValue(json, nameof(MachineId)) ?? string.Empty;
         }
@@ -323,6 +354,7 @@ public sealed class FleetConfig
     private void Normalize()
     {
         ProtectedFleetKey ??= string.Empty;
+        RemovedFleetKeyId ??= string.Empty;
         ProtectedPendingFleetKey ??= string.Empty;
         KnownPeers ??= new();
         KnownPeers.RemoveAll(p => p == null);
@@ -377,7 +409,7 @@ public sealed class FleetConfig
     private DecryptedKey? _decryptedKey;
 
     /// <summary>
-    /// The decrypted pairing code, or null. Never written to fleet.json. Decrypted once per instance (a new
+    /// The decrypted fleet code (on a managed PC, its access code), or null. Never written to fleet.json. Decrypted once per instance (a new
     /// instance is loaded when the file changes); each caller gets its own copy.
     /// </summary>
     [JsonIgnore]
@@ -400,27 +432,97 @@ public sealed class FleetConfig
         catch { return null; }
     }
 
-    /// <summary>Sets the fleet's pairing code (a new fleet, a full join or a pasted code), so this PC is no longer managed.</summary>
-    public static void SetFleetKey(byte[]? key) => Update(c =>
+    /// <summary>
+    /// Sets the fleet code (a new fleet, a full join, a pasted code, or Change fleet code), so this PC is no longer
+    /// managed. A PC without a code that gets one starts or joins a fleet: unless it is the code removed here last, what
+    /// belonged to its earlier fleet goes (<see cref="ForgetEarlierFleet"/>). A code that replaces another keeps the
+    /// fleet's PCs and addresses: after Change fleet code, it is the same fleet with a new code.
+    /// </summary>
+    /// <param name="pastedFromAnotherPc">
+    /// The code was copied from another PC and entered here by hand (Settings → Fleet → Enter fleet code). Such a code
+    /// may be another fleet's, whose PCs would then get the access codes of the PCs this PC manages one way (see
+    /// <see cref="ShareManaged"/>). So when it differs from the code this PC has, the managed PCs are forgotten here.
+    /// Only here: they are not added to <see cref="RemovedManagedPcs"/>, which goes to the other PCs, so that a code
+    /// that is the same fleet's new code (this PC missed Change fleet code) removes nothing across the fleet, and the
+    /// managed PCs come back from the other PCs. The saved PCs and the addresses added by hand stay: the PCs of an earlier
+    /// fleet do not have the new code, so this PC and they refuse each other's requests. False for a code made on this
+    /// PC, sent by Change fleet code, or set by joining.
+    /// </param>
+    public static void SetFleetKey(byte[]? key, bool pastedFromAnotherPc = false) => Update(c =>
     {
+        var before = c.FleetKey;
+        if (key == null)
+        {
+            // Entering this code again is the same fleet, so it finds its PCs again.
+            if (before != null) c.RemovedFleetKeyId = CommandSigner.KeyId(before);
+        }
+        else
+        {
+            if (before == null)
+            {
+                if (CommandSigner.KeyId(key) != c.RemovedFleetKeyId) c.ForgetEarlierFleet();
+            }
+            // A PC managed one way manages no PCs: only its access code is replaced, as before.
+            else if (pastedFromAnotherPc && !CryptographicOperations.FixedTimeEquals(before, key)) c.ManagedPcs.Clear();
+            c.RemovedFleetKeyId = string.Empty;
+        }
         c.ProtectedFleetKey = Protect(key);
-        c.ProtectedPendingFleetKey = string.Empty;
+        c.ClearPendingFleetKey();
         c.ManagedBy = string.Empty;
     });
+
+    /// <summary>
+    /// The fingerprint of the fleet code removed last (Settings → Fleet → Remove code), while this PC has no code. Empty
+    /// otherwise.
+    /// </summary>
+    public string RemovedFleetKeyId { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Forgets what belonged to the fleet this PC was in before: its PCs, the addresses added by hand to find them, and
+    /// the PCs it managed one way, whose codes the new fleet would otherwise get from this PC. This PC's own settings
+    /// stay.
+    /// </summary>
+    private void ForgetEarlierFleet()
+    {
+        KnownPeers.Clear();
+        ManualAddresses.Clear();
+        ManagedPcs.Clear();
+        RemovedManagedPcs.Clear();
+    }
 
     private static string Protect(byte[]? key)
         => key == null ? string.Empty : Convert.ToBase64String(ProtectedData.Protect(key, null, DataProtectionScope.CurrentUser));
 
     /// <summary>
-    /// A new pairing code sent by "Change fleet code" on another PC, encrypted like the pairing code. The agent
+    /// A new code sent by "Change fleet code" on another PC, encrypted like the fleet code. The agent
     /// accepts it next to the current code until the first request that uses it; then it replaces the current code.
     /// </summary>
     public string ProtectedPendingFleetKey { get; set; } = string.Empty;
+    /// <summary>
+    /// When the pending code arrived. It is used for <see cref="PendingCodeLifetime"/> only, so a code sent by a PC that
+    /// has left the fleet since can't switch this PC later. Missing from files that older versions saved: then the code is not used.
+    /// </summary>
+    public DateTime PendingFleetKeyUtc { get; set; }
+
+    /// <summary>How long a new code from Change fleet code waits for its first use. The fleet's PCs use it within seconds.</summary>
+    internal static readonly TimeSpan PendingCodeLifetime = TimeSpan.FromMinutes(10);
 
     [JsonIgnore]
-    public byte[]? PendingFleetKey => Unprotect(ProtectedPendingFleetKey);
+    public byte[]? PendingFleetKey => IsPendingFresh(PendingFleetKeyUtc, DateTime.UtcNow) ? Unprotect(ProtectedPendingFleetKey) : null;
 
-    public static void SetPendingFleetKey(byte[] key) => Update(c => c.ProtectedPendingFleetKey = Protect(key));
+    internal static bool IsPendingFresh(DateTime receivedUtc, DateTime nowUtc) => (nowUtc - receivedUtc).Duration() < PendingCodeLifetime;
+
+    public static void SetPendingFleetKey(byte[] key) => Update(c =>
+    {
+        c.ProtectedPendingFleetKey = Protect(key);
+        c.PendingFleetKeyUtc = DateTime.UtcNow;
+    });
+
+    private void ClearPendingFleetKey()
+    {
+        ProtectedPendingFleetKey = string.Empty;
+        PendingFleetKeyUtc = default;
+    }
 
     // ----- Managed PCs -----
 
@@ -435,26 +537,61 @@ public sealed class FleetConfig
     public static void StopBeingManaged() => Update(c =>
     {
         c.ProtectedFleetKey = Protect(CommandSigner.NewKey());
-        c.ProtectedPendingFleetKey = string.Empty;
+        c.ClearPendingFleetKey();
         c.ManagedBy = string.Empty;
         c.KnownPeers.Clear();
     });
 
-    /// <summary>This PC joined a fleet one way: <paramref name="key"/> is its own code, known only to that fleet.</summary>
+    /// <summary>
+    /// This PC joined a fleet one way: <paramref name="key"/> is its own code, known only to that fleet. It replaces the
+    /// fleet code, so what belonged to an earlier fleet goes, as when leaving one: its PCs, and the codes of the PCs it
+    /// managed one way (this PC could still reach them).
+    /// </summary>
     public static void BecomeManaged(byte[] key, string managedBy) => Update(c =>
     {
         c.ProtectedFleetKey = Protect(key);
-        c.ProtectedPendingFleetKey = string.Empty;
+        c.ClearPendingFleetKey();
         c.ManagedBy = managedBy.Length > 0 ? managedBy : "another fleet";
+        c.KnownPeers.Clear();
+        c.ManagedPcs.Clear();
+        c.RemovedManagedPcs.Clear();
     });
 
-    /// <summary>A PC paired one way from this PC. Replaces an earlier pairing of a PC with the same name.</summary>
-    public static void AddManagedPc(string name, string address, byte[] key) => Update(c =>
+    /// <summary>
+    /// A PC paired one way from this PC. Replaces an earlier one-way pairing with the same name or machine ID. A fleet
+    /// member with the machine ID counts as the same PC paired again the other way: it is forgotten here, so the PC is not
+    /// known both ways (commands to it would be refused). One with only the same name is kept, as the joining PC picks its
+    /// name. The ID is what the joining PC says about itself and proves nothing, so "Add a PC" warns before it allows a
+    /// PC whose name or ID is saved here, and names what it replaces (see <see cref="PairingHostWindow.CheckRequest"/>).
+    /// </summary>
+    /// <param name="machineId">The PC's machine ID, as its status reports it; null when the pairing did not say.</param>
+    public static void AddManagedPc(string name, string address, byte[] key, string? machineId = null) => Update(c =>
     {
-        foreach (var old in c.ManagedPcs.Where(p => MachineRelay.Sanitize(p.Name) == MachineRelay.Sanitize(name)).ToList())
+        var id = machineId ?? string.Empty;
+        foreach (var old in c.ManagedPcs.Where(p => MachineRelay.Sanitize(p.Name) == MachineRelay.Sanitize(name)
+                     || (id.Length > 0 && p.MachineId.Equals(id, StringComparison.OrdinalIgnoreCase))).ToList())
             c.ForgetManaged(old);
-        c.ManagedPcs.Add(ManagedPcRecord.Create(name, address, key, DateTime.UtcNow));
+        if (id.Length > 0) c.KnownPeers.RemoveAll(p => p.MachineId.Equals(id, StringComparison.OrdinalIgnoreCase));
+        var record = ManagedPcRecord.Create(name, address, key, DateTime.UtcNow);
+        record.MachineId = id;
+        c.ManagedPcs.Add(record);
     });
+
+    /// <summary>Forgets the managed PCs that match; the fleet PCs this PC syncs with forget them too. Returns how many.</summary>
+    internal int ForgetManagedWhere(Func<ManagedPcRecord, bool> match)
+    {
+        var gone = ManagedPcs.Where(match).ToList();
+        foreach (var pc in gone) ForgetManaged(pc);
+        return gone.Count;
+    }
+
+    /// <summary>
+    /// Forgets a fleet member that was paired again one way as <paramref name="pc"/>: same name and machine ID, and last
+    /// heard from with the fleet's code before that pairing. Returns whether it did.
+    /// </summary>
+    private bool ForgetPeerManagedSince(ManagedPcRecord pc)
+        => pc.MachineId.Length > 0 && KnownPeers.RemoveAll(p => MachineRelay.Sanitize(p.Name) == MachineRelay.Sanitize(pc.Name)
+            && p.MachineId.Equals(pc.MachineId, StringComparison.OrdinalIgnoreCase) && p.LastSeenUtc < pc.AddedUtc) > 0;
 
     /// <summary>Removes a managed PC here; the fleet PCs this PC syncs with remove it too.</summary>
     public static void RemoveManagedPc(string keyId) => Update(c =>
@@ -502,7 +639,8 @@ public sealed class FleetConfig
 
     /// <summary>
     /// Takes in another fleet PC's managed PCs: removals first, then PCs not known here. Of two pairings of the same PC
-    /// (by machine ID, or by name while the ID is unknown), the newer one is kept. Returns whether anything changed.
+    /// (by machine ID, or by name while the ID is unknown), the newer one is kept. A managed PC that was a fleet member
+    /// before is forgotten as a member (see <see cref="ForgetPeerManagedSince"/>). Returns whether anything changed.
     /// </summary>
     internal bool MergeManaged(IEnumerable<ManagedPcShare> pcs, IEnumerable<RemovedManagedPc> removed)
     {
@@ -521,7 +659,16 @@ public sealed class FleetConfig
             catch (FormatException) { continue; }
             if (key.Length != 32) continue;
             var keyId = CommandSigner.KeyId(key);
-            if (ManagedPcs.Any(p => p.KeyId == keyId) || RemovedManagedPcs.Any(r => r.KeyId == keyId)) continue;
+            if (ManagedPcs.FirstOrDefault(p => p.KeyId == keyId) is { } known)
+            {
+                // Shared before the PC first answered there: its ID comes with a later share.
+                if (known.MachineId.Length > 0 || string.IsNullOrEmpty(share.MachineId)) continue;
+                known.MachineId = share.MachineId;
+                ForgetPeerManagedSince(known);
+                changed = true;
+                continue;
+            }
+            if (RemovedManagedPcs.Any(r => r.KeyId == keyId)) continue;
             var same = ManagedPcs.Where(p => share.MachineId?.Length > 0 && p.MachineId.Length > 0
                     ? p.MachineId.Equals(share.MachineId, StringComparison.OrdinalIgnoreCase)
                     : MachineRelay.Sanitize(p.Name) == MachineRelay.Sanitize(share.Name)).ToList();
@@ -535,13 +682,14 @@ public sealed class FleetConfig
             var record = ManagedPcRecord.Create(share.Name, share.Address ?? string.Empty, key, share.AddedUtc);
             record.MachineId = share.MachineId ?? string.Empty;
             ManagedPcs.Add(record);
+            ForgetPeerManagedSince(record);
             changed = true;
         }
         return changed;
     }
 
     /// <summary>
-    /// Makes the pending code the pairing code, if it still is <paramref name="key"/> (in fleet.json, or the copy the agent
+    /// Makes the pending code the fleet code, if it still is <paramref name="key"/> (in fleet.json, or the copy the agent
     /// kept in memory). The old code stops working.
     /// </summary>
     public static void UsePendingFleetKey(byte[] key, byte[]? remembered = null) => Update(c =>
@@ -549,11 +697,11 @@ public sealed class FleetConfig
         var pending = c.PendingFleetKey ?? remembered;
         if (pending == null || !CryptographicOperations.FixedTimeEquals(pending, key)) return;
         c.ProtectedFleetKey = Protect(key);
-        c.ProtectedPendingFleetKey = string.Empty;
+        c.ClearPendingFleetKey();
     });
 }
 
-/// <summary>The fleet pairing code: 32 random bytes, shown as "rwk_…" so it can be copied between PCs.</summary>
+/// <summary>The fleet code: 32 random bytes, shown as "rwk_…" so it can be copied between PCs.</summary>
 public static class CommandSigner
 {
     private const string KeyPrefix = "rwk_";
@@ -586,9 +734,35 @@ public static class CommandSigner
 /// <summary>AI assistant access: off by default; reading is always allowed once on, changes follow these rules.</summary>
 public sealed class AssistantOptions
 {
-    public bool Enabled { get; set; }
-    /// <summary>Ask before an assistant creates, starts, stops or restarts a runner. Moving and removing always ask.</summary>
-    public bool AskBeforeChanges { get; set; } = true;
+    /// <summary>"Allow AI assistants". Not in fleet.json: see <see cref="AssistantSwitches"/>. Setting it needs administrator rights.</summary>
+    [JsonIgnore]
+    public bool Enabled
+    {
+        get => AssistantSwitches.Current.Enabled;
+        set => AssistantSwitches.Set(enabled: value);
+    }
+
+    /// <summary>
+    /// Ask before an assistant creates, starts, stops or restarts a runner. Moving and removing always ask. Not in
+    /// fleet.json: see <see cref="AssistantSwitches"/>. Setting it needs administrator rights.
+    /// </summary>
+    [JsonIgnore]
+    public bool AskBeforeChanges
+    {
+        get => AssistantSwitches.Current.AskBeforeChanges;
+        set => AssistantSwitches.Set(askBeforeChanges: value);
+    }
+
+    // Where earlier versions kept the two switches: read only to move them once, and never written again.
+    [JsonInclude, JsonPropertyName(nameof(Enabled)), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    private bool? EnabledJson { get => null; set => EnabledInFile = value; }
+
+    [JsonInclude, JsonPropertyName(nameof(AskBeforeChanges)), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    private bool? AskBeforeChangesJson { get => null; set => AskBeforeChangesInFile = value; }
+
+    internal bool? EnabledInFile { get; private set; }
+    internal bool? AskBeforeChangesInFile { get; private set; }
+
     /// <summary>Also serve MCP over HTTP on this PC only (127.0.0.1), for AI tools that connect to a URL.</summary>
     public bool HttpEnabled { get; set; }
     /// <summary>The HTTP endpoint's access token, encrypted for this Windows user with DPAPI.</summary>
@@ -619,7 +793,7 @@ public sealed class ManagedPcRecord
     public DateTime LastSeenUtc { get; set; }
     /// <summary>When it was paired; of two pairings of one PC, the newer one wins.</summary>
     public DateTime AddedUtc { get; set; }
-    /// <summary>The PC's own pairing code, encrypted for this Windows user with DPAPI.</summary>
+    /// <summary>The PC's own access code, encrypted for this Windows user with DPAPI.</summary>
     public string ProtectedKey { get; set; } = string.Empty;
     /// <summary>The code's fingerprint, which identifies this pairing.</summary>
     public string KeyId { get; set; } = string.Empty;

@@ -16,6 +16,7 @@ public partial class SetupWindow : Window
     private bool _installing;
     private string _installedExe = string.Empty;
     private string _installFolder = AppUpdater.InstallDir;
+    private readonly Task _presetDone;
 
     public SetupWindow()
     {
@@ -23,6 +24,7 @@ public partial class SetupWindow : Window
         WindowTheme.Apply(this);
         VersionText.Text = $"Setup · version {AppUpdater.CurrentVersion}";
         ShowInstallFolder();
+        _presetDone = PresetFromInstallAsync();
         if (Installer.IsInstalled)
         {
             ExistingText.Text = AppUpdater.InstalledVersion is { } installed && AppUpdater.IsOlder(AppUpdater.CurrentVersion, installed)
@@ -40,6 +42,33 @@ public partial class SetupWindow : Window
         Closing += (_, e) => { if (_installing) e.Cancel = true; };
     }
 
+    /// <summary>
+    /// Setup over an existing install keeps its desktop shortcut and "Start with Windows": both are turned on here when
+    /// they exist, because setup removes what is turned off.
+    /// </summary>
+    private async Task PresetFromInstallAsync()
+    {
+        DesktopShortcutToggle.IsChecked = Installer.HasDesktopShortcut;
+        // Not changeable until the scheduled tasks are read, so the answer never overrides the user's choice.
+        StartupToggle.IsEnabled = false;
+        try
+        {
+            if (await Installer.StartsWithWindowsAsync() is { } starts)
+            {
+                StartupToggle.IsChecked = starts;
+                _startupKnown = true;
+            }
+            else MachineRelay.AppendAgentLog("Setup could not read the startup task, so it leaves it as it is unless the choice is changed.");
+        }
+        catch (Exception ex) { MachineRelay.AppendAgentLog($"Setup could not read the startup task: {ex.Message}"); }
+        finally { StartupToggle.IsEnabled = true; }
+    }
+
+    /// <summary>Whether the startup choice is known: read from the install, or set by the user. Otherwise setup leaves the task as it is.</summary>
+    private bool _startupKnown;
+
+    private void StartupToggle_Click(object sender, RoutedEventArgs e) => _startupKnown = true;
+
     private void ShowPage(int page)
     {
         _page = page;
@@ -48,8 +77,10 @@ public partial class SetupWindow : Window
         var dots = new[] { Dot1, Dot2, Dot3 };
         for (var i = 0; i < dots.Length; i++)
             dots[i].Background = (System.Windows.Media.Brush)FindResource(i <= page ? "AccentBrush" : "BorderBrush");
+        StepText.Text = $"Step {page + 1} of {dots.Length}";
         BackButton.Visibility = page == 1 ? Visibility.Visible : Visibility.Collapsed;
         NextButton.Content = page switch { 1 => "Install", 2 => "Finish", _ => "Next" };
+        NextButton.IsEnabled = page != 2 || _installed;
         CancelButton.Visibility = page == 2 ? Visibility.Collapsed : Visibility.Visible;
     }
 
@@ -60,6 +91,8 @@ public partial class SetupWindow : Window
 
     private async void Next_Click(object sender, RoutedEventArgs e)
     {
+        // An install may still wait for the startup task to be read, on the options page.
+        if (_installing) return;
         if (_page < 1) { ShowPage(_page + 1); return; }
         if (_page == 1) { await InstallAsync(); return; }
         Finish();
@@ -67,20 +100,25 @@ public partial class SetupWindow : Window
 
     private void Back_Click(object sender, RoutedEventArgs e)
     {
+        if (_installing) return;
         if (_page == 1) ShowPage(0);
+        // After a failed install: back to the options, to change them and install again.
+        else if (_page == 2 && !_installed && !_installing) ShowPage(1);
     }
 
     private SetupChoices Choices => new(
         DesktopShortcutToggle.IsChecked == true,
-        StartupToggle.IsChecked == true,
+        _startupKnown ? StartupToggle.IsChecked == true : null,
         SeveralPcsOption.IsChecked != true ? FleetChoice.SinglePc : JoinFleetOption.IsChecked == true ? FleetChoice.JoinFleet : FleetChoice.NewFleet);
 
     private async Task InstallAsync()
     {
-        var choices = Choices;
-        ShowPage(2);
-        NextButton.IsEnabled = false;
         _installing = true;
+        NextButton.IsEnabled = false;
+        await _presetDone;
+        var choices = Choices;
+        ResetInstallPage();
+        ShowPage(2);
         try
         {
             AppUpdater.UseInstallDir(_installFolder);
@@ -91,12 +129,7 @@ public partial class SetupWindow : Window
             DoneGlyph.Foreground = Palette.Success;
             DoneBadge.Background = Palette.Tint(Palette.Success);
             InstallStatus.Text = "Runner Manager is in the Start menu. To remove it, go to Settings → Apps.";
-            NextStepsText.Text = choices switch
-            {
-                { Fleet: FleetChoice.NewFleet } => "Next: Runner Manager starts a new fleet. Then install Runner Manager on your other PCs and choose “Join an existing fleet”.",
-                { Fleet: FleetChoice.JoinFleet } => "Next: on a PC that is already in the fleet, click “Add a PC” in the sidebar. This PC then connects to it.",
-                _ => string.Empty
-            };
+            NextStepsText.Text = WhatComesNext(choices.Fleet, await AlreadyInFleetAsync());
             NextStepsText.Visibility = NextStepsText.Text.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
             LaunchToggle.Visibility = Visibility.Visible;
         }
@@ -109,7 +142,6 @@ public partial class SetupWindow : Window
             InstallStatus.Text = ex.Message;
             CancelButton.Visibility = Visibility.Visible;
             BackButton.Visibility = Visibility.Visible;
-            _page = 2;
         }
         finally
         {
@@ -117,6 +149,39 @@ public partial class SetupWindow : Window
             InstallProgress.Visibility = Visibility.Collapsed;
             NextButton.IsEnabled = _installed;
         }
+    }
+
+    /// <summary>
+    /// What the last page says comes next. A PC that is already in a fleet stays in it whatever was chosen (the dashboard
+    /// starts or joins a fleet only on a PC that is in none), so the page says that and not what to do on another PC.
+    /// </summary>
+    internal static string WhatComesNext(FleetChoice fleet, bool alreadyInFleet) => (fleet, alreadyInFleet) switch
+    {
+        (FleetChoice.JoinFleet, true) => "This PC is already in a fleet and stays in it.",
+        (_, true) => "This PC is already in a fleet and stays in it. To leave the fleet, open Settings → Fleet → “Leave fleet”.",
+        (FleetChoice.NewFleet, false) => "Next: Runner Manager starts a new fleet. Then install Runner Manager on your other PCs and choose “Join an existing fleet”.",
+        (FleetChoice.JoinFleet, false) => "Next: on a PC that is already in the fleet, click “Add a PC” in the sidebar. This PC then connects to it.",
+        _ => string.Empty
+    };
+
+    /// <summary>The same rule as the dashboard: the fleet agent is installed and this PC has the fleet code.</summary>
+    private static async Task<bool> AlreadyInFleetAsync()
+    {
+        try { return FleetConfig.Current.FleetKey != null && await MachineRelay.IsAgentInstalledAsync(); }
+        catch { return false; }
+    }
+
+    /// <summary>The last page as it is before an install, also after a failed one.</summary>
+    private void ResetInstallPage()
+    {
+        InstallTitle.Text = "Installing…";
+        DoneGlyph.Text = "";
+        DoneGlyph.SetResourceReference(TextBlock.ForegroundProperty, "AccentBrush");
+        DoneBadge.SetResourceReference(Border.BackgroundProperty, "SelectedBrush");
+        InstallStatus.Text = string.Empty;
+        InstallProgress.Visibility = Visibility.Visible;
+        NextStepsText.Visibility = Visibility.Collapsed;
+        LaunchToggle.Visibility = Visibility.Collapsed;
     }
 
     private void Finish()
@@ -165,9 +230,6 @@ public partial class SetupWindow : Window
         ShowInstallFolder();
     }
 
-    private void Cancel_Click(object sender, RoutedEventArgs e)
-    {
-        if (_page == 2 && !_installed && BackButton.Visibility == Visibility.Visible) { ShowPage(1); return; }
-        Close();
-    }
+    // Also Esc. During the install the window stays open (see the constructor).
+    private void Cancel_Click(object sender, RoutedEventArgs e) => Close();
 }
