@@ -31,28 +31,46 @@ public static class RunnerActivity
     private static readonly Regex Timestamp = new(@"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z ?", RegexOptions.Compiled);
     private static readonly Regex AnsiCodes = new(@"\x1B\[[0-9;?]*[A-Za-z]", RegexOptions.Compiled);
     // actions/checkout passes the repository token to git as -c http.extraheader="AUTHORIZATION: basic …".
-    // sonar.login= holds a token, sig= signs an Azure storage URL, and curl -H "Cookie: …" sends a session.
+    // sonar.login= holds a token, sig= signs an Azure storage URL, and curl -H "Cookie: …" sends a session. key= is in
+    // storage connection strings (AccountKey=, SharedAccessKey=) and in API URLs (?key=).
     private static readonly string[] SecretHints =
     {
         "token", "password", "passwd", "pwd", "secret", "apikey", "api_key", "api-key", "pat=", "authorization", "extraheader",
-        "bearer", "credential", "auth", "pass:", "pass=", "login=", "sig=", "cookie"
+        "bearer", "credential", "auth", "pass:", "pass=", "login=", "sig=", "cookie", "key="
     };
-    /// <summary>Raw GitHub, GitLab and Slack tokens, alone or as a value (ghp_…, github_pat_…, glpat-…, xoxb-…).</summary>
-    private static readonly Regex TokenValue = new(@"(^|[=:])(gh[pousr]_|github_pat_|glpat-|xox[abprs]-)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    /// <summary>
+    /// Raw tokens, alone or as a value: GitHub (ghp_…, github_pat_…), GitLab (glpat-…), Slack (xoxb-…), npm, PyPI,
+    /// Docker Hub, HashiCorp Vault and Anthropic, and JSON web tokens (eyJ… with a dot).
+    /// </summary>
+    private static readonly Regex TokenValue = new(
+        @"(^|[=:])(gh[pousr]_|github_pat_|glpat-|xox[abprs]-|npm_|pypi-AgE|dckr_pat_|hvs\.|sk-ant-|eyJ[a-z0-9_-]{8,}\.)",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
     /// <summary>An option for a password or passphrase whose value follows it: --pass X, --passphrase X, keytool -storepass X, openssl -passin.</summary>
     private static readonly Regex PassOption = new(@"^(--?|/)[a-z0-9._-]*(?<!by)pass(phrase|in|out)?([=:]|$)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
     /// <summary>
+    /// -pw, the password option of PuTTY's plink, pscp and psftp, for every program: alone (-pw Secret) or with its value
+    /// attached (-pw=Secret, -pw:Secret, -pwSecret).
+    /// </summary>
+    private static readonly Regex PwOption = new(@"^(--?pw|/pw([=:]|$))", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    /// <summary>
     /// Programs whose -p or -P is a password, attached (mysql -pSecret, 7z -pSecret) or as the next argument (sqlcmd -P
-    /// Secret). For other programs -p is often something else: a port, mkdir -p, Unity's -projectPath, MSBuild's -p:.
+    /// Secret, docker login -p Secret, psexec -p Secret). For other programs -p is often something else: a port, mkdir
+    /// -p, Unity's -projectPath, MSBuild's -p:. For some of these too (docker run -p 8080:80, plink -P 22), which is
+    /// then left out as well.
     /// </summary>
     private static readonly HashSet<string> PasswordP = new(StringComparer.OrdinalIgnoreCase)
     {
         "mysql", "mysqldump", "mysqladmin", "mysqlimport", "mysqlcheck", "mysqlshow", "mysqlpump", "mysqlsh",
         "mariadb", "mariadb-dump", "mariadb-admin", "7z", "7za", "7zr", "7zz", "rar", "unrar", "winrar", "zip", "unzip",
-        "sshpass", "sqlcmd", "bcp", "osql", "mongo", "mongosh", "mongodump", "mongorestore", "mongoexport", "mongoimport"
+        "sshpass", "sqlcmd", "bcp", "osql", "mongo", "mongosh", "mongodump", "mongorestore", "mongoexport", "mongoimport",
+        "psexec", "psexec64", "plink", "pscp", "psftp", "docker", "podman", "helm", "az", "oc", "twine"
     };
-    /// <summary>User and password with -u or --user (curl -u user:pass, --user=user:pass, -uuser:pass).</summary>
-    private static readonly Regex AttachedUser = new(@"^(-u|--user=)\S*:", RegexOptions.Compiled);
+    /// <summary>
+    /// User and password with -u, --user or curl's proxy options -U and --proxy-user (curl -u user:pass,
+    /// --user=user:pass, -uuser:pass).
+    /// </summary>
+    private static readonly Regex AttachedUser = new(@"^(-u|-U|--user=|--proxy-user=)\S*:", RegexOptions.Compiled);
+    private static readonly char[] Spaces = { ' ', '\t' };
     /// <summary>The user and password in a URL (https://user:pass@host/…).</summary>
     private static readonly Regex UrlCredentials = new(@"(?<=://)[^/@\s]+@", RegexOptions.Compiled);
     private static readonly object CpuGate = new();
@@ -373,14 +391,13 @@ public static class RunnerActivity
     {
         var text = commandLine.Trim();
         if (text.Length == 0) return string.Empty;
-        var end = text[0] == '"' ? text.IndexOf('"', 1) : text.IndexOf(' ');
+        var end = text[0] == '"' ? text.IndexOf('"', 1) : text.IndexOfAny(Spaces);
         if (end < 0) return string.Empty;
-        var program = Path.GetFileNameWithoutExtension(text[..end].Trim('"').TrimEnd());
-        // net use and net user take passwords as plain arguments: only the subcommand is shown.
-        var limit = program.Equals("net", StringComparison.OrdinalIgnoreCase) || program.Equals("net1", StringComparison.OrdinalIgnoreCase) ? 1 : 3;
+        var program = ProgramName(text[..end]);
+        var limit = ShownArguments(program);
         var passwordP = PasswordP.Contains(program);
-        var tokens = text[(end + 1)..].Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .Select(t => UrlCredentials.Replace(t.Trim('"'), string.Empty)).Where(t => t.Length > 0).ToList();
+        var tokens = text[(end + 1)..].Split(Spaces, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(t => UrlCredentials.Replace(t.Trim('"', '\''), string.Empty)).Where(t => t.Length > 0).ToList();
         var parts = new List<string>();
         for (var i = 0; i < tokens.Count && parts.Count < limit; i++)
         {
@@ -388,19 +405,36 @@ public static class RunnerActivity
             // Everything from a secret on is left out: the value often follows its option.
             if (LooksSecret(clean, i + 1 < tokens.Count ? tokens[i + 1] : string.Empty, passwordP)) break;
             parts.Add(clean.Contains('\\') || clean.Contains('/') ? Path.GetFileName(clean.TrimEnd('\\', '/')) : clean);
+            // A program started through another one (cmd /c mysql -pSecret), or the rest of a path with spaces that is
+            // not in quotes (C:\Program Files\MySQL\bin\mysql.exe -pSecret).
+            if (!passwordP && PasswordP.Contains(ProgramName(clean))) passwordP = true;
         }
         var joined = string.Join(' ', parts);
         return joined.Length > 60 ? joined[..57] + "…" : joined;
     }
+
+    /// <summary>"docker" for docker, docker.exe, DOCKER.EXE, C:\Tools\docker.exe and "C:\Program Files\Docker\docker.exe".</summary>
+    private static string ProgramName(string path) => Path.GetFileNameWithoutExtension(path.Trim().Trim('"', '\'').TrimEnd('\\', '/'));
+
+    /// <summary>How many arguments are shown: fewer for programs that take a secret as a plain argument.</summary>
+    private static int ShownArguments(string program) => program.ToLowerInvariant() switch
+    {
+        // net use and net user take passwords as plain arguments: only the subcommand is shown.
+        "net" or "net1" => 1,
+        // nuget push package.nupkg ApiKey.
+        "nuget" => 2,
+        _ => 3
+    };
 
     /// <param name="passwordP">The program takes a password with -p or -P (see <see cref="PasswordP"/>).</param>
     private static bool LooksSecret(string token, string next, bool passwordP)
         => SecretHints.Any(hint => token.Contains(hint, StringComparison.OrdinalIgnoreCase))
            || TokenValue.IsMatch(token)
            || PassOption.IsMatch(token)
+           || PwOption.IsMatch(token)
            || (passwordP && token.Length >= 2 && token[0] == '-' && (token[1] is 'p' or 'P'))
            || AttachedUser.IsMatch(token)
-           || ((token is "-u" or "--user") && next.Contains(':'))
+           || ((token is "-u" or "--user" or "-U" or "--proxy-user") && next.Contains(':'))
            || token.Equals("/p", StringComparison.OrdinalIgnoreCase) || token.Equals("/rp", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Output files written before the job's worker started belong to an earlier job (a minute of slack for clocks).</summary>

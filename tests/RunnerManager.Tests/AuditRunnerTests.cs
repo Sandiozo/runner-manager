@@ -258,6 +258,63 @@ public class AuditRunnerTests
     public void ProcessArguments_LeaveOutCommonPasswordForms(string commandLine, string expected)
         => Assert.Equal(expected, RunnerActivity.ShortArguments(commandLine));
 
+    [Theory]
+    // -pw is PuTTY's password option, and it is a password for every program.
+    [InlineData(@"pscp.exe -pw Secret file.txt host:/tmp", "")]
+    [InlineData(@"plink -ssh -pw Secret host", "-ssh")]
+    [InlineData(@"psftp.exe -pw Secret host", "")]
+    [InlineData(@"""C:\Program Files\PuTTY\pscp.exe"" -pw Secret a b", "")]
+    [InlineData(@"C:\Program Files\PuTTY\plink.exe -batch -pw Secret host", "plink.exe -batch")]
+    [InlineData(@"tool.exe -pw=Secret run", "")]
+    [InlineData(@"tool.exe -pw:Secret run", "")]
+    [InlineData(@"tool.exe -pwSecret run", "")]
+    [InlineData(@"tool.exe -PW Secret run", "")]
+    [InlineData(@"tool.exe --pw Secret run", "")]
+    [InlineData(@"tool.exe /pw:Secret run", "")]
+    [InlineData("pscp.exe\t-pw\tSecret file.txt", "")]
+    [InlineData(@"tool.exe '-pw' 'Secret'", "")]
+    // -p and -P of docker, podman, helm, az, oc, psexec, PuTTY and twine, with or without .exe, a path or quotes.
+    [InlineData(@"docker login -p Secret ghcr.io", "login")]
+    [InlineData(@"docker.exe login -pSecret", "login")]
+    [InlineData(@"DOCKER.EXE login -p=Secret", "login")]
+    [InlineData(@"""C:\Program Files\Docker\Docker\resources\bin\docker.exe"" login -P Secret", "login")]
+    [InlineData(@"C:\Program Files\Docker\docker.exe login -p Secret", "docker.exe login")]
+    [InlineData(@"docker login --password Secret", "login")]
+    [InlineData(@"docker login --password=Secret", "login")]
+    [InlineData(@"podman.exe login -p Secret quay.io", "login")]
+    [InlineData(@"helm registry login -p Secret", "registry login")]
+    [InlineData(@"helm.exe repo add --password=Secret", "repo add")]
+    [InlineData(@"az.cmd login -p Secret", "login")]
+    [InlineData(@"oc login -p Secret", "login")]
+    [InlineData(@"C:\Tools\PsExec64.exe -accepteula -p Secret \\host cmd", "-accepteula")]
+    [InlineData(@"psexec -p Secret", "")]
+    [InlineData(@"""C:\Tools\PSEXEC.EXE"" -pSecret", "")]
+    [InlineData(@"plink.exe -P 22 host", "")]
+    [InlineData(@"twine upload -p Secret dist", "upload")]
+    // A program started through another one, or the rest of a path with spaces that is not in quotes.
+    [InlineData(@"cmd.exe /c mysql -pSecret", "c mysql")]
+    [InlineData(@"C:\Program Files\MySQL\bin\mysql.exe -pSecret db", "mysql.exe")]
+    // Other forms.
+    [InlineData(@"curl.exe -U proxyuser:Secret https://example.com", "")]
+    [InlineData(@"curl.exe --proxy-user=proxyuser:Secret https://example.com", "")]
+    [InlineData(@"curl.exe --proxy-user proxyuser:Secret https://example.com", "")]
+    [InlineData(@"nuget.exe push App.1.0.0.nupkg Secret -Source https://example.com", "push App.1.0.0.nupkg")]
+    [InlineData(@"tool.exe publish npm_abcdefgh123", "publish")]
+    [InlineData(@"vault.exe login hvs.CAESIabc", "login")]
+    [InlineData(@"tool.exe upload pypi-AgEIcHlwaS5vcmc", "upload")]
+    [InlineData(@"tool.exe login dckr_pat_abc123", "login")]
+    [InlineData(@"tool.exe call sk-ant-api03-abc", "call")]
+    [InlineData(@"tool.exe run --header=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig", "run")]
+    [InlineData(@"tool.exe send Endpoint=sb://bus.example.net/;SharedAccessKey=abc", "send")]
+    [InlineData(@"curl.exe https://maps.example.com/api?key=abc", "")]
+    // Ordinary arguments stay.
+    [InlineData(@"docker.exe build -t app .", "build -t app")]
+    [InlineData(@"pwsh.exe -NoProfile -File build.ps1", "-NoProfile -File build.ps1")]
+    [InlineData(@"psql.exe -U postgres -d app", "-U postgres -d")]
+    [InlineData(@"cmd.exe /c dotnet build -p:Configuration=Release", "c dotnet build")]
+    public void ProcessArguments_LeaveOutPasswordsAfterPw_AndOfMorePrograms(string commandLine, string expected)
+        => Assert.Equal(expected, RunnerActivity.ShortArguments(commandLine));
+
     /// <summary>
     /// A web server on this PC that answers one request with headers for a large file and then sends a byte every
     /// <paramref name="byteEvery"/>, or nothing more when it is null.
