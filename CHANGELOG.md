@@ -157,10 +157,12 @@ Runner Manager no longer starts a runner's service next to its console window.
   moved runner is handled as before.
 - Fix: when a move to another PC failed, the runner's Windows service on its PC was set to start with Windows and
   started, also when it was disabled because the runner runs in a console window, so that the runner could run twice.
-  The runner is now set up as it was before the move: a disabled service stays disabled and is not started, and a
-  service that started manually or with Windows does so again and is started, unless a console window ran the runner.
-  Such a runner is no longer left looking like the old copy of a moved runner, and its console window, which the move
-  closed, opens again at the next sign-in. This needs 2.10.0 on the runner's PC.
+  A runner that was stopped before the move was started too. The runner is now set up as it was before the move: a
+  disabled service stays disabled and is not started, and a service that started manually or with Windows does so
+  again and is started, unless a console window ran the runner or it was stopped in Runner Manager. A stopped runner
+  stays stopped. A runner in a console window is no longer left looking like the old copy of a moved runner, and its
+  console window, which the move closed, opens again at the next sign-in. Its disabled service also stays disabled
+  after another failed move when an earlier move failed with 2.9.0. This needs 2.10.0 on the runner's PC.
 - Fix: when the processes on a PC could not be read, the live output of a step that printed nothing for 5 minutes was
   no longer shown. It is shown now when Runner Manager saw earlier, while it could read the processes, that it is the
   running job's output. Otherwise the output says that the processes could not be read.

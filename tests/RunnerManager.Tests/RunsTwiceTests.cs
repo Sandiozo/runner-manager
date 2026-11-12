@@ -450,13 +450,14 @@ public class RunsTwiceTests : IDisposable
         Assert.False(before.RunsTwice);
 
         // Step 1 records how the runner ran in the marker, closes the console window and disables the service.
-        var recorded = FleetActions.BeforeMove(before);
+        var recorded = FleetActions.BeforeMove(before, wasStopped: false);
         var marker = Path.Combine(root, RunnerService.MovedAwayMarker);
-        File.WriteAllText(marker, RunnerService.MovedAwayText(DateTime.UtcNow, recorded.ManualStart, recorded.ServiceStart, recorded.Console));
+        File.WriteAllText(marker, RunnerService.MovedAwayText(DateTime.UtcNow, recorded.ManualStart, recorded.ServiceStart, recorded.Console, recorded.Stopped));
         var moving = await Read(root, new List<RunnerServiceRecord> { Service(root, "Stopped", "Disabled", name: CoreService) }, new List<ProcessInfo>(), startup);
         Assert.True(moving.MovedAway);
-        // A second try (after a move that got no answer) records the same, not that the move disabled the service.
-        Assert.Equal(recorded, FleetActions.BeforeMove(moving));
+        // A second try (after a move that got no answer) records the same, not that the first try disabled the service
+        // and marked the runner as stopped.
+        Assert.Equal(recorded, FleetActions.BeforeMove(moving, wasStopped: true));
         // The new copy on the other PC is registered as on the first try.
         Assert.Equal(before.RegistrationOptions, moving.RegistrationOptions);
 
@@ -464,9 +465,80 @@ public class RunsTwiceTests : IDisposable
         var undo = FleetActions.AfterFailedMove(moving);
         Assert.Equal(putBack, FleetActions.StartMode(undo.ServiceStart));
         Assert.Equal(started, undo.Start);
+        Assert.False(undo.Stopped);
         Assert.StartsWith(started ? "The runner was started again." : "The runner is as it was before the move.", undo.Text);
         if (console != "none") Assert.Contains("console window", undo.Text);
         else if (!started) Assert.Contains("disabled, as before, and was not started", undo.Text);
+    }
+
+    [Theory]
+    [InlineData("open")]
+    [InlineData("at sign-in")]
+    public async Task AFailedMoveOfAConsoleRunnerThatAMoveOf290LeftMarked_KeepsItsServiceDisabled(string console)
+    {
+        // 2.9.0 did not undo a failed move of a console runner: the marker stays, without a service line, and the service
+        // is disabled. A startup entry opens the console window again, and the runner is moved again.
+        var root = MakeRunner("project-Livonia-3");
+        var startup = StartupShortcut(root);
+        var processes = console == "open" ? new List<ProcessInfo> { Listener(root, 9100, 1) } : new List<ProcessInfo>();
+        var marker = Path.Combine(root, RunnerService.MovedAwayMarker);
+        File.WriteAllText(marker, "Moved to another PC on 2026-11-01T10:00:00.0000000Z. Its registration belongs to that PC now.");
+        var disabled = new List<RunnerServiceRecord> { Service(root, "Stopped", "Disabled", name: CoreService) };
+        var before = await Read(root, disabled, processes, startup);
+        Assert.True(before.MovedAway);
+        Assert.False(before.ServiceRecordedBeforeMove);
+
+        // A failed move right away, with the marker of 2.9.0, keeps the service disabled.
+        Assert.Equal((ServiceStart.Disabled, false), (FleetActions.StartMode(FleetActions.AfterFailedMove(before).ServiceStart), FleetActions.AfterFailedMove(before).Start));
+
+        // The next move records the service as disabled, and its failure leaves it disabled.
+        var recorded = FleetActions.BeforeMove(before, wasStopped: true);
+        Assert.Equal((RunnerStart.Disabled, true), (recorded.ServiceStart, recorded.Console));
+        File.WriteAllText(marker, RunnerService.MovedAwayText(DateTime.UtcNow, recorded.ManualStart, recorded.ServiceStart, recorded.Console, recorded.Stopped));
+        var moving = await Read(root, disabled, new List<ProcessInfo>(), startup);
+        var undo = FleetActions.AfterFailedMove(moving);
+        Assert.Equal(ServiceStart.Disabled, FleetActions.StartMode(undo.ServiceStart));
+        Assert.False(undo.Start);
+        Assert.Contains("console window", undo.Text);
+    }
+
+    [Theory]
+    [InlineData("", RunnerStart.WithWindows)]
+    [InlineData("\r\nstart=manual", RunnerStart.Off)]
+    public async Task AServiceRunnerThatAMoveOf290LeftMarked_IsPutBackAs290PutItBack(string manualLine, string putBack)
+    {
+        var root = MakeRunner("project-Livonia-3");
+        File.WriteAllText(Path.Combine(root, RunnerService.MovedAwayMarker), "Moved to another PC on 2026-11-01T10:00:00.0000000Z." + manualLine);
+        var runner = await Read(root, new List<RunnerServiceRecord> { Service(root, "Stopped", "Disabled", name: CoreService) }, new List<ProcessInfo>(), new List<string>());
+        Assert.False(runner.HasConsoleCopy);
+        Assert.Equal(putBack, FleetActions.BeforeMove(runner, wasStopped: true).ServiceStart);
+        Assert.Equal((putBack, true), (FleetActions.AfterFailedMove(runner).ServiceStart, FleetActions.AfterFailedMove(runner).Start));
+    }
+
+    [Theory]
+    [InlineData("Auto", true)]
+    [InlineData("Manual", true)]
+    [InlineData("Auto", false)]
+    public async Task AFailedMoveOfARunnerThatWasStopped_LeavesItStopped(string startMode, bool stopped)
+    {
+        var root = MakeRunner("project-Livonia-3");
+        var before = await Read(root, new List<RunnerServiceRecord> { Service(root, stopped ? "Stopped" : "Running", startMode, name: CoreService) },
+            new List<ProcessInfo>(), new List<string>());
+        // Stopped in Runner Manager: on the list of runners that auto-recovery leaves alone.
+        var recorded = FleetActions.BeforeMove(before, wasStopped: stopped);
+        Assert.Equal(stopped, recorded.Stopped);
+        var text = RunnerService.MovedAwayText(DateTime.UtcNow, recorded.ManualStart, recorded.ServiceStart, recorded.Console, recorded.Stopped);
+        Assert.Equal(stopped, text.Split(Environment.NewLine).Contains("stopped"));
+        File.WriteAllText(Path.Combine(root, RunnerService.MovedAwayMarker), text);
+        var moving = await Read(root, new List<RunnerServiceRecord> { Service(root, "Stopped", "Disabled", name: CoreService) }, new List<ProcessInfo>(), new List<string>());
+        // The move marked every runner as stopped; a second try still records how it was before.
+        Assert.Equal(recorded, FleetActions.BeforeMove(moving, wasStopped: true));
+
+        var undo = FleetActions.AfterFailedMove(moving);
+        Assert.Equal(startMode == "Auto" ? ServiceStart.Automatic : ServiceStart.Manual, FleetActions.StartMode(undo.ServiceStart));
+        Assert.Equal((!stopped, stopped), (undo.Start, undo.Stopped));
+        Assert.Equal(stopped ? "The runner is as it was before the move. It was stopped before the move, so it was not started." : "The runner was started again.",
+            undo.Text);
     }
 
     [Fact]
@@ -481,15 +553,18 @@ public class RunsTwiceTests : IDisposable
         Assert.True(ManualFor290(manual));
         Assert.False(ManualFor290(RunnerService.MovedAwayText(now, manualStart: false, RunnerStart.WithWindows, console: false)));
         Assert.False(ManualFor290(RunnerService.MovedAwayText(now, manualStart: false, RunnerStart.Disabled, console: true)));
+        Assert.True(ManualFor290(RunnerService.MovedAwayText(now, manualStart: true, RunnerStart.Off, console: false, stopped: true)));
 
         // What this version writes, it reads back.
         foreach (var start in new[] { RunnerStart.WithWindows, RunnerStart.Off, RunnerStart.Disabled })
         foreach (var console in new[] { false, true })
-            Assert.Equal((start == RunnerStart.Off, start, console),
-                RunnerService.ParseMovedAway(RunnerService.MovedAwayText(now, start == RunnerStart.Off, start, console).Split(Environment.NewLine)));
-        // A marker of 2.9.0 has no service line: the service is put back as 2.9.0 put it back.
-        Assert.Equal((true, RunnerStart.Off, false), RunnerService.ParseMovedAway(new[] { "Moved to another PC on 2026-11-01T10:00:00Z.", "start=manual" }));
-        Assert.Equal((false, RunnerStart.WithWindows, false), RunnerService.ParseMovedAway(new[] { "Moved to another PC on 2026-11-01T10:00:00Z." }));
+        foreach (var stopped in new[] { false, true })
+            Assert.Equal((start == RunnerStart.Off, start, console, true, stopped),
+                RunnerService.ParseMovedAway(RunnerService.MovedAwayText(now, start == RunnerStart.Off, start, console, stopped).Split(Environment.NewLine)));
+        // A marker of 2.9.0 has no service line: the service is put back as 2.9.0 put it back, unless a console window
+        // runs the runner (see AFailedMoveOfAConsoleRunnerThatAMoveOf290LeftMarked_KeepsItsServiceDisabled).
+        Assert.Equal((true, RunnerStart.Off, false, false, false), RunnerService.ParseMovedAway(new[] { "Moved to another PC on 2026-11-01T10:00:00Z.", "start=manual" }));
+        Assert.Equal((false, RunnerStart.WithWindows, false, false, false), RunnerService.ParseMovedAway(new[] { "Moved to another PC on 2026-11-01T10:00:00Z." }));
         // Without a marker (none could be read), as before: with Windows, and started.
         Assert.Equal((RunnerStart.WithWindows, true), (FleetActions.AfterFailedMove(null).ServiceStart, FleetActions.AfterFailedMove(null).Start));
         Assert.Equal(ServiceStart.Disabled, FleetActions.StartMode(RunnerStart.Disabled));
