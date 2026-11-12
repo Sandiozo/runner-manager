@@ -189,6 +189,44 @@ public class AuditR4DashboardTests
     public void JobPanel_AsksToConnectGitHub_OnlyAfterTheCheckFoundNoSignIn(bool signInChecked, bool signedIn, string? note)
         => Assert.Equal(note, MainWindow.JobNoteWithoutSignIn(signInChecked, signedIn));
 
+    // ----- 12: this PC's card on a PC managed one way names its access code -----
+
+    [Fact]
+    public void ThisPcsCard_OnAPcManagedOneWay_NamesItsAccessCode()
+    {
+        // fleet.json of the test state folder; other tests that use it do not run beside the dashboard tests.
+        var path = System.IO.Path.Combine(FleetConfig.StateDir, "fleet.json");
+        System.IO.Directory.CreateDirectory(FleetConfig.StateDir);
+        var saved = System.IO.File.Exists(path) ? System.IO.File.ReadAllText(path) : null;
+        try
+        {
+            var local = MachineInfo.FromPayload(Environment.MachineName.ToLowerInvariant(),
+                new MachineStatusPayload { MachineName = Environment.MachineName, SigningKeyId = "d4e5f6" });
+            var other = MachineInfo.FromPayload("build-55", new MachineStatusPayload { MachineName = "BUILD-55", SigningKeyId = "a1b2c3" });
+            Assert.True(local.IsLocal);
+            Assert.False(local.IsManaged);
+
+            FleetConfig.SetFleetKey(CommandSigner.NewKey());
+            Assert.Equal("Paired. Connections to other PCs are encrypted with the fleet code (fingerprint d4e5f6).", local.SignedTip);
+
+            FleetConfig.BecomeManaged(CommandSigner.NewKey(), "HOSTPC");
+            Assert.Equal("Managed one way. Connections to this PC are encrypted with its own access code (fingerprint d4e5f6), "
+                         + "which it cannot use to reach the other PCs.", local.SignedTip);
+            // Another PC's card says what that PC is, not what this PC is.
+            Assert.Equal("Paired. Connections to other PCs are encrypted with the fleet code (fingerprint a1b2c3).", other.SignedTip);
+        }
+        finally
+        {
+            if (saved != null)
+            {
+                System.IO.File.WriteAllText(path, saved);
+                // A new time, so the cached settings are read again.
+                System.IO.File.SetLastWriteTimeUtc(path, DateTime.UtcNow.AddDays(-1).AddTicks(Random.Shared.Next()));
+            }
+            else if (System.IO.File.Exists(path)) System.IO.File.Delete(path);
+        }
+    }
+
     // ----- 10: a sign-in check that failed -----
 
     [Fact]
