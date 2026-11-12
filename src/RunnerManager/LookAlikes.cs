@@ -4,12 +4,15 @@ namespace RunnerManager;
 
 /// <summary>
 /// Letters of the Latin, Greek and Cyrillic alphabets that look alike (a Cyrillic а and a Latin a), for the warnings in
-/// "Add a PC". A name written in one alphabet is never a problem by itself; one that mixes alphabets, or that matches
-/// another name once look-alike letters are read as Latin, is warned about.
+/// "Add a PC". A name written in one alphabet is never a problem by itself; one that mixes alphabets that have letters
+/// like Latin ones, or that matches another name once look-alike letters are read as Latin, is warned about.
 /// </summary>
 public static class LookAlikes
 {
-    /// <summary>The alphabets whose letters look like each other's, and <see cref="Other"/> for the letters of every other script.</summary>
+    /// <summary>
+    /// The alphabets whose letters look like each other's, and <see cref="Other"/> for the letters of the other scripts
+    /// that have letters like Latin letters or digits (see <see cref="AlphabetOf"/>).
+    /// </summary>
     public enum Alphabet { None, Latin, Greek, Cyrillic, Other }
 
     // Each letter and the Latin letter or digit it looks like, in the same case. The table is read once as the name is
@@ -28,7 +31,11 @@ public static class LookAlikes
 
     private static readonly Dictionary<char, char> Latin = From.Zip(To).ToDictionary(p => p.First, p => p.Second);
 
-    /// <summary>Which alphabet a letter belongs to; <see cref="Alphabet.None"/> for digits, signs and other characters that are no letters.</summary>
+    /// <summary>
+    /// Which alphabet a letter belongs to. <see cref="Alphabet.None"/> for digits, signs and other characters that are no
+    /// letters, and for the letters of scripts that have no letter like a Latin one (Chinese, Japanese, Korean, Thai,
+    /// Arabic, Hebrew, Devanagari and others): together with Latin letters they cannot pass for a Latin name.
+    /// </summary>
     public static Alphabet AlphabetOf(Rune rune)
     {
         if (!Rune.IsLetter(rune)) return Alphabet.None;
@@ -38,13 +45,19 @@ public static class LookAlikes
             return Alphabet.Latin;
         if (v is >= 0x370 and <= 0x3FF or >= 0x1F00 and <= 0x1FFF) return Alphabet.Greek;
         if (v is >= 0x400 and <= 0x52F or >= 0x1C80 and <= 0x1C8F or >= 0x2DE0 and <= 0x2DFF or >= 0xA640 and <= 0xA69F) return Alphabet.Cyrillic;
-        // Armenian, Cherokee, Chinese, Thai and every other script.
-        return Alphabet.Other;
+        // Other scripts with letters like Latin letters: Armenian (Oh, like O), Cherokee (Go, like A), Lisu (Pa, like P),
+        // Coptic (Ro, like P), Canadian syllabics (Ki, like P), Runic (Berkanan, like B) and Tifinagh (Yar, like O).
+        if (v is >= 0x530 and <= 0x58F or >= 0xFB13 and <= 0xFB17 or >= 0x13A0 and <= 0x13FF or >= 0xAB70 and <= 0xABBF
+            or >= 0xA4D0 and <= 0xA4FF or >= 0x2C80 and <= 0x2CFF or >= 0x1400 and <= 0x167F or >= 0x18B0 and <= 0x18FF
+            or >= 0x16A0 and <= 0x16FF or >= 0x2D30 and <= 0x2D7F)
+            return Alphabet.Other;
+        return Alphabet.None;
     }
 
     /// <summary>
     /// The alphabets that a name has letters of, in the order Latin, Greek, Cyrillic, Other. Two or more means the name
-    /// mixes them. The letters of all other scripts count as one, <see cref="Alphabet.Other"/>; digits and signs do not count.
+    /// mixes them. The letters of the other scripts with letters like Latin ones count as one, <see cref="Alphabet.Other"/>;
+    /// digits, signs and the letters of scripts without such letters do not count.
     /// </summary>
     public static IReadOnlyList<Alphabet> AlphabetsIn(string name)
         => Normalized(name, NormalizationForm.FormKC).EnumerateRunes().Select(AlphabetOf).Where(a => a != Alphabet.None).Distinct().Order().ToList();

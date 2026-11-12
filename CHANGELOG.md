@@ -21,9 +21,9 @@ Runner Manager updates itself from [Releases](https://github.com/Sandiozo/runner
   add the PC again, and a PC that confirms the 6-digit codes is told that it was not added.
 - **Add a PC** warns about a name whose letters only look like the letters of another PC's name or of this PC's name,
   such as a Cyrillic А in place of a Latin A, or full-width letters, also when the name is in small letters. It also warns
-  about a name that mixes Latin, Greek or Cyrillic letters with each other or with letters of another alphabet, such
-  as Armenian or Chinese. A name written in one other alphabet only, with digits and hyphens, is not warned about,
-  unless it looks like the name of another PC.
+  about a name that mixes Latin, Greek or Cyrillic letters with each other, or with letters of another alphabet that
+  has letters like Latin ones, such as Armenian or Cherokee. A name without such a mix is not warned about, unless it
+  looks like the name of another PC.
 - Fix: when the processes on a PC could not be read, the live output of a step that printed nothing for 5 minutes was
   no longer shown. It is shown now when Runner Manager saw earlier, while it could read the processes, that it is the
   running job's output. Otherwise the output says that the processes could not be read.

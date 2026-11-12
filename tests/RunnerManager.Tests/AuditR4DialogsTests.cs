@@ -94,12 +94,12 @@ public class AddAPcCheckTests
     [Theory]
     [InlineData("J\u0100NIS-PC")]                    // JĀNIS-PC
     [InlineData("\u00D6STRA")]                       // ÖSTRA
-    [InlineData("\u6771\u4EAC-2")]                   // Tokyo in Japanese, with a digit
+    [InlineData("\u6771\u4EAC-PC")]                  // Tokyo in Japanese
     [InlineData("\u0395\u03BB\u03BB\u03AC\u03B4\u03B1")] // Greece in Greek, with a composed accent
     [InlineData("OFFICE PC 2")]
     // Marks that can be seen: names in these scripts cannot be written without them.
     [InlineData("JĀNIS-PC")]                   // JĀNIS-PC with A and a combining macron
-    [InlineData("กิน-2")]             // Thai, with a vowel sign above
+    [InlineData("กิน-PC")]            // Thai, with a vowel sign above
     [InlineData("कुमार")]   // Devanagari, with a vowel sign below
     public void NamesInOtherAlphabets_CanStillBeAllowed(string name)
         => Assert.Equal(new PairingHostWindow.RequestCheck(null, CanAllow: true), Check(new FleetConfig(), name, null));

@@ -261,9 +261,10 @@ public partial class PairingHostWindow : Window
     /// full-width letters, for example), or of a PC saved here or allowed a moment ago, once look-alike letters of the
     /// Latin, Greek and Cyrillic alphabets are read as one (<see cref="LookAlikes.LookAlike"/>). A name that is the same
     /// for <see cref="SameNameForWarning"/> is left to <see cref="SameNameWarning"/>. Otherwise, a name that mixes
-    /// alphabets (Latin, Greek, Cyrillic, and the letters of any other script as one more) is warned about, as it can
-    /// look like a name that is not saved here. A name written in one alphabet alone is not. Null when there is nothing
-    /// to say.
+    /// alphabets with letters like Latin ones (Latin, Greek, Cyrillic, and as one more the other scripts that have such
+    /// letters, such as Armenian or Cherokee; see <see cref="LookAlikes.AlphabetOf"/>) is warned about, as it can look like
+    /// a name that is not saved here. A name written in one alphabet alone is not, nor are the letters of a script without
+    /// such letters (Chinese or Thai) next to Latin ones. Null when there is nothing to say.
     /// </summary>
     internal static string? LookAlikeWarning(FleetConfig config, string name, string thisPc, IEnumerable<(string Name, string? MachineId)>? allowed = null)
     {
