@@ -1312,8 +1312,10 @@ public class AuditDashboardTests
         var note = click.IndexOf("log(RemoteAddRunnerNote(pc.MachineName));", StringComparison.Ordinal);
         var create = click.IndexOf("_fleetActions.CreateRunnerAsync(pc, setup.RepositoryUrl, setup.RunnerName, setup.Labels, log)", StringComparison.Ordinal);
         Assert.True(note > 0 && note < create);
-        // Before the first sign-in check has answered, the sign-in is not known yet.
-        Assert.True(click.IndexOf("await check;", StringComparison.Ordinal) < click.IndexOf("if (!_githubAuthenticated)", StringComparison.Ordinal));
+        // Before the first sign-in check has answered, the sign-in is not known yet (round 4: asked only for this PC).
+        var signIn = MethodBody("MainWindow.xaml.cs", "private async Task<bool> HasSignInToAddHereAsync(");
+        var wait = signIn.IndexOf("await check;", StringComparison.Ordinal);
+        Assert.True(wait > 0 && wait < signIn.IndexOf("if (_githubAuthenticated) return true;", StringComparison.Ordinal));
     }
 
     [Fact]

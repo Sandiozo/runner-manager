@@ -42,6 +42,8 @@ public partial class MainWindow : Window
     private bool _refreshQueuedForceAuth;
     private bool _operationRunning;
     private string _operationTitle = string.Empty;
+    /// <summary>The running operation works only on another PC (Add runner there), so it changes nothing on this PC.</summary>
+    private bool _operationOnOtherPcOnly;
     private bool _githubAuthenticated;
     /// <summary>gh has been asked once; until then the dashboard does not say that GitHub is not connected.</summary>
     private bool _githubChecked;
@@ -58,6 +60,8 @@ public partial class MainWindow : Window
     private string _filter = string.Empty;
     private DateTime _lastAuthCheck = DateTime.MinValue;
     private DateTime _lastLocalRunnerRefresh = DateTime.MinValue;
+    /// <summary>Whether this PC's runners were last read with GitHub (connected then), or null before the first reading.</summary>
+    private bool? _localRunnersReadWithGitHub;
     private bool _forceDiscovery = true;
 
     public MainWindow()
@@ -129,14 +133,45 @@ public partial class MainWindow : Window
     /// <summary>Whether the fleet is read while the operation with this title runs on this PC.</summary>
     internal static bool ReadsFleetDuring(string operationTitle) => operationTitle is not (JoinFleetTitle or LeaveFleetTitle);
 
-    /// <summary>Waits until a fleet read that is still running has ended (it never throws).</summary>
-    private Task WaitForFleetReadAsync()
-        => _fleetRead is { IsCompleted: false } read ? read.ContinueWith(_ => { }, TaskScheduler.Default) : Task.CompletedTask;
+    /// <summary>An operation that changes this PC runs (see <see cref="HoldsThisPcBack"/>).</summary>
+    private bool ThisPcOperationRunning => HoldsThisPcBack(_operationRunning, _operationOnOtherPcOnly);
 
     /// <summary>
-    /// Reads the fleet and this PC's runners and shows them. Nothing here waits for gh: the GitHub sign-in is checked
-    /// beside it (<see cref="StartGitHubCheck"/>), and the job health, update and recent-run checks run after it, so the
-    /// next timer tick is not skipped while GitHub is slow.
+    /// Whether refreshes leave this PC alone while an operation runs: they do not read this PC's runners, change its card
+    /// or start the checks after a refresh, and Refresh (F5) waits. Operations change this PC's runners, fleet agent and
+    /// fleet membership, and everything is refreshed when they end. An Add runner on another PC changes nothing here, so
+    /// refreshes go on as usual while it waits for that PC, which can take many minutes. Other operations still wait for it.
+    /// </summary>
+    internal static bool HoldsThisPcBack(bool operationRunning, bool onOtherPcOnly) => operationRunning && !onOtherPcOnly;
+
+    /// <summary>How long joining or leaving the fleet waits for a fleet read that started before.</summary>
+    internal static readonly TimeSpan FleetReadWait = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// Waits until a fleet read that is still running has ended, at most <see cref="FleetReadWait"/>: a read that does
+    /// not end would leave Join or Leave running with no way to cancel it. It never throws.
+    /// </summary>
+    private async Task WaitForFleetReadAsync()
+    {
+        if (!await WaitForReadAsync(_fleetRead, () => Task.Delay(FleetReadWait)))
+            AddActivity("A fleet read that started before did not end within 30 seconds. Going on without it.", ActivityKind.Warning);
+    }
+
+    /// <summary>
+    /// Waits until <paramref name="read"/> has ended, or <paramref name="limit"/> has (started only when the read still
+    /// runs). True when the read ended or was not running. It never throws, also when the read failed.
+    /// </summary>
+    internal static async Task<bool> WaitForReadAsync(Task? read, Func<Task> limit)
+    {
+        if (read is not { IsCompleted: false }) return true;
+        return await Task.WhenAny(read, limit()) == read;
+    }
+
+    /// <summary>
+    /// Reads the fleet and this PC's runners and shows them. The GitHub sign-in is checked beside it
+    /// (<see cref="StartGitHubCheck"/>), and the job health, update and recent-run checks run after it without being
+    /// waited for, so a slow gh does not hold those back. Reading this PC's runners with GitHub (every 30 seconds, see
+    /// <see cref="ReadsLocalRunners"/>) still waits for gh, and a timer tick that comes meanwhile is skipped.
     /// </summary>
     private async Task RefreshAsync(bool forceAuthCheck = false)
     {
@@ -158,21 +193,21 @@ public partial class MainWindow : Window
             var machinesTask = MachineRelay.ReadFleetAsync(_forceDiscovery);
             _fleetRead = machinesTask;
             _forceDiscovery = false;
-            // While an operation runs on this PC, only the other PCs are refreshed: this PC's runners, fleet agent and
-            // fleet membership are what operations change, and everything is refreshed when the operation ends.
-            if (_operationRunning)
+            // While an operation that changes this PC runs, only the other PCs are refreshed (see HoldsThisPcBack).
+            if (ThisPcOperationRunning)
             {
                 ApplyFleet(await machinesTask, Runners.ToList(), localRunnersRead: false);
                 LastUpdatedText.Text = $"Updated {TimeFormat.WithSeconds(DateTime.Now)}  ·  Refreshes every {_settings.RefreshSeconds}s";
                 return;
             }
             if (forceAuthCheck || DateTime.Now - _lastAuthCheck > AuthCheckInterval) StartGitHubCheck();
-            // This PC's runners are read with GitHub when it was connected at the last check. When the check that runs
-            // now says otherwise, they are read again (see CheckGitHubAsync).
-            var refreshLocalRunners = forceAuthCheck || Runners.Count == 0
-                || DateTime.Now - _lastLocalRunnerRefresh >= LocalGitHubRefreshInterval;
+            // This PC's runners are read with GitHub when it was connected at the last check. When a check says otherwise,
+            // the next refresh reads them again.
+            var withGitHub = _githubAuthenticated;
+            var refreshLocalRunners = ReadsLocalRunners(forceAuthCheck, Runners.Count == 0, _localRunnersReadWithGitHub, withGitHub,
+                DateTime.Now - _lastLocalRunnerRefresh);
             var runnersTask = refreshLocalRunners
-                ? RunnerService.ReadSnapshotAsync(_githubAuthenticated)
+                ? RunnerService.ReadSnapshotAsync(withGitHub)
                 : Task.FromResult(Runners.ToList());
 
             _isEnrolled = await MachineRelay.IsAgentInstalledAsync();
@@ -191,13 +226,14 @@ public partial class MainWindow : Window
                 ApplyFleet(await machinesTask, Runners.ToList(), localRunnersRead: false);
             var runners = await runnersTask;
             var machines = await machinesTask;
-            // An operation may have started while this refresh waited.
-            if (_operationRunning)
+            // An operation that changes this PC may have started while this refresh waited.
+            if (ThisPcOperationRunning)
             {
                 ApplyFleet(machines, Runners.ToList(), localRunnersRead: false);
                 return;
             }
             ApplyFleet(machines, runners, refreshLocalRunners);
+            if (refreshLocalRunners) _localRunnersReadWithGitHub = withGitHub;
             completed = true;
             LastUpdatedText.Text = $"Updated {TimeFormat.WithSeconds(DateTime.Now)}  ·  Refreshes every {_settings.RefreshSeconds}s";
             ShowIdleStatus();
@@ -222,6 +258,15 @@ public partial class MainWindow : Window
             await RefreshAsync(force);
         }
     }
+
+    /// <summary>
+    /// Whether a refresh reads this PC's runners again. Read with GitHub, each costs several requests, so they are read
+    /// every 30 seconds, and at once when the refresh is forced or none are known. Also at once when they were last read
+    /// with another sign-in than GitHub has now: at start-up, the first refresh reads them before the sign-in check has
+    /// answered, and a refresh that was still running when it answered reads them the old way too.
+    /// </summary>
+    internal static bool ReadsLocalRunners(bool forced, bool noneKnown, bool? lastReadWithGitHub, bool gitHubConnected, TimeSpan sinceLastRead)
+        => forced || noneKnown || lastReadWithGitHub != gitHubConnected || sinceLastRead >= LocalGitHubRefreshInterval;
 
     /// <summary>
     /// The checks that ask Windows and GitHub, after a refresh has shown the fleet. They are not awaited by the refresh,
@@ -265,47 +310,76 @@ public partial class MainWindow : Window
         _gitHubCheck = CheckGitHubAsync();
     }
 
+    /// <summary>
+    /// How often Disconnect and Reconnect changed the sign-in. A check that started before a change answers for the
+    /// sign-in before it, so its answer is thrown away.
+    /// </summary>
+    private int _signInChanges;
+
+    /// <summary>gh was signed out on this PC (Disconnect, Reconnect). A sign-in check that still runs answers for before.</summary>
+    private void ForgetGitHubSignIn()
+    {
+        _githubAuthenticated = false;
+        _githubLogin = string.Empty;
+        _signInChanges++;
+    }
+
+    /// <summary>
+    /// The sign-in a check shows: gh's answer, or what was shown before when gh failed to answer (the check has still
+    /// answered, so "Checking…" ends). Null when Disconnect or Reconnect changed the sign-in while gh answered: the answer
+    /// is from before the change, and nothing is shown.
+    /// </summary>
+    internal static bool? SignInToShow(bool wasAuthenticated, bool? answer, bool changedMeanwhile)
+        => changedMeanwhile ? null : answer ?? wasAuthenticated;
+
+    /// <summary>Asks gh whether GitHub is connected, and shows it. It never throws: it is awaited from event handlers.</summary>
     private async Task CheckGitHubAsync()
     {
+        var changes = _signInChanges;
         var wasAuthenticated = _githubAuthenticated;
         var wasChecked = _githubChecked;
-        bool authenticated;
+        bool? answer = null;
         var login = _githubLogin;
         try
         {
-            authenticated = await GitHubCli.IsAuthenticatedAsync();
-            if (authenticated && (!wasAuthenticated || login.Length == 0))
+            answer = await GitHubCli.IsAuthenticatedAsync();
+            if (answer == true && (!wasAuthenticated || login.Length == 0))
             {
                 var user = await GitHubCli.RunAsync("api user --jq .login");
                 // Without an answer (no network, for example) the name read before stays.
                 if (user.ExitCode == 0) login = user.Output.Trim();
             }
         }
-        catch (Exception ex)
+        catch (Exception ex) { AddActivity($"Could not check the GitHub connection: {ex.Message}"); }
+        try
         {
-            AddActivity($"Could not check the GitHub connection: {ex.Message}");
-            return;
+            if (SignInToShow(wasAuthenticated, answer, changedMeanwhile: changes != _signInChanges) is not { } authenticated)
+            {
+                // The next refresh asks again.
+                _lastAuthCheck = DateTime.MinValue;
+                return;
+            }
+            _githubAuthenticated = authenticated;
+            _githubLogin = authenticated ? login : string.Empty;
+            _githubChecked = true;
+            ApplyGitHubStatus();
+            UpdatePageHeader();
+            if (authenticated == wasAuthenticated)
+            {
+                if (!wasChecked) ShowIdleStatus();
+                return;
+            }
+            // Connected now: what GitHub refused before (no sign-in) is asked again at once, not after its pause.
+            if (authenticated) GitHubCli.ForgetProblems();
+            // This PC's runners were read the other way, with or without GitHub, so the refresh reads them again.
+            await RefreshAsync();
         }
-        _githubAuthenticated = authenticated;
-        _githubLogin = authenticated ? login : string.Empty;
-        _githubChecked = true;
-        ApplyGitHubStatus();
-        UpdatePageHeader();
-        if (authenticated == wasAuthenticated)
-        {
-            if (!wasChecked) ShowIdleStatus();
-            return;
-        }
-        // Connected now: what GitHub refused before (no sign-in) is asked again at once, not after its pause.
-        if (authenticated) GitHubCli.ForgetProblems();
-        // This PC's runners were read the other way, with or without GitHub.
-        _lastLocalRunnerRefresh = DateTime.MinValue;
-        await RefreshAsync();
+        catch (Exception ex) { AddActivity($"Could not show the GitHub connection: {ex.Message}"); }
     }
 
     /// <summary>
-    /// Shows a reading of the fleet, with <paramref name="runners"/> as this PC's runners. While an operation runs on this
-    /// PC, nothing on this PC is started or changed, and cards that show a pending action are kept as they are.
+    /// Shows a reading of the fleet, with <paramref name="runners"/> as this PC's runners. While an operation that changes
+    /// this PC runs, nothing on this PC is started or changed, and cards that show a pending action are kept as they are.
     /// </summary>
     private void ApplyFleet(List<MachineInfo> machines, List<RunnerInfo> runners, bool localRunnersRead)
     {
@@ -313,7 +387,7 @@ public partial class MainWindow : Window
         machines = machines.ToList();
         var localIndex = machines.FindIndex(m => m.IsLocal);
         if (localIndex >= 0) machines[localIndex] = machines[localIndex].WithLocalRunners(runners);
-        var duringOperation = _operationRunning;
+        var duringOperation = ThisPcOperationRunning;
         if (localRunnersRead)
         {
             _lastLocalRunnerRefresh = DateTime.Now;
@@ -878,8 +952,7 @@ public partial class MainWindow : Window
             {
                 await GitHubCli.DisconnectAsync();
                 // So the refresh after it does not ask GitHub; the sign-in check that it starts says the same.
-                _githubAuthenticated = false;
-                _githubLogin = string.Empty;
+                ForgetGitHubSignIn();
                 ApplyGitHubStatus();
                 log("GitHub disconnected.");
             });
@@ -915,8 +988,7 @@ public partial class MainWindow : Window
                 await GitHubCli.DisconnectAsync();
             GitHubCli.LaunchLogin();
             AddActivity("Reconnecting GitHub. Complete sign-in in the browser or terminal window.");
-            _githubAuthenticated = false;
-            _githubLogin = string.Empty;
+            ForgetGitHubSignIn();
             WatchGitHubSignIn();
             await RefreshAsync(forceAuthCheck: true);
         }
@@ -973,16 +1045,8 @@ public partial class MainWindow : Window
 
     private async void AddRunner_Click(object sender, RoutedEventArgs e)
     {
-        // The first sign-in check runs beside the first refresh; until it answers, the sign-in is not known.
-        if (!_githubChecked && _gitHubCheck is { } check) await check;
-        if (!_githubAuthenticated)
-        {
-            if (DialogWindow.Show(this, DialogTone.Info, "Connect GitHub first",
-                    "Adding a runner requires a GitHub account. Runner Manager uses your GitHub CLI sign-in to request short-lived registration tokens and does not store them.",
-                    "Connect GitHub") == "Connect GitHub")
-                GitHubConnect_Click(sender, e);
-            return;
-        }
+        // Only this PC can be chosen: ask for its sign-in before the form is filled in.
+        if (OnlyThisPcToAddOn(Machines) && !await HasSignInToAddHereAsync(sender, e)) return;
         if (IsOperationRunning("Add runner")) return;
         // A PC card's button adds on that PC; the toolbar and Ctrl+N on the PC selected in the sidebar.
         var selected = ItemFrom<MachineInfo>(sender) ?? Machines.FirstOrDefault(m => m.MachineKey == _selectedMachineKey);
@@ -990,22 +1054,55 @@ public partial class MainWindow : Window
         if (dialog.ShowDialog() != true || dialog.Setup is not { } setup) return;
         if (OtherPcToAddOn(dialog.TargetPc, Machines) is not { } pc)
         {
+            if (!await HasSignInToAddHereAsync(sender, e)) return;
             await RunOperationAsync("Add runner", log => RunnerService.CreateRunnerAsync(setup, log));
             return;
         }
+        // That PC registers the runner with its own GitHub sign-in: this PC's is needed only for the workflow check.
         if (!CanSendTo(pc.MachineKey)) return;
         await RunOperationAsync($"Add runner on {pc.MachineName}", async log =>
         {
             log(RemoteAddRunnerNote(pc.MachineName));
             await _fleetActions.CreateRunnerAsync(pc, setup.RepositoryUrl, setup.RunnerName, setup.Labels, log);
             var path = RunnerService.RepositoryPath(setup.RepositoryUrl);
-            if (!setup.CheckWorkflows || string.IsNullOrWhiteSpace(path)) return;
             // The workflows are on GitHub, so this PC checks them; the runner works either way.
+            var (checkWorkflows, note) = WorkflowCheckAfterRemoteAdd(setup.CheckWorkflows, path, _githubAuthenticated);
+            if (note.Length > 0) log(note);
+            if (!checkWorkflows) return;
             log("Checking repository workflows…");
             try { await WorkflowManager.CheckAndUpdateAsync(path, setup.Labels, log); }
             catch (Exception ex) { log($"Warning: the workflow check failed: {ex.Message.Split('\n')[0].Trim()} The runner was created."); }
-        });
+        }, onOtherPcOnly: true);
     }
+
+    /// <summary>
+    /// Adding a runner on this PC registers it with this PC's GitHub sign-in. True when there is one; otherwise says so,
+    /// offers to connect, and returns false.
+    /// </summary>
+    private async Task<bool> HasSignInToAddHereAsync(object sender, RoutedEventArgs e)
+    {
+        // The first sign-in check runs beside the first refresh; until it answers, the sign-in is not known.
+        if (!_githubChecked && _gitHubCheck is { } check) await check;
+        if (_githubAuthenticated) return true;
+        if (DialogWindow.Show(this, DialogTone.Info, "Connect GitHub first",
+                "Adding a runner on this PC requires a GitHub account. Runner Manager uses your GitHub CLI sign-in to request short-lived registration tokens and does not store them.",
+                "Connect GitHub") == "Connect GitHub")
+            GitHubConnect_Click(sender, e);
+        return false;
+    }
+
+    /// <summary>Whether the Add runner window can offer only this PC: no other PC is online with a fleet agent that adds runners.</summary>
+    internal static bool OnlyThisPcToAddOn(IEnumerable<MachineInfo> machines) => AddRunnerForm.TargetPcs(machines).All(m => m.IsLocal);
+
+    /// <summary>
+    /// After a runner was added on another PC: whether this PC checks the repository's workflows, which needs its GitHub
+    /// sign-in. Not asked for, or an organization runner: no check and no note. Not connected on this PC: the check is
+    /// skipped, and the note says so, as when the check fails.
+    /// </summary>
+    internal static (bool Check, string Note) WorkflowCheckAfterRemoteAdd(bool asked, string repositoryPath, bool signedIn)
+        => !asked || string.IsNullOrWhiteSpace(repositoryPath) ? (false, string.Empty)
+            : signedIn ? (true, string.Empty)
+            : (false, "Warning: the workflow check was skipped because GitHub is not connected on this PC. The runner was created.");
 
     /// <summary>
     /// The PC the Add runner window chose, as the dashboard knows it now, when it is another PC; null for this PC.
@@ -1025,10 +1122,17 @@ public partial class MainWindow : Window
     /// Returns true when it ran and succeeded; false when it was skipped or failed. Set pending states inside
     /// <paramref name="operation"/>, so nothing shows as pending when the operation is skipped.
     /// </summary>
-    private async Task<bool> RunOperationAsync(string title, Func<Action<string>, Task> operation)
+    private Task<bool> RunOperationAsync(string title, Func<Action<string>, Task> operation)
+        => RunOperationAsync(title, operation, onOtherPcOnly: false);
+
+    /// <param name="onOtherPcOnly">
+    /// The operation changes nothing on this PC, so refreshes go on as usual while it runs (see <see cref="HoldsThisPcBack"/>).
+    /// </param>
+    private async Task<bool> RunOperationAsync(string title, Func<Action<string>, Task> operation, bool onOtherPcOnly)
     {
         if (IsOperationRunning(title)) return false;
         _operationRunning = true;
+        _operationOnOtherPcOnly = onOtherPcOnly;
         _operationTitle = title;
         var operationId = ++_operationId;
         SetStatus($"{title}…", StatusKind.Busy);
@@ -1050,6 +1154,7 @@ public partial class MainWindow : Window
         finally
         {
             _operationRunning = false;
+            _operationOnOtherPcOnly = false;
             await RefreshAsync(forceAuthCheck: true);
         }
         return succeeded;
@@ -1528,10 +1633,11 @@ public partial class MainWindow : Window
 
     private async Task ManualRefreshAsync()
     {
-        if (_operationRunning || !RefreshButton.IsEnabled) return;
+        if (ThisPcOperationRunning || !RefreshButton.IsEnabled) return;
         RefreshButton.IsEnabled = false;
         _noticeUntilUtc = DateTime.MinValue;
-        SetStatus("Refreshing…", StatusKind.Busy);
+        // The status bar keeps the progress of an operation on another PC.
+        if (!_operationRunning) SetStatus("Refreshing…", StatusKind.Busy);
         try
         {
             // GitHub is asked again at once, so the user does not wait out a pause after fixing its cause.

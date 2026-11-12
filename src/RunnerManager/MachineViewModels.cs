@@ -616,9 +616,11 @@ public sealed class MachineInfo : INotifyPropertyChanged
     public string WatchdogText => WatchdogEnabled ? "Auto-recovery on" : "Auto-recovery off";
     public Brush WatchdogBrush => WatchdogEnabled ? Palette.Success : Palette.TextMuted;
     public Visibility SignedVisibility => string.IsNullOrEmpty(SigningKeyId) ? Visibility.Collapsed : Visibility.Visible;
-    public string SignedTip => IsManaged
-        ? $"Managed one way. Connections to it are encrypted with its own access code (fingerprint {SigningKeyId}), which it cannot use to reach the other PCs."
+    public string SignedTip => IsManaged || IsLocalAndManaged
+        ? $"Managed one way. Connections to {(IsLocal ? "this PC" : "it")} are encrypted with its own access code (fingerprint {SigningKeyId}), which it cannot use to reach the other PCs."
         : $"Paired. Connections to other PCs are encrypted with the fleet code (fingerprint {SigningKeyId}).";
+    /// <summary>This PC's own card, on a PC that a fleet manages one way (<see cref="IsManaged"/> is about other PCs).</summary>
+    private bool IsLocalAndManaged => IsLocal && FleetConfig.Current.ManagedBy.Length > 0;
     public Visibility ManagedVisibility => IsManaged ? Visibility.Visible : Visibility.Collapsed;
     public string ForgetHeader => IsManaged ? "Stop managing this PC…" : "Forget this PC…";
 

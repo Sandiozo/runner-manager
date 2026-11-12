@@ -206,10 +206,10 @@ public partial class MainWindow
         var key = RunnerKey(runner);
         if (!_liveJobs.TryGetValue(key, out var state)) _liveJobs[key] = state = new LiveJobState();
 
-        if (!_githubAuthenticated)
+        if (JobNoteWithoutSignIn(_githubChecked, _githubAuthenticated) is { } signInNote)
         {
             state.Job = null;
-            state.JobNote = "Connect GitHub to see the job and its steps.";
+            state.JobNote = signInNote;
         }
         else if (string.IsNullOrWhiteSpace(runner.RepositoryPath) || runner.AgentId == 0)
         {
@@ -248,6 +248,15 @@ public partial class MainWindow
         }
         catch (Exception ex) { state.ActivityNote = $"Could not read the output from {machine.MachineName}: {ex.Message}"; }
     }
+
+    /// <summary>
+    /// What the job panel says while GitHub cannot be asked for the job, or null when it can. Until the first sign-in
+    /// check has answered, the sign-in is not known, so it does not ask to connect GitHub yet.
+    /// </summary>
+    internal static string? JobNoteWithoutSignIn(bool signInChecked, bool signedIn)
+        => signedIn ? null
+            : signInChecked ? "Connect GitHub to see the job and its steps."
+            : "Checking the GitHub connection…";
 
     private void ApplyLiveJob(MachineRunnerStatus runner)
         => runner.LiveJob = runner.IsBusy && _liveJobs.TryGetValue(RunnerKey(runner), out var state)

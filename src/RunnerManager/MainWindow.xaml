@@ -531,7 +531,9 @@
                                                                             <RowDefinition Height="Auto"/>
                                                                         </Grid.RowDefinitions>
                                                                         <Grid.ColumnDefinitions>
-                                                                            <ColumnDefinition Width="Auto"/>
+                                                                            <!-- The chevron's width and gap, as in the header, so the details start under the title.
+                                                                                 Nothing sizes this column itself: the header spans it. -->
+                                                                            <ColumnDefinition Width="21"/>
                                                                             <ColumnDefinition Width="*"/>
                                                                             <ColumnDefinition Width="Auto"/>
                                                                             <ColumnDefinition Width="Auto"/>
@@ -542,7 +544,8 @@
                                                                                 AutomationProperties.Name="{Binding HeaderName}">
                                                                         <Grid>
                                                                             <Grid.ColumnDefinitions>
-                                                                                <ColumnDefinition Width="Auto"/>
+                                                                                <!-- The chevron (9 at font size 9) and its margin -->
+                                                                                <ColumnDefinition Width="21"/>
                                                                                 <ColumnDefinition Width="*"/>
                                                                                 <ColumnDefinition Width="Auto"/>
                                                                             </Grid.ColumnDefinitions>
