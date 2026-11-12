@@ -1412,9 +1412,12 @@ public class AuditDashboardTests
             Assert.Equal("Needs attention, 5", AutomationProperties.GetName(window.AttentionTile));
             var runnersTile = window.TileRunners.Text;
 
-            // Pressed: only those PCs and runners, and the other tiles still count the whole fleet.
-            window.AttentionTile.IsChecked = true;
-            window.AttentionTile.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent, window.AttentionTile));
+            // Pressed the way a screen reader does it, which changes the state without a click: only those PCs and
+            // runners, and the other tiles still count the whole fleet.
+            var press = (System.Windows.Automation.Provider.IToggleProvider)UIElementAutomationPeer.CreatePeerForElement(window.AttentionTile)
+                .GetPattern(PatternInterface.Toggle);
+            press.Toggle();
+            Assert.True(window.AttentionTile.IsChecked);
             Assert.True(window.AttentionOnly);
             Assert.Equal(new[] { "BUILD-41", "BUILD-42", "BUILD-43" }, window.MachinesView.Cast<MachineInfo>().Select(m => m.MachineName));
             Assert.Equal(new[] { "api", "build", "docs" }, fleet[1].Runners.Where(r => r.MatchesFilter).Select(r => r.DisplayName));
@@ -1432,9 +1435,9 @@ public class AuditDashboardTests
             Assert.Equal(new[] { "docs" }, fleet[1].Runners.Where(r => r.MatchesFilter).Select(r => r.DisplayName));
             window.SearchBox.Text = string.Empty;
 
-            // A second click shows everything again.
-            window.AttentionTile.IsChecked = false;
-            window.AttentionTile.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent, window.AttentionTile));
+            // A second press shows everything again.
+            press.Toggle();
+            Assert.False(window.AttentionTile.IsChecked);
             Assert.False(window.AttentionOnly);
             Assert.Equal(4, window.MachinesView.Cast<MachineInfo>().Count());
             Assert.All(fleet.SelectMany(m => m.Runners), r => Assert.True(r.MatchesFilter));

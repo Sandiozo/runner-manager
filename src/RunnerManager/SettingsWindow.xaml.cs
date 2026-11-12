@@ -387,16 +387,22 @@ public partial class SettingsWindow : Window
         await _fleetChanged();
     }
 
-    private sealed record PeerRow(string Name, string Address, string Detail, bool Managed)
+    internal sealed record PeerRow(string Name, string Address, string Detail, bool Managed)
     {
         public string Action => Managed ? "Stop managing" : "Forget";
         public string ActionName => $"{Action} {Name}";
+
+        /// <summary>What a screen reader reads for the row: a list row without a name of its own is read with this.</summary>
+        public override string ToString() => $"{Name}, {Detail.Replace("  ·  ", ", ")}";
     }
 
     /// <summary>An address added in Settings, with what the last fleet refresh found there.</summary>
-    private sealed record AddressRow(string Address, string Status)
+    internal sealed record AddressRow(string Address, string Status)
     {
         public string RemoveName => $"Remove {Address}";
+
+        /// <summary>What a screen reader reads for the row.</summary>
+        public override string ToString() => $"{Address}, {Status}";
     }
 
     private static string LastSeen(DateTime utc) => utc == DateTime.MinValue ? "never" : utc.ToLocalTime().ToString("g");

@@ -214,13 +214,15 @@ A large release with many fixes from a review of 2.8.2, most of them for securit
   say whether it runs. A path with spaces but without quotes, for example in an AI tool's configuration, is no longer
   taken for arguments.
 - Uninstall waits until its message is closed, so RunnerManager.exe is always removed. Setup ignores Back and Next
-  while it installs, shows "Step 2 of 3", and its options have names for screen readers.
+  while it installs, shows "Step 2 of 3", and its options have names for screen readers. On a PC that is already in a
+  fleet, setup's last page says that the PC stays in it, and no longer tells you to click "Add a PC" on another PC.
 
 ### Dashboard and windows
 
 - A **Needs attention** tile counts PCs that are offline, runners that are stopped, and runners whose job looks stuck,
   runs long or waits although the runner is idle. A runner that was stopped with **Stop** is not counted. Click the
-  tile to show only those; click it again to show everything. It is hidden when nothing needs attention.
+  tile to show only those; click it again to show everything. It is hidden when nothing needs attention, and it also
+  works when a screen reader presses it.
 - Danger dialogs (Delete runner, Leave fleet, Uninstall and the like) start on **Cancel**, so a repeated Enter no
   longer deletes anything. Long dialogs scroll, and their text can be selected and copied with Ctrl+C.
 - Fix: actions on other PCs show their result. A command that could not be sent shows a dialog, and a failed start or
@@ -242,7 +244,8 @@ A large release with many fixes from a review of 2.8.2, most of them for securit
   until the runner leaves the list, and says when updates are paused because text is selected.
 - Card headers, runner rows and links work with Tab, Enter and Space, and Tab starts at the PCs. PC headers, runner
   headers and the rows of the queue and of recent runs are buttons for screen readers, and buttons, Settings pages,
-  the pairing windows and setup have names for them. A click in an open runner's details no longer closes it.
+  the pairing windows and setup have names for them, and the PCs and addresses in **Settings → Fleet** are read by
+  what they show. A click in an open runner's details no longer closes it.
 - Forgetting a PC from its card asks first, as Settings does, and also removes an IPv6 address the PC was added by.
 - Faint text and status pills reach a contrast of 4.5:1, and text in buttons, menus and segments shows its style's
   color again, for example red Danger buttons.

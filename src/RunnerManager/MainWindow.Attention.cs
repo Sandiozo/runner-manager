@@ -31,7 +31,15 @@ public partial class MainWindow
         AutomationProperties.SetHelpText(AttentionTile, attention.Summary);
     }
 
-    private void AttentionTile_Click(object sender, RoutedEventArgs e) => ShowAttentionOnly(AttentionTile.IsChecked == true);
+    /// <summary>
+    /// The tile was pressed or let go: by a click, the keyboard, or a screen reader (which changes the state without a
+    /// click). Not when <see cref="ShowAttentionOnly"/> sets the state itself.
+    /// </summary>
+    private void AttentionTile_Changed(object sender, RoutedEventArgs e)
+    {
+        var pressed = AttentionTile.IsChecked == true;
+        if (pressed != _attentionOnly) ShowAttentionOnly(pressed);
+    }
 
     /// <summary>Shows only what needs attention, or everything again.</summary>
     internal void ShowAttentionOnly(bool on)

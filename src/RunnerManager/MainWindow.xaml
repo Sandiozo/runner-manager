@@ -360,8 +360,10 @@
                         </StackPanel>
                     </DockPanel>
                 </Border>
-                <!-- Needs attention: offline PCs, and stopped runners and runners with a concern. Click: show only those. Hidden at zero. -->
-                <ToggleButton x:Name="AttentionTile" Style="{StaticResource ToggleTile}" Visibility="Collapsed" Click="AttentionTile_Click"
+                <!-- Needs attention: offline PCs, and stopped runners and runners with a concern. Click: show only those. Hidden at zero.
+                     Checked and Unchecked, not Click: a screen reader presses the tile without a click. -->
+                <ToggleButton x:Name="AttentionTile" Style="{StaticResource ToggleTile}" Visibility="Collapsed"
+                              Checked="AttentionTile_Changed" Unchecked="AttentionTile_Changed"
                               AutomationProperties.Name="Needs attention">
                     <DockPanel>
                         <Border Width="28" Height="28" CornerRadius="7" Background="{DynamicResource Bg3Brush}" VerticalAlignment="Center">

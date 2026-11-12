@@ -77,6 +77,41 @@ public class AuditWiringTests
     }
 
     [Fact]
+    public void Setup_OnAPcThatIsAlreadyInAFleet_DoesNotSendTheUserToAnotherPc()
+    {
+        foreach (var choice in Enum.GetValues<FleetChoice>())
+        {
+            var text = SetupWindow.WhatComesNext(choice, alreadyInFleet: true);
+
+            Assert.StartsWith("This PC is already in a fleet and stays in it.", text);
+            Assert.DoesNotContain("Add a PC", text);
+        }
+        // Where the PC stays in a fleet against the choice, the page also says how to leave it.
+        Assert.Contains("Leave fleet", SetupWindow.WhatComesNext(FleetChoice.NewFleet, alreadyInFleet: true));
+        Assert.Contains("Leave fleet", SetupWindow.WhatComesNext(FleetChoice.SinglePc, alreadyInFleet: true));
+        Assert.DoesNotContain("Leave fleet", SetupWindow.WhatComesNext(FleetChoice.JoinFleet, alreadyInFleet: true));
+    }
+
+    [Fact]
+    public void Setup_OnAPcThatIsInNoFleet_SaysWhatComesNext()
+    {
+        Assert.Contains("click “Add a PC” in the sidebar", SetupWindow.WhatComesNext(FleetChoice.JoinFleet, alreadyInFleet: false));
+        Assert.Contains("starts a new fleet", SetupWindow.WhatComesNext(FleetChoice.NewFleet, alreadyInFleet: false));
+        Assert.Equal(string.Empty, SetupWindow.WhatComesNext(FleetChoice.SinglePc, alreadyInFleet: false));
+    }
+
+    [Fact]
+    public void FleetRowsInSettings_AreReadByWhatTheyShow_NotByTheirTypeName()
+    {
+        var pc = new SettingsWindow.PeerRow("BUILD-01", "10.0.0.5:47821", "Managed one way  ·  10.0.0.5:47821  ·  last seen never", Managed: true);
+        var address = new SettingsWindow.AddressRow("build-02.example.ts.net", "No PC answered there.");
+
+        // A list row without a name of its own is read with ToString, which for a record is its type name and fields.
+        Assert.Equal("BUILD-01, Managed one way, 10.0.0.5:47821, last seen never", pc.ToString());
+        Assert.Equal("build-02.example.ts.net, No PC answered there.", address.ToString());
+    }
+
+    [Fact]
     public void AddAPc_OnAManagedPc_SaysWhyItCannotAddPcs()
     {
         var text = MainWindow.ManagedCannotAddText("OFFICE-PC");

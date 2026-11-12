@@ -129,12 +129,7 @@ public partial class SetupWindow : Window
             DoneGlyph.Foreground = Palette.Success;
             DoneBadge.Background = Palette.Tint(Palette.Success);
             InstallStatus.Text = "Runner Manager is in the Start menu. To remove it, go to Settings → Apps.";
-            NextStepsText.Text = choices switch
-            {
-                { Fleet: FleetChoice.NewFleet } => "Next: Runner Manager starts a new fleet. Then install Runner Manager on your other PCs and choose “Join an existing fleet”.",
-                { Fleet: FleetChoice.JoinFleet } => "Next: on a PC that is already in the fleet, click “Add a PC” in the sidebar. This PC then connects to it.",
-                _ => string.Empty
-            };
+            NextStepsText.Text = WhatComesNext(choices.Fleet, await AlreadyInFleetAsync());
             NextStepsText.Visibility = NextStepsText.Text.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
             LaunchToggle.Visibility = Visibility.Visible;
         }
@@ -154,6 +149,26 @@ public partial class SetupWindow : Window
             InstallProgress.Visibility = Visibility.Collapsed;
             NextButton.IsEnabled = _installed;
         }
+    }
+
+    /// <summary>
+    /// What the last page says comes next. A PC that is already in a fleet stays in it whatever was chosen (the dashboard
+    /// starts or joins a fleet only on a PC that is in none), so the page says that and not what to do on another PC.
+    /// </summary>
+    internal static string WhatComesNext(FleetChoice fleet, bool alreadyInFleet) => (fleet, alreadyInFleet) switch
+    {
+        (FleetChoice.JoinFleet, true) => "This PC is already in a fleet and stays in it.",
+        (_, true) => "This PC is already in a fleet and stays in it. To leave the fleet, open Settings → Fleet → “Leave fleet”.",
+        (FleetChoice.NewFleet, false) => "Next: Runner Manager starts a new fleet. Then install Runner Manager on your other PCs and choose “Join an existing fleet”.",
+        (FleetChoice.JoinFleet, false) => "Next: on a PC that is already in the fleet, click “Add a PC” in the sidebar. This PC then connects to it.",
+        _ => string.Empty
+    };
+
+    /// <summary>The same rule as the dashboard: the fleet agent is installed and this PC has the fleet code.</summary>
+    private static async Task<bool> AlreadyInFleetAsync()
+    {
+        try { return FleetConfig.Current.FleetKey != null && await MachineRelay.IsAgentInstalledAsync(); }
+        catch { return false; }
     }
 
     /// <summary>The last page as it is before an install, also after a failed one.</summary>
