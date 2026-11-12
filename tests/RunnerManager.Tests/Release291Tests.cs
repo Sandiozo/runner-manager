@@ -66,11 +66,179 @@ public class RestartAskedTests
     [Fact]
     public void WorkThatMovesOn_ShowsInTheStatus_AndOlderAgentsSendNone()
     {
-        var status = JsonSerializer.Deserialize<MachineStatusPayload>("""{"Busy":true}""")!;
-        Assert.Equal(0, status.WorkMoves);
+        var built = new MachineStatusPayload { MachineName = "PC1", UpdatedUtc = DateTime.UtcNow };
         var moves = AgentWork.Moves;
         AgentWork.MovedOn();
-        Assert.True(AgentWork.Moves > moves);
+        // The status the agent sends, as a dashboard reads it.
+        var answer = MachineRelay.AgentAnswer(built, DateTime.UtcNow, ["cmd-1"], []);
+        var read = JsonSerializer.Deserialize<MachineStatusPayload>(JsonSerializer.Serialize(answer))!;
+        Assert.True(read.WorkMoves > moves);
+        Assert.True(read.Busy);
+        Assert.Equal(new[] { "cmd-1" }, read.PendingCommandIds);
+        // Work moves on again: the next status says so.
+        AgentWork.MovedOn();
+        Assert.True(MachineRelay.AgentAnswer(built, DateTime.UtcNow, [], []).WorkMoves > read.WorkMoves);
+
+        var status = JsonSerializer.Deserialize<MachineStatusPayload>("""{"Busy":true}""")!;
+        Assert.Equal(0, status.WorkMoves);
+    }
+}
+
+/// <summary>
+/// The last seconds of the fleet agent's own update (Update on the card of another PC): no command that the agent took
+/// is lost, an agent that cannot restart does not refuse commands for good, and a failure to finish the update is shown
+/// as the result of the update's command.
+/// </summary>
+[Collection(FleetSettingsCollection.Name)]
+public class AgentUpdateExitTests
+{
+    /// <summary>The agent's queue, as the agent's loop has it.</summary>
+    private sealed class Queue
+    {
+        public readonly System.Threading.Channels.Channel<MachineCommand> Commands = System.Threading.Channels.Channel.CreateUnbounded<MachineCommand>();
+        public readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> Pending = new(StringComparer.OrdinalIgnoreCase);
+        public readonly HashSet<string> Done = new(StringComparer.OrdinalIgnoreCase);
+
+        public void Take(string id)
+            => MachineRelay.TakeCommand(new MachineCommand { Id = id, Target = "runner", Action = "Start", TargetKey = "r1" }, Pending, Commands.Writer, Done.Contains);
+
+        public List<string> Read()
+        {
+            var ids = new List<string>();
+            while (Commands.Reader.TryRead(out var command)) ids.Add(command.Id);
+            return ids;
+        }
+    }
+
+    [Fact]
+    public async Task ACommandTakenJustBeforeTheAgentStopsTakingCommands_StillRuns()
+    {
+        var queue = new Queue();
+        try
+        {
+            // The loop read the queue and found it empty. Then a command came in, before the restart was due.
+            queue.Take("late");
+            var ran = new List<string>();
+            await MachineRelay.StopTakingCommandsAsync(() =>
+            {
+                // When the agent reads the queue again, it already takes no new command, so none can come in after it.
+                var refused = Assert.Throws<InvalidOperationException>(() => queue.Take("new"));
+                Assert.Equal(MachineRelay.RestartingNowText, refused.Message);
+                ran.AddRange(queue.Read());
+                return Task.CompletedTask;
+            });
+            Assert.Equal(new[] { "late" }, ran);
+        }
+        finally { MachineRelay.TakeCommandsAgain(); }
+    }
+
+    [Fact]
+    public async Task WhileTheAgentExits_ANewCommandIsRefused_ButOneSentAgainIsTaken()
+    {
+        var queue = new Queue();
+        queue.Take("queued");
+        queue.Done.Add("done");
+        try
+        {
+            await MachineRelay.StopTakingCommandsAsync(() => Task.CompletedTask);
+            var refused = Assert.Throws<InvalidOperationException>(() => queue.Take("new"));
+            Assert.Equal(MachineRelay.RestartingNowText, refused.Message);
+            Assert.False(queue.Pending.ContainsKey("new"));
+            // Sent again after a lost answer: a command that is queued is queued once, and one that is done is taken.
+            queue.Take("queued");
+            queue.Take("done");
+            Assert.Equal(new[] { "queued", "done" }, queue.Read());
+        }
+        finally { MachineRelay.TakeCommandsAgain(); }
+        queue.Take("new");
+        Assert.Equal(new[] { "new" }, queue.Read());
+    }
+
+    [Fact]
+    public async Task WhenTheHelperCannotStart_TheAgentStays_TakesCommandsAgain_AndSaysWhy()
+    {
+        var queue = new Queue();
+        AgentWork.AskRestart();
+        try
+        {
+            await MachineRelay.StopTakingCommandsAsync(() => Task.CompletedTask);
+            var failures = new List<string>();
+            var registered = 0;
+            var exits = await MachineRelay.SwitchTaskBeforeExitAsync(@"C:\RM\RunnerManager.exe",
+                () => throw new System.ComponentModel.Win32Exception(2, "The system cannot find the file specified."),
+                _ => { registered++; return Task.CompletedTask; }, failures.Add);
+
+            Assert.False(exits);
+            // Nothing would start the agent again, so its task is left as it is.
+            Assert.Equal(0, registered);
+            Assert.Equal($"The fleet agent could not restart to finish the update, so it still runs v{AppUpdater.CurrentVersion}: " +
+                         "The system cannot find the file specified.", Assert.Single(failures));
+            // It takes commands and AI assistants' changes again.
+            queue.Take("next");
+            Assert.Equal(new[] { "next" }, queue.Read());
+            Assert.False(AgentWork.RestartAsked);
+        }
+        finally { MachineRelay.TakeCommandsAgain(); }
+    }
+
+    [Fact]
+    public void AFailedTaskSwitch_IsTheResultOfTheUpdate_InTheFirstStatusAfterTheRestart()
+    {
+        var folder = Directory.CreateTempSubdirectory("rm-291-state-").FullName;
+        var path = Path.Combine(folder, "agent-state.json");
+        try
+        {
+            const string failure = "agent Update failed: Could not switch the fleet agent's task to the new version: Access is denied.";
+            var state = new MachineRelay.AgentState();
+            state.MarkProcessed("update-1", "Updated to v9.9.9. Restarting.");
+            state.MarkProcessed("start-2", "Runner start completed");
+            Assert.Equal(failure, MachineRelay.UpdateFailure(state, "update-1",
+                "Could not switch the fleet agent's task to the new version: Access is denied.", afterRestart: true));
+            MachineRelay.SaveAgentState(state, path);
+
+            // The agent exits, and the helper starts it again from the saved state.
+            var next = MachineRelay.LoadAgentState(path);
+            var shown = MachineRelay.StartResult(next, path);
+            Assert.Equal(failure, shown);
+            Assert.True(MachineRelay.IsFailedResult(shown));
+            // The first status after the restart, as the PC's card shows it.
+            var machine = MachineInfo.FromPayload("OTHERPC", new MachineStatusPayload
+            {
+                MachineName = "OTHERPC", LastCommandId = next.LastCommandId, LastCommandResult = shown, RecentCommands = next.Results
+            });
+            Assert.Equal(failure, machine.LastResultText);
+            Assert.Equal(failure, machine.CommandResult("update-1"));
+            Assert.Equal("Runner start completed", machine.CommandResult("start-2"));
+            // Shown once: the start after that says that the agent started.
+            Assert.Equal($"Fleet agent v{AppUpdater.CurrentVersion} started", MachineRelay.StartResult(MachineRelay.LoadAgentState(path), path));
+        }
+        finally { Directory.Delete(folder, recursive: true); }
+    }
+
+    [Fact]
+    public void AFailedRestart_IsTheResultOfTheUpdate_WhileTheAgentRuns()
+    {
+        var state = new MachineRelay.AgentState();
+        state.MarkProcessed("update-1", "Updated to v9.9.9. Restarting.");
+        var result = MachineRelay.UpdateFailure(state, "update-1", "The fleet agent could not restart to finish the update.", afterRestart: false);
+        Assert.Equal("agent Update failed: The fleet agent could not restart to finish the update.", result);
+        Assert.Equal(result, state.Results.Single(r => r.Id == "update-1").Result);
+        Assert.Equal("update-1", state.LastCommandId);
+        // The agent did not exit, so its next start says that it started.
+        Assert.Null(state.ResultAtStart);
+    }
+
+    [Fact]
+    public void TheAgentLoop_StopsTakingCommandsBeforeItWaits_AndKeepsAFailure()
+    {
+        var code = File.ReadAllText(Path.Combine(DashboardSource.Dir, "MachineRelay.cs"));
+        var stop = code.IndexOf("await StopTakingCommandsAsync(RunQueuedCommandsAsync);", StringComparison.Ordinal);
+        Assert.True(stop > 0);
+        Assert.True(stop < code.IndexOf("await Task.Delay(TimeSpan.FromSeconds(3), CancellationToken.None); // let the dashboard read the result", StringComparison.Ordinal));
+        Assert.Contains("if (failure != null) KeepUpdateFailure(failure, exiting);", code);
+        Assert.Contains("if (exiting) Environment.Exit(0);", code);
+        Assert.Contains("var lastResult = StartResult(state);", code);
+        Assert.DoesNotContain("_exitingForUpdate = true;", code.Replace("lock (CommandGate) _exitingForUpdate = true;", string.Empty));
     }
 }
 
@@ -120,22 +288,22 @@ public class AgentTaskSwitchTests
     {
         var done = new List<string>();
         var log = new List<string>();
-        await MachineRelay.SwitchTaskBeforeExitAsync(@"C:\RM\RunnerManager.exe", () => done.Add("helper"),
-            exe => { done.Add($"register {exe}"); return Task.CompletedTask; }, log.Add);
+        Assert.True(await MachineRelay.SwitchTaskBeforeExitAsync(@"C:\RM\RunnerManager.exe", () => done.Add("helper"),
+            exe => { done.Add($"register {exe}"); return Task.CompletedTask; }, log.Add));
         Assert.Equal(new[] { "helper", @"register C:\RM\RunnerManager.exe" }, done);
         Assert.Empty(log);
     }
 
     [Fact]
-    public async Task TheAgentItself_LogsAFailedRegistration_AndStillExits()
+    public async Task TheAgentItself_ReportsAFailedRegistration_AndStillExits()
     {
         var log = new List<string>();
-        await MachineRelay.SwitchTaskBeforeExitAsync(@"C:\RM\RunnerManager.exe", () => { },
-            _ => Task.FromException(new InvalidOperationException("Access is denied.")), log.Add);
+        Assert.True(await MachineRelay.SwitchTaskBeforeExitAsync(@"C:\RM\RunnerManager.exe", () => { },
+            _ => Task.FromException(new InvalidOperationException("Access is denied.")), log.Add));
         Assert.Equal("Could not switch the fleet agent's task to the new version: Access is denied.", Assert.Single(log));
 
         var helper = 0;
-        await MachineRelay.SwitchTaskBeforeExitAsync(null, () => helper++, _ => throw new InvalidOperationException("not called"), log.Add);
+        Assert.True(await MachineRelay.SwitchTaskBeforeExitAsync(null, () => helper++, _ => throw new InvalidOperationException("not called"), log.Add));
         Assert.Equal(1, helper);
     }
 }

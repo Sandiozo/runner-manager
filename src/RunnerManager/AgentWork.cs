@@ -50,7 +50,10 @@ public static class AgentWork
 
     public static void AskRestart() => _restartAsked = true;
 
-    /// <summary>For tests: the agent no longer waits to restart.</summary>
+    /// <summary>
+    /// The agent no longer waits to restart: the restart could not be started (<see cref="MachineRelay.TakeCommandsAgain"/>),
+    /// or a test is done.
+    /// </summary>
     internal static void ForgetRestart() => _restartAsked = false;
 
     /// <summary>Waits until no work is running, or the timeout passes. Returns whether the agent is idle.</summary>

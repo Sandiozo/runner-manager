@@ -45,8 +45,12 @@ public static class MachineRelay
     private static StatusCache? _status;
     /// <summary>The agent is about to exit for an update: a command sent now would never run, so it is refused.</summary>
     private static volatile bool _exitingForUpdate;
+    /// <summary>Held while a command is taken and while the agent stops taking commands, so no command is taken in between.</summary>
+    private static readonly object CommandGate = new();
     /// <summary>The exe an update installed, which the agent's task is registered for when the agent exits to run it.</summary>
     private static volatile string? _agentExeAfterUpdate;
+    /// <summary>The command that installed that update: its result says so when the update cannot be finished.</summary>
+    private static volatile string? _agentUpdateCommandId;
     /// <summary>
     /// How long an update waits for the agent's work to finish before it restarts the agent anyway: as long as the
     /// longest work, an AI assistant's call that waits for its approval and then creates a runner on another PC
@@ -896,20 +900,16 @@ public static class MachineRelay
         }
 
         var state = LoadAgentState();
-        var lastResult = $"Fleet agent v{AppUpdater.CurrentVersion} started";
+        var lastResult = StartResult(state);
         AppendAgentLog($"Fleet agent v{AppUpdater.CurrentVersion} started (protocol {ProtocolVersion}) from {Environment.ProcessPath}.");
 
         var queue = Channel.CreateUnbounded<MachineCommand>();
         // Commands that are queued or running, reported in the status so callers keep waiting for them.
         var pending = new ConcurrentDictionary<string, byte>(StringComparer.OrdinalIgnoreCase);
-        // Runs on HTTP threads. A command sent again with the same ID (a retry after a lost answer) is queued once;
-        // the command loop skips IDs it already processed.
+        // Runs on HTTP threads.
         string Enqueue(MachineCommand command)
         {
-            // Sent again after a lost answer, a command that is queued or done is still taken.
-            if (_exitingForUpdate && !pending.ContainsKey(command.Id) && !state.HasProcessed(command.Id))
-                throw new InvalidOperationException(RestartingNowText);
-            if (pending.TryAdd(command.Id, 0)) queue.Writer.TryWrite(command);
+            TakeCommand(command, pending, queue.Writer, state.HasProcessed);
             InvalidateStatus();
             return command.Id;
         }
@@ -920,13 +920,7 @@ public static class MachineRelay
             var cached = await status.GetAsync();
             // Pending before results: a command that finishes in between then shows in both, never in neither.
             var running = pending.Keys.ToArray();
-            return AsAnswer(cached, DateTime.UtcNow) with
-            {
-                PendingCommandIds = running,
-                RecentCommands = state.Results,
-                Busy = running.Length > 0 || !AgentWork.IsIdle,
-                WorkMoves = AgentWork.Moves
-            };
+            return AgentAnswer(cached, DateTime.UtcNow, running, state.Results);
         }
 
         using var server = new AgentServer(StatusAsync, Enqueue, LogReader.ReadAsync, job: RunnerActivity.ReadAsync);
@@ -951,6 +945,47 @@ public static class MachineRelay
         var restart = new UpdateRestartClock(() => DateTime.UtcNow, UpdateRestartWait, UpdateRestartLimit);
         var toldRestart = false;
         var moves = AgentWork.Moves;
+        // Runs the queued commands, one after the other.
+        async Task RunQueuedCommandsAsync()
+        {
+            while (queue.Reader.TryRead(out var command))
+            {
+                if (state.HasProcessed(command.Id))
+                {
+                    pending.TryRemove(command.Id, out _);
+                    InvalidateStatus();
+                    continue;
+                }
+                string result;
+                using (AgentWork.Begin())
+                {
+                    try { result = await ExecuteCommandAsync(command); }
+                    catch (Exception ex)
+                    {
+                        result = $"{command.Target} {command.Action} failed: {ex.Message}";
+                        AppendAgentLog(result);
+                    }
+                }
+                lastResult = result;
+                state.MarkProcessed(command.Id, result);
+                pending.TryRemove(command.Id, out _);
+                restart.WorkFinished();
+                InvalidateStatus();
+                try { SaveAgentState(state); }
+                catch (Exception ex) { AppendAgentLog($"Could not save the agent state: {ex.Message}"); }
+            }
+        }
+        // The update could not be finished: its command's result says so, now or, when the agent exits, after the restart.
+        void KeepUpdateFailure(string reason, bool exiting)
+        {
+            // An event shows on the PC's card in place of the event of the update; one from an agent that exits is lost.
+            if (exiting) AppendAgentLog(reason);
+            else AddEvent(reason, warning: true);
+            lastResult = UpdateFailure(state, _agentUpdateCommandId, reason, afterRestart: exiting);
+            InvalidateStatus();
+            try { SaveAgentState(state); }
+            catch (Exception ex) { AppendAgentLog($"Could not save the agent state: {ex.Message}"); }
+        }
         while (!cancellationToken.IsCancellationRequested)
         {
             try
@@ -963,32 +998,7 @@ public static class MachineRelay
                     catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { }
                 }
 
-                while (queue.Reader.TryRead(out var command))
-                {
-                    if (state.HasProcessed(command.Id))
-                    {
-                        pending.TryRemove(command.Id, out _);
-                        InvalidateStatus();
-                        continue;
-                    }
-                    string result;
-                    using (AgentWork.Begin())
-                    {
-                        try { result = await ExecuteCommandAsync(command); }
-                        catch (Exception ex)
-                        {
-                            result = $"{command.Target} {command.Action} failed: {ex.Message}";
-                            AppendAgentLog(result);
-                        }
-                    }
-                    lastResult = result;
-                    state.MarkProcessed(command.Id, result);
-                    pending.TryRemove(command.Id, out _);
-                    restart.WorkFinished();
-                    InvalidateStatus();
-                    try { SaveAgentState(state); }
-                    catch (Exception ex) { AppendAgentLog($"Could not save the agent state: {ex.Message}"); }
-                }
+                await RunQueuedCommandsAsync();
 
                 // An AI assistant's call or approval that started or ended, or a create on another PC that moved on in
                 // that PC's queue, is work that moves on, as a finished command is.
@@ -1012,11 +1022,17 @@ public static class MachineRelay
                             : restart.PastLimit
                                 ? $"Restarting to finish the update, although work is still running. The update has waited {(int)UpdateRestartLimit.TotalHours} hours for it."
                                 : $"Restarting to finish the update, although work is still running. Nothing finished in {(int)UpdateRestartWait.TotalMinutes} minutes.");
-                        _exitingForUpdate = true;
+                        // From here a new command is refused. One taken since the queue was read above runs first.
+                        await StopTakingCommandsAsync(RunQueuedCommandsAsync);
                         await Task.Delay(TimeSpan.FromSeconds(3), CancellationToken.None); // let the dashboard read the result
-                        await SwitchTaskBeforeExitAsync(_agentExeAfterUpdate, () => AppUpdater.ScheduleAgentTaskRestart(ScheduledTasks.AgentTaskName),
-                            RegisterAgentTaskAsync, AppendAgentLog);
-                        Environment.Exit(0);
+                        string? failure = null;
+                        var exiting = await SwitchTaskBeforeExitAsync(_agentExeAfterUpdate,
+                            () => AppUpdater.ScheduleAgentTaskRestart(ScheduledTasks.AgentTaskName), RegisterAgentTaskAsync, reason => failure = reason);
+                        if (failure != null) KeepUpdateFailure(failure, exiting);
+                        if (exiting) Environment.Exit(0);
+                        // The agent could not restart, and stays as it is. A later update waits for the work from the start.
+                        restart = new UpdateRestartClock(() => DateTime.UtcNow, UpdateRestartWait, UpdateRestartLimit);
+                        toldRestart = false;
                     }
                 }
 
@@ -1048,6 +1064,52 @@ public static class MachineRelay
     }
 
     private static void InvalidateStatus() => _status?.Invalidate();
+
+    /// <summary>
+    /// Queues a command for the agent's loop. A command sent again with the same ID (a retry after a lost answer) is
+    /// queued once, and the loop skips IDs it already processed (<paramref name="processed"/>). Once the agent is about
+    /// to exit for an update (<see cref="StopTakingCommandsAsync"/>), a new command is refused with
+    /// <see cref="RestartingNowText"/>; one sent again that is queued or done is still taken.
+    /// </summary>
+    internal static void TakeCommand(MachineCommand command, ConcurrentDictionary<string, byte> pending, ChannelWriter<MachineCommand> queue,
+        Func<string, bool> processed)
+    {
+        lock (CommandGate)
+        {
+            if (_exitingForUpdate && !pending.ContainsKey(command.Id) && !processed(command.Id))
+                throw new InvalidOperationException(RestartingNowText);
+            if (pending.TryAdd(command.Id, 0)) queue.TryWrite(command);
+        }
+    }
+
+    /// <summary>
+    /// The agent is about to exit for an update: from now on a new command is refused (<see cref="TakeCommand"/>). Then
+    /// the commands taken before are run (<paramref name="runQueued"/>), also one taken after the loop last read the
+    /// queue, so a command that was taken is never lost.
+    /// </summary>
+    internal static async Task StopTakingCommandsAsync(Func<Task> runQueued)
+    {
+        lock (CommandGate) _exitingForUpdate = true;
+        await runQueued();
+    }
+
+    /// <summary>The agent does not exit for the update after all: it takes commands again, and no longer waits to restart.</summary>
+    internal static void TakeCommandsAgain()
+    {
+        lock (CommandGate) _exitingForUpdate = false;
+        AgentWork.ForgetRestart();
+    }
+
+    /// <summary>The agent's answer to a status request: the built status as an answer, with its commands and its work.</summary>
+    /// <param name="running">The commands queued or running, read before <paramref name="results"/>.</param>
+    internal static MachineStatusPayload AgentAnswer(MachineStatusPayload built, DateTime nowUtc, string[] running, FleetCommandResult[] results)
+        => AsAnswer(built, nowUtc) with
+        {
+            PendingCommandIds = running,
+            RecentCommands = results,
+            Busy = running.Length > 0 || !AgentWork.IsIdle,
+            WorkMoves = AgentWork.Moves
+        };
 
     /// <summary>
     /// A built status as the answer to a request: stamped with the time it is sent, as agents always did, unless no
@@ -1144,7 +1206,7 @@ public static class MachineRelay
                     FleetConfig.Update(c => c.Watchdog = enabled);
                     return enabled ? "Auto-recovery turned on" : "Auto-recovery turned off";
                 case "Update":
-                    return await UpdateSelfAsync(force: command.Value.Equals("force", StringComparison.OrdinalIgnoreCase));
+                    return await UpdateSelfAsync(command.Id, force: command.Value.Equals("force", StringComparison.OrdinalIgnoreCase));
                 default:
                     throw new InvalidOperationException($"Unsupported agent action: {command.Action}");
             }
@@ -1172,7 +1234,7 @@ public static class MachineRelay
         throw new InvalidOperationException($"Unsupported target: {command.Target}");
     }
 
-    private static async Task<string> UpdateSelfAsync(bool force)
+    private static async Task<string> UpdateSelfAsync(string commandId, bool force)
     {
         var release = await AppUpdater.GetLatestReleaseAsync(force: true)
             ?? throw new InvalidOperationException($"No Runner Manager release found in {AppUpdater.ReleaseRepository}.");
@@ -1180,6 +1242,7 @@ public static class MachineRelay
             return $"Already up to date (v{AppUpdater.CurrentVersion})";
         // The task is switched to the new copy when the agent exits, after its work: registering may end this agent.
         _agentExeAfterUpdate = await AppUpdater.DownloadAndInstallAsync(release, message => AppendAgentLog($"Update: {message}"));
+        _agentUpdateCommandId = commandId;
         AgentWork.AskRestart();
         AddEvent($"Updated to {release.Tag}. Restarting the fleet agent.");
         return $"Updated to {release.Tag}. Restarting.";
@@ -1496,14 +1559,52 @@ public static class MachineRelay
     /// <summary>
     /// The last step before the agent exits to finish an update: starts the helper that starts the task again once this
     /// agent has exited, and only then registers the task for <paramref name="exe"/>, since registering may end this
-    /// agent. A failed registration is logged; the helper then starts the task as it was.
+    /// agent. Returns whether the agent is to exit. When the helper cannot be started (PowerShell is blocked or
+    /// missing), nothing would start the agent again, so it stays as it is and takes commands again
+    /// (<see cref="TakeCommandsAgain"/>). After a failed registration it exits, and the helper starts the task as it
+    /// was. A failure is given to <paramref name="failed"/>.
     /// </summary>
-    internal static async Task SwitchTaskBeforeExitAsync(string? exe, Action scheduleRestart, Func<string, Task> register, Action<string> log)
+    internal static async Task<bool> SwitchTaskBeforeExitAsync(string? exe, Action scheduleRestart, Func<string, Task> register, Action<string> failed)
     {
-        scheduleRestart();
-        if (exe == null) return;
+        try { scheduleRestart(); }
+        catch (Exception ex)
+        {
+            TakeCommandsAgain();
+            failed($"The fleet agent could not restart to finish the update, so it still runs v{AppUpdater.CurrentVersion}: {ex.Message}");
+            return false;
+        }
+        if (exe == null) return true;
         try { await register(exe); }
-        catch (Exception ex) { log($"Could not switch the fleet agent's task to the new version: {ex.Message}"); }
+        catch (Exception ex) { failed($"Could not switch the fleet agent's task to the new version: {ex.Message}"); }
+        return true;
+    }
+
+    /// <summary>
+    /// Keeps a failure to finish an update that the agent installed itself as the result of the update's command
+    /// (<paramref name="commandId"/>), so a status shows it as the result of the last command, as a failed update did
+    /// before 2.9.1. When the agent exits now (<paramref name="afterRestart"/>), the agent's next start shows it too
+    /// (<see cref="StartResult"/>). Returns the result.
+    /// </summary>
+    internal static string UpdateFailure(AgentState state, string? commandId, string reason, bool afterRestart)
+    {
+        var result = $"agent Update failed: {reason}";
+        if (commandId is { Length: > 0 }) state.MarkProcessed(commandId, result);
+        if (afterRestart) state.ResultAtStart = result;
+        return result;
+    }
+
+    /// <summary>
+    /// What a starting agent shows as the result of its last command: a failure that the agent before it kept for it
+    /// (<see cref="UpdateFailure"/>), once, or that it started.
+    /// </summary>
+    /// <param name="path">The agent state file (tests pass their own).</param>
+    internal static string StartResult(AgentState state, string? path = null)
+    {
+        if (state.ResultAtStart is not { } kept) return $"Fleet agent v{AppUpdater.CurrentVersion} started";
+        state.ResultAtStart = null;
+        try { SaveAgentState(state, path); }
+        catch (Exception ex) { AppendAgentLog($"Could not save the agent state: {ex.Message}"); }
+        return kept;
     }
 
     /// <summary>
@@ -1745,12 +1846,14 @@ public static class MachineRelay
         return new string(chars);
     }
 
-    private static AgentState LoadAgentState()
+    /// <param name="path">The agent state file (tests pass their own).</param>
+    internal static AgentState LoadAgentState(string? path = null)
     {
+        path ??= AgentStatePath;
         try
         {
-            if (!File.Exists(AgentStatePath)) return new AgentState();
-            using var json = JsonDocument.Parse(File.ReadAllText(AgentStatePath));
+            if (!File.Exists(path)) return new AgentState();
+            using var json = JsonDocument.Parse(File.ReadAllText(path));
             var state = new AgentState();
             if (json.RootElement.TryGetProperty("processed", out var processed) && processed.ValueKind == JsonValueKind.Array)
                 foreach (var id in processed.EnumerateArray())
@@ -1761,19 +1864,25 @@ public static class MachineRelay
                     if (result is { Id.Length: > 0 }) state.MarkProcessed(result.Id, result.Result, result.CompletedUtc);
             if (json.RootElement.TryGetProperty("lastCommandId", out var last) && last.GetString() is { Length: > 0 } lastId)
                 state.MarkProcessed(lastId);
+            // Older agents do not write it, and ignore it.
+            if (json.RootElement.TryGetProperty("resultAtStart", out var shown) && shown.ValueKind == JsonValueKind.String)
+                state.ResultAtStart = shown.GetString();
             return state;
         }
         catch { return new AgentState(); }
     }
 
-    private static void SaveAgentState(AgentState state)
+    /// <param name="path">The agent state file (tests pass their own).</param>
+    internal static void SaveAgentState(AgentState state, string? path = null)
     {
-        Directory.CreateDirectory(FleetConfig.StateDir);
-        WriteAtomically(AgentStatePath, JsonSerializer.Serialize(new
+        path ??= AgentStatePath;
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        WriteAtomically(path, JsonSerializer.Serialize(new
         {
             lastCommandId = state.LastCommandId,
             processed = state.Recent,
-            results = state.Results
+            results = state.Results,
+            resultAtStart = state.ResultAtStart
         }));
     }
 
@@ -1841,7 +1950,7 @@ public static class MachineRelay
     }
 
     /// <summary>The commands an agent processed (so one sent again is not run twice) and their latest results.</summary>
-    private sealed class AgentState
+    internal sealed class AgentState
     {
         private const int MaxProcessed = 50;
         private const int MaxResults = 20;
@@ -1850,11 +1959,19 @@ public static class MachineRelay
         private readonly HashSet<string> _set = new(StringComparer.OrdinalIgnoreCase);
         private readonly List<FleetCommandResult> _results = new();
         private string _lastCommandId = string.Empty;
+        private string? _resultAtStart;
 
         // Read by status requests on other threads while the command loop updates it.
         public string LastCommandId { get { lock (_gate) return _lastCommandId; } }
         public string[] Recent { get { lock (_gate) return _recent.ToArray(); } }
         public FleetCommandResult[] Results { get { lock (_gate) return _results.ToArray(); } }
+
+        /// <summary>What the agent's next start shows as the result of its last command; null to show that it started.</summary>
+        public string? ResultAtStart
+        {
+            get { lock (_gate) return _resultAtStart; }
+            set { lock (_gate) _resultAtStart = value; }
+        }
 
         public bool HasProcessed(string id)
         {
