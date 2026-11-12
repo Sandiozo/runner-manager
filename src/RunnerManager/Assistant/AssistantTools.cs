@@ -217,11 +217,10 @@ public static class AssistantTools
     public static async Task<object> CallAsync(string name, JsonElement arguments, Func<string, string, Task<bool>> approve, Action<string>? log = null,
         CancellationToken cancellationToken = default)
     {
-        // An update restarts the agent only after calls like this one are done.
-        using var _ = AgentWork.Begin();
         if (!FleetConfig.Current.Assistant.Enabled)
             throw new AssistantException("AI assistant access is turned off. Turn it on in Runner Manager → Settings → AI assistants.");
         var tool = Find(name) ?? throw new AssistantException($"Unknown tool: {name}. Available tools: {string.Join(", ", All.Select(t => t.Name))}.");
+        using var _ = BeginWork(tool.Kind, AgentWork.RestartAsked);
         var steps = new List<string>();
         var call = new AssistantCall(arguments, approve, message => { steps.Add(message); log?.Invoke(message); }, cancellationToken);
         try
@@ -236,6 +235,18 @@ public static class AssistantTools
             if (tool.Kind != AssistantToolKind.Read) AssistantLog.Append($"{tool.Name}: {AssistantLog.OneLine(reason, 200)} {Summarize(arguments)}");
             throw;
         }
+    }
+
+    /// <summary>
+    /// Marks a call as the agent's work, so an update restarts the agent only after it is done. Once an update asked for
+    /// the restart (<paramref name="restartAsked"/>), a change would begin work that the restart may cut off, so it is
+    /// refused. A read is short and changes nothing: it still runs, but does not hold up the restart (returns null).
+    /// </summary>
+    internal static IDisposable? BeginWork(AssistantToolKind kind, bool restartAsked)
+    {
+        if (!restartAsked) return AgentWork.Begin();
+        if (kind != AssistantToolKind.Read) throw new AssistantException(AgentWork.RestartingText);
+        return null;
     }
 
     // ----- Read tools -----

@@ -53,6 +53,40 @@ public class UpdateRestartWaitTests
     }
 
     [Fact]
+    public async Task AnAiAssistantsCall_ThatStartsAfterTheUpdateAsked_GetsTheWholeWait()
+    {
+        // Work that is stuck keeps the agent busy. 50 minutes after the update asked, a new call starts (the agent's
+        // work moves on) and runs for as long as a call may. Before, the restart came 70 minutes after the first read
+        // and cut the new call off after 20 minutes.
+        var late = TimeSpan.FromMinutes(50);
+        var (log, waited) = await WaitAsync(TimeSpan.FromMinutes(1), elapsed => elapsed < late + AssistantHost.DrainLimit
+            ? new MachineStatusPayload { Busy = true, WorkMoves = elapsed < late ? 1 : 2 }
+            : new MachineStatusPayload());
+        Assert.Equal(late + AssistantHost.DrainLimit, waited);
+        Assert.Equal("Waiting for the fleet agent to finish its current work…", Assert.Single(log));
+    }
+
+    [Fact]
+    public async Task AnAiAssistantsCall_ThatWaitsBehindOtherApprovals_IsNotCutOff()
+    {
+        // Three approvals ahead of it end after 10 minutes each (the agent's work moves on), then it creates a runner
+        // for 60 minutes: 90 minutes in all, more than the 70 minutes of the wait.
+        var (log, waited) = await WaitAsync(TimeSpan.FromMinutes(1), elapsed => elapsed < TimeSpan.FromMinutes(90)
+            ? new MachineStatusPayload { Busy = true, WorkMoves = 10 + Math.Min(3, (int)(elapsed / TimeSpan.FromMinutes(10))) }
+            : new MachineStatusPayload());
+        Assert.Equal(TimeSpan.FromMinutes(90), waited);
+        Assert.Single(log);
+    }
+
+    [Fact]
+    public async Task AnOlderAgent_ThatSendsNoWorkMoves_IsWaitedForAsBefore()
+    {
+        var (log, waited) = await WaitAsync(TimeSpan.FromMinutes(1), _ => new MachineStatusPayload { Busy = true });
+        Assert.Equal(TimeSpan.FromMinutes(1) + MachineRelay.UpdateRestartWait, waited);
+        Assert.Contains("finished nothing", log[^1]);
+    }
+
+    [Fact]
     public void InTheAgent_AnAiAssistantsCall_IsWaitedFor_ThoughNoCommandFinishes()
     {
         var now = Start;
