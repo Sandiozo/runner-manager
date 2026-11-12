@@ -43,7 +43,14 @@ public static class MachineRelay
     private static readonly List<AgentEvent> RecentEvents = new();
     private static readonly RunnerRecovery Recovery = new();
     private static StatusCache? _status;
-    private static volatile bool _restartAgentAfterUpdate;
+    /// <summary>The agent is about to exit for an update: a command sent now would never run, so it is refused.</summary>
+    private static volatile bool _exitingForUpdate;
+    /// <summary>Held while a command is taken and while the agent stops taking commands, so no command is taken in between.</summary>
+    private static readonly object CommandGate = new();
+    /// <summary>The exe an update installed, which the agent's task is registered for when the agent exits to run it.</summary>
+    private static volatile string? _agentExeAfterUpdate;
+    /// <summary>The command that installed that update: its result says so when the update cannot be finished.</summary>
+    private static volatile string? _agentUpdateCommandId;
     /// <summary>
     /// How long an update waits for the agent's work to finish before it restarts the agent anyway: as long as the
     /// longest work, an AI assistant's call that waits for its approval and then creates a runner on another PC
@@ -52,8 +59,10 @@ public static class MachineRelay
     /// long is, or one that is still busy after <see cref="UpdateRestartLimit"/>.
     /// </summary>
     /// <remarks>
-    /// Counted from when the update asked, not from when an AI assistant's call ends: the dashboard sees only the
-    /// agent's status, which tells when a command finished but not when such a call did.
+    /// Work also moves on when an AI assistant's call or approval starts or ends, and when another PC finishes a command
+    /// queued before a create this agent waits for (<see cref="AgentWork.Moves"/>; a dashboard reads it as
+    /// <see cref="MachineStatusPayload.WorkMoves"/>). In the agent, an AI assistant's change that comes after the update
+    /// asked is refused (<see cref="AgentWork.RestartingText"/>), so no new work begins that the restart would cut off.
     /// </remarks>
     internal static readonly TimeSpan UpdateRestartWait = AssistantHost.DrainLimit;
 
@@ -63,6 +72,13 @@ public static class MachineRelay
     /// PC does not stay half updated, with the new version on disk and the old one running.
     /// </summary>
     internal static readonly TimeSpan UpdateRestartLimit = TimeSpan.FromHours(3);
+
+    /// <summary>
+    /// Why a command that comes in the last seconds before the agent exits to restart (to finish an update, or to run
+    /// through the start helper) is refused.
+    /// </summary>
+    internal static string RestartingNowText
+        => $"The fleet agent on {Environment.MachineName} is restarting and did not take the request. Try again in a minute.";
 
     /// <summary>
     /// The longest a caller waits for a command its agent still reports as queued or running: as long as the longest
@@ -82,8 +98,88 @@ public static class MachineRelay
     /// <remarks>
     /// Runs on the thread pool, not on the caller's thread: decrypting and reading the answers and saving fleet.json
     /// (which can wait for the agent's write) would otherwise run on the dashboard's UI thread and make it stutter.
+    /// While this PC joins or leaves the fleet, it fails with <see cref="FleetReadsHeldText"/> (see <see cref="HoldFleetReadsAsync"/>).
     /// </remarks>
-    public static Task<List<MachineInfo>> ReadFleetAsync(bool forceDiscovery = false) => Task.Run(() => ReadFleetOnPoolAsync(forceDiscovery));
+    public static Task<List<MachineInfo>> ReadFleetAsync(bool forceDiscovery = false) => StartFleetRead(() => ReadFleetOnPoolAsync(forceDiscovery));
+
+    /// <summary>
+    /// Asks addresses that no known PC has for their status, as a fleet read does (<see cref="FetchPeerAsync"/>): a PC
+    /// that answers is saved. Held back like <see cref="ReadFleetAsync"/> while this PC joins or leaves the fleet.
+    /// </summary>
+    public static Task<MachineInfo?[]> ReadAddressesAsync(IReadOnlyList<string> addresses)
+        => StartFleetRead(() => Task.WhenAll(addresses.Select(a => FetchPeerAsync(null, null, a, null))));
+
+    internal const string FleetReadsHeldText = "This PC is joining or leaving the fleet, so the other PCs are not read until it is done. Try again in a moment.";
+
+    private static readonly object FleetReadGate = new();
+    private static int _fleetReadHolds;
+    private static readonly HashSet<Task> FleetReads = new();
+
+    /// <summary>Whether this PC joins or leaves the fleet now, so fleet reads in this process are held back.</summary>
+    internal static bool FleetReadsHeld { get { lock (FleetReadGate) return _fleetReadHolds > 0; } }
+
+    /// <summary>Starts a read that saves the PCs it finds, on the thread pool, unless this PC joins or leaves the fleet.</summary>
+    internal static Task<T> StartFleetRead<T>(Func<Task<T>> read)
+    {
+        lock (FleetReadGate)
+        {
+            if (_fleetReadHolds > 0) return Task.FromException<T>(new InvalidOperationException(FleetReadsHeldText));
+            var running = Task.Run(read);
+            FleetReads.Add(running);
+            _ = running.ContinueWith(ended => { lock (FleetReadGate) FleetReads.Remove(ended); }, TaskScheduler.Default);
+            return running;
+        }
+    }
+
+    /// <summary>
+    /// Holds back every fleet read in this process (the dashboard's refresh, Change fleet code and the address check in
+    /// Settings) until the result is disposed, and first waits for the reads that started before. Join fleet and Leave
+    /// fleet take it: a read saves the PCs it finds, and could add a PC back to the list that leaving just cleared. It
+    /// waits at most until <paramref name="limit"/> has ended (started only when a read still runs), as a read that does
+    /// not end would leave Join or Leave running with no way to cancel it. It never throws.
+    /// </summary>
+    internal static async Task<FleetReadHold> HoldFleetReadsAsync(Func<Task> limit)
+    {
+        Task[] running;
+        lock (FleetReadGate)
+        {
+            _fleetReadHolds++;
+            running = FleetReads.ToArray();
+        }
+        var hold = new FleetReadHold();
+        try { hold.EarlierReadsEnded = await WaitForReadAsync(running.Length == 0 ? null : Task.WhenAll(running), limit); }
+        catch
+        {
+            hold.Dispose();
+            throw;
+        }
+        return hold;
+    }
+
+    /// <summary>Holds fleet reads back until it is disposed (see <see cref="HoldFleetReadsAsync"/>).</summary>
+    internal sealed class FleetReadHold : IDisposable
+    {
+        private int _released;
+
+        /// <summary>The reads that started before ended; false when the hold went on without them.</summary>
+        public bool EarlierReadsEnded { get; internal set; }
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _released, 1) == 1) return;
+            lock (FleetReadGate) _fleetReadHolds--;
+        }
+    }
+
+    /// <summary>
+    /// Waits until <paramref name="read"/> has ended, or <paramref name="limit"/> has (started only when the read still
+    /// runs). True when the read ended or was not running. It never throws, also when the read failed.
+    /// </summary>
+    internal static async Task<bool> WaitForReadAsync(Task? read, Func<Task> limit)
+    {
+        if (read is not { IsCompleted: false }) return true;
+        return await Task.WhenAny(read, limit()) == read;
+    }
 
     private static async Task<List<MachineInfo>> ReadFleetOnPoolAsync(bool forceDiscovery)
     {
@@ -177,14 +273,18 @@ public static class MachineRelay
         return await ReadLocalMachineAsync(outdated, running);
     }
 
-    /// <summary>Whether the agent task runs this exact build (used before a fleet code exists).</summary>
-    private static async Task<bool> LocalAgentIsCurrentAsync()
+    /// <summary>
+    /// Whether the agent task runs this exact build (used before a fleet code exists): the version of the exe it starts,
+    /// also when it starts it through the start helper (see <see cref="AgentTaskExecutableAsync"/>), read from the file
+    /// that is there now (see <see cref="AppUpdater.VersionOfFile"/>), also when it is this dashboard's own path.
+    /// </summary>
+    internal static async Task<bool> LocalAgentIsCurrentAsync()
     {
         var exe = await AgentTaskExecutableAsync();
         return await Task.Run(() =>
         {
             if (string.IsNullOrEmpty(exe) || !File.Exists(exe)) return false;
-            var version = FileVersionInfo.GetVersionInfo(exe).ProductVersion ?? string.Empty;
+            var version = AppUpdater.VersionOfFile(exe) ?? string.Empty;
             return !AppUpdater.IsNewer(AppUpdater.CurrentVersion, version);
         });
     }
@@ -364,12 +464,17 @@ public static class MachineRelay
         if (!duplicates && renamed.Count == 0 && !wasManaged && existing != null && existing.Name == name && existing.Address == address
             && existing.Version == version && existing.MachineId == machineId
             && DateTime.UtcNow - existing.LastSeenUtc < TimeSpan.FromMinutes(10)) return;
-        FleetConfig.Update(c =>
+        var saved = FleetConfig.UpdateIf(c =>
         {
+            // This PC is not in a fleet (any more). A read that ends after Leave fleet, also one in another process
+            // such as an AI assistant's, must not add a PC back to the list that leaving cleared.
+            if (string.IsNullOrEmpty(c.ProtectedFleetKey)) return false;
             c.KnownPeers.RemoveAll(p => Sanitize(p.Name) == Sanitize(name) || renamed.Any(r => Sanitize(r.Name) == Sanitize(p.Name)));
             c.KnownPeers.Add(new PeerRecord { Name = name, Address = address, Version = version, MachineId = machineId, LastSeenUtc = DateTime.UtcNow });
             if (wasManaged) c.ForgetManagedWhere(p => p.MachineId.Equals(machineId, StringComparison.OrdinalIgnoreCase));
+            return true;
         });
+        if (!saved) return;
         if (wasManaged) AppendAgentLog($"{name} joined the fleet, so it is no longer managed one way.");
         foreach (var old in renamed)
         {
@@ -383,8 +488,12 @@ public static class MachineRelay
     /// same PC ends here; a managed PC with only the same name is kept.
     /// </summary>
     /// <param name="machineId">The PC's machine ID, as its status reports it; null when the pairing did not say.</param>
+    /// <exception cref="InvalidOperationException">This PC is not in a fleet (any more), so the PC is not saved.</exception>
     public static void AddKnownPeer(string name, string address, string? machineId = null)
-        => RememberPeer(name, FleetNetwork.WithPort(address), string.Empty, machineId ?? string.Empty);
+    {
+        if (string.IsNullOrEmpty(FleetConfig.Current.ProtectedFleetKey)) throw new InvalidOperationException("This PC is not in a fleet any more.");
+        RememberPeer(name, FleetNetwork.WithPort(address), string.Empty, machineId ?? string.Empty);
+    }
 
     public static void ForgetPeer(string name)
     {
@@ -721,9 +830,11 @@ public static class MachineRelay
         => WaitForCommandAsync(machineKey, commandId, timeout, () => DateTime.UtcNow, cancellationToken);
 
     /// <param name="utcNow">The clock (tests pass their own).</param>
+    /// <param name="movedOn">Called when the agent finished a command queued before this one (<see cref="AgentWork.MovedOn"/> unless a test passes its own).</param>
     internal static async Task<string> WaitForCommandAsync(string machineKey, string commandId, TimeSpan timeout, Func<DateTime> utcNow,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default, Action? movedOn = null)
     {
+        movedOn ??= AgentWork.MovedOn;
         var started = utcNow();
         var deadline = started + timeout;
         var longest = timeout > MaxCommandWait ? timeout : MaxCommandWait;
@@ -749,7 +860,12 @@ public static class MachineRelay
             {
                 runningSeenUtc = utcNow();
                 var now = status.RecentCommands.Select(r => r.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
-                if (finished != null && !now.IsSubsetOf(finished)) cap = runningSeenUtc + longest;
+                if (finished != null && !now.IsSubsetOf(finished))
+                {
+                    cap = runningSeenUtc + longest;
+                    // In the fleet agent, an update restart then waits for this create longer, too.
+                    movedOn();
+                }
                 finished = now;
                 continue;
             }
@@ -791,17 +907,16 @@ public static class MachineRelay
         }
 
         var state = LoadAgentState();
-        var lastResult = $"Fleet agent v{AppUpdater.CurrentVersion} started";
+        var lastResult = StartResult(state);
         AppendAgentLog($"Fleet agent v{AppUpdater.CurrentVersion} started (protocol {ProtocolVersion}) from {Environment.ProcessPath}.");
 
         var queue = Channel.CreateUnbounded<MachineCommand>();
         // Commands that are queued or running, reported in the status so callers keep waiting for them.
         var pending = new ConcurrentDictionary<string, byte>(StringComparer.OrdinalIgnoreCase);
-        // Runs on HTTP threads. A command sent again with the same ID (a retry after a lost answer) is queued once;
-        // the command loop skips IDs it already processed.
+        // Runs on HTTP threads.
         string Enqueue(MachineCommand command)
         {
-            if (pending.TryAdd(command.Id, 0)) queue.Writer.TryWrite(command);
+            TakeCommand(command, pending, queue.Writer, state.HasProcessed);
             InvalidateStatus();
             return command.Id;
         }
@@ -812,12 +927,7 @@ public static class MachineRelay
             var cached = await status.GetAsync();
             // Pending before results: a command that finishes in between then shows in both, never in neither.
             var running = pending.Keys.ToArray();
-            return AsAnswer(cached, DateTime.UtcNow) with
-            {
-                PendingCommandIds = running,
-                RecentCommands = state.Results,
-                Busy = running.Length > 0 || !AgentWork.IsIdle
-            };
+            return AgentAnswer(cached, DateTime.UtcNow, running, state.Results);
         }
 
         using var server = new AgentServer(StatusAsync, Enqueue, LogReader.ReadAsync, job: RunnerActivity.ReadAsync);
@@ -841,6 +951,48 @@ public static class MachineRelay
             "Auto-recovery can read this PC's runners again.");
         var restart = new UpdateRestartClock(() => DateTime.UtcNow, UpdateRestartWait, UpdateRestartLimit);
         var toldRestart = false;
+        var moves = AgentWork.Moves;
+        // Runs the queued commands, one after the other.
+        async Task RunQueuedCommandsAsync()
+        {
+            while (queue.Reader.TryRead(out var command))
+            {
+                if (state.HasProcessed(command.Id))
+                {
+                    pending.TryRemove(command.Id, out _);
+                    InvalidateStatus();
+                    continue;
+                }
+                string result;
+                using (AgentWork.Begin())
+                {
+                    try { result = await ExecuteCommandAsync(command); }
+                    catch (Exception ex)
+                    {
+                        result = $"{command.Target} {command.Action} failed: {ex.Message}";
+                        AppendAgentLog(result);
+                    }
+                }
+                lastResult = result;
+                state.MarkProcessed(command.Id, result);
+                pending.TryRemove(command.Id, out _);
+                restart.WorkFinished();
+                InvalidateStatus();
+                try { SaveAgentState(state); }
+                catch (Exception ex) { AppendAgentLog($"Could not save the agent state: {ex.Message}"); }
+            }
+        }
+        // The update could not be finished: its command's result says so, now or, when the agent exits, after the restart.
+        void KeepUpdateFailure(string reason, bool exiting)
+        {
+            // An event shows on the PC's card in place of the event of the update; one from an agent that exits is lost.
+            if (exiting) AppendAgentLog(reason);
+            else AddEvent(reason, warning: true);
+            lastResult = UpdateFailure(state, _agentUpdateCommandId, reason, afterRestart: exiting);
+            InvalidateStatus();
+            try { SaveAgentState(state); }
+            catch (Exception ex) { AppendAgentLog($"Could not save the agent state: {ex.Message}"); }
+        }
         while (!cancellationToken.IsCancellationRequested)
         {
             try
@@ -848,42 +1000,25 @@ public static class MachineRelay
                 using (var wait = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
                 {
                     // While an update waits for work to finish, look again every second.
-                    wait.CancelAfter(_restartAgentAfterUpdate ? TimeSpan.FromSeconds(1) : WatchdogInterval);
+                    wait.CancelAfter(AgentWork.RestartAsked ? TimeSpan.FromSeconds(1) : WatchdogInterval);
                     try { await queue.Reader.WaitToReadAsync(wait.Token); }
                     catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { }
                 }
 
-                while (queue.Reader.TryRead(out var command))
+                await RunQueuedCommandsAsync();
+
+                // An AI assistant's call or approval that started or ended, or a create on another PC that moved on in
+                // that PC's queue, is work that moves on, as a finished command is.
+                if (AgentWork.Moves != moves)
                 {
-                    if (state.HasProcessed(command.Id))
-                    {
-                        pending.TryRemove(command.Id, out _);
-                        InvalidateStatus();
-                        continue;
-                    }
-                    string result;
-                    using (AgentWork.Begin())
-                    {
-                        try { result = await ExecuteCommandAsync(command); }
-                        catch (Exception ex)
-                        {
-                            result = $"{command.Target} {command.Action} failed: {ex.Message}";
-                            AppendAgentLog(result);
-                        }
-                    }
-                    lastResult = result;
-                    state.MarkProcessed(command.Id, result);
-                    pending.TryRemove(command.Id, out _);
+                    moves = AgentWork.Moves;
                     restart.WorkFinished();
-                    InvalidateStatus();
-                    try { SaveAgentState(state); }
-                    catch (Exception ex) { AppendAgentLog($"Could not save the agent state: {ex.Message}"); }
                 }
 
-                if (_restartAgentAfterUpdate)
+                if (AgentWork.RestartAsked)
                 {
                     // Exit once queued commands and other work (AI assistant calls) are done. Commands run in this loop, so
-                    // a queued one always runs first; other work is waited for until nothing finished for a long time,
+                    // a queued one always runs first; other work is waited for until nothing moved on for a long time,
                     // or at most UpdateRestartLimit in all.
                     var quiet = pending.IsEmpty && AgentWork.IsIdle;
                     if (!toldRestart && !quiet) AppendAgentLog("Restarting to finish the update once the current work is done.");
@@ -894,9 +1029,28 @@ public static class MachineRelay
                             : restart.PastLimit
                                 ? $"Restarting to finish the update, although work is still running. The update has waited {(int)UpdateRestartLimit.TotalHours} hours for it."
                                 : $"Restarting to finish the update, although work is still running. Nothing finished in {(int)UpdateRestartWait.TotalMinutes} minutes.");
+                        // From here a new command is refused. One taken since the queue was read above runs first.
+                        await StopTakingCommandsAsync(RunQueuedCommandsAsync);
                         await Task.Delay(TimeSpan.FromSeconds(3), CancellationToken.None); // let the dashboard read the result
-                        // The helper started with the update gives up after two minutes; this one starts the new agent.
-                        AppUpdater.ScheduleAgentTaskRestart(ScheduledTasks.AgentTaskName);
+                        string? failure = null;
+                        var exiting = await SwitchTaskBeforeExitAsync(_agentExeAfterUpdate,
+                            () => AppUpdater.ScheduleAgentTaskRestart(ScheduledTasks.AgentTaskName), RegisterAgentTaskAsync, reason => failure = reason);
+                        if (failure != null) KeepUpdateFailure(failure, exiting);
+                        if (exiting) Environment.Exit(0);
+                        // The agent could not restart, and stays as it is. A later update waits for the work from the start.
+                        restart = new UpdateRestartClock(() => DateTime.UtcNow, UpdateRestartWait, UpdateRestartLimit);
+                        toldRestart = false;
+                    }
+                }
+
+                // The agent restarts through the start helper (see Launcher.AgentStep) only when it is quiet: no command
+                // queued or running, no other work, and no update in progress.
+                if (TakeStartHelperStep() is var helperStep and not Launcher.AgentStartStep.Nothing)
+                {
+                    bool Quiet() => pending.IsEmpty && AgentWork.IsIdle && !AgentWork.RestartAsked;
+                    if (Quiet() && await RestartThroughStartHelperAsync(helperStep, RunQueuedCommandsAsync, Quiet, StartHelperRestartSteps.ForThisPc))
+                    {
+                        UpdateGuard.OnAgentExiting();
                         Environment.Exit(0);
                     }
                 }
@@ -929,6 +1083,167 @@ public static class MachineRelay
     }
 
     private static void InvalidateStatus() => _status?.Invalidate();
+
+    /// <summary>
+    /// Queues a command for the agent's loop. A command sent again with the same ID (a retry after a lost answer) is
+    /// queued once, and the loop skips IDs it already processed (<paramref name="processed"/>). Once the agent is about
+    /// to exit for an update (<see cref="StopTakingCommandsAsync"/>), a new command is refused with
+    /// <see cref="RestartingNowText"/>; one sent again that is queued or done is still taken.
+    /// </summary>
+    internal static void TakeCommand(MachineCommand command, ConcurrentDictionary<string, byte> pending, ChannelWriter<MachineCommand> queue,
+        Func<string, bool> processed)
+    {
+        lock (CommandGate)
+        {
+            if (_exitingForUpdate && !pending.ContainsKey(command.Id) && !processed(command.Id))
+                throw new InvalidOperationException(RestartingNowText);
+            if (pending.TryAdd(command.Id, 0)) queue.TryWrite(command);
+        }
+    }
+
+    /// <summary>
+    /// The agent is about to exit for an update: from now on a new command is refused (<see cref="TakeCommand"/>). Then
+    /// the commands taken before are run (<paramref name="runQueued"/>), also one taken after the loop last read the
+    /// queue, so a command that was taken is never lost.
+    /// </summary>
+    internal static async Task StopTakingCommandsAsync(Func<Task> runQueued)
+    {
+        lock (CommandGate) _exitingForUpdate = true;
+        await runQueued();
+    }
+
+    /// <summary>The agent does not exit for the update after all: it takes commands again, and no longer waits to restart.</summary>
+    internal static void TakeCommandsAgain()
+    {
+        lock (CommandGate) _exitingForUpdate = false;
+        AgentWork.ForgetRestart();
+    }
+
+    // ================= Restarting through the start helper =================
+
+    /// <summary>What the agent's check asked the agent's loop to do about its start (see <see cref="AskStartHelperStep"/>).</summary>
+    private static int _startHelperStep;
+
+    /// <summary>
+    /// Asks the agent's loop to restart the agent through the start helper (<see cref="Launcher.AgentStep"/>); it does so
+    /// once it is quiet (see <see cref="RestartThroughStartHelperAsync"/>).
+    /// </summary>
+    internal static void AskStartHelperStep(Launcher.AgentStartStep step) => Interlocked.Exchange(ref _startHelperStep, (int)step);
+
+    private static Launcher.AgentStartStep TakeStartHelperStep() => (Launcher.AgentStartStep)Interlocked.Exchange(ref _startHelperStep, 0);
+
+    /// <summary>A move of the agent's task that did not work is not tried again by this process.</summary>
+    private static bool _startHelperMoveFailed;
+
+    /// <summary>Forgets that a move of the agent's task did not work (for tests).</summary>
+    internal static void ForgetStartHelperMove() => _startHelperMoveFailed = false;
+
+    /// <summary>The steps of a restart through the start helper (tests pass their own).</summary>
+    internal sealed record StartHelperRestartSteps(
+        Func<bool> UpdateInProgress, Action ScheduleRestart, Func<Task> MoveTask, Func<Task<bool>> TaskStartsHelper, Action MarkRestarted, Action<string> Log)
+    {
+        /// <summary>This PC's: an update holds the update lock or waits to prove itself; the task is this user's fleet agent task.</summary>
+        public static StartHelperRestartSteps ForThisPc => new(
+            () => !AppUpdater.IsUpdateLockFree() || UpdateWatched(),
+            () => AppUpdater.ScheduleAgentTaskRestart(ScheduledTasks.AgentTaskName),
+            () => RegisterAgentTaskAsync(AppUpdater.InstalledExe),
+            async () => ScheduledTasks.CommandOfOwnElevatedTask(await ScheduledTasks.QueryXmlAsync(ScheduledTasks.AgentTaskName)) is { } command
+                        && Launcher.IsLauncherPath(command) && Launcher.CanStart(command),
+            () => InstallChecks.MarkDone(Launcher.AgentRestartCheck),
+            AppendAgentLog);
+    }
+
+    /// <summary>
+    /// Restarts the agent through the start helper, so it runs with a clean environment: only while no update is in
+    /// progress, and after it stopped taking commands and ran the ones it took (<paramref name="runQueued"/>), only when it
+    /// is still quiet (<paramref name="quiet"/>). It starts the helper that starts its task again once it has exited, then
+    /// (for <see cref="Launcher.AgentStartStep.MoveTaskAndRestart"/>) registers its task for the start helper and checks
+    /// that the task now starts it. Returns whether the agent is to exit (with exit code 0, so neither Task Scheduler nor
+    /// the update's watch counts it as a failure). Otherwise it takes commands again; a move that did not work is logged
+    /// and not tried again by this process, and the restart helper finds the agent still running and leaves it.
+    /// </summary>
+    internal static async Task<bool> RestartThroughStartHelperAsync(Launcher.AgentStartStep step, Func<Task> runQueued, Func<bool> quiet,
+        StartHelperRestartSteps steps)
+    {
+        if (step == Launcher.AgentStartStep.Nothing || steps.UpdateInProgress()) return false;
+        if (step == Launcher.AgentStartStep.MoveTaskAndRestart && _startHelperMoveFailed) return false;
+        await StopTakingCommandsAsync(runQueued);
+        if (!quiet())
+        {
+            lock (CommandGate) _exitingForUpdate = false;
+            return false;
+        }
+        try { steps.ScheduleRestart(); }
+        catch (Exception ex)
+        {
+            lock (CommandGate) _exitingForUpdate = false;
+            steps.Log($"The fleet agent could not restart through the start helper: {ex.Message}");
+            return false;
+        }
+        if (step == Launcher.AgentStartStep.MoveTaskAndRestart)
+        {
+            string? problem = null;
+            try { await steps.MoveTask(); }
+            catch (Exception ex) { problem = ex.Message; }
+            if (problem == null && !await steps.TaskStartsHelper()) problem = "the task does not start it after it was registered";
+            if (problem != null)
+            {
+                _startHelperMoveFailed = true;
+                lock (CommandGate) _exitingForUpdate = false;
+                steps.Log($"Could not move the fleet agent task to the start helper ({problem}). The fleet agent keeps running as it is.");
+                return false;
+            }
+        }
+        steps.MarkRestarted();
+        steps.Log(step == Launcher.AgentStartStep.MoveTaskAndRestart
+            ? "Moved the fleet agent task to the start helper. The fleet agent restarts through it, so it runs with a clean environment."
+            : "The fleet agent restarts through the start helper, so it runs with a clean environment.");
+        return true;
+    }
+
+    /// <summary>
+    /// The fleet agent's check of its start (every few minutes): asks the loop to restart through the start helper when
+    /// <see cref="Launcher.AgentStep"/> says so. Only for the installed build with administrator rights
+    /// (<see cref="Launcher.Decides"/>), and only once this process saw the start helper start Runner Manager (see
+    /// <see cref="StartHelperWorksAsync"/>): a probe runs before the task moves to it.
+    /// </summary>
+    internal static async Task CheckStartHelperAsync()
+    {
+        if (!Launcher.Decides()) return;
+        var exe = AppUpdater.InstalledExe;
+        var command = ScheduledTasks.CommandOfOwnElevatedTask(await ScheduledTasks.QueryXmlAsync(ScheduledTasks.AgentTaskName));
+        var startedByHelper = Launcher.StartedThisProcess();
+        var step = Launcher.AgentStep(startedByHelper, Launcher.IsInPlace(AppUpdater.InstallDir), command, exe,
+            UpdateWatched(), InstallChecks.IsDone(Launcher.AgentRestartCheck));
+        if (step == Launcher.AgentStartStep.Nothing || await ScheduledTasks.OtherOwnerAsync(ScheduledTasks.AgentTaskName) != null) return;
+        if (await StartHelperWorksAsync(AppUpdater.InstallDir, Launcher.EnsureForThisCopyAsync)) AskStartHelperStep(step);
+    }
+
+    /// <summary>
+    /// Whether the start helper in <paramref name="folder"/> starts Runner Manager, checked before the agent moves its task
+    /// to it and restarts through it (see <see cref="Launcher.ProveAsync"/>). One that does not is given up on by
+    /// <paramref name="giveUp"/>, as one that was removed is (see <see cref="Launcher.EnsureForThisCopyAsync"/>, which
+    /// finds the result of the probe): this PC runs without it and this user's tasks start the exe. False without a
+    /// decision while an update holds the update lock; the next check tries again.
+    /// </summary>
+    internal static async Task<bool> StartHelperWorksAsync(string folder, Func<Task> giveUp)
+    {
+        var proof = await Launcher.ProveAsync(folder, TimeSpan.FromSeconds(2));
+        if (proof.Outcome == Launcher.Proof.Works) return true;
+        if (proof.Outcome == Launcher.Proof.Fails) await giveUp();
+        return false;
+    }
+
+    /// <summary>The agent's answer to a status request: the built status as an answer, with its commands and its work.</summary>
+    /// <param name="running">The commands queued or running, read before <paramref name="results"/>.</param>
+    internal static MachineStatusPayload AgentAnswer(MachineStatusPayload built, DateTime nowUtc, string[] running, FleetCommandResult[] results)
+        => AsAnswer(built, nowUtc) with
+        {
+            PendingCommandIds = running,
+            RecentCommands = results,
+            Busy = running.Length > 0 || !AgentWork.IsIdle,
+            WorkMoves = AgentWork.Moves
+        };
 
     /// <summary>
     /// A built status as the answer to a request: stamped with the time it is sent, as agents always did, unless no
@@ -993,9 +1308,8 @@ public static class MachineRelay
                     Recovery.Forget(command.TargetKey);
                     return "Runner stopped for the move";
                 case "Start" when command.Value == "enable":
-                    // The move failed: this copy keeps the runner.
-                    await FleetActions.StartAfterFailedMoveAsync(command.TargetKey);
-                    return "Runner start completed";
+                    // The move failed: this copy keeps the runner, as it was before the move.
+                    return await FleetActions.StartAfterFailedMoveAsync(command.TargetKey);
                 case "StopJob":
                     var stopped = await RunnerActivity.StopJobProcessesAsync(command.TargetKey);
                     return stopped.Count == 0 ? "The job had no processes to stop" : $"Stopped the job's processes: {string.Join(", ", stopped)}";
@@ -1005,7 +1319,8 @@ public static class MachineRelay
                 case "Start" or "Stop" or "Restart":
                     // Dashboards don't offer these for such a runner, but a command can be sent from an older status.
                     if (await RunnerService.FindRunnerAsync(command.TargetKey) is { } target
-                        && FleetActions.ConsoleRunnerProblem(target.IsInteractive, target.ServiceInstalled, command.Action) is { } problem)
+                        && FleetActions.ConsoleRunnerProblem(target.IsInteractive, target.ServiceInstalled, command.Action,
+                            target.ConsoleAtSignIn, target.RunsTwice) is { } problem)
                         throw new InvalidOperationException(problem);
                     await RunnerService.ControlServiceAsync(command.TargetKey, command.Action);
                     FleetConfig.SetManuallyStopped(command.TargetKey, command.Action == "Stop");
@@ -1025,7 +1340,7 @@ public static class MachineRelay
                     FleetConfig.Update(c => c.Watchdog = enabled);
                     return enabled ? "Auto-recovery turned on" : "Auto-recovery turned off";
                 case "Update":
-                    return await UpdateSelfAsync(force: command.Value.Equals("force", StringComparison.OrdinalIgnoreCase));
+                    return await UpdateSelfAsync(command.Id, force: command.Value.Equals("force", StringComparison.OrdinalIgnoreCase));
                 default:
                     throw new InvalidOperationException($"Unsupported agent action: {command.Action}");
             }
@@ -1037,13 +1352,13 @@ public static class MachineRelay
             {
                 case "Reboot":
                     var from = string.IsNullOrWhiteSpace(command.Value) ? "another PC" : command.Value;
-                    var (code, output) = await ScheduledTasks.RunAsync("shutdown.exe",
+                    var (code, output) = await ScheduledTasks.RunAsync(WindowsTools.FullPath("shutdown.exe"),
                         $"/r /t 60 /c \"Runner Manager: restart requested from {from.Replace("\"", "")}\"");
                     if (code != 0) throw new InvalidOperationException(output.Trim());
                     AddEvent($"Restart requested from {from}. Restarting in 60 seconds.", warning: true);
                     return "Restarting in 60 seconds";
                 case "CancelReboot":
-                    await ScheduledTasks.RunAsync("shutdown.exe", "/a");
+                    await ScheduledTasks.RunAsync(WindowsTools.FullPath("shutdown.exe"), "/a");
                     return "Restart cancelled";
                 default:
                     throw new InvalidOperationException($"Unsupported PC action: {command.Action}");
@@ -1053,16 +1368,18 @@ public static class MachineRelay
         throw new InvalidOperationException($"Unsupported target: {command.Target}");
     }
 
-    private static async Task<string> UpdateSelfAsync(bool force)
+    private static async Task<string> UpdateSelfAsync(string commandId, bool force)
     {
         var release = await AppUpdater.GetLatestReleaseAsync(force: true)
             ?? throw new InvalidOperationException($"No Runner Manager release found in {AppUpdater.ReleaseRepository}.");
         if (!force && !AppUpdater.IsNewer(release.Version, AppUpdater.CurrentVersion) && AppUpdater.IsRunningInstalledCopy)
             return $"Already up to date (v{AppUpdater.CurrentVersion})";
-        var exe = await AppUpdater.DownloadAndInstallAsync(release, message => AppendAgentLog($"Update: {message}"));
-        AppUpdater.ScheduleAgentTaskRestart(ScheduledTasks.AgentTaskName);
-        await RegisterAgentTaskAsync(exe);
-        _restartAgentAfterUpdate = true;
+        // The task is switched to the new copy when the agent exits, after its work: the new copy runs only from the next
+        // start of the task, because registering it again does not end this agent on Windows 11 (measured; other Windows
+        // versions were not), and on a version where it does, the agent would stop in the middle of its work.
+        _agentExeAfterUpdate = await AppUpdater.DownloadAndInstallAsync(release, message => AppendAgentLog($"Update: {message}"));
+        _agentUpdateCommandId = commandId;
+        AgentWork.AskRestart();
         AddEvent($"Updated to {release.Tag}. Restarting the fleet agent.");
         return $"Updated to {release.Tag}. Restarting.";
     }
@@ -1077,10 +1394,11 @@ public static class MachineRelay
         var acted = false;
         foreach (var runner in local.Runners.Where(r => r.ServiceInstalled))
         {
-            // A runner that runs from a console window is left alone: when that closes (sign-out), starting the
-            // service would run it twice at the next sign-in.
-            var step = Recovery.Check(runner.Name, runner.IsInteractive, runner.IsRunning, IsPending(runner),
-                watchdogOn: config.Watchdog, held: IsManuallyStopped(runner.Name), DateTime.UtcNow);
+            if (TwiceReported.Changed(runner.Name, runner.RunsTwice))
+                AddEvent(runner.RunsTwice
+                    ? $"Runner {runner.AgentName} runs twice: as its Windows service and in a console window. Stop the service, or turn off “Start when you sign in”."
+                    : $"Runner {runner.AgentName} no longer runs twice", warning: runner.RunsTwice);
+            var step = CheckRecovery(Recovery, runner, config.Watchdog, IsManuallyStopped(runner.Name), DateTime.UtcNow);
             if (step == RunnerRecovery.Step.GiveUp)
                 AddEvent($"Auto-recovery stopped for runner {runner.AgentName} after {RunnerRecovery.MaxAttempts} attempts in one hour", warning: true);
             if (step != RunnerRecovery.Step.Start) continue;
@@ -1094,6 +1412,29 @@ public static class MachineRelay
         }
 
         return acted;
+    }
+
+    /// <summary>
+    /// Auto-recovery's step for a runner with a service. A runner that runs from a console window, or that a startup
+    /// entry opens in one at sign-in, is left alone: starting its service would run it twice, also when the window is
+    /// closed now (signed out) and when this agent never saw the window. The startup entry is read on every reading.
+    /// </summary>
+    internal static RunnerRecovery.Step CheckRecovery(RunnerRecovery recovery, RunnerInfo runner, bool watchdogOn, bool held, DateTime nowUtc)
+        => recovery.Check(runner.Name, runner.HasConsoleCopy, runner.IsRunning, IsPending(runner), watchdogOn, held, nowUtc);
+
+    /// <summary>The runners this agent reported as running twice, so each time is reported once.</summary>
+    private static readonly OnceReported TwiceReported = new();
+
+    /// <summary>Keys reported as in a state, so a state is reported once when it begins and once when it ends.</summary>
+    internal sealed class OnceReported
+    {
+        private readonly HashSet<string> _keys = new(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>Whether the state of this key changed since the last call; a key never seen starts as not in it.</summary>
+        public bool Changed(string key, bool now)
+        {
+            lock (_keys) return now ? _keys.Add(key) : _keys.Remove(key);
+        }
     }
 
     /// <summary>Its service is starting or stopping (Win32_Service.State "Start Pending", "Stop Pending" and so on).</summary>
@@ -1120,17 +1461,23 @@ public static class MachineRelay
     private static int _agentInstalledVersion;
     private static readonly TimeSpan AgentInstalledCacheTime = TimeSpan.FromSeconds(60);
 
-    /// <summary>Whether the agent task exists. Cached for a minute (it runs schtasks.exe); changes here clear it.</summary>
+    /// <summary>
+    /// Whether this user's fleet agent task exists: one that runs with the highest rights, as Runner Manager registers it
+    /// (see <see cref="ScheduledTasks.IsOwnElevatedTask"/>). A task under its name that any program could have created, or
+    /// another Windows user's (see <see cref="AgentOwnership"/>), is not this user's agent: the dashboard, setup and
+    /// updates then neither start it nor register the agent in its place. Cached for a minute (it runs schtasks.exe);
+    /// changes here clear it.
+    /// </summary>
     public static async Task<bool> IsAgentInstalledAsync()
     {
         if (_agentInstalled is { } cached && DateTime.UtcNow - cached.CheckedUtc < AgentInstalledCacheTime) return cached.Installed;
         var version = Volatile.Read(ref _agentInstalledVersion);
-        var installed = await ScheduledTasks.ExistsAsync(ScheduledTasks.AgentTaskName);
+        var installed = await ScheduledTasks.IsOwnElevatedTaskAsync(ScheduledTasks.AgentTaskName) == true;
         if (version == Volatile.Read(ref _agentInstalledVersion)) _agentInstalled = new InstalledCheck(installed, DateTime.UtcNow);
         return installed;
     }
 
-    private static void ForgetAgentInstalled()
+    internal static void ForgetAgentInstalled()
     {
         Interlocked.Increment(ref _agentInstalledVersion);
         _agentInstalled = null;
@@ -1165,18 +1512,25 @@ public static class MachineRelay
         catch { return false; }
     });
 
+    /// <summary>
+    /// Ends and deletes this user's fleet agent task, and RunnerWidget's, when it is this user's own task with the highest
+    /// rights; any other task under these names, also another Windows user's, is left as it is. Then removes the firewall rules.
+    /// </summary>
     public static async Task RemoveAgentTaskAsync()
+    {
+        await RemoveOwnAgentTasksAsync();
+        await FleetNetwork.RemoveFirewallRulesAsync();
+    }
+
+    /// <summary>The tasks part of <see cref="RemoveAgentTaskAsync"/>.</summary>
+    internal static async Task RemoveOwnAgentTasksAsync()
     {
         try
         {
             foreach (var task in new[] { ScheduledTasks.AgentTaskName, ScheduledTasks.LegacyAgentTaskName })
-            {
-                await ScheduledTasks.EndTaskAsync(task);
-                await ScheduledTasks.DeleteTaskAsync(task);
-            }
+                await ScheduledTasks.DeleteOwnTaskAsync(task, end: true);
         }
         finally { ForgetAgentInstalled(); }
-        await FleetNetwork.RemoveFirewallRulesAsync();
     }
 
     /// <summary>
@@ -1361,7 +1715,7 @@ public static class MachineRelay
     /// Replaces a running (possibly older) agent: waits for its work to finish, stops it, re-registers the task for
     /// exe, and starts it.
     /// </summary>
-    private static async Task ReplaceAndStartAgentTaskAsync(string exe, Action<string>? log = null)
+    internal static async Task ReplaceAndStartAgentTaskAsync(string exe, Action<string>? log = null)
     {
         // Never stop another Windows user's agent.
         await AgentOwnership.EnsureOursAsync();
@@ -1371,21 +1725,116 @@ public static class MachineRelay
         await RegisterAgentTaskAsync(exe);
         await FleetNetwork.EnsureFirewallRulesAsync();
         await Task.Delay(1500);
-        var (code, output) = await ScheduledTasks.RunTaskAsync(ScheduledTasks.AgentTaskName);
+        // Ended through the start helper, the task counts as running for a moment longer (see StartAgainAsync).
+        var (code, output) = await ScheduledTasks.StartAgainAsync(ScheduledTasks.AgentTaskName, AgentStartWait);
         if (code != 0) throw new InvalidOperationException(output.Trim());
+    }
+
+    /// <summary>
+    /// The last step before the agent exits to finish an update: starts the helper that starts the task again once this
+    /// agent has exited, and only then registers the task for <paramref name="exe"/>: registering it again does not end
+    /// this agent on Windows 11 (measured; other Windows versions were not), but the helper must be there in case a Windows
+    /// version does. Returns whether the agent is to exit. When the helper cannot be started (PowerShell is blocked or
+    /// missing), nothing would start the agent again, so it stays as it is and takes commands again
+    /// (<see cref="TakeCommandsAgain"/>). After a failed registration it exits, and the helper starts the task as it
+    /// was. A failure is given to <paramref name="failed"/>.
+    /// </summary>
+    internal static async Task<bool> SwitchTaskBeforeExitAsync(string? exe, Action scheduleRestart, Func<string, Task> register, Action<string> failed)
+    {
+        try { scheduleRestart(); }
+        catch (Exception ex)
+        {
+            TakeCommandsAgain();
+            failed($"The fleet agent could not restart to finish the update, so it still runs v{AppUpdater.CurrentVersion}: {ex.Message}");
+            return false;
+        }
+        if (exe == null) return true;
+        try { await register(exe); }
+        catch (Exception ex) { failed($"Could not switch the fleet agent's task to the new version: {ex.Message}"); }
+        return true;
+    }
+
+    /// <summary>
+    /// Keeps a failure to finish an update that the agent installed itself as the result of the update's command
+    /// (<paramref name="commandId"/>), so a status shows it as the result of the last command, as a failed update did
+    /// before 2.10.0. When the agent exits now (<paramref name="afterRestart"/>), the agent's next start shows it too
+    /// (<see cref="StartResult"/>). Returns the result.
+    /// </summary>
+    internal static string UpdateFailure(AgentState state, string? commandId, string reason, bool afterRestart)
+    {
+        var result = $"agent Update failed: {reason}";
+        if (commandId is { Length: > 0 }) state.MarkProcessed(commandId, result);
+        if (afterRestart) state.ResultAtStart = result;
+        return result;
+    }
+
+    /// <summary>
+    /// What a starting agent shows as the result of its last command: a failure that the agent before it kept for it
+    /// (<see cref="UpdateFailure"/>), once, or that it started.
+    /// </summary>
+    /// <param name="path">The agent state file (tests pass their own).</param>
+    internal static string StartResult(AgentState state, string? path = null)
+    {
+        if (state.ResultAtStart is not { } kept) return $"Fleet agent v{AppUpdater.CurrentVersion} started";
+        state.ResultAtStart = null;
+        try { SaveAgentState(state, path); }
+        catch (Exception ex) { AppendAgentLog($"Could not save the agent state: {ex.Message}"); }
+        return kept;
     }
 
     /// <summary>
     /// Restarts the local agent (after an update or a settings change that needs it). Unless <paramref name="force"/>
     /// is set, it first waits for the agent to finish commands and AI assistant calls (see <see cref="WaitWhileBusyAsync"/>).
     /// </summary>
-    public static async Task RestartLocalAgentAsync(bool force = false, Action<string>? log = null)
+    /// <param name="switchTo">After an update, the exe the agent's task is registered for, once the agent has stopped.</param>
+    public static Task RestartLocalAgentAsync(bool force = false, Action<string>? log = null, string? switchTo = null)
+        => RestartAgentAsync(new AgentRestartSteps(
+            () => force ? Task.CompletedTask : WaitForLocalAgentIdleAsync(log),
+            async () =>
+            {
+                await ScheduledTasks.EndTaskAsync(ScheduledTasks.AgentTaskName);
+                await Task.Run(EndOtherAgents);
+            },
+            RegisterAgentTaskAsync,
+            async () =>
+            {
+                await Task.Delay(1500);
+                var (code, output) = await ScheduledTasks.StartAgainAsync(ScheduledTasks.AgentTaskName, AgentStartWait);
+                if (code != 0)
+                {
+                    var text = $"The fleet agent could not be started again: {output.Trim()} Its task starts it again within five minutes.";
+                    log?.Invoke(text);
+                    AppendAgentLog(text);
+                }
+            }), switchTo, log);
+
+    /// <summary>How long a start of the fleet agent's task after it was ended waits while Task Scheduler still counts it as running.</summary>
+    internal static readonly TimeSpan AgentStartWait = TimeSpan.FromSeconds(30);
+
+    /// <summary>The steps of a restart of this PC's agent (a test passes its own).</summary>
+    internal sealed record AgentRestartSteps(Func<Task> WaitForIdle, Func<Task> Stop, Func<string, Task> Register, Func<Task> Start);
+
+    /// <summary>
+    /// Waits for the agent's work, stops the agent, registers its task for <paramref name="switchTo"/> (when given),
+    /// and starts it. Registering comes only after the wait: it does not end a running agent on Windows 11 (measured;
+    /// other Windows versions were not), but Task Scheduler refuses to start the task again until the agent that runs
+    /// has exited. When registering fails, the agent is still started (with the task as it was), and then the failure is
+    /// thrown.
+    /// </summary>
+    internal static async Task RestartAgentAsync(AgentRestartSteps steps, string? switchTo, Action<string>? log)
     {
-        if (!force) await WaitForLocalAgentIdleAsync(log);
-        await ScheduledTasks.EndTaskAsync(ScheduledTasks.AgentTaskName);
-        await Task.Run(EndOtherAgents);
-        await Task.Delay(1500);
-        await ScheduledTasks.RunTaskAsync(ScheduledTasks.AgentTaskName);
+        await steps.WaitForIdle();
+        await steps.Stop();
+        Exception? failed = null;
+        if (switchTo != null)
+        {
+            log?.Invoke("Switching the fleet agent to the new version...");
+            try { await steps.Register(switchTo); }
+            catch (Exception ex) { failed = ex; }
+        }
+        await steps.Start();
+        if (failed != null)
+            throw new InvalidOperationException($"The fleet agent was started again, but its task could not be switched to the new version: {failed.Message}", failed);
     }
 
     private static Task WaitForLocalAgentIdleAsync(Action<string>? log)
@@ -1406,6 +1855,7 @@ public static class MachineRelay
     {
         var restart = new UpdateRestartClock(utcNow, UpdateRestartWait, UpdateRestartLimit);
         HashSet<string>? finished = null;
+        long? moves = null;
         var told = false;
         while (true)
         {
@@ -1414,8 +1864,10 @@ public static class MachineRelay
             catch { return; }
             if (status is not { Busy: true }) return;
             var now = status.RecentCommands.Select(r => r.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
-            if (finished != null && !now.IsSubsetOf(finished)) restart.WorkFinished();
+            // A finished command, or other work that started, ended or moved on (older agents always send 0).
+            if ((finished != null && !now.IsSubsetOf(finished)) || (moves != null && status.WorkMoves != moves)) restart.WorkFinished();
             finished = now;
+            moves = status.WorkMoves;
             if (restart.Due(quiet: false))
             {
                 var message = restart.PastLimit
@@ -1458,14 +1910,19 @@ public static class MachineRelay
         catch { }
     }
 
-    /// <summary>The executable the installed agent task runs, or empty when the task doesn't exist.</summary>
+    /// <summary>
+    /// The executable that this user's agent task runs, or empty when there is no such task with the highest rights (see
+    /// <see cref="IsAgentInstalledAsync"/>).
+    /// </summary>
     public static async Task<string> AgentTaskExecutableAsync()
-        => ScheduledTasks.CommandOf(await ScheduledTasks.QueryXmlAsync(ScheduledTasks.AgentTaskName));
+        => ScheduledTasks.ExeOfOwnElevatedTask(await ScheduledTasks.QueryXmlAsync(ScheduledTasks.AgentTaskName)) ?? string.Empty;
 
     /// <summary>
     /// Tasks created by older versions used schtasks defaults: they refuse to start on battery,
     /// are killed when a laptop unplugs, and are force-stopped after 72 hours. Re-register those
-    /// with always-on settings, keeping the executable path the task already points to.
+    /// with always-on settings, keeping the executable path the task already points to. A task whose exe is gone gets the
+    /// installed exe when there is one, never the exe of this process (which may be a build folder or a download), and is
+    /// otherwise left as it is.
     /// </summary>
     public static async Task<bool> RepairAgentTaskSettingsAsync()
     {
@@ -1476,26 +1933,56 @@ public static class MachineRelay
             && xml.Contains("<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>", StringComparison.OrdinalIgnoreCase);
         if (healthy) return false;
 
-        var exe = ScheduledTasks.CommandOf(xml);
-        if (string.IsNullOrWhiteSpace(exe) || !File.Exists(exe)) exe = Environment.ProcessPath ?? string.Empty;
+        // Only this user's task with the highest rights keeps its exe; see ExeOfOwnElevatedTask.
+        if (ScheduledTasks.ExeOfOwnElevatedTask(xml) is not { } exe)
+        {
+            AppendAgentLog(ScheduledTasks.NotRegisteredElevatedText(ScheduledTasks.AgentTaskName));
+            return false;
+        }
+        if (!File.Exists(exe))
+        {
+            if (!File.Exists(AppUpdater.InstalledExe)) return false;
+            exe = AppUpdater.InstalledExe;
+        }
         if (!exe.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) return false;
 
         await RegisterAgentTaskAsync(exe);
-        // If re-registering ended the running instance this starts it again; otherwise the task's
-        // IgnoreNew policy (and the agent's own mutex) make this a no-op.
+        // Registering again does not end a running agent on Windows 11 (measured; other versions were not), and the
+        // task's IgnoreNew policy (and the agent's own mutex) make this a no-op then. An agent that was not running, or
+        // one that a Windows version ended, starts again.
         await ScheduledTasks.RunTaskAsync(ScheduledTasks.AgentTaskName);
         return true;
     }
 
+    /// <summary>
+    /// Registers this user's fleet agent task for <paramref name="exe"/>. It starts the exe through the start helper beside
+    /// it while that is in place (see <see cref="Launcher.CommandFor"/>), but moves there only once no update waits to
+    /// prove itself (see <see cref="AgentTaskUsesStartHelper"/>).
+    /// </summary>
     internal static async Task RegisterAgentTaskAsync(string exe)
     {
         try
         {
+            var current = ScheduledTasks.CommandOfOwnElevatedTask(await ScheduledTasks.QueryXmlAsync(ScheduledTasks.AgentTaskName));
             await ScheduledTasks.RegisterLogonTaskAsync(ScheduledTasks.AgentTaskName, exe, "--agent",
-                "Runner Manager fleet agent. Reports runner status and runs commands from other PCs.", restartOnFailure: true);
+                "Runner Manager fleet agent. Reports runner status and runs commands from other PCs.", restartOnFailure: true,
+                startHelper: AgentTaskUsesStartHelper(current, UpdateWatched()));
         }
         finally { ForgetAgentInstalled(); }
     }
+
+    /// <summary>Whether an update waits to prove itself (see <see cref="UpdateGuard.IsWatching"/>); tests pass their own.</summary>
+    internal static Func<bool> UpdateWatched { get; set; } = UpdateGuard.IsWatching;
+
+    /// <summary>
+    /// Whether a registration of the fleet agent task may use the start helper: always when the task already starts it
+    /// (<paramref name="currentCommand"/>), otherwise only when no update waits to prove itself
+    /// (<paramref name="updateWatched"/>). The agent of an update moves its task itself once the update counts as working
+    /// (see <see cref="Launcher.AgentStep"/>), so a rollback to a version before the start helper finds the task as that
+    /// version left it.
+    /// </summary>
+    internal static bool AgentTaskUsesStartHelper(string? currentCommand, bool updateWatched)
+        => !updateWatched || (currentCommand != null && Launcher.IsLauncherPath(currentCommand));
 
     // ================= Local status =================
 
@@ -1563,6 +2050,11 @@ public static class MachineRelay
                 ServiceInstalled = r.ServiceInstalled,
                 MovedAway = r.MovedAway,
                 StartsAt = r.StartsAt,
+                RunsTwice = r.RunsTwice,
+                TwoConsoleWindows = r.TwoConsoleWindows,
+                ConsoleAtSignIn = r.ConsoleAtSignIn,
+                ServiceAccount = r.ServiceAccount,
+                WorkFolderOwner = r.WorkFolderOwner,
                 RunnerVersion = r.RunnerVersion,
                 WorkFolderBytes = r.WorkFolderBytes,
                 ManuallyStopped = config.ManuallyStopped.Contains(r.Name, StringComparer.OrdinalIgnoreCase),
@@ -1580,12 +2072,14 @@ public static class MachineRelay
         return new string(chars);
     }
 
-    private static AgentState LoadAgentState()
+    /// <param name="path">The agent state file (tests pass their own).</param>
+    internal static AgentState LoadAgentState(string? path = null)
     {
+        path ??= AgentStatePath;
         try
         {
-            if (!File.Exists(AgentStatePath)) return new AgentState();
-            using var json = JsonDocument.Parse(File.ReadAllText(AgentStatePath));
+            if (!File.Exists(path)) return new AgentState();
+            using var json = JsonDocument.Parse(File.ReadAllText(path));
             var state = new AgentState();
             if (json.RootElement.TryGetProperty("processed", out var processed) && processed.ValueKind == JsonValueKind.Array)
                 foreach (var id in processed.EnumerateArray())
@@ -1596,19 +2090,25 @@ public static class MachineRelay
                     if (result is { Id.Length: > 0 }) state.MarkProcessed(result.Id, result.Result, result.CompletedUtc);
             if (json.RootElement.TryGetProperty("lastCommandId", out var last) && last.GetString() is { Length: > 0 } lastId)
                 state.MarkProcessed(lastId);
+            // Older agents do not write it, and ignore it.
+            if (json.RootElement.TryGetProperty("resultAtStart", out var shown) && shown.ValueKind == JsonValueKind.String)
+                state.ResultAtStart = shown.GetString();
             return state;
         }
         catch { return new AgentState(); }
     }
 
-    private static void SaveAgentState(AgentState state)
+    /// <param name="path">The agent state file (tests pass their own).</param>
+    internal static void SaveAgentState(AgentState state, string? path = null)
     {
-        Directory.CreateDirectory(FleetConfig.StateDir);
-        WriteAtomically(AgentStatePath, JsonSerializer.Serialize(new
+        path ??= AgentStatePath;
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        WriteAtomically(path, JsonSerializer.Serialize(new
         {
             lastCommandId = state.LastCommandId,
             processed = state.Recent,
-            results = state.Results
+            results = state.Results,
+            resultAtStart = state.ResultAtStart
         }));
     }
 
@@ -1676,7 +2176,7 @@ public static class MachineRelay
     }
 
     /// <summary>The commands an agent processed (so one sent again is not run twice) and their latest results.</summary>
-    private sealed class AgentState
+    internal sealed class AgentState
     {
         private const int MaxProcessed = 50;
         private const int MaxResults = 20;
@@ -1685,11 +2185,19 @@ public static class MachineRelay
         private readonly HashSet<string> _set = new(StringComparer.OrdinalIgnoreCase);
         private readonly List<FleetCommandResult> _results = new();
         private string _lastCommandId = string.Empty;
+        private string? _resultAtStart;
 
         // Read by status requests on other threads while the command loop updates it.
         public string LastCommandId { get { lock (_gate) return _lastCommandId; } }
         public string[] Recent { get { lock (_gate) return _recent.ToArray(); } }
         public FleetCommandResult[] Results { get { lock (_gate) return _results.ToArray(); } }
+
+        /// <summary>What the agent's next start shows as the result of its last command; null to show that it started.</summary>
+        public string? ResultAtStart
+        {
+            get { lock (_gate) return _resultAtStart; }
+            set { lock (_gate) _resultAtStart = value; }
+        }
 
         public bool HasProcessed(string id)
         {
@@ -1747,11 +2255,11 @@ public static class LogReader
         {
             var key = logKey[4..];
             var root = await RunnerActivity.FindRootAsync(key);
-            var lines = RunnerActivity.ReadOutput(root, MaxLines);
+            var output = RunnerActivity.ReadJobOutput(root, MaxLines);
             return new LogPayload
             {
                 Title = $"{Path.GetFileName(root)} live output — {Environment.MachineName}",
-                Text = lines.Length > 0 ? Truncate(lines) : "(No output yet. The runner writes the output of the running step here while a job runs.)",
+                Text = JobLogText(output),
                 CreatedUtc = DateTime.UtcNow
             };
         }
@@ -1760,6 +2268,14 @@ public static class LogReader
         var text = path != null && File.Exists(path) ? Tail(path) : "(No log file yet.)";
         return new LogPayload { Title = title, Text = text, CreatedUtc = DateTime.UtcNow };
     }
+
+    /// <summary>The text of a job's live output log.</summary>
+    internal static string JobLogText(RunnerActivity.JobOutput output)
+        => output.Lines.Length > 0 ? Truncate(output.Lines)
+            : output.ProcessesUnreadable
+                ? "(The processes on this PC could not be read, so it is not known whether a step is running. Output older than " +
+                  $"{(int)RunnerActivity.RecentPage.TotalMinutes} minutes is not shown, because it can belong to an earlier job. Try again in a moment.)"
+                : "(No output yet. The runner writes the output of the running step here while a job runs.)";
 
     private static string? NewestLog(string folder)
     {
@@ -1797,17 +2313,18 @@ public static class LogReader
 
 /// <summary>
 /// When an agent restarts for an update although it still has work: once it finished nothing for <c>wait</c>, or
-/// once <c>limit</c> passed since the update asked. Each finished command starts the wait again, so work that moves on
-/// (a long runner create, or several queued) is not cut off; only work that seems stuck is, or work that keeps the
-/// agent busy for longer than the limit. Both begin at the first <see cref="Due"/>, which comes right after the
-/// update asked for the restart.
+/// once <c>limit</c> passed since the update asked. Each finished command, and other work that moves on (see
+/// <see cref="AgentWork.Moves"/>), starts the wait again, so work that moves on (a long runner create, several queued, an
+/// approval that waits behind others) is not cut off; only work that seems stuck is, or work that keeps the agent busy
+/// for longer than the limit. Both begin at the first <see cref="Due"/>, which comes right after the update asked for
+/// the restart.
 /// </summary>
 internal sealed class UpdateRestartClock(Func<DateTime> utcNow, TimeSpan wait, TimeSpan limit)
 {
     private DateTime? _byUtc;
     private DateTime? _limitUtc;
 
-    /// <summary>A command finished: the wait, once it began, starts again from now. The limit stays.</summary>
+    /// <summary>Work finished or moved on: the wait, once it began, starts again from now. The limit stays.</summary>
     public void WorkFinished()
     {
         if (_byUtc != null) _byUtc = utcNow() + wait;
@@ -1869,6 +2386,11 @@ public sealed record MachineStatusPayload
     public string[] PendingCommandIds { get; init => field = value?.Where(id => !string.IsNullOrEmpty(id)).ToArray() ?? []; } = [];
     /// <summary>The agent is running a command or other work, which a restart would cut off (protocol 12).</summary>
     public bool Busy { get; init; }
+    /// <summary>
+    /// Grows each time the agent's work starts, ends or moves on (<see cref="AgentWork.Moves"/>), so a restart that
+    /// waits for the agent's work can tell work that moves on from work that is stuck. Older agents send 0.
+    /// </summary>
+    public long WorkMoves { get; init; }
     public int CpuPercent { get; init; }
     public int MemoryPercent { get; init; }
     public double MemoryTotalGb { get; init; }

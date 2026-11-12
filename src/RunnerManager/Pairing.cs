@@ -54,6 +54,8 @@ public static class Pairing
     {
         public bool IsOutdated => Version < Pairing.Version;
         public string Detail => IsOutdated ? $"{Address}  ·  older Runner Manager, update it first" : Address;
+        /// <summary>What a screen reader says for the PC's row in Join a fleet. Without it, the row is read as the record's type name and fields.</summary>
+        public override string ToString() => $"{Name}, {Detail.Replace("  ·  ", ", ")}";
     }
 
     /// <param name="Managed">
@@ -440,8 +442,8 @@ public static class Pairing
     {
         private readonly byte[] _pairingKey;
         private readonly string _name;
-        private readonly int _pairingPort;
-        private readonly int _announcePort;
+        private int _pairingPort;
+        private int _announcePort;
         // Listening ends first; open connections keep _cts until StopAsync has told them no.
         private readonly CancellationTokenSource _listen = new();
         private readonly CancellationTokenSource _cts = new();
@@ -473,6 +475,8 @@ public static class Pairing
         /// <summary>How long this host waits for the new PC's next message while they exchange keys.</summary>
         internal TimeSpan StepTimeout { get; init; } = Pairing.StepTimeout;
 
+        /// <param name="pairingPort">The TCP port to listen on; 0 lets the system pick a free one (see <see cref="Port"/>).</param>
+        /// <param name="announcePort">The UDP port to answer find-probes on; 0 lets the system pick a free one.</param>
         public PairingHost(byte[] pairingKey, string name, int pairingPort = PairingPort, int announcePort = AnnouncePort)
         {
             _pairingKey = pairingKey;
@@ -480,6 +484,12 @@ public static class Pairing
             _pairingPort = pairingPort;
             _announcePort = announcePort;
         }
+
+        /// <summary>The TCP port it listens on: the one it was given, or, for port 0, the one the system picked when it started.</summary>
+        public int Port { get { lock (_gate) return _pairingPort; } }
+
+        /// <summary>The UDP port it answers find-probes on, read like <see cref="Port"/>.</summary>
+        public int AnnouncePortInUse { get { lock (_gate) return _announcePort; } }
 
         /// <summary>Starts listening. Throws once the host has been stopped: nothing would be left to free the ports.</summary>
         public void Start()
@@ -493,6 +503,9 @@ public static class Pairing
                     _tcp.Start();
                     _udp = new UdpClient(new IPEndPoint(IPAddress.Any, _announcePort)) { EnableBroadcast = true };
                     FleetNetwork.IgnoreConnectionResets(_udp);
+                    // The ports it has now, also when the system picked them: find-probes are answered with the pairing port.
+                    _pairingPort = ((IPEndPoint)_tcp.LocalEndpoint).Port;
+                    _announcePort = ((IPEndPoint)_udp.Client.LocalEndPoint!).Port;
                 }
                 catch
                 {

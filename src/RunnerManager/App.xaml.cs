@@ -8,6 +8,11 @@ public partial class App : Application
 {
     /// <summary>Exits right away. An update is test-started with it, to check that its .NET runtime is installed.</summary>
     public const string ProbeArgument = "--probe";
+    /// <summary>
+    /// Followed by one https address: gives it to Explorer and exits, with 0 when Explorer was started. gh runs this as its
+    /// browser for the GitHub sign-in page (see <see cref="GitHubCli.BrowserForGh"/> and <see cref="WindowsTools.OpenUrlExitCode"/>).
+    /// </summary>
+    public const string OpenUrlArgument = "--open-url";
     /// <summary>Passed by the launch task, so a copy that still is not elevated asks with UAC instead of looping.</summary>
     public const string FromTaskArgument = "--from-task";
     /// <summary>Added when a copy asks for administrator rights, so a copy that still is not elevated stops instead of looping.</summary>
@@ -41,11 +46,24 @@ public partial class App : Application
     /// </summary>
     internal static bool ElevatedByPrompt { get; private set; }
 
+    /// <summary>
+    /// This dashboard was started by the restart through the start helper of a dashboard that a task started as
+    /// RunnerManager.exe itself (see <see cref="StartHelperRestart"/>), so it checks the tasks once that task's instance ended.
+    /// </summary>
+    internal static bool RestartedThroughStartHelper { get; private set; }
+
     protected override async void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
         // An AI tool may start the exe by a path with spaces but without quotes; the pieces of that path are not arguments.
         var startArgs = RunningCopies.WithoutProgramPathPieces(e.Args, Environment.CommandLine, Environment.ProcessPath);
+        // Started by gh as its browser: only hands the address to Explorer and exits, without a window. First, so this copy
+        // takes no mutex, hands nothing to an elevated copy, and reads or writes no file, registry, task or setting.
+        if (startArgs.Contains(OpenUrlArgument, StringComparer.OrdinalIgnoreCase))
+        {
+            Shutdown(WindowsTools.OpenUrlExitCode(startArgs));
+            return;
+        }
         // An exception on another thread ends the process; this is where it gets recorded.
         AppDomain.CurrentDomain.UnhandledException += (_, args) =>
             MachineRelay.AppendAgentLog($"Runner Manager stopped after an unexpected error: {args.ExceptionObject}");
@@ -79,6 +97,8 @@ public partial class App : Application
         {
             ShutdownMode = ShutdownMode.OnExplicitShutdown;
             await HandOffToElevatedAsync(startArgs);
+            // Download folders that 2.9.0 and earlier left in the data folder: only removed here, without administrator rights.
+            await Task.Run(() => AppUpdater.RemoveOldStagingFolders());
             Shutdown();
             return;
         }
@@ -104,6 +124,12 @@ public partial class App : Application
         // A task an older version registered starts the agent and the dashboard below normal priority.
         if (ProcessPriority.RaiseToNormal())
             MachineRelay.AppendAgentLog("Runner Manager was started below normal priority. It now runs at normal priority.");
+        // An install of an earlier version has no record of its folder yet: the folder of the exe that this user's own
+        // tasks start is recorded once, where only administrators can change it, also when this copy is not the install.
+        // First, so the repair below looks in that folder, and setup offers that folder as confirmed. Uninstall removes
+        // the record.
+        if (!startArgs.Contains("--uninstall", StringComparer.OrdinalIgnoreCase))
+            await MachineInstall.RecordRunningInstallAsync(MachineRelay.AppendAgentLog);
         // Logs what it found; the dashboard tells the user about an exe that is missing for another reason.
         UpdateGuard.RepairMissingExe(tellUser: false);
 
@@ -194,6 +220,16 @@ public partial class App : Application
             }
         }
 
+        // A dashboard that one of this user's tasks started as RunnerManager.exe itself, not through the start helper,
+        // starts again through the start helper, once, before it opens a window, so the task can move to the start helper
+        // (see StartHelperRestart). The new dashboard waits until this one has exited.
+        RestartedThroughStartHelper = StartHelperRestart.IsRestart(startArgs);
+        if (await StartHelperRestart.TryAsync(startArgs, AppUpdater.InstallDir, MachineRelay.AppendAgentLog))
+        {
+            ExitApplication();
+            return;
+        }
+
         DispatcherUnhandledException += OnUiUnhandledException;
 
         var window = new MainWindow();
@@ -222,7 +258,9 @@ public partial class App : Application
             return 1;
         }
         // A task registered by an older version lacks the keep-alive trigger or runs below normal priority. Checked once
-        // the agent has proven itself, because re-registering may restart it.
+        // the agent has proven itself: registering the task again does not end the running agent on Windows 11 (measured;
+        // other Windows versions were not), but a restart is scheduled in case it does (see
+        // ScheduledTasks.UpdateAgentTaskIfOutdatedAsync).
         if (!another)
             _ = Task.Run(async () =>
             {
@@ -238,13 +276,32 @@ public partial class App : Application
                 // The dashboard leaves its own tasks alone while they run it; the agent catches a moment when they do not.
                 try { await Installer.EnsureLaunchTaskAsync(); }
                 catch (Exception ex) { MachineRelay.AppendAgentLog($"Could not update the dashboard's scheduled tasks: {ex.Message}"); }
+                // From then on every few minutes: the start helper is still there (antivirus software may remove it), the
+                // launch and startup tasks move to it once they no longer run the dashboard, and the agent restarts
+                // through it once the update has proven itself (see Launcher.AgentStep).
+                for (var first = true; ; first = false)
+                {
+                    try
+                    {
+                        if (!first) await Installer.EnsureLaunchTaskAsync();
+                        await MachineRelay.CheckStartHelperAsync();
+                    }
+                    catch (Exception ex) { MachineRelay.AppendAgentLog($"Could not check the start helper: {ex.Message}"); }
+                    await Task.Delay(StartHelperCheckInterval);
+                }
             });
         await MachineRelay.RunAgentAsync(CancellationToken.None);
         if (!another) UpdateGuard.OnAgentExiting();
         return 0;
     }
 
-    /// <summary>Passed by "Restart now" with the id of the dashboard that exits, so the new one waits for it.</summary>
+    /// <summary>How often the fleet agent checks the start helper and its own start (see <see cref="RunAgentProcessAsync"/>).</summary>
+    private static readonly TimeSpan StartHelperCheckInterval = TimeSpan.FromMinutes(5);
+
+    /// <summary>
+    /// Passed by "Restart now" with the id of the dashboard that exits, or of the start helper that started it (which exits
+    /// right after it), so the new one waits for it.
+    /// </summary>
     internal const string AfterArgument = "--after=";
 
     internal static int? AfterProcessId(string[] args)
@@ -260,9 +317,9 @@ public partial class App : Application
             main.AddActivity("Runner Manager restarts once the fleet agent has restarted.");
             await main.WaitForAgentWorkAsync();
         }
-        var start = new ProcessStartInfo(AppUpdater.InstalledExe) { UseShellExecute = true, WorkingDirectory = AppUpdater.InstallDir };
-        start.ArgumentList.Add(AfterArgument + Environment.ProcessId);
-        Process.Start(start);
+        // Through the start helper while it is in place. The new dashboard waits for the start helper that started this
+        // one, when one did: it exits a moment after this process, and until then its file cannot be replaced.
+        Process.Start(Launcher.StartInfo(AppUpdater.InstalledExe, new[] { AfterArgument + (Launcher.HelperProcessId() ?? Environment.ProcessId) }));
         ExitApplication();
     }
 
@@ -353,11 +410,14 @@ public partial class App : Application
             return;
         }
         var fromTask = args.Contains(FromTaskArgument, StringComparer.OrdinalIgnoreCase);
-        if (args.Length == 0 && AppUpdater.IsRunningInstalledCopy && await Elevation.TryStartLaunchTaskAsync()) return;
         // The elevated copy checks that it still runs as this user (a standard user may type an administrator's password).
         var relaunchArgs = args.Where(a => !a.Equals(FromTaskArgument, StringComparison.OrdinalIgnoreCase))
             .Append(ElevationAttemptedArgument).Append(Elevation.UserSidArgument + Elevation.CurrentUserSid);
-        if (Elevation.RelaunchElevated(relaunchArgs) && fromTask)
+        // Without administrator rights nothing is checked or decided about the start helper: when the launch task ran but
+        // no dashboard came, the UAC prompt is for RunnerManager.exe itself (see Elevation.HandOffAsync).
+        var (started, askedWithUac) = await Elevation.HandOffAsync(Environment.ProcessPath!, relaunchArgs,
+            tryLaunchTask: args.Length == 0 && AppUpdater.IsRunningInstalledCopy, Elevation.TryStartLaunchTaskAsync);
+        if (started && askedWithUac && fromTask)
             MachineRelay.AppendAgentLog("The launch task started Runner Manager without administrator rights. Asked with UAC instead.");
     }
 
@@ -389,7 +449,7 @@ public partial class App : Application
         try
         {
             var note = await Installer.UninstallAsync(removeData, message => MachineRelay.AppendAgentLog($"Uninstall: {message}"));
-            if (!quiet) DialogWindow.Info(null, "Runner Manager is uninstalled", $"Your runners continue to run as Windows services.{note}");
+            if (!quiet) DialogWindow.Info(null, "Runner Manager is uninstalled", $"Your runners keep running.{note}");
         }
         catch (Exception ex)
         {

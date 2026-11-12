@@ -760,7 +760,8 @@ public class AgentFileTests
         Directory.CreateDirectory(FleetConfig.StateDir);
         var inUse = 0;
         // As the other process does while it appends: the log is open for writing, here until the append found it in use.
-        var other = new FileStream(MachineRelay.AgentLogPath, FileMode.Append, FileAccess.Write, FileShare.Read);
+        // It lets other tests read the log meanwhile; the append, which lets others only read, still finds it in use.
+        var other = new FileStream(MachineRelay.AgentLogPath, FileMode.Append, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete);
         MachineRelay.AgentLogInUse = () =>
         {
             Interlocked.Increment(ref inUse);

@@ -78,6 +78,24 @@ public class LongCreateWaitTests
             await MachineRelay.WaitForCommandAsync("SLOWPC", "mine", TimeSpan.FromMinutes(1), clock)));
 
     [Fact]
+    public async Task ACreateQueuedBehindLongWork_TellsAnUpdateRestart_ThatItMovesOn()
+    {
+        // In the fleet agent, an AI assistant's create on another PC waits there behind another create. When that one
+        // finishes, the wait of an update restart starts again (AgentWork.MovedOn), so the restart does not cut it off.
+        var movedOn = 0;
+        await WithSlowPcAsync(
+            (s, poll) => poll switch
+            {
+                <= 2 => s with { PendingCommandIds = new[] { "ahead", "mine" }, Busy = true },
+                <= 4 => s with { PendingCommandIds = new[] { "mine" }, RecentCommands = new[] { Done("ahead", "Runner created: r0") }, Busy = true },
+                _ => s with { RecentCommands = new[] { Done("ahead", "Runner created: r0"), Done("mine", "Runner created: r1") } }
+            },
+            async clock => Assert.Equal("Runner created: r1",
+                await MachineRelay.WaitForCommandAsync("SLOWPC", "mine", TimeSpan.FromMinutes(1), clock, movedOn: () => movedOn++)));
+        Assert.Equal(1, movedOn);
+    }
+
+    [Fact]
     public Task ACommandThatNeverMovesOn_IsWaitedForAsLongAsTheLongestCommand() => WithSlowPcAsync(
         (s, _) => s with { PendingCommandIds = new[] { "stuck" }, Busy = true },
         async clock =>

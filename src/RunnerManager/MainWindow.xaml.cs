@@ -121,12 +121,10 @@ public partial class MainWindow : Window
     private const string JoinFleetTitle = "Join fleet";
     private const string LeaveFleetTitle = "Leave fleet";
 
-    /// <summary>The fleet read that runs now or ran last, so joining or leaving the fleet can wait for it.</summary>
-    private Task? _fleetRead;
-
     /// <summary>
     /// This PC joins or leaves the fleet. The fleet is not read meanwhile: a read saves the PCs it finds, and could add a PC
-    /// back to the list that leaving just cleared. The refresh at the end of the operation reads it again.
+    /// back to the list that leaving just cleared. The refresh at the end of the operation reads it again. Reads started
+    /// elsewhere in the dashboard are held back by <see cref="MachineRelay.HoldFleetReadsAsync"/>.
     /// </summary>
     private bool FleetMembershipChanging => _operationRunning && !ReadsFleetDuring(_operationTitle);
 
@@ -148,23 +146,15 @@ public partial class MainWindow : Window
     internal static readonly TimeSpan FleetReadWait = TimeSpan.FromSeconds(30);
 
     /// <summary>
-    /// Waits until a fleet read that is still running has ended, at most <see cref="FleetReadWait"/>: a read that does
-    /// not end would leave Join or Leave running with no way to cancel it. It never throws.
+    /// Holds back every fleet read in the dashboard until the result is disposed, and waits for the reads that are still
+    /// running, at most <see cref="FleetReadWait"/> (see <see cref="MachineRelay.HoldFleetReadsAsync"/>). It never throws.
     /// </summary>
-    private async Task WaitForFleetReadAsync()
+    private async Task<IDisposable> HoldFleetReadsAsync()
     {
-        if (!await WaitForReadAsync(_fleetRead, () => Task.Delay(FleetReadWait)))
+        var hold = await MachineRelay.HoldFleetReadsAsync(() => Task.Delay(FleetReadWait));
+        if (!hold.EarlierReadsEnded)
             AddActivity("A fleet read that started before did not end within 30 seconds. Going on without it.", ActivityKind.Warning);
-    }
-
-    /// <summary>
-    /// Waits until <paramref name="read"/> has ended, or <paramref name="limit"/> has (started only when the read still
-    /// runs). True when the read ended or was not running. It never throws, also when the read failed.
-    /// </summary>
-    internal static async Task<bool> WaitForReadAsync(Task? read, Func<Task> limit)
-    {
-        if (read is not { IsCompleted: false }) return true;
-        return await Task.WhenAny(read, limit()) == read;
+        return hold;
     }
 
     /// <summary>
@@ -191,7 +181,6 @@ public partial class MainWindow : Window
             // Other PCs are read directly from their agents on the network; GitHub is not involved, so they never
             // wait for it.
             var machinesTask = MachineRelay.ReadFleetAsync(_forceDiscovery);
-            _fleetRead = machinesTask;
             _forceDiscovery = false;
             // While an operation that changes this PC runs, only the other PCs are refreshed (see HoldsThisPcBack).
             if (ThisPcOperationRunning)
@@ -473,11 +462,14 @@ public partial class MainWindow : Window
     public Task WaitForAgentWorkAsync()
         => _agentWork is { } work ? work.ContinueWith(_ => { }, TaskScheduler.Default) : Task.CompletedTask;
 
-    /// <summary>Restarts this PC's fleet agent (after an update) without blocking the dashboard.</summary>
-    public void RestartLocalAgentInBackground()
+    /// <summary>
+    /// Restarts this PC's fleet agent after an update without blocking the dashboard. Once the agent is idle, its task is
+    /// switched to <paramref name="exe"/>, the newly installed copy.
+    /// </summary>
+    public void RestartLocalAgentInBackground(string exe)
         => RunAgentWorkInBackground("Restart the fleet agent", async log =>
         {
-            await MachineRelay.RestartLocalAgentAsync(log: log);
+            await MachineRelay.RestartLocalAgentAsync(log: log, switchTo: exe);
             log("The fleet agent runs the new version.");
         });
 
@@ -1374,21 +1366,10 @@ public partial class MainWindow : Window
         if (IsOwnClick(sender, e) && ItemFrom<MachineRunnerStatus>(sender) is { } runner) ToggleRunner(runner);
     }
 
-    /// <summary>A job of the queue or a recent run: opens it on GitHub.</summary>
-    private void RunRow_Click(object sender, RoutedEventArgs e)
+    /// <summary>A link, a job of the queue or a recent run (a button whose Tag is an address): opens it on GitHub.</summary>
+    private void LinkButton_Click(object sender, RoutedEventArgs e)
     {
         if (IsOwnClick(sender, e) && sender is FrameworkElement { Tag: string { Length: > 0 } url }) OpenUrl(url);
-    }
-
-    // Enter or Space on a focused link does what a click does.
-    private static bool IsActivation(object sender, KeyEventArgs e)
-        => e.Key is Key.Enter or Key.Space && Keyboard.Modifiers == ModifierKeys.None && ReferenceEquals(e.OriginalSource, sender);
-
-    private void Link_KeyDown(object sender, KeyEventArgs e)
-    {
-        if (!IsActivation(sender, e) || sender is not FrameworkElement { Tag: string { Length: > 0 } url }) return;
-        OpenUrl(url);
-        e.Handled = true;
     }
 
     private void ToggleRunner(MachineRunnerStatus runner)
@@ -1508,15 +1489,6 @@ public partial class MainWindow : Window
     private void RunnerOpenSettings_Click(object sender, RoutedEventArgs e)
         => OpenUrl(ItemFrom<MachineRunnerStatus>(sender)?.RunnersSettingsUrl);
 
-    private void Link_Click(object sender, MouseButtonEventArgs e)
-    {
-        if (sender is FrameworkElement { Tag: string url } && url.Length > 0)
-        {
-            OpenUrl(url);
-            e.Handled = true;
-        }
-    }
-
     private void OpenButtonMenu_Click(object sender, RoutedEventArgs e)
     {
         if (sender is Button button) Menus.OpenBelow(button, alignRight: true);
@@ -1543,7 +1515,7 @@ public partial class MainWindow : Window
         await RunOperationAsync(LeaveFleetTitle, async log =>
         {
             // A fleet read that started before could save a PC again after the list is cleared.
-            await WaitForFleetReadAsync();
+            using var hold = await HoldFleetReadsAsync();
             var told = await MachineRelay.LeaveFleetAsync(log);
             _isEnrolled = false;
             _agentTaskChecked = false;
@@ -1603,7 +1575,7 @@ public partial class MainWindow : Window
         }
         await RunOperationAsync(JoinFleetTitle, async log =>
         {
-            await WaitForFleetReadAsync();
+            using var hold = await HoldFleetReadsAsync();
             await AppUpdater.InstallCurrentBuildAsync(log);
             log("Starting the fleet agent and opening its ports for the local network and Tailscale…");
             await MachineRelay.InstallAndStartAgentTaskAsync();
@@ -1899,22 +1871,19 @@ public partial class MainWindow : Window
         ActivityCount.Text = ActivityTabCount.Text = ActivityLog.Count.ToString();
     }
 
+    /// <summary>Opens a folder through Explorer, without administrator rights (see <see cref="WindowsTools.OpenFolder"/>).</summary>
     private void OpenFolder(string path)
     {
-        if (!Directory.Exists(path))
-        {
-            AddActivity($"Folder not found: {path}");
-            SetStatus($"Folder not found: {path}", StatusKind.Warning);
-            return;
-        }
-        Process.Start(new ProcessStartInfo("explorer.exe", $"\"{path}\"") { UseShellExecute = true });
+        if (WindowsTools.OpenFolder(path) is not { } problem) return;
+        AddActivity(problem);
+        SetStatus(problem, StatusKind.Warning);
     }
 
+    /// <summary>Opens an https address through Explorer, without administrator rights (see <see cref="WindowsTools.OpenUrl"/>).</summary>
     private void OpenUrl(string? url)
     {
-        if (string.IsNullOrWhiteSpace(url) || !url.StartsWith("https://", StringComparison.OrdinalIgnoreCase)) return;
-        try { Process.Start(new ProcessStartInfo(url) { UseShellExecute = true }); }
-        catch (Exception ex) { AddActivity($"Could not open {url}: {ex.Message}"); }
+        if (string.IsNullOrWhiteSpace(url)) return;
+        if (WindowsTools.OpenUrl(url) is { } problem) AddActivity(problem);
     }
 
     private sealed record PendingCommand(string CommandId, string Action, DateTime QueuedUtc);

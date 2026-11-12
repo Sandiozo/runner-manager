@@ -3,6 +3,262 @@
 Runner Manager updates itself from [Releases](https://github.com/Sandiozo/runner-manager/releases): open
 **Settings → Updates**, or click **Update** on a PC's card.
 
+## 2.10.0
+
+New installs go to Program Files. There, Runner Manager's program files cannot be changed without administrator rights.
+A runner that runs twice on a PC, as its Windows service and in a console window, is now shown as **Runs twice**, and
+Runner Manager no longer starts a runner's service next to its console window.
+
+### After updating
+
+- An install in `%LOCALAPPDATA%\Programs\RunnerManager` or in a folder chosen in setup stays where it is, and updates
+  keep it there. To move it to Program Files, run the setup again, click **Change…** and choose `C:\Program Files`.
+- On its first start with administrator rights, also in setup, Runner Manager records the folder that its own
+  scheduled tasks start it from, and the fleet agent's log says so. When it finds no such task, or cannot read the
+  tasks, it records nothing, and the log says that too, once for each version (see **Security**).
+- The setup of AI tools does not change. Copy it again from **Settings → AI assistants** only after a move to another
+  folder.
+- A runner that has a Windows service and also opens in a console window when you sign in is no longer started as a
+  service from Runner Manager, also not by auto-recovery. To use its service, turn off **Start when you sign in** on
+  the runner first (see **Runners and jobs**).
+- A new file, `RunnerManagerLauncher.exe`, is in the install folder: the start helper (see **Security**). While Runner
+  Manager runs, it also shows in Task Manager, next to each RunnerManager.exe that it started. A self-contained
+  Runner Manager unpacks its files into a `.net` folder there. The UAC prompt for Runner Manager now names
+  `RunnerManagerLauncher.exe`.
+- The scheduled tasks move to the start helper by themselves after the update, once the installed Runner Manager with
+  administrator rights has seen the start helper start it: the launch task and the startup task when the dashboard or
+  the fleet agent runs and the task does not run the dashboard at that moment, and the fleet agent's task only once the
+  update has proven itself. The fleet agent then restarts once, when it has no work. A dashboard that its launch task
+  or startup task started as RunnerManager.exe itself starts again through the start helper, once, before it opens its
+  window, so that its task can move too.
+- Links and the GitHub sign-in page open in your browser without administrator rights: Runner Manager gives them to
+  Explorer, which opens them for the signed-in Windows user. Runner Manager opens only https addresses without a comma.
+- GitHub CLI that is installed for one Windows user only, in a folder that only that user's PATH names, is no longer
+  found by Runner Manager, because it starts with the PC's PATH. Install GitHub CLI for all users instead: the
+  installer from https://cli.github.com/ does that.
+
+### Security
+
+- The folder Runner Manager is installed in is now recorded for each Windows user where only an administrator can
+  change it. The parts that run with administrator rights, such as updates and the fleet agent's task, take the folder
+  from there or from the folder the installed copy runs in. The Settings → Apps entry, which another program of the
+  user can change, only confirms that the running copy is installed, keeps setup from removing a copy in the folder
+  that it names, and makes setup show that folder as one it could not confirm (see **Setup and updates**). An install
+  of an earlier version is recorded once, from the scheduled tasks of the Windows user that run with administrator
+  rights. A program without administrator rights cannot register such a task.
+- Runner Manager starts, repairs, moves over from an earlier version or deletes a scheduled task under one of its names
+  only when it is the Windows user's own task that runs with administrator rights. Any program of the user can create a
+  task under such a name that runs without administrator rights. Such a task no longer makes Runner Manager register
+  and start the fleet agent or register the startup task: Runner Manager leaves it as it is, and the fleet agent's log
+  says so. Only the launch task, which opens the dashboard without a UAC prompt, is registered again when it is not the
+  user's own task with administrator rights.
+- Runner Manager goes back to the previous version after an update only when a file beside RunnerManager.exe,
+  `RunnerManager.exe.pending`, names that update. The starts of the new fleet agent are counted in that file, and only
+  those counts decide. In Program Files, only administrators can change that file. Before, the update state in the
+  user's data folder was enough, and any program of the user can change it, so such a program could make Runner
+  Manager go back to the previous version. The file is deleted when the update is no longer watched. When an update
+  was undone, the file records that, and only this record, not the update state, keeps Runner Manager from updating
+  the fleet agent to that version again by itself. A program of the user can still end the watch of an update through
+  the update state, so that an update whose fleet agent does not work is not undone. Versions before 2.10.0 write no
+  such file, so for 24 hours after an update from one of them, or after a setup that replaced one of them, the update
+  state alone is still enough.
+- Updates are prepared in a `RunnerManager.update-<number>` folder in the install folder instead of in the user's data
+  folder. In Program Files, the new files cannot be changed between the checksum check and the copy without
+  administrator rights. Old update folders in the install folder are removed only when they hold nothing but files and
+  are not a link themselves. The `update-<number>` folders that earlier versions left in the data folder are removed
+  only by a start without administrator rights, so a link that another program puts there reaches nothing that the
+  user could not delete anyway. A missing or half-written RunnerManager.exe is still put back, and rollback still works.
+- The signature check of the .NET runtime download, the scripts that setup and uninstall run, and the check whether a
+  scheduled task runs take folder, file and task names from the environment instead of from the script text, so a name
+  with quotes cannot run commands. PowerShell is always started from the Windows folder.
+- The other Windows tools that Runner Manager runs, such as sc.exe, schtasks.exe, netsh.exe, shutdown.exe, cmd.exe
+  (also for config.cmd) and explorer.exe, are now started by their full path in the Windows folder too. By their bare
+  name, Windows looks for them in Runner Manager's folder and the current folder first. When GitHub CLI is not in
+  `C:\Program Files\GitHub CLI`, Runner Manager looks for gh.exe in the PATH folders itself, leaving out its own
+  folder, the current folder and folders without a full path, and starts it by the full path it found.
+- The release build no longer loads the assemblies that `DOTNET_STARTUP_HOOKS` names, which any program of the user
+  can set.
+- Uninstall and a move to another folder remove the whole folder only in Program Files. From any other folder, also
+  the default of earlier versions, they remove only Runner Manager's own files and its own update folders that hold
+  nothing but files.
+- **Uninstall and delete settings** no longer goes into a link (a junction or symbolic link) that it finds in the data
+  folder: it removes the link itself. A data folder that is a link itself is not emptied. The startup scripts that
+  Runner Manager had turned off are no longer moved to Documents. They stay in the `disabled-startup` folder of the
+  data folder, and the result of the uninstall says where they are.
+- The console window in which Runner Manager runs gh for the GitHub sign-in no longer runs the AutoRun commands of
+  cmd.exe, which any program of the user can set in the registry.
+- Runner Manager now starts through a start helper, `RunnerManagerLauncher.exe`, beside RunnerManager.exe. Its
+  scheduled tasks (the launch task, the startup task and the fleet agent's task) run the start helper, and so do the
+  UAC prompt, the start after setup and **Settings → Updates → Uninstall…**. **Restart now** after an update starts
+  the new RunnerManager.exe from the dashboard that is open, with the environment that the start helper gave that
+  dashboard. The uninstall entry in Windows **Settings → Apps** still starts RunnerManager.exe itself. The start helper ignores the
+  environment it is started with and starts RunnerManager.exe with a new one: the PC's variables, the user's name and
+  folders as Windows gives them, and only the proxy and GitHub token variables (`HTTP_PROXY`, `HTTPS_PROXY`,
+  `ALL_PROXY`, `NO_PROXY`, `GH_TOKEN`, `GITHUB_TOKEN`) from the environment it was given. Variables that any program of
+  the user can set for the user, such as `DOTNET_*`, `CORECLR_*` and `PATH`, no longer reach Runner Manager with
+  administrator rights through its tasks and its own starts. This protects an install that programs without
+  administrator rights cannot change, such as one in Program Files. Setup writes the start helper and checks that it
+  starts Runner Manager before it registers the tasks. Only the installed Runner Manager with administrator rights
+  looks after it: it puts it back when it is missing and checks it in the same way before a task or a start depends on
+  it. An earlier copy that still runs after an update leaves it alone. When antivirus software removes or blocks it, it
+  cannot be written, or it does not start Runner Manager, Runner Manager runs without it and its tasks start
+  RunnerManager.exe as before, until the next update or setup. The fleet agent's log says so, and so does **Settings →
+  Updates**. Activity says so on every start, and within 5 minutes when it happens while the dashboard is open. When
+  the UAC prompt cannot start the start helper, or the launch task started it but no dashboard appeared, Runner
+  Manager asks with UAC for RunnerManager.exe itself.
+- The framework-dependent RunnerManager.exe looks for the .NET runtime only where it is installed for the whole PC, no
+  longer in a folder that `DOTNET_ROOT` names.
+- Runner Manager with administrator rights no longer takes its data folder from `RUNNER_MANAGER_STATE_DIR`, which any
+  program of the user can set.
+- Still open: an install in the user's profile, such as `%LOCALAPPDATA%\Programs\RunnerManager`, can be changed by any
+  program of the user, so the start helper does not protect it until it is moved to Program Files. Runner Manager says
+  so once for each version in Activity, and in **Settings → Updates**. The settings files in the user's data folder can
+  also be changed by any program of the user. Setup itself always runs with the environment it was started with. A PC
+  that runs without the start helper starts Runner Manager as before. After the update from 2.9.0, the first start of
+  the dashboard, and the fleet agent until the update has proven itself, still start as before. A dashboard that a task
+  started as RunnerManager.exe itself runs with the environment it was given until it has started again through the
+  start helper, before it opens its window. When antivirus software removes or blocks the start helper while Runner
+  Manager is closed, the fleet agent does not start until someone opens Runner Manager and accepts the UAC prompt; then
+  Runner Manager puts the start helper back or runs without it. To avoid that, exclude `RunnerManagerLauncher.exe` in
+  the install folder from the antivirus software's checks.
+
+### Fleet and pairing
+
+- Fix: **Add a PC** said nothing when a PC joined the fleet but this PC could not save it. It now says so and how to
+  add the PC again, and a PC that confirms the 6-digit codes is told that it was not added.
+- **Add a PC** warns about a name whose letters only look like the letters of another PC's name or of this PC's name,
+  such as a Cyrillic А in place of a Latin A, or full-width letters, also when the name is in small letters. It also warns
+  about a name that mixes Latin, Greek or Cyrillic letters with each other, or with letters of another alphabet that
+  has letters like Latin ones, such as Armenian or Cherokee. A name without such a mix is not warned about, unless it
+  looks like the name of another PC.
+- Fix: while this PC joined or left the fleet, **Change fleet code** and the address check in Settings still read the
+  other PCs, and could add back a PC that leaving had just removed. **Change fleet code** now says to try again when it
+  is done, and the address check in Settings does not read the other PCs then, so it shows what the last refresh
+  found. A PC that is not in a fleet does not save other PCs.
+
+### Runners and jobs
+
+- Fix: a runner could run twice on a PC, as its Windows service and in a console window that a startup entry opens when
+  you sign in, and look healthy. Only one copy gets jobs, and in the service they failed because git refused the work
+  folder of the console window's user. Such a runner now shows **Runs twice**, and its details say why jobs fail or wait
+  and what to do. It counts under **Needs attention**, gives one alert when it begins (with **Stuck and waiting jobs**
+  turned on), and the other PCs and AI assistants see it too.
+- A runner that two console windows run, for example one in each of two Windows sessions on a PC, now shows **Two
+  console windows**. Both use one registration, so only one of them gets jobs. Its details say to close one of the
+  console windows or to sign out of the other Windows session. It counts under **Needs attention**, gives one alert
+  (with **Stuck and waiting jobs** turned on), and the other PCs and AI assistants see it too. Only console windows that
+  have both run for 2 minutes count, so a runner that restarts is not reported. It stays shown for up to 5 minutes
+  after one of the console windows was closed. Start, Stop, Restart and auto-recovery work as before.
+- Start and Restart of a runner's service are refused while a console window runs the runner, or while a startup entry
+  that is turned on opens it in one when you sign in, also when no console window runs now. This holds for the
+  dashboard, commands from other PCs, AI assistants, auto-recovery, and the restart after an edit or **Clean work
+  folder**. After an edit, a service that config.cmd started is stopped again for such a runner. **Stop** still works.
+  The runner's **Start when you sign in** switch turns its startup entries off and on.
+- A startup entry that only names files in a runner's work folder or log folder (`_work`, `_diag`), such as a
+  scheduled task that deletes old logs, no longer counts as one that opens the runner. Such a task does not make a
+  runner show **Runs twice**, and Runner Manager no longer turns it off with the runner's startup entries.
+- The **Windows service** row in a runner's details is short now. Pointing at it shows the service's name and the
+  account it runs as, with a note when a console window runs the runner. Screen readers read this too. When a
+  runner's Windows service runs it and folders in its work folder belong to another account, which git refuses, the
+  details say so, and a running runner counts under **Needs attention** as **Work folder owner**. A stuck job, a job
+  that runs long, or jobs that wait for an idle runner are shown before it, with **Stop the job's processes**, and it
+  gives one alert, not one each time such a job concern ends. A runner that a startup entry opens in a console window
+  is not warned about: its folders belong to the signed-in user, as they should.
+- **Run as Windows service**, **Repair Windows service** and an edit give the work folder to the service's account,
+  NETWORK SERVICE, before config.cmd installs the service, when folders in it belong to another account and the service
+  runs the runner from then on. Nothing is deleted, and links in it are not followed. An edit leaves the work folder as
+  it is while a console window runs the runner, or a startup entry that is turned on opens it in one when you sign in,
+  and the log says so.
+- Fix: an edit of a runner whose Windows service is disabled, as for a runner that runs in a console window instead,
+  made the service start with Windows, so that after the next restart of the PC the runner could run twice. The service
+  is now disabled again after the edit, also when a failed edit registers the runner again with its old name and
+  labels. While the console window runs such a runner, an edit is refused, and nothing is changed. The old copy of a
+  moved runner is handled as before.
+- Fix: when a move to another PC failed, the runner's Windows service on its PC was set to start with Windows and
+  started, also when it was disabled because the runner runs in a console window, so that the runner could run twice.
+  A runner that was stopped before the move was started too. The runner is now set up as it was before the move: a
+  disabled service stays disabled and is not started, and a service that started manually or with Windows does so
+  again and is started, unless a console window ran the runner or it was stopped in Runner Manager. A stopped runner
+  stays stopped. A runner in a console window is no longer left looking like the old copy of a moved runner, and its
+  console window, which the move closed, opens again at the next sign-in. Its disabled service also stays disabled
+  after another failed move when an earlier move failed with 2.9.0. This needs 2.10.0 on the runner's PC.
+- When a move fails and the runner's PC runs a version before 2.10.0, a runner that a console window ran or whose
+  Windows service was disabled stays stopped there, and its service is not started. Runner Manager now says so, and to
+  update Runner Manager on that PC and then start the runner there as before.
+- A move to another PC still sets the runner up there as a Windows service, also when a console window ran it on the
+  old PC or its Windows service was disabled there. The service starts with Windows, or manually when the runner was
+  set not to start automatically. The Move window now says so. To keep such a runner in a console window, turn off its
+  service on the new PC and add the startup entry there.
+- Fix: when the processes on a PC could not be read, the live output of a step that printed nothing for 5 minutes was
+  no longer shown. It is shown now when Runner Manager saw earlier, while it could read the processes, that it is the
+  running job's output. Otherwise the output says that the processes could not be read.
+
+### GitHub
+
+- Fix: a GitHub answer that could not be read paused its request again when it arrived after **Refresh** or
+  **Connect GitHub** had cleared the pauses.
+
+### Setup and updates
+
+- On a PC without Runner Manager, setup installs it to `C:\Program Files\RunnerManager`. On a PC with an install that
+  setup can confirm, setup shows the folder it is in, and **Default** or **Current folder** goes back to that folder.
+- When setup finds an install only from the Settings → Apps entry or in the default folder of earlier versions, which
+  any program of the user can change, it starts with Program Files selected. **Current folder** selects the folder it
+  found, and setup says that it could not confirm the install there. When another folder is selected, setup says that
+  it leaves the folder it found as it is. Setup never offers a folder that it cannot install to, such as a network
+  folder.
+- For a folder outside Program Files, also one that setup offers, setup says to check that only administrators can
+  change the files in it.
+- A folder in Program Files or Program Files (x86), such as `C:\Program Files (x86)\RunnerManager`, gets its rights
+  from there, so setup shows no such note for it.
+- The first page says what setup does with a copy that is already in the chosen folder, also after **Change…**.
+- Several Windows users on one PC can share one install outside the user profiles, such as in Program Files: when a
+  second user runs the setup, it offers such an install folder that Runner Manager recorded for another user. An
+  install in the default folder of earlier versions is in its user's profile, so setup offers Program Files to a
+  second user who has no install. Setup never puts an older version in place of one that another user runs, as far as
+  their records and the scheduled tasks that setup can read show, and keeps the installed version instead. Uninstall
+  and a move to another folder keep the program files while another user still uses them, and also when setup cannot
+  read the scheduled tasks that show who uses them. The record and the scheduled tasks of a Windows user who has no
+  profile on this PC any more do not count, and a folder in Task Scheduler is not taken for a task. An account that
+  was removed without its profile still counts until the profile is deleted.
+- Setup and uninstall close only the dashboards in the Windows session that runs them.
+- Fix: when a move to another folder failed, the startup task and the fleet agent's task could still start the new
+  copy, which setup then removed. Setup now points them at the old copy again and restarts the fleet agent.
+- Fix: an update could cut off work that started while it waited for the fleet agent's work to end, such as an AI
+  assistant's change or a runner that another PC creates behind a long queue. When the fleet agent installs an update
+  itself (**Update** on the card of another PC), AI assistants' changes on that PC are refused while it waits to
+  restart, with a message that says to try again in a few minutes, and a request that arrives in the seconds while it
+  restarts is refused with a message. With **Settings → Updates** or **Update** on this PC's card, the restart also
+  waits for work that starts while it waits, but work that starts just before the fleet agent is stopped can still be
+  cut off.
+- Fix: an update switched the fleet agent's task to the new version before the fleet agent's work was done, which
+  could stop that work. The task is now switched when the fleet agent restarts. When the switch fails, the PC's card
+  shows the error as the result of the update.
+- When the fleet agent cannot restart to finish an update, for example because PowerShell cannot be started, it keeps
+  running the version it has, takes commands again, and the PC's card says why.
+- Fix: a dashboard that stayed open after an update was installed, such as one that the fleet agent installed in the
+  background, took its own version for the installed one. It did not offer **Restart now**, and it ended the watch of
+  the new update, so Runner Manager did not go back to the previous version when the new fleet agent did not work. An
+  open dashboard now reads the version from the installed file, offers **Restart now** and keeps watching the update.
+  Still open: when a PC updates from 2.9.0 or older while its dashboard is open, that dashboard still ends the watch of
+  this one update.
+
+### Dashboard and windows
+
+- Fix: a click on a PC card header, a runner header or a row could scroll the card list. The list now stays where it
+  is while the mouse button is down or a pen or a touch is on the screen. When Tab or a screen reader moves the focus,
+  the list still scrolls to it.
+- The job, the repository and the current job in a runner's details are now buttons, so Tab and screen readers reach
+  them. A job or a run without an address on GitHub, there and in the queue and the recent runs, is plain text and not a
+  button, and so is **Repository unknown**.
+- Fix: screen readers left an underscore out of a runner's or a PC's name on some buttons, so that **More actions** for
+  `GPT_CP` was read as "More actions for GPTCP". This was so for the action buttons of PCs and runners, **Add runner**,
+  **Forget** and **Remove** in Settings and the PC choices in **Add runner**. **Move to** in **Move runner** and the PCs
+  in **Change fleet code** also showed the name without its underscore. Such names are now read and shown as they are.
+- Screen readers now read the rows of a PC's runners, of the queue and the recent runs, of a job's steps and
+  processes, and the PCs to join in **Set up a fleet** by what they show, such as a runner's name and state, instead of
+  the name of a class.
+
 ## 2.9.0
 
 A large release with many fixes from a review of 2.8.2, most of them for security and for the fleet.

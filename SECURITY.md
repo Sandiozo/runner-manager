@@ -35,6 +35,10 @@ Runner Manager runs with administrator rights and listens on the network, so the
 - **Runner configuration**: runner names, labels and URLs are checked before they reach `config.cmd`.
 - **Updates**: releases are verified with their SHA-256 checksum before they replace the installed copy, and an older
   version is never installed over a newer one.
+- **Start helper**: the scheduled tasks and Runner Manager's own starts with administrator rights run
+  `RunnerManagerLauncher.exe` (source in `src/RunnerManagerLauncher`), which starts RunnerManager.exe with an
+  environment built from scratch, so variables that a program without administrator rights sets for the user do not
+  reach it. It protects an install that only administrators can change, such as one in Program Files.
 - **AI assistants** (off by default): tool calls go to the fleet agent on the same PC. The assistant and the agent prove to
   each other with Windows DPAPI that they run as the same Windows user, and changes (including stopping a stuck job's
   processes) ask for approval in a Runner Manager window. Connect by URL listens on 127.0.0.1 only and needs a bearer token.

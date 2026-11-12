@@ -1,0 +1,36 @@
+// The version resource and manifest of RunnerManagerLauncher.exe. The text is fixed: the exe's bytes are compared by
+// hash, so they must not change with the app's version. The launcher has a version of its own.
+
+#include <winver.h>
+
+1 VERSIONINFO
+FILEVERSION     1,0,0,0
+PRODUCTVERSION  1,0,0,0
+FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
+FILEFLAGS       0
+FILEOS          VOS_NT_WINDOWS32
+FILETYPE        VFT_APP
+FILESUBTYPE     VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName",      "Sandiozo"
+            VALUE "FileDescription",  "Starts Runner Manager with a clean environment"
+            VALUE "FileVersion",      "1.0.0.0"
+            VALUE "InternalName",     "RunnerManagerLauncher"
+            VALUE "LegalCopyright",   "Copyright (C) 2026 Sandiozo"
+            VALUE "OriginalFilename", "RunnerManagerLauncher.exe"
+            VALUE "ProductName",      "Runner Manager"
+            VALUE "ProductVersion",   "1.0.0.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END
+
+// 1 = CREATEPROCESS_MANIFEST_RESOURCE_ID, 24 = RT_MANIFEST: the manifest Windows reads when the exe starts.
+1 24 "launcher.manifest"

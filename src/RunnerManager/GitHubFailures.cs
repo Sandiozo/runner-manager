@@ -34,7 +34,8 @@ internal static class GitHubFailures
     /// <summary>How many failed endpoints are remembered. A PC can report any number of repositories that do not exist.</summary>
     internal const int MaxEndpoints = 500;
 
-    internal const string GhMissingMessage = "GitHub CLI (gh) was not found. Install it from https://cli.github.com/ and restart Runner Manager.";
+    internal const string GhMissingMessage = "GitHub CLI (gh) was not found. Runner Manager looks for it in Program Files and in the PATH of the PC, " +
+        "not in the PATH of one Windows user. Install it for all users from https://cli.github.com/ (its installer does that) and restart Runner Manager.";
     /// <summary>How the message of a gh call that did not finish in time starts.</summary>
     internal const string TimedOutStart = "GitHub CLI timed out";
 
@@ -116,11 +117,16 @@ internal static class GitHubFailures
     /// for). The endpoint is left alone for a while, as after a failure: asking again at once would most likely get
     /// the same answer.
     /// </summary>
-    internal static void Unreadable(string endpoint)
+    /// <param name="sentIn">
+    /// <see cref="Generation"/>, taken before the poll was sent. As in <see cref="Failed"/>, an answer to a poll that
+    /// was sent before <see cref="Forget"/> is not stored: the next polls after a reset must be sent.
+    /// </param>
+    internal static void Unreadable(string endpoint, int? sentIn = null)
     {
         var now = UtcNow();
         lock (Gate)
         {
+            if (sentIn is { } generation && generation != _generation) return;
             if (!Endpoints.ContainsKey(endpoint)) MakeRoom(now);
             Endpoints[endpoint] = new GitHubProblem(UnreadableAnswer, now + EndpointPause, RateLimited: false, Detail: string.Empty);
         }

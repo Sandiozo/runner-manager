@@ -80,10 +80,28 @@ Runner Manager is for the PCs you already have.
 Windows may show "Windows protected your PC", because the setup is not code-signed. Click **More info → Run anyway**.
 You can check the file against the SHA-256 checksum in the release notes.
 
-Runner Manager installs for the current user, by default to `%LOCALAPPDATA%\Programs\RunnerManager`. To install it
-somewhere else, click **Change…** on the first page of the setup; it gets its own `RunnerManager` folder there. To move
-an existing install, run the setup again and choose another folder. To uninstall, use **Settings → Apps** in Windows,
-or **Settings → Updates → Uninstall…** in Runner Manager. Your runners keep running.
+On a PC without Runner Manager, the setup installs it to `C:\Program Files\RunnerManager`, where its files cannot be
+changed without administrator rights. This matters because Runner Manager runs with administrator rights. To install it somewhere else,
+click **Change…** on the first page of the setup; it gets its own `RunnerManager` folder there. Outside Program Files,
+check that only administrators can change the files in that folder.
+
+Runner Manager starts through a small start helper in its folder, `RunnerManagerLauncher.exe`. It starts
+RunnerManager.exe with a clean environment, so variables that any program can set for your Windows user do not reach
+Runner Manager with administrator rights. This protects only an install that programs without administrator rights
+cannot change, such as one in Program Files. When such programs can change the install folder, Runner Manager says so
+in Activity and in **Settings → Updates**.
+
+An install from version 2.9.0 or earlier, for example in `%LOCALAPPDATA%\Programs\RunnerManager`, stays where it is,
+and updates keep it there. To move it to Program Files, run the setup again, click **Change…** and choose
+`C:\Program Files`. To uninstall, use **Settings → Apps** in Windows, or **Settings → Updates → Uninstall…** in Runner
+Manager. Your runners keep running.
+
+On a PC with several Windows users, they can share one install outside the user profiles, such as in Program Files:
+when a second user runs the setup, it offers such an install folder that Runner Manager recorded for another user. An
+install in `%LOCALAPPDATA%\Programs\RunnerManager` is in its user's profile and is not shared. Setup never puts an older
+version in place of a newer one that another user runs, as far as their records and the scheduled tasks that setup can
+read show. Each user has their own shortcuts, settings and Settings → Apps entry. Uninstall by one user keeps the
+program files while another user still uses them.
 
 Updates install a newer .NET Desktop Runtime automatically when a release needs one. Installs from version 2.1 or
 earlier (called RunnerWidget) need the setup run once on each PC; it moves the settings and scheduled tasks over.
@@ -176,13 +194,14 @@ on the least busy PC, and tell you which `runs-on` labels to use.
 
 1. Open **Settings → AI assistants** and turn on **Allow AI assistants**. This switch and **Ask before changes** count
    for every Windows user of the PC, and only a program with administrator rights can change them.
-2. Choose your AI tool, click **Copy**, and paste the setup where the page says. For most tools it is:
+2. Choose your AI tool, click **Copy**, and paste the setup where the page says. The page uses the folder Runner
+   Manager is installed in. For an install in Program Files and most tools it is:
 
    ```json
    {
      "mcpServers": {
        "runner-manager": {
-         "command": "C:\\Users\\you\\AppData\\Local\\Programs\\RunnerManager\\RunnerManager.exe",
+         "command": "C:\\Program Files\\RunnerManager\\RunnerManager.exe",
          "args": ["--mcp"]
        }
      }

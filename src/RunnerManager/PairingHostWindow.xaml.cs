@@ -36,14 +36,21 @@ public partial class PairingHostWindow : Window
     private readonly List<string> _managed = new();
     private readonly List<string> _added = new();
     private readonly List<string> _notAdded = new();
+    // PCs that joined with the fleet code but could not be saved here: a next request with the name or the machine ID
+    // of one of them is still warned about, as if it was allowed a moment ago.
+    private readonly List<(string Name, string? MachineId)> _notSaved = new();
 
     /// <summary>Names of the PCs that joined while the window was open.</summary>
     public IReadOnlyList<string> JoinedPcs => _joined;
     /// <summary>Names of the PCs that were paired one way while the window was open.</summary>
     public IReadOnlyList<string> ManagedPcs => _managed;
 
+    /// <summary>Shows an error over the window, with its heading and message; tests replace it.</summary>
+    internal Action<string, string> ShowError { get; set; }
+
     public PairingHostWindow(byte[] pairingKey)
     {
+        ShowError = (heading, message) => DialogWindow.Error(this, heading, message);
         InitializeComponent();
         WindowTheme.Apply(this);
         ThisPcRun.Text = Environment.MachineName;
@@ -156,7 +163,7 @@ public partial class PairingHostWindow : Window
     /// <summary>The request checked against this PC, the PCs saved here and the PCs allowed but not added yet.</summary>
     private RequestCheck Check(Pairing.JoinRequest request)
     {
-        var allowed = _sending.Keys.Where(r => r != request).Select(r => (r.Name, r.MachineId)).ToList();
+        var allowed = _sending.Keys.Where(r => r != request).Select(r => (r.Name, r.MachineId)).Concat(_notSaved).ToList();
         return CheckRequest(FleetConfig.Current, request.Name, request.MachineId, allowed, Environment.MachineName, _thisPcId);
     }
 
@@ -207,7 +214,11 @@ public partial class PairingHostWindow : Window
         if (machineId is { Length: > 0 } && thisPcId.Length > 0 && machineId.Equals(thisPcId, StringComparison.OrdinalIgnoreCase))
             return new RequestCheck($"{name} sends the machine ID of this PC, so the fleet cannot tell the two PCs apart, and {name} cannot be added. " +
                                     "This happens when a PC is set up from a copy of the other PC's disk.", CanAllow: false);
-        var warnings = new[] { SameNameWarning(config, name, machineId, thisPc, pending), SameIdWarning(config, name, machineId, pending) }
+        var warnings = new[]
+            {
+                SameNameWarning(config, name, machineId, thisPc, pending), LookAlikeWarning(config, name, thisPc, pending),
+                SameIdWarning(config, name, machineId, pending)
+            }
             .OfType<string>().ToList();
         return new RequestCheck(warnings.Count > 0 ? string.Join("\n\n", warnings) : null, CanAllow: true);
     }
@@ -232,7 +243,8 @@ public partial class PairingHostWindow : Window
     /// Whether two names count as one for the warnings: as Runner Manager keys them (<see cref="MachineRelay.Sanitize"/>),
     /// or in Unicode normalization form KC, so that a decomposed and a composed form of one name (A with a combining
     /// macron, and Ā), or full-width letters, count as one name. Saving and the block on this PC's name use the key only.
-    /// Letters of other alphabets that look alike (a Cyrillic О for a Latin O) still count as other names.
+    /// Letters of other alphabets that look alike (a Cyrillic О for a Latin O) still count as other names; such a name
+    /// gets its own warning (<see cref="LookAlikeWarning"/>).
     /// </summary>
     internal static bool SameNameForWarning(string a, string b)
         => MachineRelay.Sanitize(a) == MachineRelay.Sanitize(b) || MachineRelay.Sanitize(FormKC(a)) == MachineRelay.Sanitize(FormKC(b));
@@ -242,6 +254,44 @@ public partial class PairingHostWindow : Window
         try { return name.Normalize(NormalizationForm.FormKC); }
         // Not valid Unicode (a lone surrogate, for example): compared as it is.
         catch (ArgumentException) { return name; }
+    }
+
+    /// <summary>
+    /// What to tell the user when the name of a joining PC only looks like another name: like the name of this PC (in
+    /// full-width letters, for example), or of a PC saved here or allowed a moment ago, once look-alike letters of the
+    /// Latin, Greek and Cyrillic alphabets are read as one (<see cref="LookAlikes.LookAlike"/>). A name that is the same
+    /// for <see cref="SameNameForWarning"/> is left to <see cref="SameNameWarning"/>. Otherwise, a name that mixes
+    /// alphabets with letters like Latin ones (Latin, Greek, Cyrillic, and as one more the other scripts that have such
+    /// letters, such as Armenian or Cherokee; see <see cref="LookAlikes.AlphabetOf"/>) is warned about, as it can look like
+    /// a name that is not saved here. A name written in one alphabet alone is not, nor are the letters of a script without
+    /// such letters (Chinese or Thai) next to Latin ones. Null when there is nothing to say.
+    /// </summary>
+    internal static string? LookAlikeWarning(FleetConfig config, string name, string thisPc, IEnumerable<(string Name, string? MachineId)>? allowed = null)
+    {
+        const string allowIf = "Allow only if you expect a PC with this name.";
+        bool LooksLike(string other) => LookAlikes.LookAlike(other, name) && !SameNameForWarning(other, name);
+        if (MachineRelay.Sanitize(name) != MachineRelay.Sanitize(thisPc) && LookAlikes.LookAlike(thisPc, name))
+            return $"{name} looks like {thisPc}, the name of this PC, but some of its letters only look alike, so it is another PC. {allowIf}";
+        var like = config.KnownPeers.Where(p => LooksLike(p.Name)).Select(p => (p.Name, What: "a PC in this fleet", Short: "in this fleet"))
+            .Concat(config.ManagedPcs.Where(p => LooksLike(p.Name))
+                .Select(p => (p.Name, What: "a PC that this fleet manages one way", Short: "managed one way")))
+            .Concat((allowed ?? []).Where(p => LooksLike(p.Name))
+                .Select(p => (p.Name, What: "which was allowed a moment ago", Short: "allowed a moment ago")))
+            .DistinctBy(p => (p.Name, p.Short))
+            .ToList();
+        if (like.Count == 1)
+            return $"{name} looks like {like[0].Name}, {like[0].What}, but some of its letters only look alike, so it is not the same name. {allowIf}";
+        if (like.Count > 1)
+        {
+            var list = like.Select(p => $"{p.Name} ({p.Short})").ToArray();
+            return $"{name} looks like the names of these PCs, but some of its letters only look alike: {string.Join(", ", list[..^1])} and {list[^1]}. {allowIf}";
+        }
+        var alphabets = LookAlikes.AlphabetsIn(name);
+        if (alphabets.Count < 2) return null;
+        var names = alphabets.Where(a => a != LookAlikes.Alphabet.Other).Select(a => a.ToString()).ToArray();
+        var named = names.Length == 1 ? names[0] : $"{string.Join(", ", names[..^1])} and {names[^1]}";
+        var mix = alphabets.Contains(LookAlikes.Alphabet.Other) ? $"{named} letters with letters of another alphabet" : $"{named} letters";
+        return $"The name {name} mixes {mix}, so it can look like the name of another PC. {allowIf}";
     }
 
     /// <summary>
@@ -437,15 +487,52 @@ public partial class PairingHostWindow : Window
         }
         else
         {
-            _joined.Add(request.Name);
             // Discovery finds it only on the local network, so remember where it joined from (over Tailscale, for example).
             // With its machine ID, a one-way pairing of the same PC ends here.
             try { MachineRelay.AddKnownPeer(request.Name, request.Address, request.MachineId); }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+            catch (Exception ex)
+            {
+                var failure = JoinNotSaved(request.Name, request.Confirms, ex.Message);
+                if (failure.TellThePc)
+                {
+                    // The PC is told, and drops the fleet code: it is neither in the fleet nor saved here. The dialog comes
+                    // after that, so that the PC does not wait for it.
+                    Dispatcher.BeginInvoke(() =>
+                    {
+                        if (!_closed) DialogWindow.Error(this, "Could not save the PC", failure.Message);
+                    });
+                    _notAdded.Add(failure.Result);
+                    ShowResults();
+                    throw;
+                }
+                // An older PC has kept the fleet code already, so it is in the fleet.
+                _joined.Add(request.Name);
+                _notSaved.Add((request.Name, request.MachineId));
+                _added.Add(failure.Result);
+                ShowResults();
+                ShowError("Could not save the PC", failure.Message);
+                return;
+            }
+            _joined.Add(request.Name);
             _added.Add($"✓  {request.Name} joined the fleet.");
         }
         ShowResults();
     }
+
+    /// <summary>What the window does when a PC joined with the fleet code and saving it here failed.</summary>
+    /// <param name="TellThePc">Throw, so that the PC (one that confirms) is told that it was not added and drops the code.</param>
+    /// <param name="Result">The line in the window's results.</param>
+    /// <param name="Message">The error shown.</param>
+    internal sealed record JoinFailure(bool TellThePc, string Result, string Message);
+
+    /// <param name="confirms">The PC waits for this PC's answer (<see cref="Pairing.JoinRequest.Confirms"/>); an older one has kept the code.</param>
+    internal static JoinFailure JoinNotSaved(string name, bool confirms, string error) => confirms
+        ? new JoinFailure(true, $"{name} was not added. This PC could not save it.",
+            $"This PC could not save {name}, so it was not added.\n\n{error}\n\nTry again.")
+        : new JoinFailure(false, $"✓  {name} joined the fleet, but this PC could not save it.",
+            $"{name} has the fleet code and is in the fleet, but this PC could not save it.\n\n{error}\n\n" +
+            $"On the local network, the fleet finds {name} by itself. On another network, for example over Tailscale, add its address " +
+            "in Settings → Fleet → “Look for a paired PC at an address”.");
 
     private void ShowResults()
     {

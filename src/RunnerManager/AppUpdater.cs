@@ -9,24 +9,31 @@ using System.Text.RegularExpressions;
 namespace RunnerManager;
 
 /// <summary>
-/// Installs Runner Manager from its GitHub Releases into
-/// %LOCALAPPDATA%\Programs\RunnerManager, so PCs don't need the .NET SDK or a git checkout.
+/// Installs Runner Manager from its GitHub Releases into its install folder (Program Files\RunnerManager for new
+/// installs, see <see cref="MachineInstall"/>), so PCs don't need the .NET SDK or a git checkout.
 /// </summary>
 public static class AppUpdater
 {
     public const string AssetName = AppPaths.ExeName;
     /// <summary>The first version that answers --probe, so an update can be test-started before it replaces this one.</summary>
     private const string ProbeSupportedSince = "2.2.0";
-    public static readonly string DefaultInstallDir = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "RunnerManager");
+    /// <summary>Where setup installs on a PC without an install: Program Files\RunnerManager.</summary>
+    public static string DefaultInstallDir => MachineInstall.ProgramFilesDir;
     private static string? _installDir;
-    /// <summary>Where Runner Manager is installed: the folder chosen in setup (kept in the Settings → Apps entry), or the default.</summary>
-    public static string InstallDir => _installDir ??= Installer.RegisteredInstallDir() ?? DefaultInstallDir;
+    /// <summary>
+    /// Where Runner Manager is installed: the folder chosen in setup, otherwise the folder recorded for this user where only
+    /// administrators can change it, or the folder of the running install (see <see cref="MachineInstall.Resolve"/>).
+    /// </summary>
+    public static string InstallDir => _installDir ?? MachineInstall.CurrentInstallDir();
     /// <summary>Setup installs into the folder the user chose.</summary>
     internal static void UseInstallDir(string folder)
     {
         // A setup tried again in another folder copies the build there too.
-        if (_installDir == null || !SameFolder(_installDir, folder)) _installedThisBuild = false;
+        if (_installDir == null || !SameFolder(_installDir, folder))
+        {
+            _installedThisBuild = false;
+            _copiedFile = null;
+        }
         _installDir = folder;
     }
     internal static bool IsDefaultInstallDir(string folder) => SameFolder(folder, DefaultInstallDir);
@@ -65,8 +72,27 @@ public static class AppUpdater
         }
     }
 
+    /// <summary>
+    /// Whether this process was started by the installed exe's path. It stays true after an update or a rollback replaced
+    /// the file there, so it only says where this copy came from; whether this process may look after the install is
+    /// <see cref="IsInstalledBuild"/>.
+    /// </summary>
     public static bool IsRunningInstalledCopy => string.Equals(
         Path.GetFullPath(Environment.ProcessPath ?? string.Empty), Path.GetFullPath(InstalledExe), StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Whether this process is the installed build, the only one that may look after the install (the start helper, its
+    /// marker, the tasks' commands, the unpack folders): it runs from the file that is at <see cref="InstalledExe"/> now,
+    /// or it copied its own build there (setup) and that copy is still the file there. Decided by the file itself
+    /// (<see cref="ProcessImage"/>), never by path or version: after an update or a rollback a copy that still runs from
+    /// the renamed file is not the installed build, and neither is another build of the same version.
+    /// </summary>
+    internal static bool IsInstalledBuild
+        => ProcessImage.ThisProcessRunsFrom(InstalledExe)
+           || _copiedFile is { } copied && ProcessImage.IdOf(InstalledExe) == copied;
+
+    /// <summary>The file that this process copied its build to (see <see cref="InstallCurrentBuildAsync(Action{string})"/>), while that is its build.</summary>
+    private static ProcessImage.FileId? _copiedFile;
 
     /// <summary>"v2.1.0", "2.1" or "2.1.0+abc" → "2.1.0". A pre-release keeps its label: "2.4.0-beta.1".</summary>
     public static string Normalize(string version)
@@ -122,18 +148,54 @@ public static class AppUpdater
         return Version.TryParse(dash > 0 ? text[..dash] : text, out core!);
     }
 
-    /// <summary>The version of the installed copy, or null when there is none.</summary>
-    public static string? InstalledVersion
+    /// <summary>
+    /// The version of the installed copy, or null when there is none. Read from the file that is there now (see
+    /// <see cref="VersionOfFile"/>), also in a dashboard or fleet agent whose own file an update or a rollback replaced.
+    /// </summary>
+    public static string? InstalledVersion => VersionOfFile(InstalledExe);
+
+    /// <summary>
+    /// The product version of the file at <paramref name="path"/> (see <see cref="Normalize"/>), or null when there is no
+    /// file there, it has no version, or it cannot be read. Read from the file itself: for a path that a module of this
+    /// process was loaded from, <see cref="FileVersionInfo.GetVersionInfo"/> answers with that module's version, also after
+    /// the file was renamed away and another one was put at the path (measured on Windows 11), so a dashboard that was open
+    /// while an update replaced RunnerManager.exe read its own version as the installed one. Windows does not look up a
+    /// path in its \\?\ form among the loaded modules (see <see cref="UnlistedPathForm"/>), so that form is read first, and
+    /// the path as it is when that form gives nothing.
+    /// </summary>
+    internal static string? VersionOfFile(string path)
     {
-        get
+        try
         {
+            if (!File.Exists(path)) return null;
+        }
+        catch { return null; }
+        foreach (var form in new[] { UnlistedPathForm(path), path })
+        {
+            if (form == null) continue;
             try
             {
-                return File.Exists(InstalledExe) && FileVersionInfo.GetVersionInfo(InstalledExe).ProductVersion is { Length: > 0 } version
-                    ? Normalize(version) : null;
+                if (FileVersionInfo.GetVersionInfo(form).ProductVersion is { Length: > 0 } version && Normalize(version) is { Length: > 0 } normalized)
+                    return normalized;
             }
-            catch { return null; }
+            catch { }
         }
+        return null;
+    }
+
+    /// <summary>
+    /// <paramref name="path"/> as a full path in the \\?\ form (\\?\UNC\server\share\… for a network path), which Windows
+    /// does not match against the modules loaded in this process. Null for a path that already starts with a device prefix
+    /// (\\?\ or \\.\), which is read as it is, and for one that cannot be made a full path.
+    /// </summary>
+    internal static string? UnlistedPathForm(string path)
+    {
+        string full;
+        try { full = Path.GetFullPath(path); }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException or System.Security.SecurityException) { return null; }
+        if (full.StartsWith(@"\\?\", StringComparison.Ordinal) || full.StartsWith(@"\\.\", StringComparison.Ordinal)
+            || full.StartsWith(@"\??\", StringComparison.Ordinal)) return null;
+        return full.StartsWith(@"\\", StringComparison.Ordinal) ? @"\\?\UNC\" + full[2..] : @"\\?\" + full;
     }
 
     /// <summary>
@@ -352,8 +414,10 @@ public static class AppUpdater
             return InstalledExe;
         }
 
-        // Each process downloads into its own folder, so the agent and the dashboard never share files.
-        var staging = Path.Combine(FleetConfig.StateDir, $"update-{Environment.ProcessId}");
+        // Each process downloads into its own folder, so the agent and the dashboard never share files. It is inside the
+        // install folder: in Program Files only administrators can change files there, so a program without administrator
+        // rights can neither swap the file between the checksum and the copy nor put a DLL beside it for the test start.
+        var staging = StagingFolder(InstallDir, Environment.ProcessId);
         RemoveStaleStagingFolders();
         if (Directory.Exists(staging)) Directory.Delete(staging, recursive: true);
         Directory.CreateDirectory(staging);
@@ -404,28 +468,82 @@ public static class AppUpdater
         }
     }
 
-    /// <summary>Removes download folders left by processes that have exited.</summary>
-    private static void RemoveStaleStagingFolders()
+    /// <summary>
+    /// Where this process prepares an update: a folder of its own inside the install folder, with a name that only
+    /// Runner Manager uses, because a folder chosen in setup may also hold the user's own folders.
+    /// </summary>
+    internal static string StagingFolder(string installDir, int processId) => Path.Combine(installDir, $"{StagingPrefix}{processId}");
+
+    /// <summary>Whether a folder name is one that <see cref="StagingFolder"/> gives.</summary>
+    internal static bool IsStagingFolderName(string name) => StagingName.IsMatch(name);
+
+    private const string StagingPrefix = "RunnerManager.update-";
+    private static readonly Regex StagingName = new(@"^RunnerManager\.update-\d+$", RegexOptions.IgnoreCase);
+    /// <summary>The download folders of versions up to 2.9.0, in the data folder.</summary>
+    private const string OldStagingPrefix = "update-";
+    private static readonly Regex OldStagingName = new(@"^update-\d+$", RegexOptions.IgnoreCase);
+
+    private static void RemoveStaleStagingFolders() => RemoveStaleStagingFolders(InstallDir, IsProcessRunning);
+
+    /// <summary>
+    /// Removes the download folders (see <see cref="StagingFolder"/>) that processes left in the install folder when they
+    /// exited. Nothing is followed or deleted through a reparse point (a junction or link): a download folder only ever
+    /// holds files, and one that holds anything else, or is a reparse point itself, is left as it is.
+    /// </summary>
+    internal static void RemoveStaleStagingFolders(string installDir, Func<int, bool> isRunning)
+        => RemoveStale(installDir, StagingPrefix, StagingName, isRunning);
+
+    /// <summary>
+    /// Removes the download folders update-&lt;number&gt; that versions up to 2.9.0 left in the data folder, only in a
+    /// start without administrator rights (<paramref name="elevated"/> false). Any program of the user can change the
+    /// data folder, so it could swap such a folder for a link while it is deleted. Without administrator rights, that
+    /// reaches nothing that the user could not delete anyway. With them, the folders are left as they are.
+    /// </summary>
+    internal static void RemoveOldStagingFolders(string dataDir, bool elevated, Func<int, bool> isRunning)
     {
-        try
-        {
-            foreach (var folder in Directory.EnumerateDirectories(FleetConfig.StateDir, "update-*"))
-            {
-                if (int.TryParse(Path.GetFileName(folder)["update-".Length..], out var id) && IsProcessRunning(id)) continue;
-                try { Directory.Delete(folder, recursive: true); } catch { }
-            }
-        }
-        catch { }
+        if (!elevated) RemoveStale(dataDir, OldStagingPrefix, OldStagingName, isRunning);
     }
 
-    private static bool IsProcessRunning(int id)
+    /// <summary><see cref="RemoveOldStagingFolders(string, bool, Func{int, bool})"/> for this user's data folder.</summary>
+    internal static void RemoveOldStagingFolders() => RemoveOldStagingFolders(FleetConfig.StateDir, Elevation.IsElevated, IsProcessRunning);
+
+    private static void RemoveStale(string parent, string prefix, Regex name, Func<int, bool> isRunning)
     {
         try
         {
-            using var process = Process.GetProcessById(id);
-            return !process.HasExited;
+            var folder = new DirectoryInfo(parent);
+            if (!folder.Exists || folder.Attributes.HasFlag(FileAttributes.ReparsePoint)) return;
+            foreach (var staging in folder.EnumerateDirectories(prefix + "*"))
+            {
+                if (!name.IsMatch(staging.Name) || staging.Attributes.HasFlag(FileAttributes.ReparsePoint)) continue;
+                if (int.TryParse(staging.Name[prefix.Length..], out var id) && isRunning(id)) continue;
+                try
+                {
+                    var entries = staging.EnumerateFileSystemInfos().ToList();
+                    if (entries.Any(e => e is DirectoryInfo || e.Attributes.HasFlag(FileAttributes.ReparsePoint))) continue;
+                    foreach (var file in entries) file.Delete();
+                    staging.Delete(recursive: false);
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+            }
         }
-        catch { return false; }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException) { }
+    }
+
+    /// <summary>
+    /// Whether a process with this id runs. One that exists but cannot be asked (a start without administrator rights
+    /// cannot always ask one with them) counts as running, so its download folder is left as it is.
+    /// </summary>
+    private static bool IsProcessRunning(int id)
+    {
+        Process process;
+        try { process = Process.GetProcessById(id); }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException) { return false; }
+        using (process)
+        {
+            try { return !process.HasExited; }
+            catch { return true; }
+        }
     }
 
     /// <summary>
@@ -442,8 +560,11 @@ public static class AppUpdater
         => TryWithUpdateLock(UpdateLockTimeout, swap, out var result) ? result
             : throw new InvalidOperationException("Another update of Runner Manager is being installed. Try again in a few minutes.");
 
+    /// <summary>Whether no process installs or undoes an update now (the update lock is free).</summary>
+    internal static bool IsUpdateLockFree() => TryWithUpdateLock(TimeSpan.Zero, () => true, out _);
+
     /// <summary>Runs <paramref name="swap"/> under the update lock when it is free within <paramref name="wait"/>.</summary>
-    private static bool TryWithUpdateLock<T>(TimeSpan wait, Func<T> swap, out T result)
+    internal static bool TryWithUpdateLock<T>(TimeSpan wait, Func<T> swap, out T result)
     {
         using var mutex = new Mutex(initiallyOwned: false, UpdateMutexName);
         bool owned;
@@ -560,6 +681,7 @@ public static class AppUpdater
             DeleteSwapMarker(InstalledExe);
             // This build is no longer the installed one, so a setup tried again copies it again.
             _installedThisBuild = false;
+            _copiedFile = null;
         });
     }
 
@@ -678,7 +800,7 @@ public static class AppUpdater
     {
         try
         {
-            var anyAppFile = IsDefaultInstallDir(InstallDir);
+            var anyAppFile = MachineInstall.HoldsOnlyThisApp(InstallDir);
             foreach (var file in Directory.EnumerateFiles(InstallDir))
             {
                 if (!IsOldFile(Path.GetFileName(file), anyAppFile)) continue;
@@ -691,7 +813,7 @@ public static class AppUpdater
     /// <summary>Whether a file name is one that a swap gave the file it moved away; <paramref name="anyAppFile"/> also allows other app files than the exe.</summary>
     internal static bool IsOldFile(string name, bool anyAppFile) => (anyAppFile ? AnyOldFile : OwnOldFile).IsMatch(name);
 
-    private static readonly Regex OwnOldFile = new(@"^(RunnerManager|RunnerWidget)\.\d{15,}\.old\.exe$", RegexOptions.IgnoreCase);
+    private static readonly Regex OwnOldFile = new(@"^(RunnerManager|RunnerManagerLauncher|RunnerWidget)\.\d{15,}\.old\.exe$", RegexOptions.IgnoreCase);
     private static readonly Regex AnyOldFile = new(@"\.\d{15,}\.old(\.[^.]+)?$", RegexOptions.IgnoreCase);
 
     private static string OldPathFor(string file) => Path.Combine(Path.GetDirectoryName(file)!,
@@ -774,9 +896,7 @@ public static class AppUpdater
             throw new InvalidOperationException($"The .NET {major} Desktop Runtime could not be downloaded. {reason} The current version is kept.", ex);
         }
 
-        var signer = await ScheduledTasks.RunAsync("powershell.exe",
-            $"-NoLogo -NoProfile -NonInteractive -Command \"$s = Get-AuthenticodeSignature -LiteralPath '{installer.Replace("'", "''")}'; " +
-            "if ($s.Status -eq 'Valid') { $s.SignerCertificate.Subject }\"");
+        var signer = await SignerOfAsync(installer);
         if (signer.ExitCode != 0 || !signer.Output.Contains("O=Microsoft Corporation", StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("The downloaded .NET runtime is not signed by Microsoft and was not installed. The current version is kept.");
 
@@ -791,6 +911,33 @@ public static class AppUpdater
             throw new InvalidOperationException($"The update still could not start after installing .NET {major} (exit code {probe.ExitCode}). The current version is kept.");
         log($".NET {major} Desktop Runtime installed.");
     }
+
+    /// <summary>
+    /// The subject of the certificate that signed <paramref name="file"/> when its signature is valid, otherwise empty
+    /// output. The path reaches PowerShell as an environment variable, never inside the script's text, so no character in
+    /// it (such as ’ or ‘, which also end a PowerShell string) can change what runs.
+    /// </summary>
+    internal static async Task<(int ExitCode, string Output)> SignerOfAsync(string file)
+    {
+        var start = new ProcessStartInfo(PowerShellExe)
+        {
+            ArgumentList = { "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", SignerScript }
+        };
+        start.Environment[PathVariable] = file;
+        try
+        {
+            var result = await ProcessRunner.RunAsync(start, ScheduledTasks.ShortTimeout);
+            return result == null ? (-1, "The signature check did not finish in time.") : (result.ExitCode, result.Output);
+        }
+        catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException) { return (-1, ex.Message); }
+    }
+
+    internal const string PathVariable = "RUNNER_MANAGER_PATH";
+    internal const string SignerScript =
+        "$s = Get-AuthenticodeSignature -LiteralPath $env:RUNNER_MANAGER_PATH; if ($s.Status -eq 'Valid') { $s.SignerCertificate.Subject }";
+
+    /// <summary>Windows PowerShell by its full path, so no powershell.exe in the current or program folder is started instead.</summary>
+    internal static string PowerShellExe => WindowsTools.FullPath(@"WindowsPowerShell\v1.0\powershell.exe");
 
     private static async Task<(int ExitCode, string Output)> ProbeAsync(string exe)
     {
@@ -818,46 +965,103 @@ public static class AppUpdater
 
     /// <summary>
     /// Installs a release on this PC, as "Install update" does: downloads and verifies it, refreshes the Start menu
-    /// shortcut, and switches the fleet agent's task and the start-up task to the new copy. Returns whether the fleet
-    /// agent must be restarted to run it; the caller does that, because the restart waits until the agent is idle.
+    /// shortcut, and switches the start-up task to the new copy. Returns the exe the fleet agent is to run, or null when
+    /// it is not restarted. The caller restarts it (<see cref="MachineRelay.RestartLocalAgentAsync"/> with that exe),
+    /// which switches the agent's task to the new copy only after the agent finished its work: the agent restarts to run
+    /// the new copy, which would end a runner create it runs for another PC. Registering the task again does not end the
+    /// running agent itself on Windows 11 (measured; other Windows versions were not).
     /// </summary>
-    public static async Task<bool> InstallReleaseAsync(ReleaseInfo release, Action<string> log)
+    public static async Task<string?> InstallReleaseAsync(ReleaseInfo release, Action<string> log)
     {
         var exe = await DownloadAndInstallAsync(release, log);
         await CreateStartMenuShortcutAsync();
         // Only when it needs it, and not while it runs: the dashboard installing this may have been started by it.
         await Installer.UpdateStartupTaskAsync(exe);
-        if (!await MachineRelay.IsAgentInstalledAsync() || await AgentOwnership.OtherUserAsync() != null) return false;
-        log("Switching the fleet agent to the new version...");
-        await MachineRelay.RegisterAgentTaskAsync(exe);
-        return true;
+        if (!await MachineRelay.IsAgentInstalledAsync() || await AgentOwnership.OtherUserAsync() != null) return null;
+        return exe;
     }
 
     /// <summary>
-    /// Starts a detached helper that waits for this process to exit, then starts the task again. Launched before
-    /// the task is re-registered, so the agent comes back even if re-registering ends the running instance.
+    /// Starts a detached helper that waits for this process to exit, then starts the task again. Launched before the task
+    /// is registered again, so the agent comes back also on a Windows version where that ends the running instance (on
+    /// Windows 11 it does not: measured; other versions were not), and when the agent exits for another reason. The helper
+    /// also waits for the start helper that started this process (see <see cref="RunAfterExit"/>), and then until Task
+    /// Scheduler no longer counts the task as running, since it refuses to start a running task of the fleet agent's
+    /// kind; a start it refuses is tried again (see <see cref="RestartTaskScript"/>).
     /// </summary>
     public static void ScheduleAgentTaskRestart(string taskName)
-        => RunAfterExit($"schtasks.exe /Run /TN '{taskName.Replace("'", "''")}' | Out-Null", TimeSpan.FromSeconds(120), TimeSpan.FromSeconds(2));
+        => RunAfterExit(RestartTaskScript(RestartTaskSeconds), TimeSpan.FromSeconds(120), TimeSpan.FromSeconds(1), new Dictionary<string, string>
+        {
+            [ScheduledTasks.TaskNameVariable] = taskName,
+            [SchtasksVariable] = WindowsTools.FullPath("schtasks.exe"),
+            [LogVariable] = MachineRelay.AgentLogPath
+        });
+
+    internal const string SchtasksVariable = "RUNNER_MANAGER_SCHTASKS";
+    internal const string LogVariable = "RUNNER_MANAGER_LOG";
+
+    /// <summary>How long <see cref="RestartTaskScript"/> tries to start the task.</summary>
+    internal const int RestartTaskSeconds = 90;
+
+    /// <summary>
+    /// PowerShell that starts the task named in <see cref="ScheduledTasks.TaskNameVariable"/> again: whenever Task
+    /// Scheduler does not count it as running (TASK_STATE 2 queued, 4 running), it runs schtasks /Run
+    /// (<see cref="SchtasksVariable"/>), until that succeeds, for at most <paramref name="seconds"/> seconds. A task that
+    /// runs for 15 seconds in a row was started by something else meanwhile (its keep-alive trigger, or a dashboard), which
+    /// counts as started too. When it was not started, a line in the fleet agent log (<see cref="LogVariable"/>, written
+    /// only when it is a file of its own) says so. The task name and paths reach the script only as environment variables.
+    /// </summary>
+    internal static string RestartTaskScript(int seconds) =>
+        "$n = $env:" + ScheduledTasks.TaskNameVariable + "; $x = $env:" + SchtasksVariable + "; $ok = $false; $since = $null; " +
+        "$end = (Get-Date).AddSeconds(" + seconds + "); $s = New-Object -ComObject Schedule.Service; try { $s.Connect() } catch { }; " +
+        "while ((Get-Date) -lt $end) { $st = -2; try { $st = [int]$s.GetFolder('\\').GetTask($n).State } catch { }; " +
+        "if ($st -eq 2 -or $st -eq 4) { if (-not $since) { $since = Get-Date }; if (((Get-Date) - $since).TotalSeconds -ge 15) { $ok = $true; break } } " +
+        "else { $since = $null; & $x /Run /TN $n 2>&1 | Out-Null; if ($LASTEXITCODE -eq 0) { $ok = $true; break } }; " +
+        "Start-Sleep -Milliseconds 500 }; " +
+        "$l = $env:" + LogVariable + "; if (-not $ok -and $l) { $i = Get-Item -LiteralPath $l -Force -ErrorAction SilentlyContinue; " +
+        "if ($i -and -not ($i.Attributes -band [IO.FileAttributes]::ReparsePoint) -and -not $i.PSIsContainer) { " +
+        "try { [IO.File]::AppendAllText($l, (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + '  The fleet agent did not start again after it exited to restart: " +
+        "Task Scheduler did not start its task within " + seconds + " seconds. Its task starts it again within five minutes.' + [Environment]::NewLine) } catch { } } }";
 
     /// <summary>
     /// Starts a hidden, detached PowerShell helper that waits for this process to exit (at most <paramref name="timeout"/>,
     /// or for as long as it runs when null), waits <paramref name="delay"/> more, then runs <paramref name="script"/>.
+    /// It also waits for the start helper that started this process, when one did (see
+    /// <see cref="Launcher.HelperProcessId"/>): the start helper exits a moment after this process, and until then its
+    /// file cannot be removed and its task counts as running. Paths go to the script in <paramref name="environment"/>,
+    /// never inside its text.
     /// </summary>
-    internal static void RunAfterExit(string script, TimeSpan? timeout, TimeSpan delay)
+    internal static void RunAfterExit(string script, TimeSpan? timeout, TimeSpan delay, IReadOnlyDictionary<string, string>? environment = null)
     {
-        using var process = Process.Start(new ProcessStartInfo("powershell.exe")
-        {
-            ArgumentList = { "-NoLogo", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", AfterExitScript(script, Environment.ProcessId, timeout, delay) },
-            UseShellExecute = false,
-            CreateNoWindow = true
-        });
+        using var process = Process.Start(AfterExitStartInfo(script, Environment.ProcessId, Launcher.HelperProcessId(), timeout, delay, environment));
     }
 
-    internal static string AfterExitScript(string script, int processId, TimeSpan? timeout, TimeSpan delay)
+    /// <summary>
+    /// How <see cref="RunAfterExit"/> starts PowerShell, waiting for <paramref name="processId"/> and
+    /// <paramref name="helperId"/>. Its current folder is the system folder, never the one of this process: a process
+    /// that started from the install folder (a task, the start helper and the Start menu shortcut all start it there)
+    /// would otherwise pass that folder on, and a folder that is a running process's current folder cannot be removed.
+    /// </summary>
+    internal static ProcessStartInfo AfterExitStartInfo(string script, int processId, int? helperId, TimeSpan? timeout, TimeSpan delay,
+        IReadOnlyDictionary<string, string>? environment = null)
+    {
+        var start = new ProcessStartInfo(PowerShellExe)
+        {
+            ArgumentList = { "-NoLogo", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command",
+                AfterExitScript(script, processId, timeout, delay, helperId) },
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            WorkingDirectory = Environment.SystemDirectory
+        };
+        foreach (var (name, value) in environment ?? new Dictionary<string, string>()) start.Environment[name] = value;
+        return start;
+    }
+
+    internal static string AfterExitScript(string script, int processId, TimeSpan? timeout, TimeSpan delay, int? helperId = null)
     {
         var limit = timeout is { } wait ? $" -Timeout {(int)wait.TotalSeconds}" : string.Empty;
-        return $"Wait-Process -Id {processId}{limit} -ErrorAction SilentlyContinue; Start-Sleep -Seconds {(int)delay.TotalSeconds}; {script}";
+        var ids = helperId is { } helper && helper != processId ? $"{processId},{helper}" : $"{processId}";
+        return $"Wait-Process -Id {ids}{limit} -ErrorAction SilentlyContinue; Start-Sleep -Seconds {(int)delay.TotalSeconds}; {script}";
     }
 
     /// <summary>
@@ -888,16 +1092,17 @@ public static class AppUpdater
         await Task.Run(() => WithUpdateLock(() =>
         {
             // Going from a multi-file build to a single-file exe: clear the old app files so only the exe remains.
-            // Only builds before 2.2 were multi-file, and they always used the default folder, which only holds this app.
-            if (files.Count == 1 && IsDefaultInstallDir(InstallDir))
+            // Only builds before 2.2 were multi-file, and they always used the default folder of that time, which only
+            // holds this app. An update that another process prepares there (see StagingFolder) is left alone, and so
+            // are the start helper and the folder it lets a self-contained exe unpack into (see Launcher).
+            if (files.Count == 1 && MachineInstall.HoldsOnlyThisApp(InstallDir))
             {
-                foreach (var stale in Directory.EnumerateFiles(InstallDir)
-                             .Where(f => !Path.GetFileName(f).StartsWith(AssetName, StringComparison.OrdinalIgnoreCase) && !f.Contains(".old.")))
+                foreach (var stale in Directory.EnumerateFiles(InstallDir).Where(f => !IsKeptBySingleFileInstall(Path.GetFileName(f), isFolder: false)))
                 {
                     try { File.Delete(stale); }
                     catch { try { File.Move(stale, $"{stale}.{DateTime.UtcNow.Ticks}.old{Path.GetExtension(stale)}"); } catch { } }
                 }
-                foreach (var folder in Directory.EnumerateDirectories(InstallDir))
+                foreach (var folder in Directory.EnumerateDirectories(InstallDir).Where(f => !IsKeptBySingleFileInstall(Path.GetFileName(f), isFolder: true)))
                 {
                     try { Directory.Delete(folder, recursive: true); } catch { }
                 }
@@ -911,11 +1116,46 @@ public static class AppUpdater
                 var isExe = relative.Equals(AssetName, StringComparison.OrdinalIgnoreCase);
                 ReplaceFile(source, destination, keepPrevious: isExe, isExe ? install : null);
             }
+            // Still under the update lock, so the file recorded is the one just copied.
+            _copiedFile = ProcessImage.IdOf(InstalledExe);
         }));
         _installedThisBuild = true;
+        // Before any task is registered for the new copy (setup registers them next), so they start it through the start helper.
+        await EnsureStartHelperAsync(log);
         if (createShortcut) await CreateStartMenuShortcutAsync();
         return InstalledExe;
     }
+
+    /// <summary>
+    /// Writes the start helper into the install folder after this process installed its build there, and checks that it
+    /// starts Runner Manager (see <see cref="Launcher.EnsureAsync"/>); only with administrator rights, which setup always
+    /// has, and only while this process is the installed build (<see cref="IsInstalledBuild"/>). A PC where it cannot be
+    /// kept runs without it, as before.
+    /// </summary>
+    internal static async Task EnsureStartHelperAsync(Action<string> log)
+    {
+        if (!Launcher.Decides()) return;
+        try
+        {
+            if (!await Launcher.EnsureAsync(InstallDir, afterInstall: true, MachineRelay.AppendAgentLog) && Launcher.RunsWithout(InstallDir))
+                log("Runner Manager could not keep its start helper in the install folder, so it starts without it. Details are in the fleet agent log.");
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            MachineRelay.AppendAgentLog($"Could not write the start helper: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// What setup keeps when it clears the default install folder for a single-file exe: RunnerManager.exe and the files
+    /// beside it named after it, the start helper and its files, files renamed out of the way (.old.), update folders, and
+    /// the folder that a self-contained exe unpacks into through the start helper.
+    /// </summary>
+    internal static bool IsKeptBySingleFileInstall(string name, bool isFolder)
+        => isFolder
+            ? IsStagingFolderName(name) || name.Equals(Launcher.ExtractionFolderName, StringComparison.OrdinalIgnoreCase)
+            : name.StartsWith(AssetName, StringComparison.OrdinalIgnoreCase) || name.StartsWith(Launcher.FileName, StringComparison.OrdinalIgnoreCase)
+              || name.Contains(".old.", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// The files that make up the running app. A single-file release (e.g. RunnerManagerSetup.exe in Downloads) is just

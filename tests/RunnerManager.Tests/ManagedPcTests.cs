@@ -13,7 +13,7 @@ public class ManagedPairingTests
         var fleetKey = CommandSigner.NewKey();
         var ownKey = CommandSigner.NewKey();
         var port = 0;
-        using var host = FreePorts.Listen(2, p => new Pairing.PairingHost(fleetKey, "HOSTPC", port = p, p + 1), h => h.Start());
+        using var host = FreePorts.Host((p, a) => new Pairing.PairingHost(fleetKey, "HOSTPC", p, a), out port);
         Pairing.JoinRequest? seen = null;
         host.JoinRequested += request => { seen = request; request.AllowManaged(ownKey); };
 
@@ -32,7 +32,7 @@ public class ManagedPairingTests
     {
         var fleetKey = CommandSigner.NewKey();
         var port = 0;
-        using var host = FreePorts.Listen(2, p => new Pairing.PairingHost(fleetKey, "HOSTPC", port = p, p + 1), h => h.Start());
+        using var host = FreePorts.Host((p, a) => new Pairing.PairingHost(fleetKey, "HOSTPC", p, a), out port);
         var joined = new TaskCompletionSource<Pairing.JoinRequest>();
         host.JoinRequested += request => request.Allow();
         host.Joined += request => joined.TrySetResult(request);

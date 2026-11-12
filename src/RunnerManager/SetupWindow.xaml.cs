@@ -15,7 +15,12 @@ public partial class SetupWindow : Window
     private bool _installed;
     private bool _installing;
     private string _installedExe = string.Empty;
-    private string _installFolder = AppUpdater.InstallDir;
+    /// <summary>
+    /// The folder setup offers: this user's install where it is, the install that is on this PC, or Program Files. When
+    /// setup could not confirm the install in it (see <see cref="SetupOffer"/>), it starts with Program Files instead.
+    /// </summary>
+    private readonly SetupOffer _offer;
+    private string _installFolder;
     private readonly Task _presetDone;
 
     public SetupWindow()
@@ -23,15 +28,11 @@ public partial class SetupWindow : Window
         InitializeComponent();
         WindowTheme.Apply(this);
         VersionText.Text = $"Setup · version {AppUpdater.CurrentVersion}";
+        _offer = MachineInstall.SetupProposal();
+        _installFolder = InitialFolder(_offer, MachineInstall.ProgramFilesDir);
+        // Also says what setup does with a copy that is already in the folder it offers.
         ShowInstallFolder();
         _presetDone = PresetFromInstallAsync();
-        if (Installer.IsInstalled)
-        {
-            ExistingText.Text = AppUpdater.InstalledVersion is { } installed && AppUpdater.IsOlder(AppUpdater.CurrentVersion, installed)
-                ? $"Runner Manager v{installed} is installed, which is newer than this setup (v{AppUpdater.CurrentVersion}). Continue only to go back to the older version. Your settings are kept."
-                : "Runner Manager is already installed. Continue to update it. Your settings are kept. To move it, choose another folder.";
-            ExistingText.Visibility = Visibility.Visible;
-        }
         if (FleetConfig.Current.FleetKey != null)
         {
             SeveralPcsOption.IsChecked = true;
@@ -192,17 +193,115 @@ public partial class SetupWindow : Window
             var args = new List<string>();
             if (choices.Fleet == FleetChoice.NewFleet) args.Add("--fleet=new");
             if (choices.Fleet == FleetChoice.JoinFleet) args.Add("--fleet=join");
-            var start = new ProcessStartInfo(_installedExe) { UseShellExecute = true, WorkingDirectory = AppUpdater.InstallDir };
-            foreach (var arg in args) start.ArgumentList.Add(arg);
-            try { Process.Start(start); } catch { }
+            // Through the start helper while it is in place, in the install folder.
+            try { Process.Start(Launcher.StartInfo(_installedExe, args)); } catch { }
         }
         Close();
     }
 
+    /// <summary>
+    /// Says on the first page what setup does with a copy that is already in the chosen folder, decided as
+    /// <see cref="Installer.InstallAsync"/> decides it: this user's install is the recorded one, and other users are those
+    /// that the records and the scheduled tasks show. Shown again for each folder the user chooses.
+    /// </summary>
+    private async Task ShowExistingInstallAsync()
+    {
+        var folder = _installFolder;
+        var installedVersion = AppUpdater.InstalledVersion;
+        var ownInstall = Installer.OwnInstall(MachineInstall.ReadOwnRecord()) is { } own && AppUpdater.SameFolder(own, folder);
+        var sharedWithOthers = false;
+        if (installedVersion != null)
+        {
+            try { sharedWithOthers = (await MachineInstall.OtherUsersOfAsync(folder)).Names.Count > 0; }
+            catch (Exception ex) { MachineRelay.AppendAgentLog($"Setup could not read which other Windows users use {folder}: {ex.Message}"); }
+        }
+        // Another folder was chosen meanwhile; its own call shows the text.
+        if (!AppUpdater.SameFolder(folder, _installFolder)) return;
+        var text = ExistingInstallText(ownInstall, installedVersion, AppUpdater.CurrentVersion, sharedWithOthers);
+        ExistingText.Text = text ?? string.Empty;
+        ExistingText.Visibility = text == null ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    /// <summary>
+    /// What setup's first page says about a copy that is already in the chosen folder, or null when there is none.
+    /// <paramref name="ownInstall"/>: it is this user's recorded install. <paramref name="sharedWithOthers"/>: other Windows
+    /// users of this PC use it, so setup never puts an older version in its place (see <see cref="Installer.KeepsInstalledCopy"/>).
+    /// Any other copy is replaced by this setup's version.
+    /// </summary>
+    internal static string? ExistingInstallText(bool ownInstall, string? installedVersion, string setupVersion, bool sharedWithOthers)
+    {
+        if (installedVersion == null) return null;
+        var older = AppUpdater.IsOlder(setupVersion, installedVersion);
+        var keeps = Installer.KeepsInstalledCopy(sharedWithOthers, installedVersion, setupVersion);
+        if (ownInstall)
+            return !older ? "Runner Manager is already installed. Continue to update it. Your settings are kept. To move it, choose another folder."
+                : keeps
+                    ? $"Runner Manager v{installedVersion} is installed, which is newer than this setup (v{setupVersion}). Other Windows users on this PC use it, so setup keeps v{installedVersion}. Your settings are kept."
+                    : $"Runner Manager v{installedVersion} is installed, which is newer than this setup (v{setupVersion}). Continue only to go back to the older version. Your settings are kept.";
+        if (sharedWithOthers)
+            return keeps
+                ? $"Runner Manager v{installedVersion} is already in this folder, which is newer than this setup (v{setupVersion}). Other Windows users on this PC use it, so setup keeps v{installedVersion} and sets it up for your Windows user too."
+                : AppUpdater.IsNewer(setupVersion, installedVersion)
+                    ? $"Runner Manager v{installedVersion} is already in this folder, and other Windows users on this PC use it. Continue to update it to v{setupVersion} and to use it for your Windows user too."
+                    : $"Runner Manager v{installedVersion} is already in this folder, and other Windows users on this PC use it. Continue to use it for your Windows user too.";
+        return older
+            ? $"Runner Manager v{installedVersion} is already in this folder, which is newer than this setup (v{setupVersion}). Continue only to go back to the older version."
+            : $"Runner Manager v{installedVersion} is already in this folder. Continue to replace it with v{setupVersion}.";
+    }
+
+    /// <summary>
+    /// The folder setup starts with: the offered folder, or Program Files when setup could not confirm the install in the
+    /// offered folder. Any program of the user can make setup find a folder that it cannot confirm, so it is only one click
+    /// away, behind the "Current folder" button (see <see cref="FolderResetButton"/>).
+    /// </summary>
+    internal static string InitialFolder(SetupOffer offer, string programFilesDir) => offer.Unconfirmed ? programFilesDir : offer.Folder;
+
+    /// <summary>
+    /// The button beside the folder, and the folder it goes to. For a confirmed offer, it is shown once the folder differs
+    /// from the offered one, to go back to it: "Default" when that is Program Files, "Current folder" when it is where
+    /// Runner Manager is installed now. For an unconfirmed offer, it goes from Program Files to the found folder ("Current
+    /// folder"), and from any other folder to Program Files ("Default").
+    /// </summary>
+    internal static (bool Visible, string Label, string Target) FolderResetButton(string folder, SetupOffer offer, string programFilesDir)
+    {
+        if (!offer.Unconfirmed || AppUpdater.SameFolder(offer.Folder, programFilesDir))
+            return (!AppUpdater.SameFolder(folder, offer.Folder), AppUpdater.SameFolder(offer.Folder, programFilesDir) ? "Default" : "Current folder", offer.Folder);
+        return AppUpdater.SameFolder(folder, programFilesDir) ? (true, "Current folder", offer.Folder) : (true, "Default", programFilesDir);
+    }
+
+    /// <summary>
+    /// A note under the folder. For any folder outside Program Files and Program Files (x86)
+    /// (<paramref name="programFilesFolders"/>), which Windows does not protect by itself (also the offered one): that only
+    /// administrators should be able to change its files. A folder inside one of them is protected by the rights it gets
+    /// from there; once installed, the dashboard reads the real rights (see <see cref="InstallFolderSafety"/>). And when
+    /// setup could not confirm the install in the offered folder: that it could not, and that setup leaves that folder as
+    /// it is when another is chosen.
+    /// </summary>
+    internal static string? FolderNote(string folder, SetupOffer offer, IEnumerable<string> programFilesFolders)
+    {
+        var notes = new List<string>();
+        if (offer.Unconfirmed)
+            notes.Add(AppUpdater.SameFolder(folder, offer.Folder)
+                ? "Setup could not confirm that Runner Manager is installed in this folder."
+                : $"Setup found {offer.Folder}, but could not confirm that Runner Manager is installed there. Setup leaves that folder as it is.");
+        if (!MachineInstall.IsInsideProgramFiles(folder, programFilesFolders))
+            notes.Add("Runner Manager runs with administrator rights. Outside Program Files, check that only administrators can change the files in this folder.");
+        return notes.Count == 0 ? null : string.Join(" ", notes);
+    }
+
     private void ShowInstallFolder()
     {
+        // What setup says about a copy in the folder is about this folder.
+        AppUpdater.UseInstallDir(_installFolder);
+        _ = ShowExistingInstallAsync();
         InstallPathText.Text = _installFolder;
-        DefaultInstallFolderButton.Visibility = AppUpdater.IsDefaultInstallDir(_installFolder) ? Visibility.Collapsed : Visibility.Visible;
+        var (visible, label, target) = FolderResetButton(_installFolder, _offer, MachineInstall.ProgramFilesDir);
+        DefaultInstallFolderButton.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+        DefaultInstallFolderButton.Content = label;
+        DefaultInstallFolderButton.ToolTip = target;
+        var note = FolderNote(_installFolder, _offer, MachineInstall.ProgramFilesFolders);
+        FolderNoteText.Text = note ?? string.Empty;
+        FolderNoteText.Visibility = note == null ? Visibility.Collapsed : Visibility.Visible;
     }
 
     private void ChangeInstallFolder_Click(object sender, RoutedEventArgs e)
@@ -226,7 +325,7 @@ public partial class SetupWindow : Window
 
     private void DefaultInstallFolder_Click(object sender, RoutedEventArgs e)
     {
-        _installFolder = AppUpdater.DefaultInstallDir;
+        _installFolder = FolderResetButton(_installFolder, _offer, MachineInstall.ProgramFilesDir).Target;
         ShowInstallFolder();
     }
 

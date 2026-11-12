@@ -164,7 +164,7 @@
                             </local:SettingRow>
                             <Border Style="{StaticResource Divider}"/>
                             <local:SettingRow Glyph="&#xE916;" Title="Stuck and waiting jobs"
-                                              Description="A job that makes no progress or runs far longer than usual, a runner that idles while jobs wait for it, and jobs that no runner takes.">
+                                              Description="A job that makes no progress or runs far longer than usual, a runner that idles while jobs wait for it, a runner that runs twice or whose service cannot use its work folder, and jobs that no runner takes.">
                                 <CheckBox x:Name="JobProblemsToggle" Style="{StaticResource ToggleSwitch}" AutomationProperties.Name="Stuck and waiting jobs" Click="Toggle_Click"/>
                             </local:SettingRow>
                             <Border Style="{StaticResource Divider}"/>
@@ -244,8 +244,11 @@
                                     <DataTemplate>
                                         <StackPanel>
                                             <local:SettingRow Glyph="&#xE7F8;" Title="{Binding Name}" Description="{Binding Detail}">
-                                                <Button Content="{Binding Action}" Style="{StaticResource GhostButton}" Padding="8,2" FontSize="12"
-                                                        AutomationProperties.Name="{Binding ActionName}" Tag="{Binding}" Click="ForgetPeer_Click"/>
+                                                <!-- The text is a TextBlock, not string content, so the PC's name keeps its underscores. -->
+                                                <Button Style="{StaticResource GhostButton}" Padding="8,2" FontSize="12"
+                                                        AutomationProperties.Name="{Binding ActionName}" Tag="{Binding}" Click="ForgetPeer_Click">
+                                                    <TextBlock Text="{Binding Action}"/>
+                                                </Button>
                                             </local:SettingRow>
                                             <Border Style="{StaticResource Divider}"/>
                                         </StackPanel>
@@ -264,8 +267,10 @@
                                 <ItemsControl.ItemTemplate>
                                     <DataTemplate>
                                         <DockPanel Margin="0,0,0,8">
-                                            <Button DockPanel.Dock="Right" Content="Remove" Style="{StaticResource GhostButton}" Padding="8,2" FontSize="12"
-                                                    VerticalAlignment="Center" AutomationProperties.Name="{Binding RemoveName}" Tag="{Binding}" Click="RemoveAddress_Click"/>
+                                            <Button DockPanel.Dock="Right" Style="{StaticResource GhostButton}" Padding="8,2" FontSize="12"
+                                                    VerticalAlignment="Center" AutomationProperties.Name="{Binding RemoveName}" Tag="{Binding}" Click="RemoveAddress_Click">
+                                                <TextBlock Text="Remove"/>
+                                            </Button>
                                             <StackPanel VerticalAlignment="Center">
                                                 <TextBlock Text="{Binding Address}" FontFamily="{StaticResource MonoFont}" FontSize="12"/>
                                                 <TextBlock Text="{Binding Status}" Style="{StaticResource Hint}" Margin="0,2,0,0"/>

@@ -132,7 +132,10 @@ public static class AssistantTools
             AssistantToolKind.Read, Schema(), ListPcsAsync),
         new AssistantTool("list_runners",
             "Lists the GitHub Actions self-hosted runners on every PC (or one PC): state (busy, idle, stopped), repository or organization, labels and version. " +
-            "problem says when a runner needs attention: its job is stuck (no CPU use or output for a while) or runs far longer than usual, or it is idle while jobs it can take wait. " +
+            "problem says when a runner needs attention: its job is stuck (no CPU use or output for a while) or runs far longer than usual, or it is idle while jobs it can take wait, " +
+            "or it runs twice (its Windows service runs, and a console window runs it too or opens it at sign-in), or two console windows run it and only one of them gets jobs, " +
+            "or folders in its work folder belong to another account than its service's, which git refuses. " +
+            "runs_twice and console_at_sign_in are true for such runners: their service must not be started or restarted. " +
             "pc_online is false for a runner on a PC that cannot be reached now: its state is unknown, and last_known_state is what the PC reported last.",
             AssistantToolKind.Read, Schema(("pc", "string", "Only this PC. Optional.", false)), ListRunnersAsync),
         new AssistantTool("find_runner_for_repo",
@@ -151,7 +154,8 @@ public static class AssistantTools
                 ("even_if_exists", "boolean", "Create another runner even if the repository already has one.", false)),
             CreateRunnerAsync),
         new AssistantTool("control_runner",
-            "Starts, stops or restarts a runner's Windows service. Not for a runner that runs in a console window (list_runners: console).",
+            "Starts, stops or restarts a runner's Windows service. Not for a runner that runs in a console window (list_runners: console). " +
+            "Start and restart are refused for a runner that runs twice or opens in a console window at sign-in (list_runners: runs_twice, console_at_sign_in); stop works.",
             AssistantToolKind.Change, Schema(
                 ("pc", "string", PcArgument, true),
                 ("runner", "string", RunnerArgument, true),
@@ -217,11 +221,10 @@ public static class AssistantTools
     public static async Task<object> CallAsync(string name, JsonElement arguments, Func<string, string, Task<bool>> approve, Action<string>? log = null,
         CancellationToken cancellationToken = default)
     {
-        // An update restarts the agent only after calls like this one are done.
-        using var _ = AgentWork.Begin();
         if (!FleetConfig.Current.Assistant.Enabled)
             throw new AssistantException("AI assistant access is turned off. Turn it on in Runner Manager → Settings → AI assistants.");
         var tool = Find(name) ?? throw new AssistantException($"Unknown tool: {name}. Available tools: {string.Join(", ", All.Select(t => t.Name))}.");
+        using var _ = BeginWork(tool.Kind, AgentWork.RestartAsked);
         var steps = new List<string>();
         var call = new AssistantCall(arguments, approve, message => { steps.Add(message); log?.Invoke(message); }, cancellationToken);
         try
@@ -236,6 +239,18 @@ public static class AssistantTools
             if (tool.Kind != AssistantToolKind.Read) AssistantLog.Append($"{tool.Name}: {AssistantLog.OneLine(reason, 200)} {Summarize(arguments)}");
             throw;
         }
+    }
+
+    /// <summary>
+    /// Marks a call as the agent's work, so an update restarts the agent only after it is done. Once an update asked for
+    /// the restart (<paramref name="restartAsked"/>), a change would begin work that the restart may cut off, so it is
+    /// refused. A read is short and changes nothing: it still runs, but does not hold up the restart (returns null).
+    /// </summary>
+    internal static IDisposable? BeginWork(AssistantToolKind kind, bool restartAsked)
+    {
+        if (!restartAsked) return AgentWork.Begin();
+        if (kind != AssistantToolKind.Read) throw new AssistantException(AgentWork.RestartingText);
+        return null;
     }
 
     // ----- Read tools -----
@@ -596,7 +611,13 @@ public static class AssistantTools
     {
         if (!runner.ServiceInstalled || string.IsNullOrWhiteSpace(runner.ServiceName))
             throw new AssistantException($"{runner.TitleText} has no Windows service, so it cannot be controlled.");
-        if (!runner.IsInteractive) return;
+        if (!runner.IsInteractive)
+        {
+            // One that runs twice, or that a startup entry opens in a console window at sign-in, may only be stopped.
+            if (FleetActions.ConsoleRunnerProblem(interactive: false, serviceInstalled: true, action, runner.ConsoleAtSignIn, runner.RunsTwice) is { } problem)
+                throw new AssistantException($"{runner.TitleText} on {machine.MachineName}: {problem} Nothing was changed.");
+            return;
+        }
         var where = $"{runner.TitleText} runs in a console window on {machine.MachineName} now, and its Windows service is not used.";
         throw new AssistantException(action == "Stop"
             ? $"{where} Stopping the service would not stop the runner. To stop it, close its console window on {machine.MachineName}. Nothing was changed."
@@ -838,6 +859,8 @@ public static class AssistantTools
             last_known_state = online ? null : StateOf(runner),
             problem = health == null ? null : ProblemOf(runner, health),
             console = runner.IsInteractive,
+            runs_twice = runner.RunsTwice,
+            console_at_sign_in = runner.ConsoleAtSignIn,
             // "windows", "signin" or "signin-shared" (a console runner opened at sign-in), "off", "disabled", "none"; null from older agents.
             starts_after_restart = runner.StartsAt.Length > 0 ? runner.StartsAt
                 : machine.IsLocal || machine.AgentProtocolVersion >= 13 ? "none" : null,

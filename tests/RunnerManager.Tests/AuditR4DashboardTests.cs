@@ -135,14 +135,14 @@ public class AuditR4DashboardTests
         // A read that does not end: the wait ends when the limit has passed.
         var stuck = new TaskCompletionSource<List<MachineInfo>>();
         var limit = new TaskCompletionSource();
-        var wait = MainWindow.WaitForReadAsync(stuck.Task, () => limit.Task);
+        var wait = MachineRelay.WaitForReadAsync(stuck.Task, () => limit.Task);
         Assert.False(wait.IsCompleted);
         limit.SetResult();
         Assert.False(await wait);
 
         // A read that ends first, also when it fails.
         var read = new TaskCompletionSource<List<MachineInfo>>();
-        wait = MainWindow.WaitForReadAsync(read.Task, () => never.Task);
+        wait = MachineRelay.WaitForReadAsync(read.Task, () => never.Task);
         Assert.False(wait.IsCompleted);
         read.SetException(new IOException("The network is not reachable."));
         Assert.True(await wait);
@@ -150,8 +150,8 @@ public class AuditR4DashboardTests
         // No read runs: nothing to wait for, and the limit is not started.
         var limitStarted = false;
         Task Limit() { limitStarted = true; return never.Task; }
-        Assert.True(await MainWindow.WaitForReadAsync(null, Limit));
-        Assert.True(await MainWindow.WaitForReadAsync(Task.CompletedTask, Limit));
+        Assert.True(await MachineRelay.WaitForReadAsync(null, Limit));
+        Assert.True(await MachineRelay.WaitForReadAsync(Task.CompletedTask, Limit));
         Assert.False(limitStarted);
     }
 

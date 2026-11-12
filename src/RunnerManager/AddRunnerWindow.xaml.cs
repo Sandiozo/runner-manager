@@ -97,7 +97,8 @@ public partial class AddRunnerWindow : Window
         foreach (var pc in targets)
         {
             var (label, accessibleName) = AddRunnerForm.PcLabel(pc);
-            var choice = new RadioButton { Content = label, GroupName = "Pc", Style = (Style)FindResource("Segment"), IsChecked = pc == _target };
+            // In a TextBlock: with string content, the name a screen reader gets would drop an underscore in the PC's name.
+            var choice = new RadioButton { Content = new TextBlock { Text = label }, GroupName = "Pc", Style = (Style)FindResource("Segment"), IsChecked = pc == _target };
             AutomationProperties.SetName(choice, accessibleName);
             choice.Checked += (_, _) =>
             {

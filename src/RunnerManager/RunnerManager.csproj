@@ -15,7 +15,7 @@
     <AssemblyName>RunnerManager</AssemblyName>
     <RootNamespace>RunnerManager</RootNamespace>
     <!-- Release builds override this from the git tag (see .github/workflows/release.yml). -->
-    <Version>2.9.0</Version>
+    <Version>2.10.0</Version>
     <Product>Runner Manager</Product>
     <!-- Shown in the exe's Properties → Details. An exe without a publisher or description looks more like malware to
          antivirus scanners. AssemblyTitle is the file description that Task Manager and Defender show. -->
@@ -26,6 +26,46 @@
     <Copyright>Copyright © 2026 Sandiozo</Copyright>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
   </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <!-- Runner Manager runs with administrator rights. Any program of the user can set DOTNET_STARTUP_HOOKS for the user,
+         so the runtime must not load the assemblies it names. Debug builds keep them for Hot Reload. -->
+    <StartupHookSupport>false</StartupHookSupport>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <!-- The published exe looks for .NET only where it is installed for the whole PC (the registered and the default
+         location), never in DOTNET_ROOT, which any program of the user can set. Publish only; a self-contained exe
+         carries its own runtime and ignores it. -->
+    <AppHostDotNetSearch>Global</AppHostDotNetSearch>
+  </PropertyGroup>
+
+  <!-- The start helper, RunnerManagerLauncher.exe (src\RunnerManagerLauncher): a small native program that starts
+       RunnerManager.exe with a clean environment. It is built with the Visual C++ tools before the app and embedded in it,
+       so a release stays one exe; the installed app writes it beside itself (see Launcher.cs). Without the tools the build
+       goes on without it, and the app then registers its tasks at the exe as before. A release passes
+       -p:RequireLauncher=true, so it cannot be built without it. LauncherExe may be set to another file (the tests do). -->
+  <PropertyGroup>
+    <LauncherFolder>$(MSBuildThisFileDirectory)..\RunnerManagerLauncher\</LauncherFolder>
+    <LauncherExe Condition="'$(LauncherExe)' == ''">$(LauncherFolder)bin\RunnerManagerLauncher.exe</LauncherExe>
+  </PropertyGroup>
+
+  <Target Name="BuildLauncher" BeforeTargets="BeforeBuild" Condition="'$(SkipLauncherBuild)' != 'true'">
+    <Exec Command="&quot;$(SystemRoot)\System32\WindowsPowerShell\v1.0\powershell.exe&quot; -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;$(LauncherFolder)build.ps1&quot; -IfToolsPresent" />
+  </Target>
+
+  <Target Name="CheckLauncher">
+    <Error Condition="'$(RequireLauncher)' == 'true' and !Exists('$(LauncherExe)')"
+           Text="RequireLauncher is set, but the start helper $(LauncherExe) is missing. Build it first with src\RunnerManagerLauncher\build.ps1 (it needs the Visual C++ x64 build tools); a release must not be built without it." />
+  </Target>
+
+  <!-- In a target, not as a static item: the file may only exist once BuildLauncher has run. -->
+  <Target Name="EmbedLauncher" BeforeTargets="BeforeBuild" DependsOnTargets="BuildLauncher;CheckLauncher">
+    <ItemGroup Condition="Exists('$(LauncherExe)')">
+      <EmbeddedResource Include="$(LauncherExe)" LogicalName="RunnerManagerLauncher.exe" />
+    </ItemGroup>
+    <Warning Condition="!Exists('$(LauncherExe)')" Text="This build has no start helper (RunnerManagerLauncher.exe), so it registers its scheduled tasks at RunnerManager.exe." />
+  </Target>
 
   <ItemGroup>
     <Using Remove="System.Windows.Forms" />

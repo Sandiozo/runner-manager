@@ -26,6 +26,9 @@ public partial class MainWindow
     private DateTime _lastRunnerReleaseCheck = DateTime.MinValue;
     private static readonly TimeSpan UpdateGuardInterval = TimeSpan.FromMinutes(1);
     private DateTime _lastUpdateGuardCheck = DateTime.MinValue;
+    private static readonly TimeSpan StartHelperCheckInterval = TimeSpan.FromMinutes(5);
+    /// <summary>The start checks the start helper (see <see cref="Installer.EnsureLaunchTaskAsync"/>), so the next check is a while after it.</summary>
+    private DateTime _lastStartHelperCheck = DateTime.UtcNow;
 
     /// <summary>Starts monitoring. Called when the window loads, or directly when starting minimized to the tray.</summary>
     public async Task StartAsync()
@@ -37,6 +40,10 @@ public partial class MainWindow
         AddActivity($"Runner Manager v{AppUpdater.CurrentVersion} started.");
         try
         {
+            // After a restart through the start helper, the task instance of the dashboard before ends a moment after it.
+            // The tasks are looked at once it did, so they can move to the start helper now (see StartHelperRestart).
+            if (App.RestartedThroughStartHelper)
+                await StartHelperRestart.WaitForTasksAsync(AppUpdater.InstalledExe, StartHelperRestart.TaskEndWait, MachineRelay.AppendAgentLog);
             await LegacyInstall.MigrateAsync(AddActivity);
             await Installer.EnsureLaunchTaskAsync(force: App.ElevatedByPrompt);
             if (Elevation.IsElevated)
@@ -44,6 +51,8 @@ public partial class MainWindow
                     AddActivity($"Repaired the scheduled task \"{name}\". Windows could not start it.");
         }
         catch (Exception ex) { AddActivity($"Could not update the install: {ex.Message}"); }
+        TellWithoutStartHelper();
+        _ = TellUnsafeInstallFolderAsync();
         if (UpdateGuard.TakeRollbackNotice() is { } notice) RaiseAlert(notice, warning: true);
         if (AppSettings.LoadProblem is { } settingsProblem) AddActivity($"Settings: {settingsProblem}");
         await RefreshAsync(forceAuthCheck: true);
@@ -51,6 +60,36 @@ public partial class MainWindow
         _refreshTimer.Start();
         StartLiveJobs();
         await RunPostSetupStepsAsync();
+    }
+
+    /// <summary>
+    /// Says once per version, in Activity, that programs without administrator rights can change the install folder
+    /// (see <see cref="InstallFolderSafety"/>). The rights are read in the background, so the start does not wait for them.
+    /// </summary>
+    private async Task TellUnsafeInstallFolderAsync()
+    {
+        try
+        {
+            if (InstallChecks.IsDone(InstallFolderSafety.ToldCheck) || await InstallFolderSafety.CurrentAsync() is not { } problem) return;
+            MachineRelay.AppendAgentLog($"The install folder {AppUpdater.InstallDir} is not protected: {problem}.");
+            AddActivity(InstallFolderSafety.UnsafeActivityText, ActivityKind.Warning);
+            InstallChecks.MarkDone(InstallFolderSafety.ToldCheck);
+        }
+        catch (Exception ex) { MachineRelay.AppendAgentLog($"Could not read the rights of the install folder: {ex.Message}"); }
+    }
+
+    /// <summary>Whether Activity says that this PC runs without the start helper (see <see cref="TellWithoutStartHelper"/>).</summary>
+    private bool _withoutStartHelperTold;
+
+    /// <summary>
+    /// Says in Activity that this PC runs without the start helper: at the start, and when the fleet agent or this
+    /// dashboard gave it up since the last check, once each time (see <see cref="InstallFolderSafety.WithoutStartHelperNotice"/>).
+    /// </summary>
+    private void TellWithoutStartHelper()
+    {
+        bool tell;
+        (tell, _withoutStartHelperTold) = InstallFolderSafety.WithoutStartHelperNotice(InstallFolderSafety.RunsWithoutStartHelper, _withoutStartHelperTold);
+        if (tell) AddActivity(InstallFolderSafety.WithoutStartHelperActivityText, ActivityKind.Warning);
     }
 
     /// <summary>Follow-up step chosen in the setup wizard (passed as --fleet=new|join).</summary>
@@ -92,6 +131,16 @@ public partial class MainWindow
             {
                 _lastUpdateGuardCheck = DateTime.UtcNow;
                 if (await UpdateGuard.CheckFromDashboardAsync(_isEnrolled) is { } notice) RaiseAlert(notice, warning: true);
+            }
+
+            // Antivirus software may remove the start helper while the dashboard runs; a task must not name it then (on a
+            // PC with a fleet agent, the agent checks too). When this dashboard or the fleet agent gave it up, Activity
+            // says so, as at the start.
+            if (DateTime.UtcNow - _lastStartHelperCheck >= StartHelperCheckInterval)
+            {
+                _lastStartHelperCheck = DateTime.UtcNow;
+                await Launcher.EnsureForThisCopyAsync();
+                TellWithoutStartHelper();
             }
 
             if (!_githubAuthenticated) return;
@@ -366,9 +415,16 @@ public partial class MainWindow
         UpdateBannerButton.Content = installed != null ? "Restart now" : "Install update";
     }
 
-    /// <summary>The installed version when it is newer than this dashboard, which then only needs a restart; otherwise null.</summary>
-    private static string? InstalledUpdate()
-        => AppUpdater.InstalledVersion is { } installed && AppUpdater.IsNewer(installed, AppUpdater.CurrentVersion) ? installed : null;
+    /// <summary>
+    /// The installed version when it is newer than this dashboard, which then only needs a restart; otherwise null. Read
+    /// from the installed file (see <see cref="AppUpdater.VersionOfFile"/>), so an update that the fleet agent installed
+    /// while this dashboard was open is seen too.
+    /// </summary>
+    private static string? InstalledUpdate() => InstalledUpdate(AppUpdater.InstalledVersion, AppUpdater.CurrentVersion);
+
+    /// <summary><paramref name="installedVersion"/> when it is newer than <paramref name="runningVersion"/>, otherwise null.</summary>
+    internal static string? InstalledUpdate(string? installedVersion, string runningVersion)
+        => installedVersion is { } installed && AppUpdater.IsNewer(installed, runningVersion) ? installed : null;
 
     private async void InstallUpdate_Click(object sender, RoutedEventArgs e)
     {
@@ -396,11 +452,11 @@ public partial class MainWindow
             return;
         }
         if (IsAgentWorkRunning()) return;
-        var restartAgent = false;
+        string? agentExe = null;
         var installed = await RunOperationAsync($"Install Runner Manager {release.Tag}",
-            async log => restartAgent = await AppUpdater.InstallReleaseAsync(release, log));
+            async log => agentExe = await AppUpdater.InstallReleaseAsync(release, log));
         if (!installed) return;
-        if (restartAgent) RestartLocalAgentInBackground();
+        if (agentExe != null) RestartLocalAgentInBackground(agentExe);
         if (DialogWindow.Show(this, DialogTone.Question, $"Runner Manager {release.Tag} is installed",
                 "Restart Runner Manager now to use the new version?", "Restart now", cancel: "Later") == "Restart now")
             ((App)Application.Current).RestartDashboard();
@@ -568,7 +624,7 @@ public partial class MainWindow
                 "Restart PC", danger: true)) return;
         if (machine.IsLocal)
         {
-            var (code, output) = await ScheduledTasks.RunAsync("shutdown.exe", "/r /t 60 /c \"Restart requested from Runner Manager\"");
+            var (code, output) = await ScheduledTasks.RunAsync(WindowsTools.FullPath("shutdown.exe"), "/r /t 60 /c \"Restart requested from Runner Manager\"");
             if (code != 0)
             {
                 DialogWindow.Error(this, $"Could not restart {machine.MachineName}", output.Trim());
@@ -578,7 +634,7 @@ public partial class MainWindow
             if (DialogWindow.Show(this, DialogTone.Warning, $"{machine.MachineName} restarts in 60 seconds",
                     "Save your work. You can cancel the restart until then.", "OK", cancel: null, secondary: "Cancel restart") == "Cancel restart")
             {
-                await ScheduledTasks.RunAsync("shutdown.exe", "/a");
+                await ScheduledTasks.RunAsync(WindowsTools.FullPath("shutdown.exe"), "/a");
                 AddActivity("Restart cancelled.");
             }
             return;

@@ -1,3 +1,5 @@
+using System.IO;
+
 namespace RunnerManager.Tests;
 
 public class UpdateCheckTests
@@ -157,5 +159,404 @@ public class UpdateRollbackTests
     {
         Assert.Equal(DashboardUpdateDecision.Forget, Dashboard(Pending(), installed: "2.5.0"));
         Assert.Equal(DashboardUpdateDecision.Nothing, Dashboard(null));
+    }
+
+    [Fact]
+    public void Dashboard_OfTheVersionBeforeTheUpdate_KeepsWatchingIt()
+    {
+        // Open while the fleet agent installed 2.4.0: it reads 2.4.0 from the installed file, so it does not forget the
+        // update, and undoes it as a dashboard of 2.4.0 would when the new fleet agent does not work.
+        Assert.Equal(DashboardUpdateDecision.RollBack, Dashboard(Pending(), running: "2.3.2"));
+        Assert.Equal(DashboardUpdateDecision.Nothing, Dashboard(Pending(), running: "2.3.2", agentDownMinutes: 0));
+        Assert.Equal(DashboardUpdateDecision.Nothing, Dashboard(Pending(), running: "2.3.2", minutesSinceInstall: 5));
+        Assert.Equal(DashboardUpdateDecision.Nothing, Dashboard(Pending(), running: "2.3.2", uptimeMinutes: 1));
+        // Without a fleet agent it never marks the update healthy: it has not run 2.4.0. The dashboard of 2.4.0 does.
+        Assert.Equal(DashboardUpdateDecision.Nothing, Dashboard(Pending(), agentInstalled: false, running: "2.3.2", uptimeMinutes: 60));
+        // Only another version installed since makes it forget.
+        Assert.Equal(DashboardUpdateDecision.Forget, Dashboard(Pending(), installed: "2.5.0", running: "2.3.2"));
+        Assert.Equal(DashboardUpdateDecision.Forget, Dashboard(Pending(), installed: "2.3.2", running: "2.3.2"));
+    }
+
+    [Fact]
+    public void TheBanner_OffersARestart_WhenTheInstalledFileIsNewerThanThisDashboard()
+    {
+        Assert.Equal("2.4.0", MainWindow.InstalledUpdate("2.4.0", "2.3.2"));
+        Assert.Null(MainWindow.InstalledUpdate("2.3.2", "2.3.2"));
+        Assert.Null(MainWindow.InstalledUpdate("2.3.0", "2.3.2"));
+        Assert.Null(MainWindow.InstalledUpdate(null, "2.3.2"));
+    }
+}
+
+/// <summary>
+/// The version of an exe is read from the file at its path now (see <see cref="AppUpdater.VersionOfFile"/>), also when a
+/// module of this process was loaded from that path and the file there was replaced since, as an update replaces
+/// RunnerManager.exe under a dashboard that is open. Nothing outside a temporary folder is touched.
+/// </summary>
+public class FileVersionTests
+{
+    [Fact]
+    public void TheVersion_IsThatOfTheFileThereNow_AlsoAfterTheFileThatThisProcessLoadedFromThatPathWasReplaced()
+    {
+        var folder = InstallEvidenceTests.NewFolder("version");
+        var path = Path.Combine(folder, "loaded.dll");
+        var aside = Path.Combine(folder, "loaded.638000000000000000.old.dll");
+        var other = Path.Combine(folder, "other.dll");
+        // A system DLL with a version resource, which this process loads as a running program has its own exe loaded, and
+        // a file with another version.
+        File.Copy(Path.Combine(Environment.SystemDirectory, "version.dll"), path);
+        File.Copy(typeof(AppUpdater).Assembly.Location, other);
+        var loadedVersion = AppUpdater.VersionOfFile(path);
+        var otherVersion = AppUpdater.VersionOfFile(other);
+        Assert.NotNull(loadedVersion);
+        Assert.NotNull(otherVersion);
+        Assert.NotEqual(loadedVersion, otherVersion);
+        var module = IntPtr.Zero;
+        try
+        {
+            module = System.Runtime.InteropServices.NativeLibrary.Load(path);
+            Assert.Equal(loadedVersion, AppUpdater.VersionOfFile(path));
+
+            // An update renames the loaded file out of the way and puts another file at its path.
+            ProcessImageTests.Retried(() => File.Move(path, aside));
+            ProcessImageTests.Retried(() => File.Copy(other, path));
+            // On Windows 11, FileVersionInfo.GetVersionInfo(path) still gives loadedVersion here: Windows answers from the
+            // module loaded from that path. That is not asserted, so the test does not depend on it.
+            Assert.Equal(otherVersion, AppUpdater.VersionOfFile(path));
+            Assert.Equal(loadedVersion, AppUpdater.VersionOfFile(aside));
+            // A relative path is read as the full path it names.
+            Assert.Equal(otherVersion, AppUpdater.VersionOfFile(Path.GetRelativePath(Environment.CurrentDirectory, path)));
+            Assert.Null(AppUpdater.VersionOfFile(Path.Combine(folder, "missing.dll")));
+        }
+        finally
+        {
+            if (module != IntPtr.Zero) System.Runtime.InteropServices.NativeLibrary.Free(module);
+            ProcessImageTests.Retried(() => Directory.Delete(folder, recursive: true));
+        }
+    }
+
+    [Fact]
+    public void AFileWithoutAVersion_HasNone()
+    {
+        var folder = InstallEvidenceTests.NewFolder("version-none");
+        try
+        {
+            var file = Path.Combine(folder, AppPaths.ExeName);
+            File.WriteAllText(file, "not a program");
+            Assert.Null(AppUpdater.VersionOfFile(file));
+        }
+        finally { ProcessImageTests.Retried(() => Directory.Delete(folder, recursive: true)); }
+    }
+
+    [Theory]
+    [InlineData(@"C:\Program Files\RunnerManager\RunnerManager.exe", @"\\?\C:\Program Files\RunnerManager\RunnerManager.exe")]
+    [InlineData(@"C:\Program Files\RunnerManager\..\RunnerManager\.\RunnerManager.exe", @"\\?\C:\Program Files\RunnerManager\RunnerManager.exe")]
+    [InlineData("C:/Program Files/RunnerManager/RunnerManager.exe", @"\\?\C:\Program Files\RunnerManager\RunnerManager.exe")]
+    [InlineData(@"\\server\share\RunnerManager\RunnerManager.exe", @"\\?\UNC\server\share\RunnerManager\RunnerManager.exe")]
+    public void TheFormThatIsReadFirst_IsTheFullPathWithTheLongPrefix(string path, string expected)
+        => Assert.Equal(expected, AppUpdater.UnlistedPathForm(path));
+
+    [Fact]
+    public void APathWithAPrefixAlready_OrNoPath_IsReadOnlyAsItIs()
+    {
+        Assert.Null(AppUpdater.UnlistedPathForm(@"\\?\C:\Program Files\RunnerManager\RunnerManager.exe"));
+        Assert.Null(AppUpdater.UnlistedPathForm(@"\\?\UNC\server\share\RunnerManager\RunnerManager.exe"));
+        Assert.Null(AppUpdater.UnlistedPathForm(@"\\.\C:\Program Files\RunnerManager\RunnerManager.exe"));
+        Assert.Null(AppUpdater.UnlistedPathForm(string.Empty));
+        // A relative path is made full first.
+        Assert.Equal(@"\\?\" + Path.GetFullPath(AppPaths.ExeName), AppUpdater.UnlistedPathForm(AppPaths.ExeName));
+    }
+}
+
+/// <summary>
+/// update-state.json is in the data folder, which any program of the user can change. A pending update from it counts
+/// only with what the install folder shows (see <see cref="UpdateGuard.PendingCounts"/>), and the counts beside the exe
+/// decide, so a program without administrator rights cannot make the fleet agent go back to the previous version of a
+/// Program Files install, nor stop the automatic update. The tests share update-state.json, so they are in one class.
+/// </summary>
+public class UpdateMarkerTests
+{
+    private static readonly DateTime Now = new(2026, 11, 12, 12, 0, 0, DateTimeKind.Utc);
+    private static readonly PendingUpdate Planted = new() { Version = "2.11.0", PreviousVersion = "2.10.0", InstalledUtc = Now, FailedStarts = 3 };
+
+    private static UpdateGuard.InstallFacts Facts(string marker = "", string previous = "2.10.0", double hoursSinceWritten = 1)
+        => new(marker, previous, Now.AddHours(-hoursSinceWritten));
+
+    [Fact]
+    public void APendingUpdate_CountsOnlyWhenTheMarkerBesideTheExeNamesIt()
+    {
+        Assert.True(UpdateGuard.PendingCounts(Planted, Facts(marker: "2.11.0"), Now));
+        // Written by hand into the update state: the install folder has no marker, or one of another update.
+        Assert.False(UpdateGuard.PendingCounts(Planted, Facts(), Now));
+        Assert.False(UpdateGuard.PendingCounts(Planted, Facts(marker: "2.12.0"), Now));
+    }
+
+    [Fact]
+    public void WithTheMarker_TheUpdateIsUndone_AlsoWhenTheNewVersionNeverStarted()
+    {
+        // The version that installed the update wrote the marker, so its dashboard can go back however long the new
+        // version has failed to start (the PC may have been off since).
+        Assert.True(UpdateGuard.PendingCounts(Planted, Facts(marker: "2.11.0", hoursSinceWritten: 72), Now));
+        Assert.True(UpdateGuard.PendingCounts(Planted, new UpdateGuard.InstallFacts("2.11.0", "2.10.0", null), Now));
+    }
+
+    [Theory]
+    [InlineData("2.9.0", 1, true)]
+    [InlineData("2.9.0", 23.9, true)]
+    [InlineData("2.9.0", 24.1, false)]
+    [InlineData("2.10.0", 1, false)]
+    [InlineData("2.10.1", 1, false)]
+    [InlineData("", 1, false)]
+    public void TheUpdateFrom290_CountsWithoutAMarker_OnlyForADayAfterTheExeWasWritten(string previous, double hours, bool counts)
+    {
+        // 2.9.0 wrote no marker when it installed 2.10.0. The previous exe (2.9.0) and the time the installed exe was written
+        // are in the install folder, which only administrators can change in Program Files.
+        var fromOld = new PendingUpdate { Version = "2.10.0", PreviousVersion = "2.9.0", InstalledUtc = Now.AddHours(-hours) };
+        Assert.Equal(counts, UpdateGuard.PendingCounts(fromOld, Facts(previous: previous, hoursSinceWritten: hours), Now));
+        Assert.False(UpdateGuard.PendingCounts(fromOld, new UpdateGuard.InstallFacts(string.Empty, previous, null), Now));
+    }
+
+    [Fact]
+    public void TheInstallFolder_IsReadForTheFacts_AndTheMarkerIsWrittenAndDeleted()
+    {
+        var folder = InstallEvidenceTests.NewFolder("pending");
+        try
+        {
+            var exe = Path.Combine(folder, AppPaths.ExeName);
+            File.WriteAllText(exe, string.Empty);
+            var written = new DateTime(2026, 11, 10, 8, 30, 0, DateTimeKind.Utc);
+            File.SetLastWriteTimeUtc(exe, written);
+            Assert.Equal(new UpdateGuard.InstallFacts(string.Empty, string.Empty, written), UpdateGuard.ReadInstallFacts(exe));
+
+            File.Copy(typeof(UpdateGuard).Assembly.Location, exe + ".previous");
+            UpdateGuard.WritePendingMarker(exe, "2.11.0");
+            Assert.Equal(Path.Combine(folder, "RunnerManager.exe.pending"), UpdateGuard.PendingMarkerPath(exe));
+            Assert.Equal(new UpdateGuard.InstallFacts("2.11.0", AppUpdater.CurrentVersion, written), UpdateGuard.ReadInstallFacts(exe));
+
+            UpdateGuard.DeletePendingMarker(exe);
+            Assert.False(File.Exists(UpdateGuard.PendingMarkerPath(exe)));
+        }
+        finally { Directory.Delete(folder, recursive: true); }
+    }
+
+    [Fact]
+    public void APlantedPendingUpdate_IsRemovedAndLogged_AndAMarkedOneIsKept()
+    {
+        var folder = InstallEvidenceTests.NewFolder("planted");
+        var statePath = Path.Combine(FleetConfig.StateDir, "update-state.json");
+        try
+        {
+            var exe = Path.Combine(folder, AppPaths.ExeName);
+            File.WriteAllText(exe, string.Empty);
+            // The previous exe is a version that writes the marker, so a pending update needs one.
+            File.Copy(typeof(UpdateGuard).Assembly.Location, exe + ".previous");
+            Directory.CreateDirectory(FleetConfig.StateDir);
+            File.WriteAllText(statePath, System.Text.Json.JsonSerializer.Serialize(new UpdateState { Pending = Planted }));
+
+            Assert.False(UpdateGuard.Counts(Planted, exe, Now));
+            Assert.Null(UpdateGuard.Load().Pending);
+            Assert.Contains(UpdateGuard.NotCountedText("2.11.0", folder), TestLogs.AgentLog());
+
+            File.WriteAllText(statePath, System.Text.Json.JsonSerializer.Serialize(new UpdateState { Pending = Planted }));
+            UpdateGuard.WritePendingMarker(exe, "2.11.0");
+            Assert.True(UpdateGuard.Counts(Planted, exe, Now));
+            Assert.Equal(Planted, UpdateGuard.Load().Pending);
+            Assert.True(File.Exists(UpdateGuard.PendingMarkerPath(exe)));
+        }
+        finally
+        {
+            Directory.Delete(folder, recursive: true);
+            File.Delete(statePath);
+        }
+    }
+
+    // ----- The counts beside the exe decide, and the marker goes when the watch ends -----
+
+    private static readonly PendingUpdate Fresh = new() { Version = "2.11.0", PreviousVersion = "2.10.0", InstalledUtc = Now };
+    private static string StatePath => Path.Combine(FleetConfig.StateDir, "update-state.json");
+
+    /// <summary>A program of the user writes update-state.json, which is in the data folder.</summary>
+    private static void WriteState(UpdateState state)
+    {
+        Directory.CreateDirectory(FleetConfig.StateDir);
+        File.WriteAllText(StatePath, System.Text.Json.JsonSerializer.Serialize(state));
+    }
+
+    /// <summary>An install folder after an update by 2.10.0 or later: the exe, and a previous exe of a version that writes the marker.</summary>
+    private static string NewInstall(string name)
+    {
+        var exe = Path.Combine(InstallEvidenceTests.NewFolder(name), AppPaths.ExeName);
+        File.WriteAllText(exe, string.Empty);
+        File.Copy(typeof(UpdateGuard).Assembly.Location, exe + ".previous");
+        return exe;
+    }
+
+    private static void Remove(string exe)
+    {
+        Directory.Delete(Path.GetDirectoryName(exe)!, recursive: true);
+        File.Delete(StatePath);
+    }
+
+    private static (AgentStartDecision Decision, PendingUpdate? Pending) Start(string exe, DateTime? at = null)
+        => UpdateGuard.AgentStarting(exe, "2.11.0", runningInstalledCopy: true, at ?? Now);
+
+    [Fact]
+    public void FailedStartsWrittenIntoTheUpdateState_BeforeTheAgentRestarts_DoNotUndoTheUpdate()
+    {
+        var exe = NewInstall("counts-planted");
+        try
+        {
+            UpdateGuard.MarkPending(exe, "2.11.0", "2.10.0", Now);
+            // Before the new fleet agent starts, a program of the user writes three failed starts into the update state.
+            WriteState(new UpdateState { Pending = Fresh with { FailedStarts = 3, Running = true } });
+
+            var (decision, pending) = Start(exe);
+            Assert.Equal(AgentStartDecision.Watch, decision);
+            Assert.Equal((0, true, 1), (pending!.FailedStarts, pending.Running, pending.Starts));
+            Assert.Equal(new UpdateGuard.UpdateMark { Pending = "2.11.0", InstalledUtc = Now, Starts = 1, Running = true }, UpdateGuard.ReadMark(exe));
+        }
+        finally { Remove(exe); }
+    }
+
+    [Fact]
+    public void ThreeStartsThatEndBeforeTheAgentWorked_UndoTheUpdate_WhateverTheUpdateStateSays()
+    {
+        var exe = NewInstall("counts-crashes");
+        try
+        {
+            UpdateGuard.MarkPending(exe, "2.11.0", "2.10.0", Now);
+            // A start that ends with a clean exit does not count.
+            Assert.Equal(AgentStartDecision.Watch, Start(exe).Decision);
+            UpdateGuard.AgentExiting(exe, "2.11.0");
+            Assert.False(UpdateGuard.ReadMark(exe)!.Running);
+
+            // Then each start ends before the agent worked. A program of the user clears the counts in the update state
+            // every time, which changes nothing.
+            var failed = new List<int>();
+            var decisions = new List<AgentStartDecision>();
+            for (var start = 0; start < 4; start++)
+            {
+                WriteState(new UpdateState { Pending = Fresh });
+                var (decision, pending) = Start(exe);
+                decisions.Add(decision);
+                failed.Add(pending!.FailedStarts);
+            }
+            Assert.Equal(new[] { AgentStartDecision.Watch, AgentStartDecision.Watch, AgentStartDecision.Watch, AgentStartDecision.RollBack }, decisions);
+            Assert.Equal(new[] { 0, 1, 2, 3 }, failed);
+            Assert.Equal((3, false), (UpdateGuard.ReadMark(exe)!.FailedStarts, UpdateGuard.ReadMark(exe)!.Running));
+        }
+        finally { Remove(exe); }
+    }
+
+    [Fact]
+    public void AnUpdateStateDeletedWhileTheUpdateIsWatched_CannotUndoTheUpdateLater()
+    {
+        var exe = NewInstall("state-deleted");
+        try
+        {
+            UpdateGuard.MarkPending(exe, "2.11.0", "2.10.0", Now);
+            Assert.Equal(AgentStartDecision.Watch, Start(exe).Decision);
+            // During the watch a program of the user deletes the update state; then the agent answers.
+            File.Delete(StatePath);
+            UpdateGuard.MarkHealthy(exe, "2.11.0");
+
+            // Days later the program writes the update back, with three failed starts.
+            WriteState(new UpdateState { Pending = Fresh with { FailedStarts = 3, Running = true } });
+            Assert.Equal(AgentStartDecision.Nothing, Start(exe, Now.AddDays(3)).Decision);
+            Assert.Null(UpdateGuard.Load().Pending);
+        }
+        finally { Remove(exe); }
+    }
+
+    [Theory]
+    [InlineData("answered", false)]
+    [InlineData("answered", true)]
+    [InlineData("no answer", false)]
+    [InlineData("no answer", true)]
+    [InlineData("next start", true)]
+    public void TheMarkerGoes_WhenTheWatchEnds_WhateverTheUpdateStateSays(string end, bool stateDeleted)
+    {
+        var exe = NewInstall("watch-ends");
+        try
+        {
+            UpdateGuard.MarkPending(exe, "2.11.0", "2.10.0", Now);
+            Assert.Equal(AgentStartDecision.Watch, Start(exe).Decision);
+            if (stateDeleted) File.Delete(StatePath);
+
+            switch (end)
+            {
+                case "answered": UpdateGuard.MarkHealthy(exe, "2.11.0"); break;
+                // It ran for the whole wait without answering a status request: kept, and no longer watched.
+                case "no answer": UpdateGuard.StopWatching(exe, "2.11.0"); break;
+                // The update state has no pending update when the next agent starts.
+                default: Assert.Equal(AgentStartDecision.Nothing, Start(exe).Decision); break;
+            }
+
+            Assert.False(File.Exists(UpdateGuard.PendingMarkerPath(exe)));
+            Assert.Null(UpdateGuard.Load().Pending);
+            Assert.Equal(end == "answered" && !stateDeleted ? "2.11.0" : string.Empty, UpdateGuard.Load().GoodVersion);
+        }
+        finally { Remove(exe); }
+    }
+
+    [Fact]
+    public void AMarkerOfTheFirstForm_CountsAsNoStarts()
+    {
+        var exe = NewInstall("first-form");
+        try
+        {
+            var written = new DateTime(2026, 11, 12, 11, 0, 0, DateTimeKind.Utc);
+            File.SetLastWriteTimeUtc(exe, written);
+            WriteState(new UpdateState { Pending = Fresh with { FailedStarts = 3, Running = true, Starts = 7, InstalledUtc = Now.AddDays(-30) } });
+            // Written by an earlier build of 2.10.0: the version only.
+            File.WriteAllText(UpdateGuard.PendingMarkerPath(exe), "2.11.0");
+            Assert.Equal(new UpdateGuard.UpdateMark { Pending = "2.11.0" }, UpdateGuard.ReadMark(exe));
+
+            var (decision, pending) = Start(exe);
+            Assert.Equal(AgentStartDecision.Watch, decision);
+            Assert.Equal((0, true, 1, written), (pending!.FailedStarts, pending.Running, pending.Starts, pending.InstalledUtc));
+            Assert.Equal(new UpdateGuard.UpdateMark { Pending = "2.11.0", InstalledUtc = written, Starts = 1, Running = true }, UpdateGuard.ReadMark(exe));
+        }
+        finally { Remove(exe); }
+    }
+
+    [Fact]
+    public void TheMarker_IsReadBackAsWritten_AndUnknownLinesAreSkipped()
+    {
+        var mark = new UpdateGuard.UpdateMark { Pending = "2.11.0", InstalledUtc = Now, Starts = 2, FailedStarts = 1, Running = true };
+        Assert.Equal(mark, UpdateGuard.ParseMark(UpdateGuard.MarkText(mark)));
+        Assert.Equal(mark, UpdateGuard.ParseMark(UpdateGuard.MarkText(mark).Replace("\n", "\r\n") + "later=1\n"));
+        Assert.Equal(new UpdateGuard.UpdateMark { Pending = "2.11.0" }, UpdateGuard.ParseMark("2.11.0\nfailed=-1\nstarts=many\nrunning=yes\n"));
+        var undone = new UpdateGuard.UpdateMark { RolledBackFrom = "2.11.0", RolledBackTo = "2.10.0" };
+        Assert.Equal(undone, UpdateGuard.ParseMark(UpdateGuard.MarkText(undone)));
+        Assert.Null(UpdateGuard.ParseMark(string.Empty));
+    }
+
+    [Fact]
+    public void OnlyTheRecordBesideTheExe_StopsTheAutomaticUpdateToAnUndoneVersion()
+    {
+        var exe = NewInstall("rolled-back");
+        try
+        {
+            // Written by hand into the update state: no reason to stop the update.
+            WriteState(new UpdateState { RolledBackFrom = "2.11.0", RolledBackTo = "2.10.0" });
+            Assert.False(UpdateGuard.WasRolledBack(exe, "2.11.0", installedVersion: "2.10.0"));
+
+            UpdateGuard.WriteRollbackMark(exe, "2.11.0", "2.10.0");
+            File.Delete(StatePath);
+            Assert.True(UpdateGuard.WasRolledBack(exe, "2.11.0", installedVersion: "2.10.0"));
+            Assert.False(UpdateGuard.WasRolledBack(exe, "2.12.0", installedVersion: "2.10.0"));
+            // A version that does not write the record (2.9.0) installed the undone version again.
+            Assert.False(UpdateGuard.WasRolledBack(exe, "2.11.0", installedVersion: "2.11.0"));
+            // The record is no pending update, and deleting the marker of one leaves it.
+            Assert.Equal(string.Empty, UpdateGuard.ReadInstallFacts(exe).MarkerVersion);
+            UpdateGuard.DeletePendingMarker(exe);
+            Assert.True(UpdateGuard.WasRolledBack(exe, "2.11.0", installedVersion: "2.10.0"));
+
+            // An update by hand replaces it.
+            UpdateGuard.MarkPending(exe, "2.11.0", "2.10.0", Now);
+            Assert.False(UpdateGuard.WasRolledBack(exe, "2.11.0", installedVersion: "2.10.0"));
+            Assert.Equal("2.11.0", UpdateGuard.ReadInstallFacts(exe).MarkerVersion);
+        }
+        finally { Remove(exe); }
     }
 }

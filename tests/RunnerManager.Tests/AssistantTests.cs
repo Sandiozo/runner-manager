@@ -572,7 +572,7 @@ public class AssistantTests
     // ----- Over stdio, with the built program -----
 
     /// <summary>A real MCP session over stdio with the built program, the way AI tools start it. It forwards to the agent.</summary>
-    [Fact]
+    [ChildProcessFact]
     public async Task StdioServer_ForwardsAnMcpSessionToTheAgent()
     {
         using var switches = new TestSwitches(enabled: true);
@@ -603,7 +603,7 @@ public class AssistantTests
         }
     }
 
-    [Fact]
+    [ChildProcessFact]
     public async Task StdioServer_ExplainsWhenTheAgentIsNotRunning()
     {
         var responses = await RunStdioAsync($"http://localhost:{TestPorts.FreeRange(1)}/mcp",
@@ -615,7 +615,7 @@ public class AssistantTests
         Assert.Contains("fleet agent is not running", responses[2]["result"]!["content"]![0]!["text"]!.GetValue<string>());
     }
 
-    [Fact]
+    [ChildProcessFact]
     public async Task StdioServer_PassesProgressOnWhileAToolRuns()
     {
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -646,7 +646,7 @@ public class AssistantTests
         Assert.False(result["result"]!["isError"]!.GetValue<bool>());
     }
 
-    [Fact]
+    [ChildProcessFact]
     public async Task StdioServer_CancellingACallClosesItsApproval()
     {
         var shown = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -721,8 +721,7 @@ public class AssistantTests
 
     private static AssistantHttpServer StartEndpoint(out string url, Func<McpServer>? newServer = null)
     {
-        var port = TestPorts.FreeRange(1);
-        var server = new AssistantHttpServer(port, "localhost", newServer);
+        var server = FreePorts.AssistantEndpoint(out var port, newServer);
         _ = server.RunAsync();
         url = $"http://localhost:{port}/mcp";
         return server;

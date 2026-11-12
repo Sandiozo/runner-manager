@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.IO;
 using System.Windows;
 using System.Windows.Input;
@@ -131,7 +130,6 @@ public partial class LogViewerWindow : Window
 
     private void Folder_Click(object sender, RoutedEventArgs e)
     {
-        if (_folder != null && Directory.Exists(_folder))
-            Process.Start(new ProcessStartInfo("explorer.exe", $"\"{_folder}\"") { UseShellExecute = true });
+        if (_folder != null && WindowsTools.OpenFolder(_folder) is { } problem) DialogWindow.Error(this, "Could not open the folder", problem);
     }
 }

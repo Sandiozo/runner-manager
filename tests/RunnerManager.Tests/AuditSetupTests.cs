@@ -150,28 +150,30 @@ public class AuditSetupTests
             var marker = Path.Combine(root, "ran.txt").Replace("'", "''");
             var write = $"Set-Content -LiteralPath '{marker}' -Value ran";
             // The Settings → Apps entry points elsewhere (or there is none): the script runs.
-            RunPowerShell(Installer.UnlessInstalledIn(Path.Combine(root, "RunnerManager"), write));
+            RunPowerShell(Installer.UnlessInstalledIn(write), Installer.FolderEnvironment(Path.Combine(root, "RunnerManager")));
             Assert.True(File.Exists(Path.Combine(root, "ran.txt")));
             File.Delete(Path.Combine(root, "ran.txt"));
 
             // Only read, never written: the entry of the Runner Manager installed on this PC, if any.
             if (Installer.RegisteredInstallDir() is { } installed)
             {
-                RunPowerShell(Installer.UnlessInstalledIn(installed + Path.DirectorySeparatorChar, write));
+                RunPowerShell(Installer.UnlessInstalledIn(write), new Dictionary<string, string> { [Installer.FolderVariable] = installed + Path.DirectorySeparatorChar });
                 Assert.False(File.Exists(Path.Combine(root, "ran.txt")));
             }
         }
         finally { Directory.Delete(root, recursive: true); }
     }
 
-    private static void RunPowerShell(string script)
+    private static void RunPowerShell(string script, IReadOnlyDictionary<string, string>? environment = null)
     {
-        using var process = Process.Start(new ProcessStartInfo("powershell.exe")
+        var start = new ProcessStartInfo(AppUpdater.PowerShellExe)
         {
             ArgumentList = { "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script },
             UseShellExecute = false,
             CreateNoWindow = true
-        })!;
+        };
+        foreach (var (name, value) in environment ?? new Dictionary<string, string>()) start.Environment[name] = value;
+        using var process = Process.Start(start)!;
         Assert.True(process.WaitForExit(30_000), "The script did not finish within 30 seconds.");
     }
 

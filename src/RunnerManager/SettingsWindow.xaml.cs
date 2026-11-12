@@ -50,7 +50,7 @@ public partial class SettingsWindow : Window
         NavVersionText.Text = $"Runner Manager {AppUpdater.CurrentVersion}";
         VersionRow.Title = $"Runner Manager {AppUpdater.CurrentVersion}";
         DataRow.Description = FleetConfig.StateDir;
-        ProgramRow.Description = $"{AppUpdater.InstallDir}. To move it, run the setup again and choose another folder.";
+        ProgramRow.Description = ProgramDescription(unsafeFolder: false);
         UpdateRunnerFolder();
         UpdateKeyStatus();
         RefreshPeers();
@@ -62,9 +62,26 @@ public partial class SettingsWindow : Window
         StartupToggle.IsEnabled = false;
         Loaded += async (_, _) =>
         {
-            await Task.WhenAll(ReadStartupTaskAsync(), ReadAgentStateAsync(), CheckAddressesAsync(again: false));
+            await Task.WhenAll(ReadStartupTaskAsync(), ReadAgentStateAsync(), CheckAddressesAsync(again: false), ShowInstallNotesAsync());
             await CheckForUpdatesAsync(force: false);
         };
+    }
+
+    /// <summary>
+    /// The install folder in Settings → Updates, with what the user should know about it: that programs without
+    /// administrator rights can change it (<paramref name="unsafeFolder"/>), and that this PC runs without the start helper.
+    /// </summary>
+    private static string ProgramDescription(bool unsafeFolder)
+    {
+        var text = $"{AppUpdater.InstallDir}. " + (unsafeFolder ? InstallFolderSafety.UnsafeNoteText : "To move it, run the setup again, click Change… and choose another folder.");
+        return InstallFolderSafety.RunsWithoutStartHelper ? $"{text} {InstallFolderSafety.WithoutStartHelperNoteText}" : text;
+    }
+
+    /// <summary>Adds the notes about the install folder once its rights are read (in the background, see <see cref="InstallFolderSafety.CurrentAsync"/>).</summary>
+    private async Task ShowInstallNotesAsync()
+    {
+        try { ProgramRow.Description = ProgramDescription(unsafeFolder: await InstallFolderSafety.CurrentAsync() != null); }
+        catch (Exception ex) { MachineRelay.AppendAgentLog($"Could not read the rights of the install folder: {ex.Message}"); }
     }
 
     /// <summary>A fleet code alone does not join a fleet: the fleet agent is what other PCs reach, and it runs auto-recovery.</summary>
@@ -91,7 +108,8 @@ public partial class SettingsWindow : Window
     {
         try
         {
-            StartupToggle.IsChecked = await ScheduledTasks.ExistsAsync(ScheduledTasks.DashboardTaskName);
+            // Only Runner Manager's own task counts: one under its name that another program created does not start it.
+            StartupToggle.IsChecked = await ScheduledTasks.IsOwnElevatedTaskAsync(ScheduledTasks.DashboardTaskName) == true;
             StartupRow.Description = StartupDescription;
         }
         catch (Exception ex)
@@ -188,7 +206,7 @@ public partial class SettingsWindow : Window
             if (StartupToggle.IsChecked == true)
                 await Installer.RegisterStartupTaskAsync(AppUpdater.PreferredExe);
             else
-                await ScheduledTasks.DeleteTaskAsync(ScheduledTasks.DashboardTaskName);
+                await ScheduledTasks.DeleteOwnTaskAsync(ScheduledTasks.DashboardTaskName);
         }
         catch (Exception ex)
         {
@@ -452,13 +470,13 @@ public partial class SettingsWindow : Window
         RefreshPeers();
         try
         {
-            var answers = await Task.WhenAll(addresses.Select(a => MachineRelay.FetchPeerAsync(null, null, a, null)));
+            var answers = await MachineRelay.ReadAddressesAsync(addresses);
             for (var i = 0; i < addresses.Count; i++)
                 if (answers[i] is { } answer) _addressAnswers[addresses[i]] = answer;
         }
         catch (Exception)
         {
-            // The status stays as the last fleet refresh found it.
+            // The status stays as the last fleet refresh found it. This is also so while this PC joins or leaves the fleet.
         }
         finally
         {
@@ -629,7 +647,8 @@ public partial class SettingsWindow : Window
         {
             var ready = pc.IsOnline && pc.AgentProtocolVersion >= MachineRelay.RekeyProtocolVersion;
             var note = ready ? string.Empty : pc.IsOnline ? "  ·  update Runner Manager on it first" : "  ·  offline";
-            var box = new CheckBox { Content = pc.MachineName + note, IsChecked = ready, IsEnabled = ready, Margin = new Thickness(0, 4, 0, 4) };
+            // In a TextBlock: string content would drop an underscore in the PC's name, read as an access key.
+            var box = new CheckBox { Content = new TextBlock { Text = pc.MachineName + note }, IsChecked = ready, IsEnabled = ready, Margin = new Thickness(0, 4, 0, 4) };
             boxes.Add((box, pc));
             body.Children.Add(box);
         }
@@ -881,7 +900,8 @@ public partial class SettingsWindow : Window
                     : AppUpdater.IsRunningInstalledCopy
                         ? "Up to date."
                         : $"Running from a build folder. Install v{_release.Version} to run from a fixed location.";
-            InstallUpdateButton.Content = available ? $"Install {_release!.Version}" : "Install";
+            // Text made at run time goes in a TextBlock, as everywhere: string content reads an underscore as an access key.
+            InstallUpdateButton.Content = new TextBlock { Text = available ? $"Install {_release!.Version}" : "Install" };
             InstallUpdateButton.Visibility = installable ? Visibility.Visible : Visibility.Collapsed;
             UpdateDot.Visibility = available && !replacesNewer ? Visibility.Visible : Visibility.Collapsed;
         }
@@ -897,13 +917,17 @@ public partial class SettingsWindow : Window
             DialogWindow.Info(this, "The fleet agent is being updated", "Try again when it is done. Progress is shown in the activity list.");
             return;
         }
-        var restartAgent = false;
-        if (!await RunOperationAsync($"Install Runner Manager {release.Tag}", async log => restartAgent = await AppUpdater.InstallReleaseAsync(release, log)))
+        string? agentExe = null;
+        if (!await RunOperationAsync($"Install Runner Manager {release.Tag}", async log => agentExe = await AppUpdater.InstallReleaseAsync(release, log)))
             return;
-        if (restartAgent)
+        if (agentExe != null)
         {
-            if (Owner is MainWindow main) main.RestartLocalAgentInBackground();
-            else await MachineRelay.RestartLocalAgentAsync();
+            if (Owner is MainWindow main) main.RestartLocalAgentInBackground(agentExe);
+            else
+            {
+                try { await MachineRelay.RestartLocalAgentAsync(switchTo: agentExe); }
+                catch (Exception ex) { DialogWindow.Error(this, "The fleet agent restart did not finish", ex.Message); }
+            }
         }
         if (DialogWindow.Show(this, DialogTone.Question, $"Runner Manager {release.Tag} is installed",
                 "Restart Runner Manager now to use the new version?", "Restart now", cancel: "Later") == "Restart now")
@@ -913,18 +937,19 @@ public partial class SettingsWindow : Window
     private void Releases_Click(object sender, RoutedEventArgs e)
     {
         var url = _release?.HtmlUrl is { Length: > 0 } html ? html : AppUpdater.ReleasesUrl;
-        Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+        // Through Explorer, so the browser does not get Runner Manager's administrator rights.
+        if (WindowsTools.OpenUrl(url) is { } problem) DialogWindow.Error(this, "Could not open the page", problem);
     }
 
     private void OpenProgramFolder_Click(object sender, RoutedEventArgs e)
     {
-        if (Directory.Exists(AppUpdater.InstallDir)) Process.Start(new ProcessStartInfo(AppUpdater.InstallDir) { UseShellExecute = true });
+        if (WindowsTools.OpenFolder(AppUpdater.InstallDir) is { } problem) DialogWindow.Error(this, "Could not open the folder", problem);
     }
 
     private void OpenDataFolder_Click(object sender, RoutedEventArgs e)
     {
         Directory.CreateDirectory(FleetConfig.StateDir);
-        Process.Start(new ProcessStartInfo(FleetConfig.StateDir) { UseShellExecute = true });
+        if (WindowsTools.OpenFolder(FleetConfig.StateDir) is { } problem) DialogWindow.Error(this, "Could not open the folder", problem);
     }
 
     private void Uninstall_Click(object sender, RoutedEventArgs e)
@@ -932,9 +957,10 @@ public partial class SettingsWindow : Window
         // Asked here, so cancelling keeps this dashboard running.
         if (App.AskUninstall(this) is not { } removeData) return;
         if (Owner is MainWindow main && !main.ConfirmExitDuringOperation()) return;
-        var start = new ProcessStartInfo(AppUpdater.PreferredExe) { UseShellExecute = true, ArgumentList = { "--uninstall", App.ConfirmedArgument } };
-        if (removeData) start.ArgumentList.Add(App.RemoveDataArgument);
-        Process.Start(start);
+        // Through the start helper while it is in place beside that exe (see Launcher.StartInfo).
+        var arguments = new List<string> { "--uninstall", App.ConfirmedArgument };
+        if (removeData) arguments.Add(App.RemoveDataArgument);
+        Process.Start(Launcher.StartInfo(AppUpdater.PreferredExe, arguments));
         ((App)Application.Current).ExitApplication();
     }
 }

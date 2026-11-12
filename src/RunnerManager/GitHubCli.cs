@@ -12,12 +12,42 @@ public static class GitHubCli
     /// <summary>Status polls share this gate, so a refresh never starts more than four gh processes at a time.</summary>
     private static readonly SemaphoreSlim PollGate = new(4);
 
+    /// <summary>
+    /// gh by its full path: where its installer puts it, or else the first gh.exe in a folder on PATH. PATH is searched
+    /// here, not by Windows, which looks in the app's folder and the current folder first: those, and folders on PATH
+    /// without a full path, are left out, so a gh.exe put there is not started. When none is found, the usual path is
+    /// returned, and starting it fails as it does when gh is not installed.
+    /// </summary>
     public static string ExecutablePath
     {
         get
         {
-            var installed = @"C:\Program Files\GitHub CLI\gh.exe";
-            return File.Exists(installed) ? installed : "gh.exe";
+            var installed = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "GitHub CLI", "gh.exe");
+            return File.Exists(installed) ? installed
+                : FindOnPath("gh.exe", Environment.GetEnvironmentVariable("PATH"), AppContext.BaseDirectory, Environment.CurrentDirectory) ?? installed;
+        }
+    }
+
+    /// <summary>
+    /// The first <paramref name="file"/> in the folders of <paramref name="path"/> (a PATH value), leaving out the
+    /// <paramref name="leftOut"/> folders and folders without a full path, such as "." or "tools".
+    /// </summary>
+    internal static string? FindOnPath(string file, string? path, params string[] leftOut)
+    {
+        var skipped = leftOut.Select(Folder).OfType<string>().ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (var entry in (path ?? string.Empty).Split(';'))
+        {
+            var folder = entry.Trim().Trim('"');
+            if (!Path.IsPathFullyQualified(folder) || Folder(folder) is not { } full || skipped.Contains(full)) continue;
+            var candidate = Path.Combine(full, file);
+            if (File.Exists(candidate)) return candidate;
+        }
+        return null;
+
+        static string? Folder(string folder)
+        {
+            try { return Path.TrimEndingDirectorySeparator(Path.GetFullPath(folder)); }
+            catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException) { return null; }
         }
     }
 
@@ -199,15 +229,51 @@ public static class GitHubCli
     /// </summary>
     private static void LaunchInConsole(string arguments)
     {
+        using var process = Process.Start(ConsoleStartInfo(ExecutablePath, arguments));
+    }
+
+    /// <summary>
+    /// How <see cref="LaunchInConsole"/> starts <paramref name="gh"/>: in cmd.exe with /d, so the AutoRun commands in the
+    /// registry (which any program of the user can set in HKCU) do not run in the console that Runner Manager opens.
+    /// The console stays open after Runner Manager exits, so its current folder is the system folder: the install folder,
+    /// which Runner Manager starts in, could not be removed or updated while the console is open. gh opens the GitHub
+    /// sign-in page with the command in GH_BROWSER (see <see cref="BrowserForGh"/>): Runner Manager, which gives the page to
+    /// Explorer, so the browser does not get Runner Manager's administrator rights.
+    /// </summary>
+    internal static ProcessStartInfo ConsoleStartInfo(string gh, string arguments)
+    {
         var startInfo = new ProcessStartInfo
         {
-            FileName = "cmd.exe",
-            Arguments = $"/k \"\"{ExecutablePath}\" {arguments}\"",
-            UseShellExecute = false
+            FileName = WindowsTools.FullPath("cmd.exe"),
+            Arguments = $"/d /k \"\"{gh}\" {arguments}\"",
+            UseShellExecute = false,
+            WorkingDirectory = Environment.SystemDirectory
         };
         PrepareEnvironment(startInfo, environmentToken: false);
-        using var process = Process.Start(startInfo);
+        startInfo.Environment["GH_BROWSER"] = BrowserForGh;
+        return startInfo;
     }
+
+    /// <summary>
+    /// The browser command for GH_BROWSER: the running exe with <see cref="App.OpenUrlArgument"/> (see
+    /// <see cref="BrowserFor"/>). gh adds the address of the page as the last argument, runs the command without a shell,
+    /// waits for it, and reports an exit code other than 0 as a failure to open a web browser. The exe gives the address
+    /// to Explorer and exits with 0 when Explorer was started (see <see cref="WindowsTools.OpenUrlExitCode"/>). Explorer is
+    /// not the command itself: explorer.exe exits with 1 also when it opened the page, so gh would report a failure
+    /// although the page is open.
+    /// </summary>
+    internal static string BrowserForGh => BrowserFor(Environment.ProcessPath);
+
+    /// <summary>
+    /// <paramref name="exe"/> with forward slashes and in double quotes, then <see cref="App.OpenUrlArgument"/>. gh splits
+    /// the value as a shell does: double quotes keep a path with spaces in one piece, and no Windows path can contain a
+    /// double quote; a backslash escapes the next character, and Windows takes forward slashes in a path as well. Without
+    /// a path, Explorer's full path with forward slashes: the page still opens, but gh reports that it did not.
+    /// </summary>
+    internal static string BrowserFor(string? exe)
+        => string.IsNullOrEmpty(exe)
+            ? WindowsTools.Explorer.Replace('\\', '/')
+            : $"\"{exe.Replace('\\', '/')}\" {App.OpenUrlArgument}";
 
     /// <summary>
     /// The app only supports github.com, so GH_HOST (which sends gh api calls to another host) is always cleared. The
@@ -303,6 +369,7 @@ public static class GitHubCli
     private static async Task<RemoteRunnerState?> PollRunnerAsync(string scope, long agentId)
     {
         var endpoint = $"{scope}/actions/runners/{GitHubNames.Id(agentId)}";
+        var sentIn = GitHubFailures.Generation;
         var response = await GetConditionalAsync(endpoint, null);
         if (!response.Ok) return null;
         try
@@ -313,7 +380,7 @@ public static class GitHubCli
         catch
         {
             // Paused like a failed poll, so it is not asked again at every refresh.
-            GitHubFailures.Unreadable(endpoint);
+            GitHubFailures.Unreadable(endpoint, sentIn);
             return null;
         }
     }
@@ -344,6 +411,7 @@ public static class GitHubCli
         (string ETag, RunnerList List)? previous;
         lock (RunnerListLock) previous = RunnerListETags.TryGetValue(scope, out var entry) ? entry : null;
         var endpoint = $"{scope}/actions/runners?per_page=100";
+        var sentIn = GitHubFailures.Generation;
         var response = await GetConditionalAsync(endpoint, previous?.ETag);
         if (response.NotModified && previous != null) return previous.Value.List;
         if (!response.Ok) return null;
@@ -356,7 +424,7 @@ public static class GitHubCli
         }
         catch
         {
-            GitHubFailures.Unreadable(endpoint);
+            GitHubFailures.Unreadable(endpoint, sentIn);
             return null;
         }
     }

@@ -59,6 +59,17 @@ jobs:
           $changelog = Get-Content CHANGELOG.md -Raw
           if ($changelog -notmatch "(?m)^## $([regex]::Escape($env:VERSION))\s*$") { throw "CHANGELOG.md has no '## $env:VERSION' section." }
 
+      # The start helper (RunnerManagerLauncher.exe) is built first, without -IfToolsPresent: a runner without the C++
+      # tools fails here, and both publishes below require it (RequireLauncher), so no release goes out without it.
+      - name: Build the start helper
+        shell: pwsh
+        run: |
+          & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File src/RunnerManagerLauncher/build.ps1 -Force
+          if ($LASTEXITCODE -ne 0) { throw "The start helper could not be built (exit code $LASTEXITCODE)." }
+          $helper = 'src/RunnerManagerLauncher/bin/RunnerManagerLauncher.exe'
+          if (-not (Test-Path -LiteralPath $helper)) { throw "$helper is missing after the build." }
+          Write-Host "RunnerManagerLauncher.exe SHA-256: $((Get-FileHash $helper -Algorithm SHA256).Hash.ToLowerInvariant())"
+
       - name: Test
         run: dotnet test tests/RunnerManager.Tests -c Release
 
@@ -68,7 +79,7 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: >
           dotnet publish src/RunnerManager/RunnerManager.csproj -c Release -r win-x64 -p:SelfContained=false
-          -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
+          -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:RequireLauncher=true
           -p:Version=$env:VERSION -o publish
 
       # Not compressed: antivirus scanners treat a compressed bundle that unpacks itself like a packed dropper, so
@@ -78,7 +89,7 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: >
           dotnet publish src/RunnerManager/RunnerManager.csproj -c Release -r win-x64 -p:SelfContained=true
-          -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true
+          -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:RequireLauncher=true
           -p:Version=$env:VERSION -o publish-standalone
 
       - name: Smoke-test both exes
@@ -93,6 +104,40 @@ jobs:
             # Installed copies compare their own version with the release's tag.
             $built = (Get-Item $exe).VersionInfo.ProductVersion
             if ($built -ne $env:VERSION) { throw "$exe reports version '$built', not '$env:VERSION'." }
+          }
+
+      - name: Smoke-test the start helper with both exes
+        shell: pwsh
+        run: |
+          # The start helper starts the RunnerManager.exe beside it with a clean environment. Started with variables that
+          # would send .NET to a missing runtime or load a profiler, it must probe exactly as the exe does on its own.
+          function Probe([string]$exe, [hashtable]$environment) {
+            $start = [System.Diagnostics.ProcessStartInfo]::new($exe)
+            $start.ArgumentList.Add('--probe')
+            $start.UseShellExecute = $false
+            $start.RedirectStandardOutput = $true
+            $start.RedirectStandardError = $true
+            foreach ($name in $environment.Keys) { $start.Environment[$name] = $environment[$name] }
+            $process = [System.Diagnostics.Process]::Start($start)
+            $out = $process.StandardOutput.ReadToEndAsync()
+            $err = $process.StandardError.ReadToEndAsync()
+            if (-not $process.WaitForExit(120000)) { $process.Kill($true); throw "$exe --probe did not finish in time." }
+            $process.WaitForExit()
+            [pscustomobject]@{ Code = $process.ExitCode; Output = ($out.Result + $err.Result).Trim() }
+          }
+          $broken = @{ DOTNET_ROOT = (Join-Path $env:RUNNER_TEMP 'no-dotnet-here'); CORECLR_ENABLE_PROFILING = '1' }
+          foreach ($variant in 'publish', 'publish-standalone') {
+            $folder = Join-Path $env:RUNNER_TEMP "start-helper-$variant"
+            New-Item -ItemType Directory -Force $folder | Out-Null
+            Copy-Item "$variant/RunnerManager.exe" $folder
+            Copy-Item src/RunnerManagerLauncher/bin/RunnerManagerLauncher.exe $folder
+            $direct = Probe (Join-Path $folder 'RunnerManager.exe') @{}
+            if ($direct.Code -ne 0) { throw "$variant/RunnerManager.exe --probe exited with code $($direct.Code): $($direct.Output)" }
+            $helper = Probe (Join-Path $folder 'RunnerManagerLauncher.exe') $broken
+            if ($helper.Code -ne $direct.Code -or $helper.Output -ne $direct.Output) {
+              throw "Through the start helper, $variant --probe exited with code $($helper.Code) ('$($helper.Output)'), not as the exe on its own ($($direct.Code), '$($direct.Output)')."
+            }
+            Write-Host "$variant`: the start helper probes as the exe does (exit code $($helper.Code))."
           }
 
       - name: Create GitHub release
@@ -142,7 +187,12 @@ jobs:
             "- RunnerManagerSetup-standalone.exe: ``$(Hash publish/RunnerManagerSetup-standalone.exe)``",
             "- RunnerManagerSetup.exe and RunnerManager.exe: ``$(Hash publish/RunnerManager.exe)``"
           ) -join "`n"
+          # The notes go through a file, not the command line: they hold quotes and line breaks, which passing them as an
+          # argument can change, and a long section could pass the length a command line may have. UTF-8 without a BOM,
+          # so the notes do not start with one.
+          $notesFile = Join-Path $env:RUNNER_TEMP 'release-notes.md'
+          [System.IO.File]::WriteAllText($notesFile, $notes, [System.Text.UTF8Encoding]::new($false))
           $flags = @("--latest=$(if ($latest) { 'true' } else { 'false' })")
           if ($env:PRERELEASE -eq 'true') { $flags += '--prerelease' }
           gh release create $tag publish/RunnerManagerSetup-standalone.exe publish/RunnerManagerSetup.exe publish/RunnerManager.exe `
-            --title "Runner Manager $tag" --notes $notes --target $env:GITHUB_SHA @flags
+            --title "Runner Manager $tag" --notes-file $notesFile --target $env:GITHUB_SHA @flags

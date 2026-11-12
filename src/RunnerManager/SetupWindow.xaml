@@ -54,16 +54,19 @@
                 <TextBlock Style="{StaticResource OptionText}" FontSize="12.5" Margin="0,6,0,18"
                            Text="Runner Manager monitors your GitHub self-hosted runners. Start and stop runners, view their jobs, repair and clean them, and get notifications when a problem occurs."/>
                 <TextBlock Text="Install to" FontWeight="SemiBold" FontSize="12"/>
-                <DockPanel Margin="0,6,0,18">
-                    <Button DockPanel.Dock="Right" Content="Change…" Margin="8,0,0,0" Click="ChangeInstallFolder_Click"/>
-                    <Button x:Name="DefaultInstallFolderButton" DockPanel.Dock="Right" Content="Default" Style="{StaticResource GhostButton}"
-                            Margin="8,0,0,0" Visibility="Collapsed" Click="DefaultInstallFolder_Click"/>
-                    <Border Background="{DynamicResource Bg0Brush}" BorderBrush="{DynamicResource BorderSubtleBrush}" BorderThickness="1"
-                            CornerRadius="6" Padding="10,7">
-                        <TextBlock x:Name="InstallPathText" FontFamily="{StaticResource MonoFont}" FontSize="11.5" TextTrimming="CharacterEllipsis"
-                                   ToolTip="{Binding Text, RelativeSource={RelativeSource Self}}"/>
-                    </Border>
-                </DockPanel>
+                <StackPanel Margin="0,6,0,18">
+                    <DockPanel>
+                        <Button DockPanel.Dock="Right" Content="Change…" Margin="8,0,0,0" Click="ChangeInstallFolder_Click"/>
+                        <Button x:Name="DefaultInstallFolderButton" DockPanel.Dock="Right" Content="Default" Style="{StaticResource GhostButton}"
+                                Margin="8,0,0,0" Visibility="Collapsed" Click="DefaultInstallFolder_Click"/>
+                        <Border Background="{DynamicResource Bg0Brush}" BorderBrush="{DynamicResource BorderSubtleBrush}" BorderThickness="1"
+                                CornerRadius="6" Padding="10,7">
+                            <TextBlock x:Name="InstallPathText" FontFamily="{StaticResource MonoFont}" FontSize="11.5" TextTrimming="CharacterEllipsis"
+                                       ToolTip="{Binding Text, RelativeSource={RelativeSource Self}}"/>
+                        </Border>
+                    </DockPanel>
+                    <TextBlock x:Name="FolderNoteText" Style="{StaticResource OptionText}" Margin="0,6,0,0" Visibility="Collapsed"/>
+                </StackPanel>
                 <CheckBox x:Name="DesktopShortcutToggle" Style="{StaticResource ToggleSwitch}" Margin="0,4" AutomationProperties.Name="Desktop shortcut">
                     <TextBlock Text="Desktop shortcut"/>
                 </CheckBox>
@@ -139,7 +142,7 @@
                 <Button x:Name="CancelButton" Content="Cancel" Style="{StaticResource GhostButton}" Click="Cancel_Click" MinWidth="80" IsCancel="True"/>
                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
                     <Button x:Name="BackButton" Content="Back" Style="{StaticResource GhostButton}" Click="Back_Click" MinWidth="80" Visibility="Collapsed"/>
-                    <Button x:Name="NextButton" Content="Next" Style="{StaticResource PrimaryButton}" Click="Next_Click" MinWidth="110" Margin="8,0,0,0" IsDefault="True"/>
+                    <Button x:Name="NextButton" Content="Next" Style="{StaticResource PrimaryButton}" Click="Next_Click" MinWidth="110" Margin="8,0,0,0" Padding="11,6" IsDefault="True"/>
                 </StackPanel>
             </DockPanel>
         </Border>

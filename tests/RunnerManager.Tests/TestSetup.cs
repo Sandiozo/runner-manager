@@ -10,14 +10,186 @@ internal static class TestSetup
 
     /// <summary>
     /// Keeps tests away from the real settings in %LOCALAPPDATA%\RunnerManager, and from the real AI assistant switches
-    /// in HKLM\SOFTWARE\RunnerManager. Runner Manager itself always keeps the switches in the registry: only code sets
-    /// another store, never the environment.
+    /// and install records in HKLM\SOFTWARE\RunnerManager. Runner Manager itself always keeps them in the registry: only
+    /// code sets another store, never the environment.
     /// </summary>
     [ModuleInitializer]
     internal static void UseTemporaryStateDir()
     {
-        Environment.SetEnvironmentVariable("RUNNER_MANAGER_STATE_DIR", StateDir);
+        // In code first: a process with administrator rights (the tests on GitHub's runners) ignores the variable. The
+        // variable stays for the copies of RunnerManager.exe that tests start.
+        AppPaths.TestStateDir = StateDir;
+        Environment.SetEnvironmentVariable(AppPaths.StateDirVariable, StateDir);
+        // The start helper is never written by a test unless the test gives its own bytes and folder, never under the
+        // update lock that the installed Runner Manager on this PC uses, and is checked again right away.
+        Launcher.Embedded = () => null;
+        Launcher.MayBeInPlace = folder => folder.StartsWith(Path.GetTempPath(), StringComparison.OrdinalIgnoreCase);
+        Launcher.UnderUpdateLock = (_, write) => write();
+        Launcher.Settle = () => Task.CompletedTask;
+        // A test's own install folders stand for the installed one, the test process decides about the start helper there
+        // as the installed build does (only there: see Launcher.MayBeInPlace), and a start helper there counts as seen to
+        // work. A test that checks those passes its own.
+        Launcher.IsInstalledExe = exe => exe.StartsWith(Path.GetTempPath(), StringComparison.OrdinalIgnoreCase);
+        Launcher.Decides = () => true;
+        Launcher.IsProven = _ => true;
+        Launcher.RunProbe = _ => null;
+        Launcher.ProbePause = () => Task.CompletedTask;
+        // No update waits to prove itself, whatever the data folder of an earlier test says.
+        MachineRelay.UpdateWatched = () => false;
         AssistantSwitches.Store = new FileSwitchStore(Path.Combine(StateDir, "assistant-switches.json"));
+        MachineInstall.Records = new MemoryInstallRecords();
+        var tasks = new MemoryTasks();
+        MachineInstall.Tasks = tasks;
+        ScheduledTasks.Scheduler = tasks;
+        MachineInstall.HasProfile = _ => true;
+    }
+}
+
+/// <summary>
+/// Scheduled tasks in memory, in place of Task Scheduler: what Runner Manager reads, and what it runs schtasks.exe for
+/// (registering, deleting, starting and ending tasks), which is recorded in <see cref="Calls"/>. Only in the tests.
+/// </summary>
+internal sealed class MemoryTasks : ITaskReader, ITaskScheduler
+{
+    /// <summary>The tasks by name. A null definition stands for a task that exists but cannot be read.</summary>
+    public Dictionary<string, string?> Definitions { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>False stands for a list of tasks that cannot be read.</summary>
+    public bool NamesReadable { get; set; } = true;
+
+    /// <summary>The tasks that run now.</summary>
+    public HashSet<string> Running { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>What was done to the tasks, in order: "Create …", "Delete …", "Run …" or "End …" and the task's name. Reads are not recorded.</summary>
+    public List<string> Calls { get; } = new();
+
+    public IReadOnlyList<string>? Names() => NamesReadable ? Definitions.Keys.ToList() : null;
+
+    public Task<string?> ReadAsync(string name) => Task.FromResult(Definitions.TryGetValue(name, out var xml) ? xml : string.Empty);
+
+    private static readonly System.Text.RegularExpressions.Regex Arguments =
+        new("^/(?<verb>Query|Create|Delete|Run|End)(?: /F)? /TN \"(?<name>[^\"]*)\"(?<xml> /XML(?: \"(?<path>[^\"]*)\")?)?$");
+
+    public Task<(int ExitCode, string Output)> SchtasksAsync(string arguments)
+    {
+        var match = Arguments.Match(arguments);
+        if (!match.Success) throw new InvalidOperationException($"The test scheduler does not know: schtasks {arguments}");
+        var name = match.Groups["name"].Value;
+        var exists = Definitions.TryGetValue(name, out var xml);
+        (int, string) Missing() => (1, $"ERROR: The system cannot find the file specified. ({name})");
+        lock (Calls)
+        {
+            switch (match.Groups["verb"].Value)
+            {
+                case "Query":
+                    if (!exists) return Task.FromResult(Missing());
+                    if (!match.Groups["xml"].Success) return Task.FromResult((0, name));
+                    return Task.FromResult(xml == null ? (1, "ERROR: Access is denied.") : (0, xml));
+                case "Create":
+                    Definitions[name] = File.ReadAllText(match.Groups["path"].Value);
+                    Unindexed.Remove(name);
+                    Calls.Add($"Create {name}");
+                    return Task.FromResult((0, $"SUCCESS: The scheduled task \"{name}\" has successfully been created."));
+                case "Delete":
+                    Calls.Add($"Delete {name}");
+                    Running.Remove(name);
+                    return Task.FromResult(Definitions.Remove(name) ? (0, "SUCCESS") : Missing());
+                case "Run":
+                    Calls.Add($"Run {name}");
+                    if (!exists) return Task.FromResult(Missing());
+                    Running.Add(name);
+                    return Task.FromResult((0, "SUCCESS"));
+                default:
+                    Calls.Add($"End {name}");
+                    Running.Remove(name);
+                    return Task.FromResult(exists ? (0, "SUCCESS") : Missing());
+            }
+        }
+    }
+
+    /// <summary>Tasks that exist but are missing from Task Scheduler's index, so they cannot run.</summary>
+    public HashSet<string> Unindexed { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    public bool? IsIndexed(string name) => !Definitions.ContainsKey(name) ? null : !Unindexed.Contains(name);
+
+    public bool? IsRegistered(string name) => NamesReadable ? Definitions.ContainsKey(name) : null;
+
+    public Task<bool?> IsRunningAsync(string name) => Task.FromResult<bool?>(Running.Contains(name));
+
+    public Task<IDisposable> LockAsync() => Task.FromResult<IDisposable>(new NoLock());
+
+    private sealed class NoLock : IDisposable
+    {
+        public void Dispose() { }
+    }
+}
+
+/// <summary>
+/// Gives a test install records and scheduled tasks of its own, in memory, and puts back the ones before it when
+/// disposed. For tests in <see cref="InstallStateCollection"/>, which run one at a time.
+/// </summary>
+internal sealed class TestInstallState : IDisposable
+{
+    private readonly IInstallRecordStore _records = MachineInstall.Records;
+    private readonly ITaskReader _tasks = MachineInstall.Tasks;
+    private readonly ITaskScheduler _scheduler = ScheduledTasks.Scheduler;
+    private readonly Func<string, bool> _hasProfile = MachineInstall.HasProfile;
+
+    public TestInstallState()
+    {
+        MachineInstall.Records = Records;
+        MachineInstall.Tasks = Tasks;
+        ScheduledTasks.Scheduler = Tasks;
+        MachineInstall.HasProfile = sid => !WithoutProfile.Contains(sid);
+        MachineInstall.Forget();
+        MachineRelay.ForgetAgentInstalled();
+        AgentOwnership.Forget();
+        ScheduledTasks.ForgetLogged();
+    }
+
+    public MemoryInstallRecords Records { get; } = new();
+
+    public MemoryTasks Tasks { get; } = new();
+
+    /// <summary>The SIDs of Windows users who have no profile on this PC (their account was removed).</summary>
+    public HashSet<string> WithoutProfile { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+    public void Dispose()
+    {
+        MachineInstall.Records = _records;
+        MachineInstall.Tasks = _tasks;
+        ScheduledTasks.Scheduler = _scheduler;
+        MachineInstall.HasProfile = _hasProfile;
+        MachineInstall.Forget();
+        MachineRelay.ForgetAgentInstalled();
+        AgentOwnership.Forget();
+    }
+}
+
+/// <summary>The install records and scheduled tasks are process-wide, so tests that set their own run on their own.</summary>
+[CollectionDefinition(Name, DisableParallelization = true)]
+public class InstallStateCollection
+{
+    public const string Name = "Install state";
+}
+
+/// <summary>Install records in memory, in place of HKLM\SOFTWARE\RunnerManager\Installs. Only in the tests.</summary>
+internal sealed class MemoryInstallRecords : IInstallRecordStore
+{
+    private readonly List<InstallRecord> _records = new();
+
+    public IReadOnlyList<InstallRecord> ReadAll()
+    {
+        lock (_records) return _records.ToList();
+    }
+
+    public void Write(string sid, string? folder)
+    {
+        lock (_records)
+        {
+            _records.RemoveAll(r => r.Sid.Equals(sid, StringComparison.OrdinalIgnoreCase));
+            if (folder != null) _records.Add(new InstallRecord(sid, folder));
+        }
     }
 }
 
@@ -70,12 +242,33 @@ internal sealed class TestSwitches : IDisposable
     }
 }
 
-/// <summary>
-/// Starts a listener on ports that <see cref="TestPorts.FreeRange"/> found free. It finds them first and the listener
-/// takes them after, so a test running at the same time may take one in between; other ports are then tried.
-/// </summary>
+/// <summary>Starts test listeners on free ports.</summary>
 internal static class FreePorts
 {
+    /// <summary>
+    /// Starts a pairing host with port 0 for both its ports: the system picks free ports as the host binds them, so a
+    /// test running at the same time cannot take one in between. <paramref name="port"/> is the pairing port it got.
+    /// </summary>
+    /// <param name="create">Makes the host from a pairing port and an announce port (both 0).</param>
+    public static Pairing.PairingHost Host(Func<int, int, Pairing.PairingHost> create, out int port)
+    {
+        var host = create(0, 0);
+        try { host.Start(); }
+        catch
+        {
+            host.Dispose();
+            throw;
+        }
+        port = host.Port;
+        return host;
+    }
+
+    /// <summary>
+    /// Starts a listener on ports that <see cref="TestPorts.FreeRange"/> found free. It finds them first and the listener
+    /// takes them after, so a test running at the same time may take one in between; other ports are then tried.
+    /// Only for the fleet agent's server: it listens with HttpListener, whose address names its port, and HttpListener
+    /// cannot be given port 0 to pick one. Everything that can bind port 0 does so instead (see <see cref="Host"/>).
+    /// </summary>
     public static T Listen<T>(int count, Func<int, T> create, Action<T> start) where T : IDisposable
     {
         for (var attempt = 1; ; attempt++)
@@ -92,4 +285,61 @@ internal static class FreePorts
             }
         }
     }
+
+    /// <summary>
+    /// Starts an AI assistant endpoint on localhost through <see cref="Listen"/>. Its own start only logs a port that it
+    /// could not get and tries again 30 seconds later, so a port that another test took in between is seen here and
+    /// another port is tried. Throws when the endpoint does not listen after the last try.
+    /// </summary>
+    public static AssistantHttpServer AssistantEndpoint(out int port, Func<McpServer>? newServer = null)
+    {
+        var chosen = 0;
+        var server = Listen(1, free => new AssistantHttpServer(chosen = free, "localhost", newServer), endpoint =>
+        {
+            endpoint.Start();
+            if (!endpoint.IsListening)
+                throw new System.Net.HttpListenerException(32, $"The AI assistant endpoint could not listen on port {chosen}.");
+        });
+        port = chosen;
+        return server;
+    }
+}
+
+/// <summary>The logs that tests read while Runner Manager may write them.</summary>
+internal static class TestLogs
+{
+    /// <summary>
+    /// The fleet agent's log, or empty without one. It is opened so that a test or the code under test can still write
+    /// it meanwhile, and rotate it.
+    /// </summary>
+    public static string AgentLog()
+    {
+        try
+        {
+            using var stream = new FileStream(MachineRelay.AgentLogPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            using var reader = new StreamReader(stream);
+            return reader.ReadToEnd();
+        }
+        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException) { return string.Empty; }
+    }
+}
+
+/// <summary>
+/// A test that starts a copy of the built RunnerManager.exe. With administrator rights that copy ignores
+/// RUNNER_MANAGER_STATE_DIR, as Runner Manager does, and would use the real data folder of the user who runs the tests.
+/// So the test runs only without administrator rights, or on a runner that GitHub hosts, which is new for each job;
+/// otherwise it is skipped, with the reason.
+/// </summary>
+public sealed class ChildProcessFactAttribute : FactAttribute
+{
+    public ChildProcessFactAttribute()
+    {
+        if (Problem is { } problem) Skip = problem;
+    }
+
+    internal static string? Problem
+        => Elevation.IsElevated && Environment.GetEnvironmentVariable("RUNNER_ENVIRONMENT") != "github-hosted"
+            ? "This test starts RunnerManager.exe, which with administrator rights would use the real data folder of this user. " +
+              "Run the tests without administrator rights to run it."
+            : null;
 }

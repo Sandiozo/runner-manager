@@ -127,6 +127,9 @@ public sealed class AssistantHttpServer : IDisposable
         Stop();
     }
 
+    /// <summary>Whether <see cref="Start"/> got the port, so tests can try another port when it did not.</summary>
+    internal bool IsListening => _http != null;
+
     /// <summary>Tries to listen. A failure is logged once until it changes or ends, however often this is tried again.</summary>
     internal void Start()
     {

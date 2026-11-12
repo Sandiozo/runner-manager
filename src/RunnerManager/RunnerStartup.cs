@@ -47,7 +47,7 @@ public static partial class RunnerService
 
     internal static async Task SetServiceStartModeAsync(string serviceName, string mode)
     {
-        var (code, output) = await ScheduledTasks.RunAsync("sc.exe",
+        var (code, output) = await ScheduledTasks.RunAsync(WindowsTools.FullPath("sc.exe"),
             $"config \"{serviceName.Replace("\"", "")}\" start= {mode}", ScheduledTasks.ShortTimeout);
         if (code != 0)
             throw new InvalidOperationException($"Could not change how the Windows service {serviceName} starts: {output.Trim()}");
@@ -61,8 +61,7 @@ public static partial class RunnerService
     public static async Task SetStartAutomaticallyAsync(string key, bool start, Action<string> log)
     {
         var runner = await FindRunnerAsync(key) ?? throw new InvalidOperationException("The runner was not found on this PC.");
-        // A runner with a service that runs from a console window starts from its console's startup entries.
-        if (runner.ServiceInstalled && !runner.IsInteractive)
+        if (StartsFromService(runner))
         {
             if (start && runner.MovedAway)
                 throw new InvalidOperationException("This is the old copy of a runner that was moved to another PC. Delete it instead.");
@@ -74,6 +73,13 @@ public static partial class RunnerService
         else await TurnOffConsoleStartupAsync(runner, log);
         ForgetStartupTasks();
     }
+
+    /// <summary>
+    /// Whether the switch sets the runner's service to start with Windows. A runner with a service that runs from a
+    /// console window, or that a startup entry opens in one at sign-in, starts from its console's startup entries, as
+    /// the card shows it ("Start when you sign in"); turning those off is what lets its service be used.
+    /// </summary>
+    internal static bool StartsFromService(RunnerInfo runner) => runner.ServiceInstalled && !runner.IsInteractive && !runner.ConsoleAtSignIn;
 
     private static async Task TurnOnConsoleStartupAsync(RunnerInfo runner, Action<string> log)
     {
@@ -177,7 +183,11 @@ public static partial class RunnerService
     /// in the background at most every five minutes, and right after startup entries were turned off or on. Returns
     /// null when <paramref name="freshTasks"/> is set and the scheduled tasks could not be read.
     /// </summary>
-    private static async Task<List<string>?> ReadStartupEntriesAsync(bool freshTasks = false)
+    /// <param name="waitForTasks">
+    /// Waits for the first reading of the scheduled tasks when there is none yet. Without it, that reading goes on in
+    /// the background and the entries come without scheduled tasks until it is done.
+    /// </param>
+    private static async Task<List<string>?> ReadStartupEntriesAsync(bool freshTasks = false, bool waitForTasks = true)
     {
         var entries = new List<string>();
         foreach (var folder in new[] { Environment.GetFolderPath(Environment.SpecialFolder.Startup), Environment.GetFolderPath(Environment.SpecialFolder.CommonStartup) }
@@ -212,15 +222,23 @@ public static partial class RunnerService
             if (tasks == null) return null;
             entries.AddRange(tasks);
         }
-        else entries.AddRange(await StartupTasksAsync());
+        else entries.AddRange(await StartupTasksAsync(waitForTasks));
         return entries;
     }
+
+    /// <summary>
+    /// The startup entries as they are now, scheduled tasks included, for a decision that must not rest on an old
+    /// reading. When the scheduled tasks cannot be read now, the last reading of them is used.
+    /// </summary>
+    private static async Task<List<string>> ReadStartupEntriesNowAsync()
+        => await ReadStartupEntriesAsync(freshTasks: true) ?? await ReadStartupEntriesAsync() ?? new List<string>();
 
     private static readonly object StartupTasksGate = new();
     private static List<string>? _startupTasks;
     private static DateTime _startupTasksReadUtc = DateTime.MinValue;
     private static string _startupTasksOffState = string.Empty;
-    private static bool _startupTasksReading;
+    /// <summary>The reading of the scheduled tasks that runs now, or null.</summary>
+    private static Task? _startupTasksReading;
 
     private static void ForgetStartupTasks()
     {
@@ -233,7 +251,7 @@ public static partial class RunnerService
         try
         {
             var script = Convert.ToBase64String(Encoding.Unicode.GetBytes(ListTasksScript));
-            var (code, output) = await ScheduledTasks.RunAsync("powershell.exe",
+            var (code, output) = await ScheduledTasks.RunAsync(AppUpdater.PowerShellExe,
                 $"-NoLogo -NoProfile -NonInteractive -EncodedCommand {script}", ScheduledTasks.ShortTimeout);
             return code == 0 ? ParseTaskList(output).Select(t => t.Actions).ToList() : null;
         }
@@ -241,10 +259,12 @@ public static partial class RunnerService
     }
 
     /// <summary>
-    /// The scheduled tasks from the last reading. The first reading is waited for, so a runner started only by a task
-    /// isn't shown as one without a service; later ones run in the background when the reading is old.
+    /// The scheduled tasks from the last reading; later readings run in the background when the reading is old. With
+    /// <paramref name="waitForFirst"/>, the first reading is waited for (also one that another caller started), so a
+    /// runner started only by a task is not shown as one without a service. Without it, the first reading runs in the
+    /// background, and its tasks come with a later call.
     /// </summary>
-    private static async Task<List<string>> StartupTasksAsync()
+    private static async Task<List<string>> StartupTasksAsync(bool waitForFirst = true)
     {
         // Another process (the dashboard or the fleet agent) may have turned startup entries off or on: read again then.
         var offState = StartupOffState();
@@ -252,10 +272,10 @@ public static partial class RunnerService
         lock (StartupTasksGate)
         {
             var stale = DateTime.UtcNow - _startupTasksReadUtc > TimeSpan.FromMinutes(5) || offState != _startupTasksOffState;
-            if (stale && !_startupTasksReading)
+            if (stale && _startupTasksReading == null)
             {
-                _startupTasksReading = true;
-                var reading = Task.Run(async () =>
+                // The task sets the field back under the same lock, so it cannot do that before it is set here.
+                _startupTasksReading = Task.Run(async () =>
                 {
                     var tasks = await ReadEnabledTaskActionsAsync();
                     lock (StartupTasksGate)
@@ -263,11 +283,11 @@ public static partial class RunnerService
                         if (tasks != null) _startupTasks = tasks;
                         _startupTasksReadUtc = DateTime.UtcNow;
                         _startupTasksOffState = offState;
-                        _startupTasksReading = false;
+                        _startupTasksReading = null;
                     }
                 });
-                if (_startupTasks == null) first = reading;
             }
+            if (_startupTasks == null && waitForFirst) first = _startupTasksReading;
         }
         if (first != null) await first;
         lock (StartupTasksGate) return _startupTasks ?? new List<string>();
