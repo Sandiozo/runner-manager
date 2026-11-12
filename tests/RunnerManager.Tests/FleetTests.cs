@@ -208,7 +208,7 @@ public class HostPortTests
 internal sealed class TestAgent : IDisposable
 {
     public byte[] Key { get; } = CommandSigner.NewKey();
-    public int Port { get; } = TestPorts.FreeRange(2);
+    public int Port { get; }
     public AgentServer Server { get; }
     public string Address => $"localhost:{Port}";
 
@@ -224,7 +224,7 @@ internal sealed class TestAgent : IDisposable
         if (key != null) Key = key;
         Name = name;
         MachineId = machineId;
-        Server = new AgentServer(
+        AgentServer NewServer(int port) => new(
             () => Task.FromResult(Status(new MachineStatusPayload
             {
                 MachineName = name, MachineId = machineId, AgentProtocolVersion = MachineRelay.ProtocolVersion, FleetAgentRunning = true,
@@ -232,8 +232,12 @@ internal sealed class TestAgent : IDisposable
             })),
             command => { lock (Commands) Commands.Add(command); return command.Id; },
             _ => Task.FromResult(new LogPayload()),
-            () => Key, $"http://localhost:{Port}/rw/", Port + 1, name, machineId: machineId);
-        if (start) Server.Start();
+            () => Key, $"http://localhost:{port}/rw/", port + 1, name, machineId: machineId);
+        var chosen = 0;
+        Server = start
+            ? FreePorts.Listen(2, port => NewServer(chosen = port), server => server.Start())
+            : NewServer(chosen = TestPorts.FreeRange(2));
+        Port = chosen;
     }
 
     /// <summary>Posts a request sealed for <paramref name="target"/> at <paramref name="time"/>, as CallAsync would.</summary>
@@ -705,7 +709,14 @@ public class RunnerMoveTests
         }
     }
 
-    private static string Steps(IEnumerable<MachineCommand> commands) => string.Join(" ", commands.Select(c => $"{c.Action}:{c.Value}"));
+    /// <summary>
+    /// The steps the PC ran. A command whose answer was slow is sent again with the same ID, and a fleet agent runs it
+    /// once, so it counts once here too.
+    /// </summary>
+    private static string Steps(IEnumerable<MachineCommand> commands)
+    {
+        lock (commands) return string.Join(" ", commands.DistinctBy(c => c.Id).Select(c => $"{c.Action}:{c.Value}"));
+    }
 
     [Fact]
     public async Task AMove_DisablesTheOldCopy_KeepsTheLabels_AndRetiresIt()
@@ -713,7 +724,7 @@ public class RunnerMoveTests
         var (source, target, error) = await MoveAsync(c => $"Runner {c.Action} completed");
         Assert.Null(error);
         Assert.Equal("Stop:disable Retire:keep", Steps(source));
-        var create = Assert.Single(target);
+        var create = Assert.Single(target.DistinctBy(c => c.Id));
         Assert.Equal("Create", create.Action);
         Assert.Equal(new[] { "gpu" }, create.RunnerLabels);
     }

@@ -69,3 +69,27 @@ internal sealed class TestSwitches : IDisposable
         try { File.Delete(Path); } catch (IOException) { }
     }
 }
+
+/// <summary>
+/// Starts a listener on ports that <see cref="TestPorts.FreeRange"/> found free. It finds them first and the listener
+/// takes them after, so a test running at the same time may take one in between; other ports are then tried.
+/// </summary>
+internal static class FreePorts
+{
+    public static T Listen<T>(int count, Func<int, T> create, Action<T> start) where T : IDisposable
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            var listener = create(TestPorts.FreeRange(count));
+            try
+            {
+                start(listener);
+                return listener;
+            }
+            catch (Exception ex) when (attempt < 5 && ex is System.Net.Sockets.SocketException or System.Net.HttpListenerException)
+            {
+                listener.Dispose();
+            }
+        }
+    }
+}
