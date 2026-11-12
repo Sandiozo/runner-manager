@@ -290,6 +290,50 @@ public class AuditR4DashboardTests
         Assert.Empty(finished);
     }
 
+    // ----- 8: an open runner's details line up with its title -----
+
+    [Fact]
+    public void OpenRunner_DetailsStartWhereItsTitleStarts()
+    {
+        var runner = new MachineRunnerStatus
+        {
+            ServiceName = "actions.runner.api", DisplayName = "api", ServiceInstalled = true, IsRunning = true, ActivityText = "Idle"
+        };
+        var pc = PcWith("BUILD-57", runner);
+        var window = WpfTestApp.Run(() => new MainWindow());
+        WpfTestApp.Run(() =>
+        {
+            runner.IsExpanded = true;
+            window.Machines.Add(pc);
+            var content = (UIElement)window.Content;
+            window.Content = null;
+            // The cards' items come from the window, which is not around them any more.
+            var host = new System.Windows.Controls.Border { Child = content, DataContext = window };
+            host.Measure(new Size(1200, 900));
+            host.Arrange(new Rect(0, 0, 1200, 900));
+            host.UpdateLayout();
+
+            var row = WpfTestApp.Descendants<System.Windows.Controls.Border>(host)
+                .First(b => ReferenceEquals(b.DataContext, runner) && b.Child is System.Windows.Controls.Grid { RowDefinitions.Count: 2 });
+            var card = (System.Windows.Controls.Grid)row.Child;
+            var header = card.Children.OfType<System.Windows.Controls.Button>().First(b => System.Windows.Controls.Grid.GetColumnSpan(b) == 3);
+            var title = WpfTestApp.Descendants<System.Windows.Controls.TextBlock>(header).First(t => t.Text == "api");
+            var glyph = WpfTestApp.Descendants<System.Windows.Controls.TextBlock>(header).First(t => t.Text == runner.ExpandGlyph);
+            var details = card.Children.OfType<System.Windows.Controls.Grid>().Single(g => System.Windows.Controls.Grid.GetRow(g) == 1);
+            Assert.Equal(Visibility.Visible, details.Visibility);
+
+            var titleLeft = title.TranslatePoint(new Point(0, 0), card).X;
+            var detailsLeft = details.TranslatePoint(new Point(0, 0), card).X;
+            Assert.True(titleLeft > 10, $"The title starts at {titleLeft}");
+            Assert.Equal(titleLeft, detailsLeft, 1);
+            // The chevron keeps its whole width in front of the title.
+            Assert.True(glyph.TranslatePoint(new Point(glyph.ActualWidth, 0), card).X <= titleLeft,
+                $"The chevron ends at {glyph.TranslatePoint(new Point(glyph.ActualWidth, 0), card).X}, the title starts at {titleLeft}");
+            Assert.True(glyph.ActualWidth >= glyph.DesiredSize.Width - glyph.Margin.Left - glyph.Margin.Right - 0.5,
+                $"The chevron is {glyph.ActualWidth} wide and wants {glyph.DesiredSize.Width}");
+        });
+    }
+
     // ----- 10: a sign-in check that failed -----
 
     [Fact]
