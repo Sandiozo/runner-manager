@@ -313,7 +313,8 @@ public partial class PairingHostWindow : Window
         _confirming.Remove(request);
         if (_sending.Remove(request, out var ownCode) && ownCode != null)
         {
-            try { FleetConfig.AddManagedPc(request.Name, FleetNetwork.WithPort(request.Address), ownCode); }
+            // With its machine ID, a fleet member that is the same PC is forgotten, so the PC is not known both ways.
+            try { FleetConfig.AddManagedPc(request.Name, FleetNetwork.WithPort(request.Address), ownCode, request.MachineId); }
             catch (Exception ex) when (request.Confirms)
             {
                 // The PC is told, and drops its code. The dialog comes after that, so that the PC does not wait for it.
@@ -341,7 +342,8 @@ public partial class PairingHostWindow : Window
         {
             _joined.Add(request.Name);
             // Discovery finds it only on the local network, so remember where it joined from (over Tailscale, for example).
-            try { MachineRelay.AddKnownPeer(request.Name, request.Address); }
+            // With its machine ID, a one-way pairing of the same PC ends here.
+            try { MachineRelay.AddKnownPeer(request.Name, request.Address, request.MachineId); }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
             _added.Add($"✓  {request.Name} joined the fleet.");
         }
