@@ -80,10 +80,14 @@ public partial class PairingHostWindow : Window
         };
     }
 
+    /// <summary>
+    /// This PC's machine ID, or empty. As in "Join a fleet", a settings file that cannot be read does not stop pairing:
+    /// without the ID, only the check for a PC that sends this PC's ID is left out.
+    /// </summary>
     private static string LocalMachineId()
     {
         try { return FleetConfig.LocalMachineId; }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return string.Empty; }
+        catch { return string.Empty; }
     }
 
     private void Enqueue(Pairing.JoinRequest request)
