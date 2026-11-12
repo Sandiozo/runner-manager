@@ -818,19 +818,19 @@ public static class AppUpdater
 
     /// <summary>
     /// Installs a release on this PC, as "Install update" does: downloads and verifies it, refreshes the Start menu
-    /// shortcut, and switches the fleet agent's task and the start-up task to the new copy. Returns whether the fleet
-    /// agent must be restarted to run it; the caller does that, because the restart waits until the agent is idle.
+    /// shortcut, and switches the start-up task to the new copy. Returns the exe the fleet agent is to run, or null when
+    /// it is not restarted. The caller restarts it (<see cref="MachineRelay.RestartLocalAgentAsync"/> with that exe),
+    /// which switches the agent's task to the new copy only after the agent finished its work: registering the task
+    /// may end the running agent, and with it a runner create it runs for another PC.
     /// </summary>
-    public static async Task<bool> InstallReleaseAsync(ReleaseInfo release, Action<string> log)
+    public static async Task<string?> InstallReleaseAsync(ReleaseInfo release, Action<string> log)
     {
         var exe = await DownloadAndInstallAsync(release, log);
         await CreateStartMenuShortcutAsync();
         // Only when it needs it, and not while it runs: the dashboard installing this may have been started by it.
         await Installer.UpdateStartupTaskAsync(exe);
-        if (!await MachineRelay.IsAgentInstalledAsync() || await AgentOwnership.OtherUserAsync() != null) return false;
-        log("Switching the fleet agent to the new version...");
-        await MachineRelay.RegisterAgentTaskAsync(exe);
-        return true;
+        if (!await MachineRelay.IsAgentInstalledAsync() || await AgentOwnership.OtherUserAsync() != null) return null;
+        return exe;
     }
 
     /// <summary>

@@ -45,6 +45,8 @@ public static class MachineRelay
     private static StatusCache? _status;
     /// <summary>The agent is about to exit for an update: a command sent now would never run, so it is refused.</summary>
     private static volatile bool _exitingForUpdate;
+    /// <summary>The exe an update installed, which the agent's task is registered for when the agent exits to run it.</summary>
+    private static volatile string? _agentExeAfterUpdate;
     /// <summary>
     /// How long an update waits for the agent's work to finish before it restarts the agent anyway: as long as the
     /// longest work, an AI assistant's call that waits for its approval and then creates a runner on another PC
@@ -923,8 +925,8 @@ public static class MachineRelay
                                 : $"Restarting to finish the update, although work is still running. Nothing finished in {(int)UpdateRestartWait.TotalMinutes} minutes.");
                         _exitingForUpdate = true;
                         await Task.Delay(TimeSpan.FromSeconds(3), CancellationToken.None); // let the dashboard read the result
-                        // The helper started with the update gives up after two minutes; this one starts the new agent.
-                        AppUpdater.ScheduleAgentTaskRestart(ScheduledTasks.AgentTaskName);
+                        await SwitchTaskBeforeExitAsync(_agentExeAfterUpdate, () => AppUpdater.ScheduleAgentTaskRestart(ScheduledTasks.AgentTaskName),
+                            RegisterAgentTaskAsync, AppendAgentLog);
                         Environment.Exit(0);
                     }
                 }
@@ -1087,9 +1089,8 @@ public static class MachineRelay
             ?? throw new InvalidOperationException($"No Runner Manager release found in {AppUpdater.ReleaseRepository}.");
         if (!force && !AppUpdater.IsNewer(release.Version, AppUpdater.CurrentVersion) && AppUpdater.IsRunningInstalledCopy)
             return $"Already up to date (v{AppUpdater.CurrentVersion})";
-        var exe = await AppUpdater.DownloadAndInstallAsync(release, message => AppendAgentLog($"Update: {message}"));
-        AppUpdater.ScheduleAgentTaskRestart(ScheduledTasks.AgentTaskName);
-        await RegisterAgentTaskAsync(exe);
+        // The task is switched to the new copy when the agent exits, after its work: registering may end this agent.
+        _agentExeAfterUpdate = await AppUpdater.DownloadAndInstallAsync(release, message => AppendAgentLog($"Update: {message}"));
         AgentWork.AskRestart();
         AddEvent($"Updated to {release.Tag}. Restarting the fleet agent.");
         return $"Updated to {release.Tag}. Restarting.";
@@ -1404,16 +1405,60 @@ public static class MachineRelay
     }
 
     /// <summary>
+    /// The last step before the agent exits to finish an update: starts the helper that starts the task again once this
+    /// agent has exited, and only then registers the task for <paramref name="exe"/>, since registering may end this
+    /// agent. A failed registration is logged; the helper then starts the task as it was.
+    /// </summary>
+    internal static async Task SwitchTaskBeforeExitAsync(string? exe, Action scheduleRestart, Func<string, Task> register, Action<string> log)
+    {
+        scheduleRestart();
+        if (exe == null) return;
+        try { await register(exe); }
+        catch (Exception ex) { log($"Could not switch the fleet agent's task to the new version: {ex.Message}"); }
+    }
+
+    /// <summary>
     /// Restarts the local agent (after an update or a settings change that needs it). Unless <paramref name="force"/>
     /// is set, it first waits for the agent to finish commands and AI assistant calls (see <see cref="WaitWhileBusyAsync"/>).
     /// </summary>
-    public static async Task RestartLocalAgentAsync(bool force = false, Action<string>? log = null)
+    /// <param name="switchTo">After an update, the exe the agent's task is registered for, once the agent has stopped.</param>
+    public static Task RestartLocalAgentAsync(bool force = false, Action<string>? log = null, string? switchTo = null)
+        => RestartAgentAsync(new AgentRestartSteps(
+            () => force ? Task.CompletedTask : WaitForLocalAgentIdleAsync(log),
+            async () =>
+            {
+                await ScheduledTasks.EndTaskAsync(ScheduledTasks.AgentTaskName);
+                await Task.Run(EndOtherAgents);
+            },
+            RegisterAgentTaskAsync,
+            async () =>
+            {
+                await Task.Delay(1500);
+                await ScheduledTasks.RunTaskAsync(ScheduledTasks.AgentTaskName);
+            }), switchTo, log);
+
+    /// <summary>The steps of a restart of this PC's agent (a test passes its own).</summary>
+    internal sealed record AgentRestartSteps(Func<Task> WaitForIdle, Func<Task> Stop, Func<string, Task> Register, Func<Task> Start);
+
+    /// <summary>
+    /// Waits for the agent's work, stops the agent, registers its task for <paramref name="switchTo"/> (when given),
+    /// and starts it. Registering may end a running agent, so it comes only after the wait. When registering fails,
+    /// the agent is still started (with the task as it was), and then the failure is thrown.
+    /// </summary>
+    internal static async Task RestartAgentAsync(AgentRestartSteps steps, string? switchTo, Action<string>? log)
     {
-        if (!force) await WaitForLocalAgentIdleAsync(log);
-        await ScheduledTasks.EndTaskAsync(ScheduledTasks.AgentTaskName);
-        await Task.Run(EndOtherAgents);
-        await Task.Delay(1500);
-        await ScheduledTasks.RunTaskAsync(ScheduledTasks.AgentTaskName);
+        await steps.WaitForIdle();
+        await steps.Stop();
+        Exception? failed = null;
+        if (switchTo != null)
+        {
+            log?.Invoke("Switching the fleet agent to the new version...");
+            try { await steps.Register(switchTo); }
+            catch (Exception ex) { failed = ex; }
+        }
+        await steps.Start();
+        if (failed != null)
+            throw new InvalidOperationException($"The fleet agent was started again, but its task could not be switched to the new version: {failed.Message}", failed);
     }
 
     private static Task WaitForLocalAgentIdleAsync(Action<string>? log)

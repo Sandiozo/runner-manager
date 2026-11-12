@@ -897,13 +897,17 @@ public partial class SettingsWindow : Window
             DialogWindow.Info(this, "The fleet agent is being updated", "Try again when it is done. Progress is shown in the activity list.");
             return;
         }
-        var restartAgent = false;
-        if (!await RunOperationAsync($"Install Runner Manager {release.Tag}", async log => restartAgent = await AppUpdater.InstallReleaseAsync(release, log)))
+        string? agentExe = null;
+        if (!await RunOperationAsync($"Install Runner Manager {release.Tag}", async log => agentExe = await AppUpdater.InstallReleaseAsync(release, log)))
             return;
-        if (restartAgent)
+        if (agentExe != null)
         {
-            if (Owner is MainWindow main) main.RestartLocalAgentInBackground();
-            else await MachineRelay.RestartLocalAgentAsync();
+            if (Owner is MainWindow main) main.RestartLocalAgentInBackground(agentExe);
+            else
+            {
+                try { await MachineRelay.RestartLocalAgentAsync(switchTo: agentExe); }
+                catch (Exception ex) { DialogWindow.Error(this, "The fleet agent restart did not finish", ex.Message); }
+            }
         }
         if (DialogWindow.Show(this, DialogTone.Question, $"Runner Manager {release.Tag} is installed",
                 "Restart Runner Manager now to use the new version?", "Restart now", cancel: "Later") == "Restart now")

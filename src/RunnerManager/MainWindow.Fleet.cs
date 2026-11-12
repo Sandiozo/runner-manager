@@ -396,11 +396,11 @@ public partial class MainWindow
             return;
         }
         if (IsAgentWorkRunning()) return;
-        var restartAgent = false;
+        string? agentExe = null;
         var installed = await RunOperationAsync($"Install Runner Manager {release.Tag}",
-            async log => restartAgent = await AppUpdater.InstallReleaseAsync(release, log));
+            async log => agentExe = await AppUpdater.InstallReleaseAsync(release, log));
         if (!installed) return;
-        if (restartAgent) RestartLocalAgentInBackground();
+        if (agentExe != null) RestartLocalAgentInBackground(agentExe);
         if (DialogWindow.Show(this, DialogTone.Question, $"Runner Manager {release.Tag} is installed",
                 "Restart Runner Manager now to use the new version?", "Restart now", cancel: "Later") == "Restart now")
             ((App)Application.Current).RestartDashboard();

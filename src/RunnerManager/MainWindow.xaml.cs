@@ -473,11 +473,14 @@ public partial class MainWindow : Window
     public Task WaitForAgentWorkAsync()
         => _agentWork is { } work ? work.ContinueWith(_ => { }, TaskScheduler.Default) : Task.CompletedTask;
 
-    /// <summary>Restarts this PC's fleet agent (after an update) without blocking the dashboard.</summary>
-    public void RestartLocalAgentInBackground()
+    /// <summary>
+    /// Restarts this PC's fleet agent after an update without blocking the dashboard. Once the agent is idle, its task is
+    /// switched to <paramref name="exe"/>, the newly installed copy.
+    /// </summary>
+    public void RestartLocalAgentInBackground(string exe)
         => RunAgentWorkInBackground("Restart the fleet agent", async log =>
         {
-            await MachineRelay.RestartLocalAgentAsync(log: log);
+            await MachineRelay.RestartLocalAgentAsync(log: log, switchTo: exe);
             log("The fleet agent runs the new version.");
         });
 

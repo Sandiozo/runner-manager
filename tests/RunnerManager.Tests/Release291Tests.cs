@@ -72,3 +72,69 @@ public class RestartAskedTests
         Assert.True(AgentWork.Moves > moves);
     }
 }
+
+/// <summary>
+/// After an update, the fleet agent's task is registered for the new copy only once the agent finished its work:
+/// registering may end the running agent, and with it a runner create it runs for another PC.
+/// </summary>
+public class AgentTaskSwitchTests
+{
+    private static MachineRelay.AgentRestartSteps Steps(List<string> done, Exception? registerFails = null) => new(
+        () => { done.Add("wait"); return Task.CompletedTask; },
+        () => { done.Add("stop"); return Task.CompletedTask; },
+        exe => { done.Add($"register {exe}"); return registerFails == null ? Task.CompletedTask : Task.FromException(registerFails); },
+        () => { done.Add("start"); return Task.CompletedTask; });
+
+    [Fact]
+    public async Task AfterAnUpdate_TheTaskIsRegistered_OnlyAfterTheWaitAndTheStop()
+    {
+        var done = new List<string>();
+        var log = new List<string>();
+        await MachineRelay.RestartAgentAsync(Steps(done), @"C:\RM\RunnerManager.exe", log.Add);
+        Assert.Equal(new[] { "wait", "stop", @"register C:\RM\RunnerManager.exe", "start" }, done);
+        Assert.Equal("Switching the fleet agent to the new version...", Assert.Single(log));
+    }
+
+    [Fact]
+    public async Task ARestartWithoutAnUpdate_DoesNotRegister()
+    {
+        var done = new List<string>();
+        await MachineRelay.RestartAgentAsync(Steps(done), switchTo: null, log: null);
+        Assert.Equal(new[] { "wait", "stop", "start" }, done);
+    }
+
+    [Fact]
+    public async Task WhenRegisteringFails_TheAgentIsStillStarted_AndTheFailureIsShown()
+    {
+        var done = new List<string>();
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            MachineRelay.RestartAgentAsync(Steps(done, new InvalidOperationException("Access is denied.")), @"C:\RM\RunnerManager.exe", null));
+        Assert.Equal("start", done[^1]);
+        Assert.Contains("started again", error.Message);
+        Assert.Contains("Access is denied.", error.Message);
+    }
+
+    [Fact]
+    public async Task TheAgentItself_StartsTheHelperFirst_ThenRegistersBeforeItExits()
+    {
+        var done = new List<string>();
+        var log = new List<string>();
+        await MachineRelay.SwitchTaskBeforeExitAsync(@"C:\RM\RunnerManager.exe", () => done.Add("helper"),
+            exe => { done.Add($"register {exe}"); return Task.CompletedTask; }, log.Add);
+        Assert.Equal(new[] { "helper", @"register C:\RM\RunnerManager.exe" }, done);
+        Assert.Empty(log);
+    }
+
+    [Fact]
+    public async Task TheAgentItself_LogsAFailedRegistration_AndStillExits()
+    {
+        var log = new List<string>();
+        await MachineRelay.SwitchTaskBeforeExitAsync(@"C:\RM\RunnerManager.exe", () => { },
+            _ => Task.FromException(new InvalidOperationException("Access is denied.")), log.Add);
+        Assert.Equal("Could not switch the fleet agent's task to the new version: Access is denied.", Assert.Single(log));
+
+        var helper = 0;
+        await MachineRelay.SwitchTaskBeforeExitAsync(null, () => helper++, _ => throw new InvalidOperationException("not called"), log.Add);
+        Assert.Equal(1, helper);
+    }
+}
