@@ -415,14 +415,33 @@ public class ProgramFilesInstallTests
             new TaskUse(@"PC\dave", IsOwn: false, ExeIn(OldDefault)),
             new TaskUse(@"PC\erin", IsOwn: false, "RunnerManager.exe")
         };
-        var users = MachineInstall.OtherUsersOf(ProgramFiles, MySid, records, tasks, sid => sid == OtherSid ? @"PC\bob" : sid);
-        Assert.Equal(new[] { @"PC\bob", @"PC\carol" }, users);
+        string Account(string sid) => sid == OtherSid ? @"PC\bob" : sid;
+        var users = MachineInstall.OtherUsersOf(ProgramFiles, MySid, records, new TaskScan(tasks.ToList(), false), Account, _ => true);
+        Assert.Equal(new[] { @"PC\bob", @"PC\carol" }, users.Names);
+        Assert.False(users.Unknown);
         // The same user found twice is named once.
-        var twice = MachineInstall.OtherUsersOf(ProgramFiles, MySid, records, tasks.Append(new TaskUse(OtherSid, false, ExeIn(ProgramFiles))),
-            sid => sid == OtherSid ? @"PC\bob" : sid);
-        Assert.Equal(2, twice.Count);
+        var twice = MachineInstall.OtherUsersOf(ProgramFiles, MySid, records,
+            new TaskScan(tasks.Append(new TaskUse(OtherSid, false, ExeIn(ProgramFiles))).ToList(), false), Account, _ => true);
+        Assert.Equal(2, twice.Names.Count);
         // Nobody else uses this user's own folder in the old default.
-        Assert.Empty(MachineInstall.OtherUsersOf(@"C:\Users\me\Other", MySid, records, tasks, sid => sid));
+        Assert.False(MachineInstall.OtherUsersOf(@"C:\Users\me\Other", MySid, records, new TaskScan(tasks.ToList(), false), Account, _ => true).KeepFiles);
+    }
+
+    [Fact]
+    public void OtherUsersOf_SkipsTheRecordsOfRemovedAccounts_AndKeepsTheFilesWhenTasksCouldNotBeRead()
+    {
+        var records = new[] { new InstallRecord(OtherSid, ProgramFiles) };
+        var none = new TaskScan(new List<TaskUse>(), Unreadable: false);
+        // The account was removed: its record no longer keeps the program files.
+        var removed = MachineInstall.OtherUsersOf(ProgramFiles, MySid, records, none, sid => sid, _ => false);
+        Assert.Empty(removed.Names);
+        Assert.False(removed.KeepFiles);
+        // A task that could not be read may be another user's: the files stay, but nobody is named.
+        var unknown = MachineInstall.OtherUsersOf(ProgramFiles, MySid, Array.Empty<InstallRecord>(), none with { Unreadable = true }, sid => sid, _ => true);
+        Assert.Empty(unknown.Names);
+        Assert.True(unknown.KeepFiles);
+        Assert.Contains("could not read", unknown.KeptBecause("them"));
+        Assert.DoesNotContain("n't", unknown.KeptBecause("them"));
     }
 
     [Fact]
@@ -652,8 +671,41 @@ public class InstallEvidenceTests
         state.Tasks.Definitions["Runner Manager (bob)"] = TaskOf(OtherSid, ProgramFilesExe);
         state.Tasks.Definitions["Runner Manager (eve)"] = TaskOf("S-1-5-21-1-2-3-1005", ProgramFilesExe, highest: false);
         state.Tasks.Definitions["OneDrive Standalone Update Task"] = TaskOf("S-1-5-21-1-2-3-1006", ProgramFilesExe);
-        var uses = await MachineInstall.RunnerManagerTasksAsync();
-        Assert.Equal(new[] { OtherSid }, uses.Select(u => u.Account));
+        var scan = await MachineInstall.RunnerManagerTasksAsync();
+        Assert.Equal(new[] { OtherSid }, scan.Uses.Select(u => u.Account));
+        Assert.False(scan.Unreadable);
+    }
+
+    // ================= 6. Other Windows users =================
+
+    [Fact]
+    public async Task ATaskThatCannotBeRead_OrNoListOfTasks_IsUnknown_NotNobody()
+    {
+        using var state = new TestInstallState();
+        state.Tasks.Definitions["Runner Manager (bob)"] = null;
+        var scan = await MachineInstall.RunnerManagerTasksAsync();
+        Assert.True(scan.Unreadable);
+        Assert.True((await MachineInstall.OtherUsersOfAsync(MachineInstall.ProgramFilesDir)).KeepFiles);
+        state.Tasks.Definitions.Clear();
+        state.Tasks.NamesReadable = false;
+        Assert.True((await MachineInstall.RunnerManagerTasksAsync()).Unreadable);
+        // Read without trouble, and nobody else: the files can go.
+        state.Tasks.NamesReadable = true;
+        Assert.False((await MachineInstall.OtherUsersOfAsync(MachineInstall.ProgramFilesDir)).KeepFiles);
+    }
+
+    [Fact]
+    public async Task TheRecordOfARemovedAccount_IsRemoved()
+    {
+        using var state = new TestInstallState();
+        const string gone = "S-1-5-21-1-2-3-1007";
+        state.Records.Write(gone, MachineInstall.ProgramFilesDir);
+        state.Records.Write(OtherSid, MachineInstall.ProgramFilesDir);
+        state.WithoutProfile.Add(gone);
+        var others = await MachineInstall.OtherUsersOfAsync(MachineInstall.ProgramFilesDir);
+        Assert.Equal(new[] { MachineInstall.AccountOf(OtherSid) }, others.Names);
+        Assert.Null(MachineInstall.RecordOf(state.Records.ReadAll(), gone));
+        Assert.NotNull(MachineInstall.RecordOf(state.Records.ReadAll(), OtherSid));
     }
 
     // ================= 2 and 4. The record of an install of an earlier version =================

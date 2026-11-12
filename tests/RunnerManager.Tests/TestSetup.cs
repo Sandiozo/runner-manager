@@ -20,6 +20,7 @@ internal static class TestSetup
         AssistantSwitches.Store = new FileSwitchStore(Path.Combine(StateDir, "assistant-switches.json"));
         MachineInstall.Records = new MemoryInstallRecords();
         MachineInstall.Tasks = new MemoryTasks();
+        MachineInstall.HasProfile = _ => true;
     }
 }
 
@@ -45,11 +46,13 @@ internal sealed class TestInstallState : IDisposable
 {
     private readonly IInstallRecordStore _records = MachineInstall.Records;
     private readonly ITaskReader _tasks = MachineInstall.Tasks;
+    private readonly Func<string, bool> _hasProfile = MachineInstall.HasProfile;
 
     public TestInstallState()
     {
         MachineInstall.Records = Records;
         MachineInstall.Tasks = Tasks;
+        MachineInstall.HasProfile = sid => !WithoutProfile.Contains(sid);
         MachineInstall.Forget();
     }
 
@@ -57,10 +60,14 @@ internal sealed class TestInstallState : IDisposable
 
     public MemoryTasks Tasks { get; } = new();
 
+    /// <summary>The SIDs of Windows users who have no profile on this PC (their account was removed).</summary>
+    public HashSet<string> WithoutProfile { get; } = new(StringComparer.OrdinalIgnoreCase);
+
     public void Dispose()
     {
         MachineInstall.Records = _records;
         MachineInstall.Tasks = _tasks;
+        MachineInstall.HasProfile = _hasProfile;
         MachineInstall.Forget();
     }
 }

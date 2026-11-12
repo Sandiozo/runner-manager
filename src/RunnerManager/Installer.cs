@@ -87,9 +87,11 @@ public static class Installer
         var moving = previous != null && !AppUpdater.SameFolder(previous, target);
         var recordBefore = MachineInstall.ReadOwnRecordRaw();
         // Program Files is shared by the Windows users of the PC. A copy that others use is never replaced by an older one.
+        // Only users that are known count here: setup never takes a copy that is already there for the installed one
+        // because some tasks could not be read.
         var sharedWith = await MachineInstall.OtherUsersOfAsync(target);
-        var keepInstalled = KeepsInstalledCopy(sharedWith.Count > 0, AppUpdater.InstalledVersion, AppUpdater.CurrentVersion);
-        if (sharedWith.Count > 0) log($"Other Windows users on this PC use Runner Manager in {target}: {string.Join(", ", sharedWith)}.");
+        var keepInstalled = KeepsInstalledCopy(sharedWith.Names.Count > 0, AppUpdater.InstalledVersion, AppUpdater.CurrentVersion);
+        if (sharedWith.Names.Count > 0) log($"Other Windows users on this PC use Runner Manager in {target}: {string.Join(", ", sharedWith.Names)}.");
         // An AI tool's host keeps running the replaced exe and needs nothing from setup; only a move takes its exe away.
         CloseRunningDashboards(log, moving ? new[] { target, previous! } : new[] { target }, endAssistants: moving);
         var replacing = File.Exists(AppUpdater.InstalledExe) && !AppUpdater.IsRunningInstalledCopy && !keepInstalled;
@@ -103,7 +105,7 @@ public static class Installer
         {
             // A half-done setup is undone, so the installed copy keeps working as before.
             log($"Setup failed: {ex.Message} Undoing it...");
-            await UndoInstallAsync(replacing, moving ? previous : null, recordBefore, keepNewCopy: sharedWith.Count > 0, log);
+            await UndoInstallAsync(replacing, moving ? previous : null, recordBefore, keepNewCopy: sharedWith.KeepFiles, log);
             throw;
         }
         return exe;
@@ -159,8 +161,8 @@ public static class Installer
             }
         }
 
-        if (moving && await MachineInstall.OtherUsersOfAsync(previous!) is { Count: > 0 } others)
-            log($"The copy in {previous} was kept, because other Windows users on this PC use it: {string.Join(", ", others)}.");
+        if (moving && await MachineInstall.OtherUsersOfAsync(previous!) is { KeepFiles: true } others)
+            log($"The copy in {previous} was kept, because {others.KeptBecause("it")}.");
         else if (moving)
         {
             // The old copy may still be in use until this process exits (its agent was just switched over).
@@ -480,7 +482,7 @@ public static class Installer
         try { Registry.CurrentUser.DeleteSubKeyTree(UninstallKey, throwOnMissingSubKey: false); } catch { }
 
         // Program Files is shared by the Windows users of the PC: the program files stay while another user's record or
-        // tasks use them. This user's record goes either way.
+        // tasks use them, or while that cannot be told. This user's record goes either way.
         var others = await MachineInstall.OtherUsersOfAsync(installDir);
         try { MachineInstall.WriteOwnRecord(null); }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.SecurityException)
@@ -491,15 +493,15 @@ public static class Installer
         var scripts = new List<string>();
         var environment = new Dictionary<string, string>();
         var note = string.Empty;
-        if (others.Count == 0)
+        if (!others.KeepFiles)
         {
             scripts.Add(RemoveProgramFilesScript(installDir));
             foreach (var (name, value) in FolderEnvironment(installDir)) environment[name] = value;
         }
         else
         {
-            log($"The program files in {installDir} were kept, because other Windows users on this PC use them: {string.Join(", ", others)}.");
-            note = $" The program files in {installDir} were kept, because other Windows users on this PC use them.";
+            log($"The program files in {installDir} were kept, because {others.KeptBecause("them")}.");
+            note = $" The program files in {installDir} were kept, because other Windows users on this PC {(others.Names.Count > 0 ? "use" : "may use")} them.";
         }
         if (removeData)
         {

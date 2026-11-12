@@ -17,6 +17,24 @@ public sealed record SetupOffer(string Folder, bool Unconfirmed);
 /// <summary>A scheduled task of Runner Manager: the account it runs as, whether that is this user, and the exe it starts.</summary>
 public sealed record TaskUse(string Account, bool IsOwn, string Command);
 
+/// <summary>The scheduled tasks of Runner Manager on this PC; <paramref name="Unreadable"/> when some could not be read.</summary>
+public sealed record TaskScan(List<TaskUse> Uses, bool Unreadable);
+
+/// <summary>
+/// The other Windows users who use an install: their account names, and <paramref name="Unknown"/> when some scheduled
+/// tasks could not be read, so another user may use it.
+/// </summary>
+public sealed record OtherUsers(List<string> Names, bool Unknown)
+{
+    /// <summary>Whether the program files must stay: another user uses them, or that cannot be told.</summary>
+    public bool KeepFiles => Names.Count > 0 || Unknown;
+
+    /// <summary>Why the files stay, to follow "… were kept, because": <paramref name="what"/> is "it" or "them".</summary>
+    public string KeptBecause(string what) => Names.Count > 0
+        ? $"other Windows users on this PC use {what}: {string.Join(", ", Names)}"
+        : $"Runner Manager could not read all scheduled tasks on this PC, so other Windows users may use {what}";
+}
+
 /// <summary>The facts the install folder is decided from (see <see cref="MachineInstall.Resolve"/>).</summary>
 /// <param name="OwnRecord">This user's recorded install folder, when it exists.</param>
 /// <param name="UserEntry">The folder in this user's Settings → Apps entry, when it exists. Any program of the user can change it.</param>
@@ -260,11 +278,13 @@ public static class MachineInstall
     // ================= Other Windows users =================
 
     /// <summary>
-    /// The other Windows users who use the install in <paramref name="folder"/>: those whose record names it, and those whose
-    /// own Runner Manager tasks (dashboard, startup or fleet agent) start an exe in it. Account names, each once.
+    /// The other Windows users who use the install in <paramref name="folder"/>: those whose record names it (when they
+    /// still have a profile on this PC, see <paramref name="hasProfile"/>), and those whose own Runner Manager tasks
+    /// (dashboard, startup or fleet agent) start an exe in it. Account names, each once; unknown when some tasks could not
+    /// be read.
     /// </summary>
-    internal static List<string> OtherUsersOf(string folder, string ownSid, IEnumerable<InstallRecord> records, IEnumerable<TaskUse> tasks,
-        Func<string, string> accountOfSid)
+    internal static OtherUsers OtherUsersOf(string folder, string ownSid, IEnumerable<InstallRecord> records, TaskScan tasks,
+        Func<string, string> accountOfSid, Func<string, bool> hasProfile)
     {
         var users = new List<string>();
         void Add(string account)
@@ -274,19 +294,56 @@ public static class MachineInstall
         foreach (var record in records)
         {
             if (record.Sid.Equals(ownSid, StringComparison.OrdinalIgnoreCase) || !Path.IsPathFullyQualified(record.Folder)) continue;
-            if (AppUpdater.SameFolder(record.Folder, folder)) Add(accountOfSid(record.Sid));
+            if (AppUpdater.SameFolder(record.Folder, folder) && hasProfile(record.Sid)) Add(accountOfSid(record.Sid));
         }
-        foreach (var task in tasks)
+        foreach (var task in tasks.Uses)
         {
             if (task.IsOwn || !Path.IsPathFullyQualified(task.Command)) continue;
             if (Path.GetDirectoryName(task.Command) is { Length: > 0 } dir && AppUpdater.SameFolder(dir, folder)) Add(accountOfSid(task.Account));
         }
-        return users;
+        return new OtherUsers(users, tasks.Unreadable);
     }
 
-    /// <summary>The other Windows users of this PC who use the install in <paramref name="folder"/> (see <see cref="OtherUsersOf"/>).</summary>
-    internal static async Task<List<string>> OtherUsersOfAsync(string folder)
-        => OtherUsersOf(folder, Elevation.CurrentUserSid, Records.ReadAll(), await RunnerManagerTasksAsync(), AccountOf);
+    /// <summary>
+    /// The other Windows users of this PC who use the install in <paramref name="folder"/> (see <see cref="OtherUsersOf"/>).
+    /// The records of users without a profile on this PC (their account was removed) are removed first: they would keep
+    /// the program files and stop older setups for ever.
+    /// </summary>
+    internal static async Task<OtherUsers> OtherUsersOfAsync(string folder)
+    {
+        var records = Records.ReadAll();
+        foreach (var gone in records.Where(r => !r.Sid.Equals(Elevation.CurrentUserSid, StringComparison.OrdinalIgnoreCase) && !HasProfile(r.Sid)))
+        {
+            try
+            {
+                Records.Write(gone.Sid, null);
+                MachineRelay.AppendAgentLog($"Removed the record of the install folder {gone.Folder} of {gone.Sid}: that Windows user has no profile on this PC.");
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or SecurityException) { }
+        }
+        return OtherUsersOf(folder, Elevation.CurrentUserSid, records, await RunnerManagerTasksAsync(), AccountOf, HasProfile);
+    }
+
+    /// <summary>Whether the Windows user with this SID has a profile on this PC: the registry, except in tests.</summary>
+    internal static Func<string, bool> HasProfile { get; set; } = ProfileExists;
+
+    /// <summary>
+    /// Whether the Windows user with this SID has a profile on this PC (an entry in ProfileList). True when that cannot be
+    /// read, so a record is removed only when it is certain that its user is gone.
+    /// </summary>
+    private static bool ProfileExists(string sid)
+    {
+        if (!sid.StartsWith("S-1-", StringComparison.OrdinalIgnoreCase) || sid.IndexOfAny(new[] { '\\', '/' }) >= 0) return true;
+        try
+        {
+            using var root = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64);
+            using var list = root.OpenSubKey(@"SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList");
+            if (list == null) return true;
+            using var profile = list.OpenSubKey(sid);
+            return profile != null;
+        }
+        catch (Exception ex) when (ex is SecurityException or UnauthorizedAccessException or IOException) { return true; }
+    }
 
     /// <summary>A SID as an account name (DOMAIN\name); anything else, or a SID that cannot be translated, as it is.</summary>
     internal static string AccountOf(string sidOrName)
@@ -298,15 +355,21 @@ public static class MachineInstall
 
     /// <summary>
     /// The scheduled tasks of Runner Manager on this PC, of every Windows user: their names come from Task Scheduler's list in
-    /// the registry (readable by administrators), their account and exe from the task definitions. Empty when the list
-    /// cannot be read.
+    /// the registry (readable by administrators), their account and exe from the task definitions. Unreadable when the list
+    /// or a task's definition could not be read: then another user may use an install without anyone knowing.
     /// </summary>
-    internal static async Task<List<TaskUse>> RunnerManagerTasksAsync()
+    internal static async Task<TaskScan> RunnerManagerTasksAsync()
     {
         var uses = new List<TaskUse>();
-        foreach (var name in (Tasks.Names() ?? Array.Empty<string>()).Where(IsRunnerManagerTaskName))
+        if (Tasks.Names() is not { } names) return new TaskScan(uses, Unreadable: true);
+        var unreadable = false;
+        foreach (var name in names.Where(IsRunnerManagerTaskName))
         {
-            var xml = await Tasks.ReadAsync(name) ?? string.Empty;
+            if (await Tasks.ReadAsync(name) is not { } xml)
+            {
+                unreadable = true;
+                continue;
+            }
             // Any program can create a task with one of these names; Runner Manager registers its own with the highest rights.
             if (!ScheduledTasks.RunsWithHighestRights(xml)) continue;
             var principal = ScheduledTasks.PrincipalOf(xml);
@@ -314,7 +377,7 @@ public static class MachineInstall
             if (principal.Length == 0 || command.Length == 0) continue;
             uses.Add(new TaskUse(principal, ScheduledTasks.IsCurrentUser(principal), command));
         }
-        return uses;
+        return new TaskScan(uses, unreadable);
     }
 
     /// <summary>The task names Runner Manager and the RunnerWidget versions used: "Runner Manager…" and "RunnerWidget…".</summary>
