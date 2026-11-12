@@ -31,8 +31,30 @@ public static class RunnerActivity
     private static readonly Regex Timestamp = new(@"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z ?", RegexOptions.Compiled);
     private static readonly Regex AnsiCodes = new(@"\x1B\[[0-9;?]*[A-Za-z]", RegexOptions.Compiled);
     // actions/checkout passes the repository token to git as -c http.extraheader="AUTHORIZATION: basic …".
+    // sonar.login= holds a token, sig= signs an Azure storage URL, and curl -H "Cookie: …" sends a session.
     private static readonly string[] SecretHints =
-        { "token", "password", "secret", "apikey", "api_key", "pat=", "authorization", "extraheader", "bearer" };
+    {
+        "token", "password", "passwd", "pwd", "secret", "apikey", "api_key", "api-key", "pat=", "authorization", "extraheader",
+        "bearer", "credential", "auth", "pass:", "pass=", "login=", "sig=", "cookie"
+    };
+    /// <summary>Raw GitHub, GitLab and Slack tokens, alone or as a value (ghp_…, github_pat_…, glpat-…, xoxb-…).</summary>
+    private static readonly Regex TokenValue = new(@"(^|[=:])(gh[pousr]_|github_pat_|glpat-|xox[abprs]-)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    /// <summary>An option for a password or passphrase whose value follows it: --pass X, --passphrase X, keytool -storepass X, openssl -passin.</summary>
+    private static readonly Regex PassOption = new(@"^(--?|/)[a-z0-9._-]*(?<!by)pass(phrase|in|out)?([=:]|$)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    /// <summary>
+    /// Programs whose -p or -P is a password, attached (mysql -pSecret, 7z -pSecret) or as the next argument (sqlcmd -P
+    /// Secret). For other programs -p is often something else: a port, mkdir -p, Unity's -projectPath, MSBuild's -p:.
+    /// </summary>
+    private static readonly HashSet<string> PasswordP = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "mysql", "mysqldump", "mysqladmin", "mysqlimport", "mysqlcheck", "mysqlshow", "mysqlpump", "mysqlsh",
+        "mariadb", "mariadb-dump", "mariadb-admin", "7z", "7za", "7zr", "7zz", "rar", "unrar", "winrar", "zip", "unzip",
+        "sshpass", "sqlcmd", "bcp", "osql", "mongo", "mongosh", "mongodump", "mongorestore", "mongoexport", "mongoimport"
+    };
+    /// <summary>User and password with -u or --user (curl -u user:pass, --user=user:pass, -uuser:pass).</summary>
+    private static readonly Regex AttachedUser = new(@"^(-u|--user=)\S*:", RegexOptions.Compiled);
+    /// <summary>The user and password in a URL (https://user:pass@host/…).</summary>
+    private static readonly Regex UrlCredentials = new(@"(?<=://)[^/@\s]+@", RegexOptions.Compiled);
     private static readonly object CpuGate = new();
     // Processor time per process at the previous reading, keyed by ID and start time so a reused ID starts over.
     private static readonly Dictionary<(int Id, string Started), (ulong Cpu, DateTime When)> CpuReadings = new();
@@ -44,18 +66,22 @@ public static class RunnerActivity
     public static async Task<RunnerJobActivity> ReadAsync(string runnerKey)
     {
         var root = await FindRootAsync(runnerKey);
-        return await Task.Run(() => new RunnerJobActivity
+        return await Task.Run(() =>
         {
-            Output = ReadOutput(root, OutputLines),
-            Processes = ReadProcesses(root),
-            CapturedUtc = DateTime.UtcNow
+            var processes = ProcessSnapshot.Read();
+            return new RunnerJobActivity
+            {
+                Output = ReadOutput(root, OutputLines, processes),
+                Processes = ReadProcesses(root, processes),
+                CapturedUtc = DateTime.UtcNow
+            };
         });
     }
 
     internal static async Task<string> FindRootAsync(string runnerKey)
     {
         lock (RootCache)
-            if (RootCache.TryGetValue(runnerKey, out var cached) && Directory.Exists(cached)) return cached;
+            if (RootCache.TryGetValue(runnerKey, out var cached) && StillHoldsRunner(cached, runnerKey)) return cached;
         var runner = await RunnerService.FindRunnerAsync(runnerKey)
                      ?? throw new InvalidOperationException("The runner was not found on this PC.");
         lock (RootCache) RootCache[runnerKey] = runner.InstallPath;
@@ -63,26 +89,85 @@ public static class RunnerActivity
     }
 
     /// <summary>
-    /// The file the runner writes the running step's output to. The runner keeps it in _diag\pages until it uploads it
-    /// to GitHub, so it only exists while a step runs.
+    /// Whether a remembered folder still holds the runner. "Remove and keep files" leaves the folder without .runner, and
+    /// a runner created again with the same name (and service name) gets a new folder.
     /// </summary>
-    internal static string? CurrentOutputFile(string root)
+    internal static bool StillHoldsRunner(string root, string runnerKey)
     {
-        var folder = Path.Combine(root, "_diag", "pages");
-        if (!Directory.Exists(folder)) return null;
-        return new DirectoryInfo(folder).EnumerateFiles("*.log")
-            .Where(f => DateTime.UtcNow - f.LastWriteTimeUtc < TimeSpan.FromMinutes(30))
-            .OrderByDescending(f => f.LastWriteTimeUtc)
-            .FirstOrDefault()?.FullName;
+        if (!File.Exists(Path.Combine(root, ".runner"))) return false;
+        if (!runnerKey.StartsWith("actions.runner.", StringComparison.OrdinalIgnoreCase))
+            return root.TrimEnd('\\').Equals(runnerKey.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase);
+        // config.cmd writes the service name to .service.
+        try { return File.ReadAllText(Path.Combine(root, ".service")).Trim().TrimStart('﻿').Equals(runnerKey, StringComparison.OrdinalIgnoreCase); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return false; }
     }
 
-    /// <summary>The last lines of the running step's output, without timestamps and color codes.</summary>
+    /// <summary>
+    /// The file the runner writes the running step's output to. The runner keeps it in _diag\pages until it uploads it
+    /// to GitHub, so it only exists while a step runs. A hung step's file can be hours old, so there is no age limit.
+    /// </summary>
+    /// <param name="notBeforeUtc">When the job's Runner.Worker started: files created before it are left over from an earlier job.</param>
+    internal static OutputFile? CurrentOutputFile(string root, DateTime? notBeforeUtc = null)
+    {
+        var folder = new DirectoryInfo(Path.Combine(root, "_diag", "pages"));
+        List<FileInfo> listed;
+        try { listed = folder.Exists ? folder.EnumerateFiles("*.log").ToList() : new List<FileInfo>(); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return null; }
+        OutputFile? newest = null;
+        foreach (var entry in listed)
+        {
+            // The listing's creation time is right (only the size and last write lag behind an open file), so files of
+            // earlier jobs are skipped without opening them. The live view reads every few seconds.
+            if (notBeforeUtc is { } notBefore && entry.CreationTimeUtc < notBefore) continue;
+            if (ReadOutputFile(entry.FullName) is not { } file) continue;
+            if (newest == null || file.ChangedUtc > newest.ChangedUtc) newest = file;
+        }
+        return newest;
+    }
+
+    /// <summary>
+    /// The file's size and times, asked from the file itself: while the runner holds it open, the folder listing keeps
+    /// the size and time it had when it was opened.
+    /// </summary>
+    private static OutputFile? ReadOutputFile(string path)
+    {
+        try
+        {
+            using var handle = File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            var created = File.GetCreationTimeUtc(handle);
+            var written = File.GetLastWriteTimeUtc(handle);
+            return new OutputFile(path, RandomAccess.GetLength(handle), written > created ? written : created);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return null; }
+    }
+
+    /// <param name="ChangedUtc">When the file was last written, or created when that is later (a new page).</param>
+    internal sealed record OutputFile(string Path, long Length, DateTime ChangedUtc)
+    {
+        /// <summary>Changes whenever the runner writes to the file.</summary>
+        public string State => $"{System.IO.Path.GetFileName(Path)}|{Length}|{ChangedUtc.Ticks}";
+    }
+
+    /// <summary>The last lines of the running step's output, without timestamps and color codes. None when the runner runs no job.</summary>
     internal static string[] ReadOutput(string root, int lines)
     {
-        var file = CurrentOutputFile(root);
+        ProcessSnapshot workers;
+        try { workers = ProcessSnapshot.Read(WorkerName); }
+        catch (Exception ex) when (ex is ManagementException or System.Runtime.InteropServices.COMException) { return Array.Empty<string>(); }
+        return ReadOutput(root, lines, workers);
+    }
+
+    /// <param name="processes">The PC's processes, or at least its Runner.Worker processes.</param>
+    internal static string[] ReadOutput(string root, int lines, ProcessSnapshot processes)
+    {
+        var workers = processes.Rows.Where(p => IsWorkerOf(p, root)).ToList();
+        // Without a job, files in _diag\pages are left over from an earlier one (a page the runner did not upload).
+        if (workers.Count == 0) return Array.Empty<string>();
+        var workerStarted = workers.Select(p => ParseStarted(p.Started)).Where(s => s != null).Min();
+        var file = CurrentOutputFile(root, OutputNotBefore(workerStarted));
         if (file == null) return Array.Empty<string>();
-        try { return CleanLines(ReadTail(file, 64 * 1024)).TakeLast(lines).ToArray(); }
-        catch (IOException) { return Array.Empty<string>(); }
+        try { return CleanLines(ReadTail(file.Path, 64 * 1024)).TakeLast(lines).ToArray(); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return Array.Empty<string>(); }
     }
 
     private static IEnumerable<string> ReadTail(string path, int maxBytes)
@@ -111,9 +196,9 @@ public static class RunnerActivity
     }
 
     /// <summary>The runner's job process (Runner.Worker) and everything it started, busiest first.</summary>
-    internal static RunnerProcess[] ReadProcesses(string root)
+    internal static RunnerProcess[] ReadProcesses(string root, ProcessSnapshot? processes = null)
     {
-        var job = ReadJobRows(root);
+        var job = JobRows(root, (processes ?? ProcessSnapshot.Read()).Rows);
         if (job.Count == 0) return Array.Empty<RunnerProcess>();
 
         var now = DateTime.UtcNow;
@@ -149,15 +234,24 @@ public static class RunnerActivity
         return result.OrderByDescending(p => p.CpuPercent).ThenByDescending(p => p.MemoryBytes).Take(MaxProcesses).ToArray();
     }
 
-    /// <summary>The job's processes: the runner's Runner.Worker processes and everything they started.</summary>
-    private static List<ProcessRow> ReadJobRows(string root)
+    private const string WorkerName = "Runner.Worker.exe";
+
+    /// <summary>
+    /// The PC's processes with their command lines. A full Win32_Process query is slow, so one reading is shared by
+    /// everything that looks at jobs in the same update.
+    /// </summary>
+    internal sealed class ProcessSnapshot(IReadOnlyList<ProcessRow> rows)
     {
-        var bin = Path.Combine(root, "bin") + Path.DirectorySeparatorChar;
-        var all = new List<ProcessRow>();
-        using (var searcher = new ManagementObjectSearcher(
-                   "SELECT ProcessId, ParentProcessId, Name, ExecutablePath, CommandLine, WorkingSetSize, KernelModeTime, UserModeTime, CreationDate FROM Win32_Process"))
-        using (var results = searcher.Get())
+        public IReadOnlyList<ProcessRow> Rows { get; } = rows;
+
+        /// <param name="name">Only processes with this file name, for a quick look.</param>
+        public static ProcessSnapshot Read(string? name = null)
         {
+            var all = new List<ProcessRow>();
+            var query = "SELECT ProcessId, ParentProcessId, Name, ExecutablePath, CommandLine, WorkingSetSize, KernelModeTime, UserModeTime, CreationDate FROM Win32_Process"
+                        + (name == null ? string.Empty : $" WHERE Name = '{name.Replace("'", string.Empty)}'");
+            using var searcher = new ManagementObjectSearcher(query);
+            using var results = searcher.Get();
             foreach (ManagementObject item in results)
             {
                 using (item)
@@ -170,20 +264,37 @@ public static class RunnerActivity
                         item["CreationDate"]?.ToString() ?? string.Empty));
                 }
             }
+            return new ProcessSnapshot(all);
         }
+    }
 
-        var workers = all.Where(p => p.Name.Equals("Runner.Worker.exe", StringComparison.OrdinalIgnoreCase)
-                                     && p.Path.StartsWith(bin, StringComparison.OrdinalIgnoreCase)).ToList();
+    private static bool IsWorkerOf(ProcessRow process, string root)
+        => process.Name.Equals(WorkerName, StringComparison.OrdinalIgnoreCase)
+           && process.Path.StartsWith(Path.Combine(root, "bin") + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// The job's processes: the runner's Runner.Worker processes and everything they started. A process whose parent
+    /// ended keeps that parent's ID, and Windows can give the ID to a new process, so a child counts only when it was
+    /// created at or after its parent (explorer.exe, whose parent userinit.exe always exits, would otherwise join a job).
+    /// </summary>
+    internal static List<ProcessRow> JobRows(string root, IReadOnlyList<ProcessRow> all)
+    {
         var children = all.ToLookup(p => p.ParentId);
         var job = new List<ProcessRow>();
-        var queue = new Queue<ProcessRow>(workers);
+        var queue = new Queue<ProcessRow>(all.Where(p => IsWorkerOf(p, root)));
         var seen = new HashSet<int>();
         while (queue.Count > 0)
         {
             var process = queue.Dequeue();
             if (!seen.Add(process.Id)) continue;
             job.Add(process);
-            foreach (var child in children[process.Id]) queue.Enqueue(child);
+            var parentStarted = ParseStarted(process.Started);
+            foreach (var child in children[process.Id])
+            {
+                if (child.Id == process.Id) continue;
+                if (parentStarted is { } parent && ParseStarted(child.Started) is { } started && started < parent) continue;
+                queue.Enqueue(child);
+            }
         }
         return job;
     }
@@ -192,24 +303,16 @@ public static class RunnerActivity
     /// A reading of a running job for <see cref="JobWatch"/>: when its Runner.Worker started, the processor time of each
     /// of its processes, and the state of the running step's output file. Null when the runner runs no job.
     /// </summary>
-    internal static JobSample? ReadJobSample(string root)
+    internal static JobSample? ReadJobSample(string root, ProcessSnapshot? processes = null)
     {
-        var job = ReadJobRows(root);
-        var worker = job.FirstOrDefault(p => p.Name.Equals("Runner.Worker.exe", StringComparison.OrdinalIgnoreCase));
+        var job = JobRows(root, (processes ?? ProcessSnapshot.Read()).Rows);
+        var worker = job.FirstOrDefault(p => p.Name.Equals(WorkerName, StringComparison.OrdinalIgnoreCase));
         if (worker == null) return null;
-        var outputState = string.Empty;
-        if (CurrentOutputFile(root) is { } output)
-        {
-            try
-            {
-                var file = new FileInfo(output);
-                outputState = $"{file.Name}|{file.Length}|{file.LastWriteTimeUtc.Ticks}";
-            }
-            catch (IOException) { }
-        }
+        var workerStarted = ParseStarted(worker.Started);
+        var outputState = CurrentOutputFile(root, OutputNotBefore(workerStarted))?.State ?? string.Empty;
         var times = new Dictionary<string, ulong>();
         foreach (var process in job) times[$"{process.Id}|{process.Started}"] = process.Cpu;
-        return new JobSample(ParseStarted(worker.Started) ?? DateTime.UtcNow, times, outputState);
+        return new JobSample(workerStarted ?? DateTime.UtcNow, times, outputState);
     }
 
     /// <summary>
@@ -225,8 +328,8 @@ public static class RunnerActivity
 
     internal static List<string> StopJobProcesses(string root)
     {
-        var job = ReadJobRows(root);
-        var workers = job.Where(p => p.Name.Equals("Runner.Worker.exe", StringComparison.OrdinalIgnoreCase)).Select(p => p.Id).ToHashSet();
+        var job = JobRows(root, ProcessSnapshot.Read().Rows);
+        var workers = job.Where(p => p.Name.Equals(WorkerName, StringComparison.OrdinalIgnoreCase)).Select(p => p.Id).ToHashSet();
         if (workers.Count == 0) throw new InvalidOperationException("The runner is not running a job.");
         var parents = job.ToDictionary(p => p.Id, p => p.ParentId);
         var stopped = new List<string>();
@@ -272,18 +375,36 @@ public static class RunnerActivity
         if (text.Length == 0) return string.Empty;
         var end = text[0] == '"' ? text.IndexOf('"', 1) : text.IndexOf(' ');
         if (end < 0) return string.Empty;
+        var program = Path.GetFileNameWithoutExtension(text[..end].Trim('"').TrimEnd());
+        // net use and net user take passwords as plain arguments: only the subcommand is shown.
+        var limit = program.Equals("net", StringComparison.OrdinalIgnoreCase) || program.Equals("net1", StringComparison.OrdinalIgnoreCase) ? 1 : 3;
+        var passwordP = PasswordP.Contains(program);
+        var tokens = text[(end + 1)..].Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(t => UrlCredentials.Replace(t.Trim('"'), string.Empty)).Where(t => t.Length > 0).ToList();
         var parts = new List<string>();
-        foreach (var token in text[(end + 1)..].Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        for (var i = 0; i < tokens.Count && parts.Count < limit; i++)
         {
-            if (parts.Count == 3) break;
-            var clean = token.Trim('"');
-            if (clean.Length == 0) continue;
-            if (SecretHints.Any(hint => clean.Contains(hint, StringComparison.OrdinalIgnoreCase))) break;
+            var clean = tokens[i];
+            // Everything from a secret on is left out: the value often follows its option.
+            if (LooksSecret(clean, i + 1 < tokens.Count ? tokens[i + 1] : string.Empty, passwordP)) break;
             parts.Add(clean.Contains('\\') || clean.Contains('/') ? Path.GetFileName(clean.TrimEnd('\\', '/')) : clean);
         }
         var joined = string.Join(' ', parts);
         return joined.Length > 60 ? joined[..57] + "…" : joined;
     }
+
+    /// <param name="passwordP">The program takes a password with -p or -P (see <see cref="PasswordP"/>).</param>
+    private static bool LooksSecret(string token, string next, bool passwordP)
+        => SecretHints.Any(hint => token.Contains(hint, StringComparison.OrdinalIgnoreCase))
+           || TokenValue.IsMatch(token)
+           || PassOption.IsMatch(token)
+           || (passwordP && token.Length >= 2 && token[0] == '-' && (token[1] is 'p' or 'P'))
+           || AttachedUser.IsMatch(token)
+           || ((token is "-u" or "--user") && next.Contains(':'))
+           || token.Equals("/p", StringComparison.OrdinalIgnoreCase) || token.Equals("/rp", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Output files written before the job's worker started belong to an earlier job (a minute of slack for clocks).</summary>
+    private static DateTime? OutputNotBefore(DateTime? workerStartedUtc) => workerStartedUtc?.AddMinutes(-1);
 
     private static DateTime? ParseStarted(string dmtf)
     {
@@ -291,7 +412,7 @@ public static class RunnerActivity
         catch { return null; }
     }
 
-    private sealed record ProcessRow(int Id, int ParentId, string Name, string Path, string CommandLine, long Memory, ulong Cpu, string Started);
+    internal sealed record ProcessRow(int Id, int ParentId, string Name, string Path, string CommandLine, long Memory, ulong Cpu, string Started);
 
     /// <param name="ProcessorTime">Processor time in 100 ns units, per process ("ID|start time").</param>
     internal sealed record JobSample(DateTime WorkerStartedUtc, Dictionary<string, ulong> ProcessorTime, string OutputState);
