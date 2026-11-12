@@ -46,10 +46,23 @@ public static class MachineRelay
     private static volatile bool _restartAgentAfterUpdate;
     /// <summary>
     /// How long an update waits for the agent's work to finish before it restarts the agent anyway: as long as the
-    /// longest command, a runner create (<see cref="FleetActions.CreateWait"/>), counted again each time the agent
-    /// finishes a command. So a create is never cut off; only an agent that finishes nothing for that long is.
+    /// longest work, an AI assistant's call that waits for its approval and then creates a runner on another PC
+    /// (<see cref="AssistantHost.DrainLimit"/>, longer than a create alone), counted again each time the agent finishes
+    /// a command. So work that runs when the update asks is not cut off; only an agent that finishes nothing for that
+    /// long is, or one that is still busy after <see cref="UpdateRestartLimit"/>.
     /// </summary>
-    internal static readonly TimeSpan UpdateRestartWait = FleetActions.CreateWait;
+    /// <remarks>
+    /// Counted from when the update asked, not from when an AI assistant's call ends: the dashboard sees only the
+    /// agent's status, which tells when a command finished but not when such a call did.
+    /// </remarks>
+    internal static readonly TimeSpan UpdateRestartWait = AssistantHost.DrainLimit;
+
+    /// <summary>
+    /// The longest an update waits for the agent's work in all, from when it asked for the restart. Work that keeps
+    /// coming (commands that each finish in time, new AI assistant calls) cannot put the update off for longer, so the
+    /// PC does not stay half updated, with the new version on disk and the old one running.
+    /// </summary>
+    internal static readonly TimeSpan UpdateRestartLimit = TimeSpan.FromHours(3);
 
     /// <summary>
     /// The longest a caller waits for a command its agent still reports as queued or running: as long as the longest
@@ -323,7 +336,7 @@ public static class MachineRelay
     private static MachineInfo Accept(MachineStatusPayload? payload, string address)
     {
         if (payload == null) throw new InvalidOperationException("The PC returned no status.");
-        payload = PeerStatus.Checked(payload, AppendAgentLog);
+        payload = PeerStatus.Checked(payload, FleetNetwork.WithPort(address), AppendAgentLog);
         var machineKey = Sanitize(payload.MachineName);
         payload = ByLocalClock(machineKey, payload, DateTime.UtcNow);
         NoteAnswer(machineKey, payload);
@@ -457,7 +470,7 @@ public static class MachineRelay
     private static MachineInfo AcceptManaged(ManagedPcRecord pc, MachineStatusPayload? payload, string address)
     {
         if (payload == null) throw new InvalidOperationException("The PC returned no status.");
-        payload = PeerStatus.Checked(payload, AppendAgentLog);
+        payload = PeerStatus.Checked(payload, "managed " + pc.KeyId, AppendAgentLog);
         var machineKey = Sanitize(payload.MachineName);
         if (machineKey != Sanitize(pc.Name) && (machineKey == LocalMachineKey || FleetConfig.Current.KnownPeers.Any(p => Sanitize(p.Name) == machineKey)))
             return MachineInfo.Placeholder("MANAGED_" + machineKey, payload.MachineName, DateTime.UtcNow, address, ManagedNameProblem(payload.MachineName), managed: true);
@@ -826,7 +839,7 @@ public static class MachineRelay
         var watchdogRead = new GuardedRead<LocalState>(() => GatherLocalStateAsync(), StatusCache.DefaultBuildTimeout, AppendAgentLog,
             $"Auto-recovery skipped its check: reading this PC's runners took more than {(int)StatusCache.DefaultBuildTimeout.TotalSeconds} seconds.",
             "Auto-recovery can read this PC's runners again.");
-        var restart = new UpdateRestartClock(() => DateTime.UtcNow, UpdateRestartWait);
+        var restart = new UpdateRestartClock(() => DateTime.UtcNow, UpdateRestartWait, UpdateRestartLimit);
         var toldRestart = false;
         while (!cancellationToken.IsCancellationRequested)
         {
@@ -870,14 +883,17 @@ public static class MachineRelay
                 if (_restartAgentAfterUpdate)
                 {
                     // Exit once queued commands and other work (AI assistant calls) are done. Commands run in this loop, so
-                    // a queued one always runs first; other work is waited for until nothing finished for a long time.
+                    // a queued one always runs first; other work is waited for until nothing finished for a long time,
+                    // or at most UpdateRestartLimit in all.
                     var quiet = pending.IsEmpty && AgentWork.IsIdle;
                     if (!toldRestart && !quiet) AppendAgentLog("Restarting to finish the update once the current work is done.");
                     toldRestart = true;
                     if (restart.Due(quiet))
                     {
                         AppendAgentLog(quiet ? "Restarting to finish the update."
-                            : $"Restarting to finish the update, although work is still running. Nothing finished in {(int)UpdateRestartWait.TotalMinutes} minutes.");
+                            : restart.PastLimit
+                                ? $"Restarting to finish the update, although work is still running. The update has waited {(int)UpdateRestartLimit.TotalHours} hours for it."
+                                : $"Restarting to finish the update, although work is still running. Nothing finished in {(int)UpdateRestartWait.TotalMinutes} minutes.");
                         await Task.Delay(TimeSpan.FromSeconds(3), CancellationToken.None); // let the dashboard read the result
                         // The helper started with the update gives up after two minutes; this one starts the new agent.
                         AppUpdater.ScheduleAgentTaskRestart(ScheduledTasks.AgentTaskName);
@@ -1381,13 +1397,14 @@ public static class MachineRelay
 
     /// <summary>
     /// Waits while this PC's agent reports that it is busy (protocol 12): until it is done, or until it finished no
-    /// command for <see cref="UpdateRestartWait"/>, so a runner create that is running or queued is not cut off.
+    /// command for <see cref="UpdateRestartWait"/>, so a runner create or an AI assistant's call that is running is not
+    /// cut off, but for at most <see cref="UpdateRestartLimit"/> in all.
     /// Returns right away when the agent does not answer or is older, since there is then nothing to wait for.
     /// </summary>
     internal static async Task WaitWhileBusyAsync(Func<Task<MachineStatusPayload?>> readStatus, Func<DateTime> utcNow, Func<Task> pause,
         Action<string>? log)
     {
-        var restart = new UpdateRestartClock(utcNow, UpdateRestartWait);
+        var restart = new UpdateRestartClock(utcNow, UpdateRestartWait, UpdateRestartLimit);
         HashSet<string>? finished = null;
         var told = false;
         while (true)
@@ -1401,7 +1418,9 @@ public static class MachineRelay
             finished = now;
             if (restart.Due(quiet: false))
             {
-                var message = $"The fleet agent is still busy, and it finished nothing in {(int)UpdateRestartWait.TotalMinutes} minutes. Restarting it anyway.";
+                var message = restart.PastLimit
+                    ? $"The fleet agent is still busy after {(int)UpdateRestartLimit.TotalHours} hours. Restarting it anyway."
+                    : $"The fleet agent is still busy, and it finished nothing in {(int)UpdateRestartWait.TotalMinutes} minutes. Restarting it anyway.";
                 log?.Invoke(message);
                 AppendAgentLog(message);
                 return;
@@ -1777,27 +1796,39 @@ public static class LogReader
 }
 
 /// <summary>
-/// When an agent restarts for an update although it still has work: once it finished nothing for a while. Each
-/// finished command starts the wait again, so work that moves on (a long runner create, or several queued) is never
-/// cut off; only work that seems stuck is.
+/// When an agent restarts for an update although it still has work: once it finished nothing for <c>wait</c>, or
+/// once <c>limit</c> passed since the update asked. Each finished command starts the wait again, so work that moves on
+/// (a long runner create, or several queued) is not cut off; only work that seems stuck is, or work that keeps the
+/// agent busy for longer than the limit. Both begin at the first <see cref="Due"/>, which comes right after the
+/// update asked for the restart.
 /// </summary>
-internal sealed class UpdateRestartClock(Func<DateTime> utcNow, TimeSpan wait)
+internal sealed class UpdateRestartClock(Func<DateTime> utcNow, TimeSpan wait, TimeSpan limit)
 {
     private DateTime? _byUtc;
+    private DateTime? _limitUtc;
 
-    /// <summary>A command finished: the wait, once it began, starts again from now.</summary>
+    /// <summary>A command finished: the wait, once it began, starts again from now. The limit stays.</summary>
     public void WorkFinished()
     {
         if (_byUtc != null) _byUtc = utcNow() + wait;
     }
 
+    /// <summary>
+    /// Set by <see cref="Due"/>: the restart is due only because the limit passed, while the work still moves on.
+    /// </summary>
+    public bool PastLimit { get; private set; }
+
     /// <summary>Whether to restart now. <paramref name="quiet"/>: no work is left.</summary>
     public bool Due(bool quiet)
     {
+        PastLimit = false;
         if (quiet) return true;
         var now = utcNow();
         _byUtc ??= now + wait;
-        return now >= _byUtc;
+        _limitUtc ??= now + limit;
+        if (now >= _byUtc) return true;
+        PastLimit = now >= _limitUtc;
+        return PastLimit;
     }
 }
 

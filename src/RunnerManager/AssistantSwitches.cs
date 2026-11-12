@@ -120,7 +120,9 @@ internal static class AssistantSwitches
 
     /// <summary>
     /// Removes the stored switches from this PC, for uninstall. Needs administrator rights. This process does not move
-    /// them from fleet.json again afterwards.
+    /// them from fleet.json again afterwards. The stored values are the only mark that the move was done, so the next
+    /// process with administrator rights that starts (the next install, or another Windows user's Runner Manager)
+    /// moves them from its fleet.json once more, as on a first install (see <see cref="MoveFromFile"/>).
     /// </summary>
     internal static void Remove()
     {

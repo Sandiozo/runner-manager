@@ -71,8 +71,15 @@ public sealed class AgentLink : IDisposable
     private volatile string? _sessionId;
     private volatile string? _initialize;
     private Task? _initializing;
-    private (DateTime Until, string Message)? _unreachable;
-    private (DateTime Until, string Message)? _signInTimedOut;
+
+    /// <summary>
+    /// A failure that later requests repeat at once until <see cref="Until"/>. Immutable and kept in one volatile
+    /// field, so a request that reads it outside the gate sees it whole, never half written.
+    /// </summary>
+    private sealed record Remembered(DateTime Until, string Message);
+
+    private volatile Remembered? _unreachable;
+    private volatile Remembered? _signInTimedOut;
 
     /// <summary>The clock for what this link remembers (tests pass their own).</summary>
     internal Func<DateTime> UtcNow { get; init; } = () => DateTime.UtcNow;
@@ -289,7 +296,7 @@ public sealed class AgentLink : IDisposable
             {
                 var message = "The fleet agent did not answer this program's sign-in in time. Try again in a minute. " +
                               "If this happens again, restart Runner Manager's fleet agent, or check which program uses port " + _port + ".";
-                _signInTimedOut = (UtcNow() + SignInTimeoutMemory, message);
+                _signInTimedOut = new Remembered(UtcNow() + SignInTimeoutMemory, message);
                 throw new AgentLinkException(message);
             }
         }
@@ -414,7 +421,7 @@ public sealed class AgentLink : IDisposable
     {
         var message = $"Runner Manager's fleet agent is not running on this PC ({reason}). " +
                       "Open Runner Manager and turn on Settings → AI assistants; it starts the agent.";
-        _unreachable = (UtcNow() + UnreachableMemory, message);
+        _unreachable = new Remembered(UtcNow() + UnreachableMemory, message);
         return new AgentLinkException(message);
     }
 

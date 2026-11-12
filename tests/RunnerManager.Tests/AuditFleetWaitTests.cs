@@ -122,16 +122,16 @@ public class LongCreateWaitTests
     {
         var (log, reads) = await WaitForUpdateRestartAsync(_ =>
             new MachineStatusPayload { Busy = true, PendingCommandIds = new[] { "stuck" }, RecentCommands = Finished(1) });
-        // 20 minutes for the first read, then 60 minutes in which nothing finished.
-        Assert.Equal(4, reads);
-        Assert.Contains("finished nothing in 60 minutes. Restarting it anyway.", log[^1]);
+        // 20 minutes for the first read, then the whole wait (70 minutes) in which nothing finished.
+        Assert.Equal(1 + (int)Math.Ceiling(MachineRelay.UpdateRestartWait / TimeSpan.FromMinutes(20)), reads);
+        Assert.Contains($"finished nothing in {(int)MachineRelay.UpdateRestartWait.TotalMinutes} minutes. Restarting it anyway.", log[^1]);
     }
 
     [Fact]
     public void TheUpdateRestartClock_StartsAgainWhenWorkFinishes()
     {
         var now = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
-        var clock = new UpdateRestartClock(() => now, TimeSpan.FromMinutes(60));
+        var clock = new UpdateRestartClock(() => now, TimeSpan.FromMinutes(60), TimeSpan.FromHours(3));
         Assert.False(clock.Due(quiet: false));
         now += TimeSpan.FromMinutes(59);
         Assert.False(clock.Due(quiet: false));
@@ -140,6 +140,6 @@ public class LongCreateWaitTests
         Assert.False(clock.Due(quiet: false));
         now += TimeSpan.FromMinutes(1);
         Assert.True(clock.Due(quiet: false));
-        Assert.True(new UpdateRestartClock(() => now, TimeSpan.FromMinutes(60)).Due(quiet: true));
+        Assert.True(new UpdateRestartClock(() => now, TimeSpan.FromMinutes(60), TimeSpan.FromHours(3)).Due(quiet: true));
     }
 }
