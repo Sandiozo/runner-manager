@@ -1,4 +1,6 @@
+using System.IO;
 using System.Windows;
+using System.Windows.Controls;
 
 namespace RunnerManager.Tests;
 
@@ -142,7 +144,7 @@ public class AuditR4DashboardTests
         var read = new TaskCompletionSource<List<MachineInfo>>();
         wait = MainWindow.WaitForReadAsync(read.Task, () => never.Task);
         Assert.False(wait.IsCompleted);
-        read.SetException(new System.IO.IOException("The network is not reachable."));
+        read.SetException(new IOException("The network is not reachable."));
         Assert.True(await wait);
 
         // No read runs: nothing to wait for, and the limit is not started.
@@ -195,9 +197,9 @@ public class AuditR4DashboardTests
     public void ThisPcsCard_OnAPcManagedOneWay_NamesItsAccessCode()
     {
         // fleet.json of the test state folder; other tests that use it do not run beside the dashboard tests.
-        var path = System.IO.Path.Combine(FleetConfig.StateDir, "fleet.json");
-        System.IO.Directory.CreateDirectory(FleetConfig.StateDir);
-        var saved = System.IO.File.Exists(path) ? System.IO.File.ReadAllText(path) : null;
+        var path = Path.Combine(FleetConfig.StateDir, "fleet.json");
+        Directory.CreateDirectory(FleetConfig.StateDir);
+        var saved = File.Exists(path) ? File.ReadAllText(path) : null;
         try
         {
             var local = MachineInfo.FromPayload(Environment.MachineName.ToLowerInvariant(),
@@ -219,11 +221,11 @@ public class AuditR4DashboardTests
         {
             if (saved != null)
             {
-                System.IO.File.WriteAllText(path, saved);
+                File.WriteAllText(path, saved);
                 // A new time, so the cached settings are read again.
-                System.IO.File.SetLastWriteTimeUtc(path, DateTime.UtcNow.AddDays(-1).AddTicks(Random.Shared.Next()));
+                File.SetLastWriteTimeUtc(path, DateTime.UtcNow.AddDays(-1).AddTicks(Random.Shared.Next()));
             }
-            else if (System.IO.File.Exists(path)) System.IO.File.Delete(path);
+            else if (File.Exists(path)) File.Delete(path);
         }
     }
 
@@ -308,18 +310,18 @@ public class AuditR4DashboardTests
             var content = (UIElement)window.Content;
             window.Content = null;
             // The cards' items come from the window, which is not around them any more.
-            var host = new System.Windows.Controls.Border { Child = content, DataContext = window };
+            var host = new Border { Child = content, DataContext = window };
             host.Measure(new Size(1200, 900));
             host.Arrange(new Rect(0, 0, 1200, 900));
             host.UpdateLayout();
 
-            var row = WpfTestApp.Descendants<System.Windows.Controls.Border>(host)
-                .First(b => ReferenceEquals(b.DataContext, runner) && b.Child is System.Windows.Controls.Grid { RowDefinitions.Count: 2 });
-            var card = (System.Windows.Controls.Grid)row.Child;
-            var header = card.Children.OfType<System.Windows.Controls.Button>().First(b => System.Windows.Controls.Grid.GetColumnSpan(b) == 3);
-            var title = WpfTestApp.Descendants<System.Windows.Controls.TextBlock>(header).First(t => t.Text == "api");
-            var glyph = WpfTestApp.Descendants<System.Windows.Controls.TextBlock>(header).First(t => t.Text == runner.ExpandGlyph);
-            var details = card.Children.OfType<System.Windows.Controls.Grid>().Single(g => System.Windows.Controls.Grid.GetRow(g) == 1);
+            var row = WpfTestApp.Descendants<Border>(host)
+                .First(b => ReferenceEquals(b.DataContext, runner) && b.Child is Grid { RowDefinitions.Count: 2 });
+            var card = (Grid)row.Child;
+            var header = card.Children.OfType<Button>().First(b => Grid.GetColumnSpan(b) == 3);
+            var title = WpfTestApp.Descendants<TextBlock>(header).First(t => t.Text == "api");
+            var glyph = WpfTestApp.Descendants<TextBlock>(header).First(t => t.Text == runner.ExpandGlyph);
+            var details = card.Children.OfType<Grid>().Single(g => Grid.GetRow(g) == 1);
             Assert.Equal(Visibility.Visible, details.Visibility);
 
             var titleLeft = title.TranslatePoint(new Point(0, 0), card).X;
